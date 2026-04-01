@@ -188,6 +188,12 @@ pub(crate) struct ZReportSyncResponse {
 
 const CLOSEOUT_SYNC_DRAIN_MAX_PASSES: usize = 4;
 const CLOSEOUT_SYNC_BLOCKER_SUMMARY_LIMIT: i64 = 5;
+const ADJUSTMENT_BLOCKER_PARENT_PAYMENT_NOT_SYNCED: &str = "parent_payment_not_synced";
+const ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID: &str =
+    "parent_payment_missing_canonical_remote_id";
+const ADJUSTMENT_QUEUE_ERROR_PARENT_PAYMENT_NOT_SYNCED: &str = "Payment not yet synced";
+const ADJUSTMENT_QUEUE_ERROR_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID: &str =
+    "Parent payment missing canonical remote id";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnsyncedSyncQueueSnapshot {
@@ -201,6 +207,13 @@ pub struct CloseoutSyncDrainState {
     pub any_progress: bool,
     pub remaining_unsynced_count: i64,
     pub remaining_blockers_summary: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DeferredAdjustmentAutoHealSummary {
+    candidate_orders: usize,
+    repaired_payment_mirrors: usize,
+    promoted_adjustments: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -6056,18 +6069,121 @@ async fn reconcile_remote_payments_for_local_order(
     Ok(reconciled)
 }
 
-pub(crate) async fn repair_local_payment_mirrors_for_orders(
+fn collect_waiting_adjustment_order_ids_missing_canonical_remote_payment_id(
+    db: &DbState,
+) -> Result<Vec<String>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(NULLIF(pa.order_id, ''), NULLIF(op.order_id, '')) AS order_id,
+                    op.remote_payment_id
+             FROM payment_adjustments pa
+             JOIN order_payments op ON op.id = pa.payment_id
+             WHERE pa.sync_state = 'waiting_parent'
+               AND op.sync_state = 'applied'",
+        )
+        .map_err(|e| format!("prepare waiting adjustment repair candidates: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .map_err(|e| format!("query waiting adjustment repair candidates: {e}"))?;
+
+    let mut order_ids = Vec::new();
+    let mut seen = HashSet::new();
+
+    for row in rows {
+        let (order_id, remote_payment_id) =
+            row.map_err(|e| format!("read waiting adjustment repair candidate: {e}"))?;
+        if normalize_optional_uuid_str(remote_payment_id.as_deref()).is_some() {
+            continue;
+        }
+
+        let Some(order_id) = order_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        if seen.insert(order_id.clone()) {
+            order_ids.push(order_id);
+        }
+    }
+
+    Ok(order_ids)
+}
+
+async fn auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with<
+    RepairFn,
+    RepairFuture,
+>(
+    db: &DbState,
+    mut repair_orders: RepairFn,
+) -> Result<DeferredAdjustmentAutoHealSummary, String>
+where
+    RepairFn: FnMut(Vec<String>) -> RepairFuture,
+    RepairFuture: Future<Output = Result<usize, String>>,
+{
+    let order_ids = collect_waiting_adjustment_order_ids_missing_canonical_remote_payment_id(db)?;
+    let candidate_orders = order_ids.len();
+    let repaired_payment_mirrors = if candidate_orders == 0 {
+        0
+    } else {
+        repair_orders(order_ids).await?
+    };
+    let promoted_adjustments = reconcile_deferred_adjustments(db)?;
+
+    let summary = DeferredAdjustmentAutoHealSummary {
+        candidate_orders,
+        repaired_payment_mirrors,
+        promoted_adjustments,
+    };
+
+    if summary.candidate_orders > 0
+        || summary.repaired_payment_mirrors > 0
+        || summary.promoted_adjustments > 0
+    {
+        info!(
+            candidate_orders = summary.candidate_orders,
+            repaired_payment_mirrors = summary.repaired_payment_mirrors,
+            promoted_adjustments = summary.promoted_adjustments,
+            "Auto-healed waiting adjustments before adjustment sync dispatch"
+        );
+    }
+
+    Ok(summary)
+}
+
+async fn auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+) -> Result<DeferredAdjustmentAutoHealSummary, String> {
+    auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
+        db,
+        |order_ids| async move {
+            repair_local_payment_mirrors_for_orders_with_auth(db, &order_ids, admin_url, api_key)
+                .await
+        },
+    )
+    .await
+}
+
+async fn repair_local_payment_mirrors_for_orders_with_auth(
     db: &DbState,
     order_ids: &[String],
+    admin_url: &str,
+    api_key: &str,
 ) -> Result<usize, String> {
     if order_ids.is_empty() {
         return Ok(0);
     }
 
-    let admin_url = storage::get_credential("admin_dashboard_url")
-        .ok_or("Missing admin dashboard URL for blocking payment repair")?;
-    let api_key = load_zeroized_pos_api_key_optional()
-        .ok_or("Missing POS API key for blocking payment repair")?;
     let now = Utc::now().to_rfc3339();
     let mut repaired = 0usize;
     let mut seen = HashSet::new();
@@ -6079,13 +6195,24 @@ pub(crate) async fn repair_local_payment_mirrors_for_orders(
         }
 
         repaired +=
-            reconcile_remote_payments_for_local_order(db, &admin_url, &api_key, normalized).await?;
+            reconcile_remote_payments_for_local_order(db, admin_url, api_key, normalized).await?;
 
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         recompute_local_order_payment_snapshot(&conn, normalized, &now)?;
     }
 
     Ok(repaired)
+}
+
+pub(crate) async fn repair_local_payment_mirrors_for_orders(
+    db: &DbState,
+    order_ids: &[String],
+) -> Result<usize, String> {
+    let admin_url = storage::get_credential("admin_dashboard_url")
+        .ok_or("Missing admin dashboard URL for blocking payment repair")?;
+    let api_key = load_zeroized_pos_api_key_optional()
+        .ok_or("Missing POS API key for blocking payment repair")?;
+    repair_local_payment_mirrors_for_orders_with_auth(db, order_ids, &admin_url, &api_key).await
 }
 
 async fn recover_payment_total_conflicts(
@@ -6312,8 +6439,13 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     total_progress += recovered_payment_conflicts;
     let reconciled_applied_payments = reconcile_applied_payment_queue_rows(db)?;
     total_progress += reconciled_applied_payments;
-    let reconciled_adjustments = reconcile_deferred_adjustments(db)?;
-    total_progress += reconciled_adjustments;
+    let auto_healed_adjustments =
+        auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids(
+            db, &admin_url, &api_key,
+        )
+        .await?;
+    total_progress += auto_healed_adjustments.repaired_payment_mirrors;
+    total_progress += auto_healed_adjustments.promoted_adjustments;
 
     cleanup_order_update_queue_rows_for_order(db, None)?;
 
@@ -6604,7 +6736,32 @@ fn str_any(v: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn normalize_optional_uuid_str(value: Option<&str>) -> Option<String> {
+fn mark_adjustment_waiting_on_parent(
+    conn: &Connection,
+    queue_id: i64,
+    adjustment_id: &str,
+    queue_error: &str,
+    blocker_reason: &str,
+) {
+    let _ = conn.execute(
+        "UPDATE sync_queue
+         SET status = 'deferred',
+             last_error = ?2,
+             updated_at = datetime('now')
+         WHERE id = ?1",
+        params![queue_id, queue_error],
+    );
+    let _ = conn.execute(
+        "UPDATE payment_adjustments
+         SET sync_state = 'waiting_parent',
+             sync_last_error = ?2,
+             updated_at = datetime('now')
+         WHERE id = ?1",
+        params![adjustment_id, blocker_reason],
+    );
+}
+
+pub(crate) fn normalize_optional_uuid_str(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -9405,13 +9562,12 @@ async fn sync_adjustment_items(
                 "Adjustment sync deferred: parent payment not yet synced"
             );
             if let Ok(conn) = db.conn.lock() {
-                let _ = conn.execute(
-                    "UPDATE sync_queue SET status = 'deferred', last_error = 'Payment not yet synced', updated_at = datetime('now') WHERE id = ?1",
-                    params![id],
-                );
-                let _ = conn.execute(
-                    "UPDATE payment_adjustments SET sync_state = 'waiting_parent', updated_at = datetime('now') WHERE id = ?1",
-                    params![entity_id],
+                mark_adjustment_waiting_on_parent(
+                    &conn,
+                    *id,
+                    entity_id,
+                    ADJUSTMENT_QUEUE_ERROR_PARENT_PAYMENT_NOT_SYNCED,
+                    ADJUSTMENT_BLOCKER_PARENT_PAYMENT_NOT_SYNCED,
                 );
             }
             continue;
@@ -9463,13 +9619,12 @@ async fn sync_adjustment_items(
                 "Adjustment sync deferred: parent payment missing canonical remote id"
             );
             if let Ok(conn) = db.conn.lock() {
-                let _ = conn.execute(
-                    "UPDATE sync_queue SET status = 'deferred', last_error = 'Parent payment missing canonical remote id', updated_at = datetime('now') WHERE id = ?1",
-                    params![id],
-                );
-                let _ = conn.execute(
-                    "UPDATE payment_adjustments SET sync_state = 'waiting_parent', sync_last_error = 'Parent payment missing canonical remote id', updated_at = datetime('now') WHERE id = ?1",
-                    params![entity_id],
+                mark_adjustment_waiting_on_parent(
+                    &conn,
+                    *id,
+                    entity_id,
+                    ADJUSTMENT_QUEUE_ERROR_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID,
+                    ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID,
                 );
             }
             continue;
@@ -11105,13 +11260,19 @@ fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, String> {
         }
 
         let _ = conn.execute(
-            "UPDATE payment_adjustments SET sync_state = 'pending', updated_at = ?1
+            "UPDATE payment_adjustments
+             SET sync_state = 'pending',
+                 sync_last_error = NULL,
+                 updated_at = ?1
              WHERE id = ?2 AND sync_state = 'waiting_parent'",
             params![now, adj_id],
         );
 
         let _ = conn.execute(
-            "UPDATE sync_queue SET status = 'pending', updated_at = datetime('now')
+            "UPDATE sync_queue
+             SET status = 'pending',
+                 last_error = NULL,
+                 updated_at = datetime('now')
              WHERE entity_type = 'payment_adjustment'
                AND entity_id = ?1
                AND status = 'deferred'",
@@ -11210,6 +11371,38 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn spawn_single_json_response_server<AssertFn>(
+        body: String,
+        assert_request: AssertFn,
+    ) -> (String, std::thread::JoinHandle<()>)
+    where
+        AssertFn: FnOnce(&str) + Send + 'static,
+    {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server address");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept mock request");
+            let mut buffer = vec![0u8; 16 * 1024];
+            let bytes_read = stream.read(&mut buffer).expect("read mock request");
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+            assert_request(&request);
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write mock response");
+        });
+
+        (format!("http://{}", addr), handle)
     }
 
     fn insert_minimal_order(db: &DbState, order_id: &str, sync_status: &str) {
@@ -13232,7 +13425,160 @@ mod tests {
     }
 
     #[test]
-    fn test_reconcile_keeps_adjustment_waiting_when_parent_payment_missing_canonical_remote_id() {
+    fn test_auto_heal_waiting_adjustment_repairs_missing_canonical_remote_id_and_allows_sync() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let queue_payload = serde_json::json!({
+            "paymentId": "pay-adj-missing-remote",
+            "orderId": "ord-adj-missing-remote",
+            "adjustmentType": "refund",
+            "amount": 8.0,
+            "reason": "Test"
+        })
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-missing-remote', '[]', 40.0, 'completed', 'synced', 'sup-adj-missing-remote', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-missing-remote', 'ord-adj-missing-remote', 'cash', 40.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-missing-remote', 'pay-adj-missing-remote', 'ord-adj-missing-remote', 'refund', 8.0, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+             VALUES ('payment_adjustment', 'adj-missing-remote', 'insert', ?1, 'adjustment:adj-missing-remote', 'deferred')",
+            params![queue_payload],
+        )
+        .unwrap();
+        let queue_id = conn.last_insert_rowid();
+
+        drop(conn);
+
+        let canonical_payment_id = Uuid::new_v4().to_string();
+        let heal_summary = tauri::async_runtime::block_on(
+            auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
+                &db,
+                |order_ids| {
+                    assert_eq!(order_ids, vec!["ord-adj-missing-remote".to_string()]);
+                    let canonical_payment_id = canonical_payment_id.clone();
+                    let db = &db;
+                    async move {
+                        let conn = db.conn.lock().unwrap();
+                        conn.execute(
+                            "UPDATE order_payments
+                             SET remote_payment_id = ?1,
+                                 updated_at = datetime('now')
+                             WHERE order_id = 'ord-adj-missing-remote'",
+                            params![canonical_payment_id],
+                        )
+                        .map_err(|e| e.to_string())?;
+                        Ok(1usize)
+                    }
+                },
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(heal_summary.candidate_orders, 1);
+        assert_eq!(heal_summary.repaired_payment_mirrors, 1);
+        assert_eq!(heal_summary.promoted_adjustments, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let adjustment_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM payment_adjustments WHERE id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_state: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let adjustment_error: Option<String> = conn
+            .query_row(
+                "SELECT sync_last_error FROM payment_adjustments WHERE id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_error: Option<String> = conn
+            .query_row(
+                "SELECT last_error FROM sync_queue WHERE entity_id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(adjustment_state, "pending");
+        assert_eq!(queue_state, "pending");
+        assert_eq!(adjustment_error, None);
+        assert_eq!(queue_error, None);
+
+        let (mock_url, server_handle) = spawn_single_json_response_server(
+            "{\"success\":true}".to_string(),
+            {
+                let canonical_payment_id = canonical_payment_id.clone();
+                move |request| {
+                    assert!(request.starts_with("POST /api/pos/payments/adjustments/sync HTTP/1.1"));
+                    assert!(request.contains("pay-adj-missing-remote"));
+                    assert!(request.contains(&canonical_payment_id));
+                }
+            },
+        );
+        let item = load_sync_item(&db, queue_id);
+        let items = vec![&item];
+        let api_key = r#"{"key":"test-key","tid":"term-heal"}"#;
+        let synced = tauri::async_runtime::block_on(sync_adjustment_items(
+            &mock_url,
+            api_key,
+            "term-heal",
+            "branch-1",
+            &db,
+            &items,
+        ));
+        assert_eq!(synced, 1);
+        server_handle.join().expect("join mock server");
+
+        let conn = db.conn.lock().unwrap();
+        let final_adjustment_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM payment_adjustments WHERE id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let final_queue_state: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(final_adjustment_state, "applied");
+        assert_eq!(final_queue_state, "synced");
+        ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync").unwrap();
+    }
+
+    #[test]
+    fn test_auto_heal_keeps_adjustment_waiting_when_parent_payment_missing_canonical_remote_id() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
@@ -13260,11 +13606,22 @@ mod tests {
             [],
         )
         .unwrap();
-
         drop(conn);
 
-        let promoted = reconcile_deferred_adjustments(&db).unwrap();
-        assert_eq!(promoted, 0);
+        let heal_summary = tauri::async_runtime::block_on(
+            auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
+                &db,
+                |order_ids| {
+                    assert_eq!(order_ids, vec!["ord-adj-missing-remote".to_string()]);
+                    async move { Ok(0usize) }
+                },
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(heal_summary.candidate_orders, 1);
+        assert_eq!(heal_summary.repaired_payment_mirrors, 0);
+        assert_eq!(heal_summary.promoted_adjustments, 0);
 
         let conn = db.conn.lock().unwrap();
         let adjustment_state: String = conn
@@ -13281,14 +13638,121 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        drop(conn);
+
         assert_eq!(adjustment_state, "waiting_parent");
         assert_eq!(queue_state, "deferred");
-        drop(conn);
 
         let closeout_error = ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync")
             .expect_err("closeout should stay blocked while the adjustment is still deferred");
         assert!(closeout_error.contains("payment_adjustment:deferred x1"));
         assert!(closeout_error.contains("Cannot close day during pre-Z-report sync"));
+    }
+
+    #[test]
+    fn test_auto_heal_waiting_adjustments_repairs_each_order_once_and_promotes_all_children() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-batch', '[]', 65.0, 'completed', 'synced', 'sup-adj-batch', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-batch-1', 'ord-adj-batch', 'cash', 30.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-batch-2', 'ord-adj-batch', 'card', 35.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-batch-1', 'pay-adj-batch-1', 'ord-adj-batch', 'refund', 10.0, 'One', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-batch-2', 'pay-adj-batch-2', 'ord-adj-batch', 'refund', 5.0, 'Two', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+             VALUES ('payment_adjustment', 'adj-batch-1', 'insert', '{}', 'adjustment:adj-batch-1', 'deferred')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+             VALUES ('payment_adjustment', 'adj-batch-2', 'insert', '{}', 'adjustment:adj-batch-2', 'deferred')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let batch_payment_id_1 = Uuid::new_v4().to_string();
+        let batch_payment_id_2 = Uuid::new_v4().to_string();
+        let heal_summary = tauri::async_runtime::block_on(
+            auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
+                &db,
+                |order_ids| {
+                    assert_eq!(order_ids, vec!["ord-adj-batch".to_string()]);
+                    let db = &db;
+                    let batch_payment_id_1 = batch_payment_id_1.clone();
+                    let batch_payment_id_2 = batch_payment_id_2.clone();
+                    async move {
+                        let conn = db.conn.lock().unwrap();
+                        conn.execute(
+                            "UPDATE order_payments
+                             SET remote_payment_id = CASE id
+                                 WHEN 'pay-adj-batch-1' THEN ?1
+                                 WHEN 'pay-adj-batch-2' THEN ?2
+                                 ELSE remote_payment_id
+                             END,
+                             updated_at = datetime('now')
+                             WHERE order_id = 'ord-adj-batch'",
+                            params![batch_payment_id_1, batch_payment_id_2],
+                        )
+                        .map_err(|e| e.to_string())?;
+                        Ok(1usize)
+                    }
+                },
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(heal_summary.candidate_orders, 1);
+        assert_eq!(heal_summary.repaired_payment_mirrors, 1);
+        assert_eq!(heal_summary.promoted_adjustments, 2);
+
+        let conn = db.conn.lock().unwrap();
+        let pending_adjustments: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM payment_adjustments WHERE order_id = 'ord-adj-batch' AND sync_state = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let pending_queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id IN ('adj-batch-1', 'adj-batch-2')
+                   AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_adjustments, 2);
+        assert_eq!(pending_queue_rows, 2);
     }
 
     fn snapshot(count: i64, blockers_summary: &str) -> UnsyncedSyncQueueSnapshot {

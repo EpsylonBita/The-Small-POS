@@ -8,6 +8,7 @@
 //! - **Log rotation helpers**: used by `lib.rs` to configure rolling log files.
 
 use crate::db::DbState;
+use crate::sync::normalize_optional_uuid_str;
 use rusqlite::params;
 use serde_json::{json, Value};
 use std::fs;
@@ -68,6 +69,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
     let (
         schema_version,
         sync_backlog,
+        payment_adjustment_backlog,
         last_sync_times,
         mut printer_status,
         last_zreport,
@@ -81,6 +83,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
             .unwrap_or(0);
 
         let sync_backlog = get_sync_backlog(&conn);
+        let payment_adjustment_backlog = get_payment_adjustment_backlog(&conn);
         let last_sync_times = get_last_sync_times(&conn);
         let printer_status = get_printer_status(&conn);
         let last_zreport = get_last_zreport(&conn);
@@ -98,6 +101,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         (
             schema_version,
             sync_backlog,
+            payment_adjustment_backlog,
             last_sync_times,
             printer_status,
             last_zreport,
@@ -131,6 +135,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
     Ok(json!({
         "schemaVersion": schema_version,
         "syncBacklog": sync_backlog,
+        "paymentAdjustmentBacklog": payment_adjustment_backlog,
         "lastSyncTimes": last_sync_times,
         "printerStatus": printer_status,
         "lastZReport": last_zreport,
@@ -197,6 +202,52 @@ fn get_sync_backlog(conn: &rusqlite::Connection) -> Value {
     }
 
     result
+}
+
+fn get_payment_adjustment_backlog(conn: &rusqlite::Connection) -> Value {
+    let mut generic_deferred = 0i64;
+    let mut waiting_for_parent_payment = 0i64;
+    let mut waiting_for_canonical_remote_payment_id = 0i64;
+
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT pa.sync_state,
+                op.sync_state,
+                op.remote_payment_id
+         FROM payment_adjustments pa
+         LEFT JOIN order_payments op ON op.id = pa.payment_id
+         WHERE pa.sync_state != 'applied'",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (adjustment_state, parent_payment_state, remote_payment_id) = row;
+                if adjustment_state == "waiting_parent" {
+                    if parent_payment_state.as_deref() == Some("applied") {
+                        if normalize_optional_uuid_str(remote_payment_id.as_deref()).is_none() {
+                            waiting_for_canonical_remote_payment_id += 1;
+                        } else {
+                            generic_deferred += 1;
+                        }
+                    } else {
+                        waiting_for_parent_payment += 1;
+                    }
+                } else {
+                    generic_deferred += 1;
+                }
+            }
+        }
+    }
+
+    json!({
+        "genericDeferred": generic_deferred,
+        "waitingForParentPayment": waiting_for_parent_payment,
+        "waitingForCanonicalRemotePaymentId": waiting_for_canonical_remote_payment_id,
+    })
 }
 
 fn get_last_sync_times(conn: &rusqlite::Connection) -> Value {
@@ -337,7 +388,19 @@ pub fn export_diagnostics_with_options(
     zip.write_all(backlog_json.as_bytes())
         .map_err(|e| e.to_string())?;
 
-    // 4. Last 20 sync errors
+    // 4. Payment-adjustment backlog breakdown
+    let payment_adjustment_backlog = redact_value_for_export(
+        get_payment_adjustment_backlog(&conn),
+        export_options.redact_sensitive,
+    );
+    zip.start_file("payment_adjustment_backlog.json", zip_options)
+        .map_err(|e| e.to_string())?;
+    let payment_adjustment_backlog_json = serde_json::to_string_pretty(&payment_adjustment_backlog)
+        .map_err(|e| format!("Failed to serialize payment adjustment backlog: {e}"))?;
+    zip.write_all(payment_adjustment_backlog_json.as_bytes())
+        .map_err(|e| e.to_string())?;
+
+    // 5. Last 20 sync errors
     let errors = redact_value_for_export(
         json!(get_recent_sync_errors(&conn, 20)),
         export_options.redact_sensitive,
@@ -349,7 +412,7 @@ pub fn export_diagnostics_with_options(
     zip.write_all(errors_json.as_bytes())
         .map_err(|e| e.to_string())?;
 
-    // 5. Printer profiles + last print job statuses
+    // 6. Printer profiles + last print job statuses
     let printers = redact_value_for_export(
         get_printer_diagnostics(&conn),
         export_options.redact_sensitive,
@@ -616,8 +679,83 @@ mod tests {
         let health = get_system_health(&db_state).unwrap();
         assert!(health.get("schemaVersion").is_some());
         assert!(health.get("syncBacklog").is_some());
+        assert!(health.get("paymentAdjustmentBacklog").is_some());
         assert!(health.get("printerStatus").is_some());
         // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_payment_adjustment_backlog_distinguishes_parent_and_canonical_blockers() {
+        let dir = std::env::temp_dir().join(format!("diag_adjustments_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let conn = db_state.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-generic', '[]', 10.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES ('pay-generic', 'ord-generic', 'cash', 10.0, 'synced', 'applied', ?1, datetime('now'), datetime('now'))",
+            params![uuid::Uuid::new_v4().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-generic', 'pay-generic', 'ord-generic', 'refund', 1.0, 'Generic', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-parent', '[]', 20.0, 'completed', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-parent', 'ord-parent', 'cash', 20.0, 'pending', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-parent', 'pay-parent', 'ord-parent', 'refund', 2.0, 'Parent', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-canonical', '[]', 30.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-canonical', 'ord-canonical', 'card', 30.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-canonical', 'pay-canonical', 'ord-canonical', 'refund', 3.0, 'Canonical', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let backlog = get_payment_adjustment_backlog(&conn);
+        drop(conn);
+
+        assert_eq!(backlog["genericDeferred"], json!(1));
+        assert_eq!(backlog["waitingForParentPayment"], json!(1));
+        assert_eq!(backlog["waitingForCanonicalRemotePaymentId"], json!(1));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
