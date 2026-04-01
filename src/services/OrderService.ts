@@ -551,6 +551,11 @@ export class OrderService {
       // to resolve the address from the customer record using customerId. Ensure that:
       // 1. Delivery orders with persisted customers always pass customerId
       // 2. Delivery orders without persisted customers always pass a non-empty deliveryAddress
+      const initialPayment =
+        (orderData as any).initialPayment ??
+        (orderData as any).initial_payment ??
+        undefined;
+
       const normalized: any = {
         // Include customerId for backend address fallback resolution
         customerId: (orderData as any).customerId ?? orderData.customer_id ?? null,
@@ -590,6 +595,8 @@ export class OrderService {
         paymentStatus: orderData.paymentStatus ?? orderData.payment_status,
         paymentMethod: orderData.paymentMethod ?? orderData.payment_method,
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
+        initialPayment,
+        initial_payment: initialPayment,
         staffShiftId: (orderData as any).staffShiftId ?? (orderData as any).staff_shift_id ?? null,
         staffId: (orderData as any).staffId ?? (orderData as any).staff_id ?? null,
       };

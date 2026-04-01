@@ -707,12 +707,11 @@ pub(crate) fn is_terminal_auth_failure(error: &str) -> bool {
         || lower.contains("api key is invalid or expired")
         || lower.contains("terminal not authorized")
         || lower.contains("terminal not found or inactive")
-        || lower.contains("terminal not found")
 }
 
 pub(crate) fn terminal_access_reset_reason(error: &str) -> &'static str {
     let lower = error.to_lowercase();
-    if lower.contains("terminal not found or inactive") || lower.contains("terminal not found") {
+    if lower.contains("terminal not found or inactive") {
         "terminal_deleted"
     } else {
         "invalid_terminal_credentials"
@@ -977,14 +976,22 @@ mod tests {
     }
 
     #[test]
-    fn terminal_access_reset_reason_maps_missing_terminal_to_terminal_deleted() {
+    fn terminal_access_reset_reason_maps_explicitly_inactive_terminal_to_terminal_deleted() {
         assert_eq!(
             terminal_access_reset_reason("Terminal not found or inactive (HTTP 401)"),
             "terminal_deleted"
         );
+    }
+
+    #[test]
+    fn generic_terminal_lookup_miss_is_not_treated_as_terminal_revocation() {
         assert_eq!(
             terminal_access_reset_reason("Terminal not found (HTTP 404)"),
-            "terminal_deleted"
+            "invalid_terminal_credentials"
+        );
+        assert!(
+            !is_terminal_auth_failure("Terminal not found (HTTP 404)"),
+            "generic lookup misses must not wipe local terminal credentials"
         );
     }
 

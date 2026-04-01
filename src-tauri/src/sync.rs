@@ -228,7 +228,11 @@ fn is_terminal_auth_failure(error: &str) -> bool {
         || lower.contains("api key is invalid or expired")
         || lower.contains("terminal not authorized")
         || lower.contains("terminal not found or inactive")
-        || lower.contains("terminal not found")
+}
+
+fn is_non_authoritative_terminal_lookup_miss(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("terminal not found") && !lower.contains("terminal not found or inactive")
 }
 
 fn load_zeroized_pos_api_key_optional() -> Option<Zeroizing<String>> {
@@ -4284,6 +4288,201 @@ fn find_canonical_duplicate_payment_target_with_conn(
     .map_err(|e| format!("resolve canonical duplicate payment target: {e}"))
 }
 
+#[derive(Debug)]
+struct AdjustmentCanonicalPaymentCandidate {
+    local_payment_id: String,
+    remote_payment_id: String,
+    score: i32,
+    status_rank: i32,
+    amount_delta: f64,
+    updated_at: String,
+}
+
+fn score_adjustment_canonical_payment_candidate(
+    parent_method: Option<&str>,
+    parent_amount: f64,
+    parent_transaction_ref: Option<&str>,
+    candidate_method: Option<&str>,
+    candidate_amount: f64,
+    candidate_transaction_ref: Option<&str>,
+    candidate_status: &str,
+) -> (i32, i32, f64) {
+    let status_rank = if candidate_status.eq_ignore_ascii_case("completed") {
+        0
+    } else if candidate_status.eq_ignore_ascii_case("refunded") {
+        1
+    } else {
+        2
+    };
+
+    let mut score = match status_rank {
+        0 => 40,
+        1 => 30,
+        _ => 10,
+    };
+
+    if let (Some(parent), Some(candidate)) = (parent_method, candidate_method) {
+        if parent.eq_ignore_ascii_case(candidate) {
+            score += 30;
+        }
+    }
+
+    let amount_delta = (candidate_amount - parent_amount).abs();
+    if amount_delta < 0.01 {
+        score += 30;
+    } else if amount_delta < 1.0 {
+        score += 10;
+    }
+
+    match (parent_transaction_ref, candidate_transaction_ref) {
+        (Some(parent), Some(candidate)) if parent.eq_ignore_ascii_case(candidate) => {
+            score += 40;
+        }
+        (Some(_), None) => {
+            // Some remote payment mirrors arrive without a transaction reference.
+            // Keep them eligible, but below an exact transaction-id match.
+            score += 5;
+        }
+        (None, None) => {
+            score += 5;
+        }
+        _ => {}
+    }
+
+    (score, status_rank, amount_delta)
+}
+
+fn find_canonical_adjustment_payment_target_with_conn(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let payment_context: Option<(String, Option<String>, f64, Option<String>)> = conn
+        .query_row(
+            "SELECT
+                 order_id,
+                 NULLIF(TRIM(COALESCE(method, '')), ''),
+                 amount,
+                 NULLIF(TRIM(COALESCE(transaction_ref, '')), '')
+             FROM order_payments
+             WHERE id = ?1
+             LIMIT 1",
+            params![payment_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load adjustment canonical payment context: {e}"))?;
+
+    let Some((order_id, method, amount, transaction_ref)) = payment_context else {
+        return Ok(None);
+    };
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                 id,
+                 NULLIF(TRIM(COALESCE(remote_payment_id, '')), ''),
+                 NULLIF(TRIM(COALESCE(method, '')), ''),
+                 amount,
+                 NULLIF(TRIM(COALESCE(transaction_ref, '')), ''),
+                 LOWER(TRIM(COALESCE(status, ''))),
+                 COALESCE(updated_at, created_at, '')
+             FROM order_payments
+             WHERE order_id = ?1
+               AND id != ?2",
+        )
+        .map_err(|e| format!("prepare adjustment canonical payment candidates: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![order_id, payment_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|e| format!("query adjustment canonical payment candidates: {e}"))?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (
+            candidate_payment_id,
+            candidate_remote_payment_id,
+            candidate_method,
+            candidate_amount,
+            candidate_transaction_ref,
+            candidate_status,
+            candidate_updated_at,
+        ) = row.map_err(|e| format!("read adjustment canonical payment candidate: {e}"))?;
+
+        if matches!(
+            candidate_status.as_str(),
+            "voided" | "cancelled" | "canceled"
+        ) {
+            continue;
+        }
+
+        let Some(candidate_remote_payment_id) =
+            normalize_optional_uuid_str(candidate_remote_payment_id.as_deref())
+        else {
+            continue;
+        };
+
+        let (score, status_rank, amount_delta) = score_adjustment_canonical_payment_candidate(
+            method.as_deref(),
+            amount,
+            transaction_ref.as_deref(),
+            candidate_method.as_deref(),
+            candidate_amount,
+            candidate_transaction_ref.as_deref(),
+            candidate_status.as_str(),
+        );
+
+        candidates.push(AdjustmentCanonicalPaymentCandidate {
+            local_payment_id: candidate_payment_id,
+            remote_payment_id: candidate_remote_payment_id,
+            score,
+            status_rank,
+            amount_delta,
+            updated_at: candidate_updated_at,
+        });
+    }
+
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.status_rank.cmp(&right.status_rank))
+            .then_with(|| {
+                left.amount_delta
+                    .partial_cmp(&right.amount_delta)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.updated_at.cmp(&right.updated_at))
+            .then_with(|| left.local_payment_id.cmp(&right.local_payment_id))
+    });
+
+    let best = &candidates[0];
+    let low_confidence_tie = candidates.len() > 1
+        && candidates[1].score == best.score
+        && best.score < 100;
+    if low_confidence_tie {
+        return Ok(None);
+    }
+
+    Ok(Some((
+        best.local_payment_id.clone(),
+        best.remote_payment_id.clone(),
+    )))
+}
+
 fn rewrite_adjustment_sync_payload_payment_id(
     payload: &str,
     canonical_payment_id: &str,
@@ -4340,14 +4539,10 @@ fn rebind_waiting_adjustments_to_canonical_duplicate_payments(
 
     for (adjustment_id, stale_payment_id) in candidates {
         let Some((canonical_payment_id, canonical_remote_payment_id)) =
-            find_canonical_duplicate_payment_target_with_conn(&conn, &stale_payment_id)?
+            find_canonical_adjustment_payment_target_with_conn(&conn, &stale_payment_id)?
         else {
             continue;
         };
-
-        if normalize_optional_uuid_str(canonical_remote_payment_id.as_deref()).is_none() {
-            continue;
-        }
 
         let updated = conn
             .execute(
@@ -4404,7 +4599,7 @@ fn rebind_waiting_adjustments_to_canonical_duplicate_payments(
             adjustment_id = %adjustment_id,
             stale_payment_id = %stale_payment_id,
             canonical_payment_id = %canonical_payment_id,
-            canonical_remote_payment_id = %canonical_remote_payment_id.unwrap_or_default(),
+            canonical_remote_payment_id = %canonical_remote_payment_id,
             "Rebound waiting adjustment to canonical sibling payment after payment repair"
         );
 
@@ -6084,9 +6279,23 @@ async fn resolve_remote_order_for_local_order(
             "/api/pos/orders?limit=25&search={}",
             percent_encode(search_term.trim())
         );
-        let response = api::fetch_from_admin(admin_url, api_key, &path, "GET", None)
-            .await
-            .map_err(|e| format!("search remote order during payment recovery: {e}"))?;
+        let response = match api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await {
+            Ok(response) => response,
+            Err(error) if is_non_authoritative_terminal_lookup_miss(&error) => {
+                warn!(
+                    local_order_id = %local_order_id,
+                    search_term = search_term.trim(),
+                    error = %error,
+                    "Remote order recovery search returned a generic terminal lookup miss; keeping terminal credentials intact"
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "search remote order during payment recovery: {error}"
+                ))
+            }
+        };
         let remote_orders = extract_remote_orders_from_response(&response);
 
         if let Some(remote_order) = select_remote_order_match(&lookup, &remote_orders) {
@@ -6113,9 +6322,23 @@ async fn resolve_remote_order_for_local_order(
             "/api/pos/orders/sync?limit=200&since={}",
             percent_encode(sync_since_cursor.trim())
         );
-        let response = api::fetch_from_admin(admin_url, api_key, &path, "GET", None)
-            .await
-            .map_err(|e| format!("scan remote order sync history during payment recovery: {e}"))?;
+        let response = match api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await {
+            Ok(response) => response,
+            Err(error) if is_non_authoritative_terminal_lookup_miss(&error) => {
+                warn!(
+                    local_order_id = %local_order_id,
+                    since_cursor = sync_since_cursor.trim(),
+                    error = %error,
+                    "Remote order recovery sync-history scan returned a generic terminal lookup miss; keeping terminal credentials intact"
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "scan remote order sync history during payment recovery: {error}"
+                ))
+            }
+        };
         let remote_orders = extract_remote_orders_from_response(&response);
 
         if let Some(remote_order) = select_remote_order_match(&lookup, &remote_orders) {
