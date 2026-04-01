@@ -105,8 +105,7 @@ fn parse_printer_profile_id_payload(
     arg0: Option<&serde_json::Value>,
     arg1: Option<&serde_json::Value>,
 ) -> Option<String> {
-    arg0
-        .and_then(|value| value_str(value, &["printerProfileId", "printer_profile_id"]))
+    arg0.and_then(|value| value_str(value, &["printerProfileId", "printer_profile_id"]))
         .or_else(|| {
             arg1.and_then(|value| value_str(value, &["printerProfileId", "printer_profile_id"]))
         })
@@ -624,12 +623,8 @@ pub async fn payment_print_receipt(
         return Ok(serde_json::json!({ "success": true, "skipped": true }));
     }
 
-    let enqueue_result = print::enqueue_print_job(
-        &db,
-        entity_type,
-        &order_id,
-        printer_profile_id.as_deref(),
-    )?;
+    let enqueue_result =
+        print::enqueue_print_job(&db, entity_type, &order_id, printer_profile_id.as_deref())?;
 
     // Process the job immediately instead of waiting for the background worker
     let data_dir = app

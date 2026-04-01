@@ -544,75 +544,6 @@ fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json:
     report_data
 }
 
-fn count_unsynced_sync_queue_items(db: &db::DbState) -> Result<i64, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let historical_pattern = format!("{}%", crate::sync::HISTORICAL_Z_REPORT_CONFLICT_PREFIX);
-    conn.query_row(
-        "SELECT COUNT(*)
-         FROM sync_queue
-         WHERE status NOT IN ('synced', 'applied')
-           AND NOT (
-                entity_type = 'z_report'
-                AND last_error LIKE ?1
-           )",
-        params![historical_pattern],
-        |row| row.get(0),
-    )
-    .map_err(|e| format!("count unsynced sync queue items: {e}"))
-}
-
-fn summarize_unsynced_sync_queue_items(db: &db::DbState, limit: i64) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let historical_pattern = format!("{}%", crate::sync::HISTORICAL_Z_REPORT_CONFLICT_PREFIX);
-    let mut stmt = conn
-        .prepare(
-            "SELECT entity_type, status, COUNT(*) AS total
-             FROM sync_queue
-             WHERE status NOT IN ('synced', 'applied')
-               AND NOT (
-                    entity_type = 'z_report'
-                    AND last_error LIKE ?2
-               )
-             GROUP BY entity_type, status
-             ORDER BY total DESC, entity_type ASC, status ASC
-             LIMIT ?1",
-        )
-        .map_err(|e| format!("prepare unsynced sync queue summary: {e}"))?;
-    let rows = stmt
-        .query_map(params![limit, historical_pattern], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })
-        .map_err(|e| format!("query unsynced sync queue summary: {e}"))?;
-
-    Ok(rows
-        .filter_map(Result::ok)
-        .map(|(entity_type, status, total)| format!("{entity_type}:{status} x{total}"))
-        .collect::<Vec<_>>()
-        .join(", "))
-}
-
-fn ensure_sync_queue_clear_for_z_report(db: &db::DbState, stage: &str) -> Result<(), String> {
-    let pending = count_unsynced_sync_queue_items(db)?;
-    if pending == 0 {
-        return Ok(());
-    }
-
-    let summary = summarize_unsynced_sync_queue_items(db, 5)?;
-    let detail = if summary.is_empty() {
-        String::new()
-    } else {
-        format!(" Blocking items: {summary}.")
-    };
-
-    Err(format!(
-        "Cannot close day during {stage}: {pending} sync item(s) are still pending or failed.{detail}"
-    ))
-}
-
 fn normalize_report_generate_payload(arg0: Option<serde_json::Value>) -> serde_json::Value {
     match arg0 {
         Some(serde_json::Value::String(shift_id)) => serde_json::json!({
@@ -1381,10 +1312,21 @@ pub async fn report_submit_z_report(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    crate::sync::force_sync(&db, &sync_state, &app)
+    let pre_closeout_drain = crate::sync::force_sync_until_closeout_stable(&db, &sync_state, &app)
         .await
         .map_err(|error| format!("Cannot close day: pre-Z-report sync failed: {error}"))?;
-    ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync")?;
+    info!(
+        passes_executed = pre_closeout_drain.passes_executed,
+        any_progress = pre_closeout_drain.any_progress,
+        remaining_unsynced_count = pre_closeout_drain.remaining_unsynced_count,
+        remaining_blockers_summary = if pre_closeout_drain.remaining_blockers_summary.is_empty() {
+            "none"
+        } else {
+            pre_closeout_drain.remaining_blockers_summary.as_str()
+        },
+        "Pre-closeout sync drain finished"
+    );
+    crate::sync::ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync")?;
 
     let initial_blockers = zreport::unsettled_payment_blockers(&db, &payload)?;
     let blockers = if initial_blockers
@@ -1429,10 +1371,23 @@ pub async fn report_submit_z_report(
         }
     };
 
-    crate::sync::force_sync(&db, &sync_state, &app)
-        .await
-        .map_err(|error| format!("Cannot close day: Z-report sync failed: {error}"))?;
-    ensure_sync_queue_clear_for_z_report(&db, "Z-report submission")?;
+    let post_submission_drain =
+        crate::sync::force_sync_until_closeout_stable(&db, &sync_state, &app)
+            .await
+            .map_err(|error| format!("Cannot close day: Z-report sync failed: {error}"))?;
+    info!(
+        passes_executed = post_submission_drain.passes_executed,
+        any_progress = post_submission_drain.any_progress,
+        remaining_unsynced_count = post_submission_drain.remaining_unsynced_count,
+        remaining_blockers_summary = if post_submission_drain.remaining_blockers_summary.is_empty()
+        {
+            "none"
+        } else {
+            post_submission_drain.remaining_blockers_summary.as_str()
+        },
+        "Post-submission sync drain finished"
+    );
+    crate::sync::ensure_sync_queue_clear_for_z_report(&db, "Z-report submission")?;
 
     let mut result = zreport::finalize_prepared_z_report_submission(&db, &prepared)?;
 

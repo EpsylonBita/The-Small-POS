@@ -55,6 +55,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Local, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -183,6 +184,23 @@ pub(crate) struct ZReportSyncResponse {
     pub report_id: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+const CLOSEOUT_SYNC_DRAIN_MAX_PASSES: usize = 4;
+const CLOSEOUT_SYNC_BLOCKER_SUMMARY_LIMIT: i64 = 5;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnsyncedSyncQueueSnapshot {
+    pub count: i64,
+    pub blockers_summary: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CloseoutSyncDrainState {
+    pub passes_executed: usize,
+    pub any_progress: bool,
+    pub remaining_unsynced_count: i64,
+    pub remaining_blockers_summary: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -2116,11 +2134,135 @@ pub fn start_sync_loop(
 }
 
 /// Trigger an immediate sync cycle (called by `sync_force`).
-pub async fn force_sync(
+fn capture_unsynced_sync_queue_snapshot_with_limit(
+    db: &DbState,
+    limit: i64,
+) -> Result<UnsyncedSyncQueueSnapshot, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let historical_pattern = format!("{HISTORICAL_Z_REPORT_CONFLICT_PREFIX}%");
+
+    let count = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM sync_queue
+             WHERE status NOT IN ('synced', 'applied')
+               AND NOT (
+                    entity_type = 'z_report'
+                    AND last_error LIKE ?1
+               )",
+            params![historical_pattern.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("count unsynced sync queue items: {e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity_type, status, COUNT(*) AS total
+             FROM sync_queue
+             WHERE status NOT IN ('synced', 'applied')
+               AND NOT (
+                    entity_type = 'z_report'
+                    AND last_error LIKE ?2
+               )
+             GROUP BY entity_type, status
+             ORDER BY total DESC, entity_type ASC, status ASC
+             LIMIT ?1",
+        )
+        .map_err(|e| format!("prepare unsynced sync queue summary: {e}"))?;
+    let rows = stmt
+        .query_map(params![limit, historical_pattern.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query unsynced sync queue summary: {e}"))?;
+
+    let blockers_summary = rows
+        .filter_map(Result::ok)
+        .map(|(entity_type, status, total)| format!("{entity_type}:{status} x{total}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Ok(UnsyncedSyncQueueSnapshot {
+        count,
+        blockers_summary,
+    })
+}
+
+pub fn capture_unsynced_sync_queue_snapshot(
+    db: &DbState,
+) -> Result<UnsyncedSyncQueueSnapshot, String> {
+    capture_unsynced_sync_queue_snapshot_with_limit(db, CLOSEOUT_SYNC_BLOCKER_SUMMARY_LIMIT)
+}
+
+pub fn ensure_sync_queue_clear_for_z_report(db: &DbState, stage: &str) -> Result<(), String> {
+    let snapshot = capture_unsynced_sync_queue_snapshot(db)?;
+    if snapshot.count == 0 {
+        return Ok(());
+    }
+
+    let detail = if snapshot.blockers_summary.is_empty() {
+        String::new()
+    } else {
+        format!(" Blocking items: {}.", snapshot.blockers_summary)
+    };
+
+    Err(format!(
+        "Cannot close day during {stage}: {} sync item(s) are still pending or failed.{detail}",
+        snapshot.count
+    ))
+}
+
+async fn drain_sync_until_closeout_stable<PassFn, PassFuture, SnapshotFn>(
+    max_passes: usize,
+    mut run_pass: PassFn,
+    mut snapshot_fn: SnapshotFn,
+) -> Result<CloseoutSyncDrainState, String>
+where
+    PassFn: FnMut() -> PassFuture,
+    PassFuture: Future<Output = Result<usize, String>>,
+    SnapshotFn: FnMut() -> Result<UnsyncedSyncQueueSnapshot, String>,
+{
+    let mut state = CloseoutSyncDrainState::default();
+    let mut previous_zero_progress_snapshot: Option<UnsyncedSyncQueueSnapshot> = None;
+
+    for _ in 0..max_passes {
+        let synced = run_pass().await?;
+        state.passes_executed += 1;
+        state.any_progress |= synced > 0;
+
+        let snapshot = snapshot_fn()?;
+        state.remaining_unsynced_count = snapshot.count;
+        state.remaining_blockers_summary = snapshot.blockers_summary.clone();
+
+        if snapshot.count == 0 {
+            break;
+        }
+
+        if synced == 0 {
+            if previous_zero_progress_snapshot
+                .as_ref()
+                .map(|previous| previous == &snapshot)
+                .unwrap_or(false)
+            {
+                break;
+            }
+            previous_zero_progress_snapshot = Some(snapshot);
+        } else {
+            previous_zero_progress_snapshot = None;
+        }
+    }
+
+    Ok(state)
+}
+
+async fn force_sync_once(
     db: &DbState,
     sync_state: &SyncState,
     app: &AppHandle,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     if !storage::is_configured() {
         return Err("Terminal not configured".into());
     }
@@ -2134,7 +2276,44 @@ pub async fn force_sync(
         *guard = Some(Utc::now().to_rfc3339());
     }
 
+    Ok(synced)
+}
+
+/// Trigger an immediate sync cycle (called by `sync_force`).
+pub async fn force_sync(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &AppHandle,
+) -> Result<(), String> {
+    let _ = force_sync_once(db, sync_state, app).await?;
     Ok(())
+}
+
+pub async fn force_sync_until_closeout_stable(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &AppHandle,
+) -> Result<CloseoutSyncDrainState, String> {
+    let state = drain_sync_until_closeout_stable(
+        CLOSEOUT_SYNC_DRAIN_MAX_PASSES,
+        || force_sync_once(db, sync_state, app),
+        || capture_unsynced_sync_queue_snapshot(db),
+    )
+    .await?;
+
+    info!(
+        passes_executed = state.passes_executed,
+        any_progress = state.any_progress,
+        remaining_unsynced_count = state.remaining_unsynced_count,
+        remaining_blockers_summary = if state.remaining_blockers_summary.is_empty() {
+            "none"
+        } else {
+            state.remaining_blockers_summary.as_str()
+        },
+        "Closeout sync drain complete"
+    );
+
+    Ok(state)
 }
 
 /// Remove unsupported order delete operations from the sync queue.
@@ -13104,6 +13283,107 @@ mod tests {
             .unwrap();
         assert_eq!(adjustment_state, "waiting_parent");
         assert_eq!(queue_state, "deferred");
+        drop(conn);
+
+        let closeout_error = ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync")
+            .expect_err("closeout should stay blocked while the adjustment is still deferred");
+        assert!(closeout_error.contains("payment_adjustment:deferred x1"));
+        assert!(closeout_error.contains("Cannot close day during pre-Z-report sync"));
+    }
+
+    fn snapshot(count: i64, blockers_summary: &str) -> UnsyncedSyncQueueSnapshot {
+        UnsyncedSyncQueueSnapshot {
+            count,
+            blockers_summary: blockers_summary.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_closeout_sync_drain_runs_second_pass_for_newly_eligible_deferred_adjustment() {
+        let mut pass_results = vec![Ok(1usize), Ok(1usize)];
+        let mut snapshots = vec![
+            Ok(snapshot(1, "payment_adjustment:deferred x1")),
+            Ok(snapshot(0, "")),
+        ];
+
+        let state = tauri::async_runtime::block_on(drain_sync_until_closeout_stable(
+            CLOSEOUT_SYNC_DRAIN_MAX_PASSES,
+            || std::future::ready(pass_results.remove(0)),
+            || snapshots.remove(0),
+        ))
+        .expect("closeout drain should succeed");
+
+        assert_eq!(state.passes_executed, 2);
+        assert!(state.any_progress);
+        assert_eq!(state.remaining_unsynced_count, 0);
+        assert!(state.remaining_blockers_summary.is_empty());
+    }
+
+    #[test]
+    fn test_closeout_sync_drain_stops_after_two_stable_zero_progress_passes() {
+        let mut pass_results = vec![Ok(0usize), Ok(0usize), Ok(1usize)];
+        let mut snapshots = vec![
+            Ok(snapshot(1, "payment_adjustment:deferred x1")),
+            Ok(snapshot(1, "payment_adjustment:deferred x1")),
+            Ok(snapshot(0, "")),
+        ];
+
+        let state = tauri::async_runtime::block_on(drain_sync_until_closeout_stable(
+            CLOSEOUT_SYNC_DRAIN_MAX_PASSES,
+            || std::future::ready(pass_results.remove(0)),
+            || snapshots.remove(0),
+        ))
+        .expect("closeout drain should return the remaining blockers");
+
+        assert_eq!(state.passes_executed, 2);
+        assert!(!state.any_progress);
+        assert_eq!(state.remaining_unsynced_count, 1);
+        assert_eq!(
+            state.remaining_blockers_summary,
+            "payment_adjustment:deferred x1"
+        );
+    }
+
+    #[test]
+    fn test_closeout_sync_drain_keeps_single_pass_behavior_for_clean_queue() {
+        let mut pass_results = vec![Ok(0usize)];
+        let mut snapshots = vec![Ok(snapshot(0, ""))];
+
+        let state = tauri::async_runtime::block_on(drain_sync_until_closeout_stable(
+            CLOSEOUT_SYNC_DRAIN_MAX_PASSES,
+            || std::future::ready(pass_results.remove(0)),
+            || snapshots.remove(0),
+        ))
+        .expect("clean queue should complete in one pass");
+
+        assert_eq!(state.passes_executed, 1);
+        assert!(!state.any_progress);
+        assert_eq!(state.remaining_unsynced_count, 0);
+        assert!(state.remaining_blockers_summary.is_empty());
+    }
+
+    #[test]
+    fn test_closeout_sync_drain_handles_post_submission_z_report_and_child_adjustment() {
+        let mut pass_results = vec![Ok(1usize), Ok(1usize)];
+        let mut snapshots = vec![
+            Ok(snapshot(
+                2,
+                "payment_adjustment:deferred x1, z_report:pending x1",
+            )),
+            Ok(snapshot(0, "")),
+        ];
+
+        let state = tauri::async_runtime::block_on(drain_sync_until_closeout_stable(
+            CLOSEOUT_SYNC_DRAIN_MAX_PASSES,
+            || std::future::ready(pass_results.remove(0)),
+            || snapshots.remove(0),
+        ))
+        .expect("post-submission drain should settle the queued z-report and child items");
+
+        assert_eq!(state.passes_executed, 2);
+        assert!(state.any_progress);
+        assert_eq!(state.remaining_unsynced_count, 0);
+        assert!(state.remaining_blockers_summary.is_empty());
     }
 
     #[test]
