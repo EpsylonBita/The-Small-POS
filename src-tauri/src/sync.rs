@@ -213,6 +213,7 @@ pub struct CloseoutSyncDrainState {
 struct DeferredAdjustmentAutoHealSummary {
     candidate_orders: usize,
     repaired_payment_mirrors: usize,
+    rebound_adjustments: usize,
     promoted_adjustments: usize,
 }
 
@@ -4225,84 +4226,244 @@ fn mark_local_payment_applied(
     mark_payment_queue_row_synced(conn, payment_id, synced_at)
 }
 
-fn resolve_duplicate_payment_total_conflict_with_conn(
+fn find_canonical_duplicate_payment_target_with_conn(
     conn: &Connection,
     payment_id: &str,
-    resolved_at: &str,
-) -> Result<Option<String>, String> {
-    let payment_context: Option<(String, String, f64, Option<String>, i64)> = conn
+) -> Result<Option<(String, Option<String>)>, String> {
+    let payment_context: Option<(String, String, f64, Option<String>)> = conn
         .query_row(
             "SELECT
                  order_id,
                  method,
                  amount,
-                 NULLIF(TRIM(COALESCE(transaction_ref, '')), ''),
-                 (
-                     SELECT COUNT(*)
-                     FROM payment_adjustments
-                     WHERE payment_id = op.id
-                 )
+                 NULLIF(TRIM(COALESCE(transaction_ref, '')), '')
              FROM order_payments op
              WHERE op.id = ?1
              LIMIT 1",
             params![payment_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
-        .map_err(|e| format!("load duplicate payment context: {e}"))?;
+        .map_err(|e| format!("load canonical duplicate payment context: {e}"))?;
 
-    let Some((order_id, method, amount, transaction_ref, adjustment_count)) = payment_context
-    else {
+    let Some((order_id, method, amount, transaction_ref)) = payment_context else {
         return Ok(None);
     };
+
+    conn.query_row(
+        "SELECT
+             id,
+             NULLIF(TRIM(COALESCE(remote_payment_id, '')), '')
+         FROM order_payments
+         WHERE order_id = ?1
+           AND id != ?2
+           AND status = 'completed'
+           AND method = ?3
+           AND ABS(amount - ?4) < 0.01
+           AND (
+                NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NOT NULL
+                OR COALESCE(sync_state, '') = 'applied'
+           )
+           AND (
+                ?5 IS NULL
+                OR NULLIF(TRIM(COALESCE(transaction_ref, '')), '') = ?5
+                OR NULLIF(TRIM(COALESCE(transaction_ref, '')), '') IS NULL
+           )
+         ORDER BY
+             CASE
+                 WHEN NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NOT NULL THEN 0
+                 ELSE 1
+             END,
+             COALESCE(updated_at, created_at, '') ASC,
+             id ASC
+         LIMIT 1",
+        params![order_id, payment_id, method, amount, transaction_ref],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| format!("resolve canonical duplicate payment target: {e}"))
+}
+
+fn rewrite_adjustment_sync_payload_payment_id(
+    payload: &str,
+    canonical_payment_id: &str,
+) -> Result<String, String> {
+    let mut data = match serde_json::from_str::<Value>(payload) {
+        Ok(Value::Object(map)) => Value::Object(map),
+        Ok(_) | Err(_) => Value::Object(Map::new()),
+    };
+
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "paymentId".to_string(),
+            Value::String(canonical_payment_id.to_string()),
+        );
+        object.insert(
+            "payment_id".to_string(),
+            Value::String(canonical_payment_id.to_string()),
+        );
+    }
+
+    serde_json::to_string(&data)
+        .map_err(|e| format!("serialize rebound adjustment sync payload: {e}"))
+}
+
+fn rebind_waiting_adjustments_to_canonical_duplicate_payments(
+    db: &DbState,
+) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT pa.id, pa.payment_id
+             FROM payment_adjustments pa
+             JOIN order_payments op ON op.id = pa.payment_id
+             WHERE pa.sync_state = 'waiting_parent'
+               AND op.sync_state = 'applied'
+               AND NULLIF(TRIM(COALESCE(op.remote_payment_id, '')), '') IS NULL",
+        )
+        .map_err(|e| format!("prepare waiting adjustment duplicate parent scan: {e}"))?;
+
+    let candidates: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| format!("query waiting adjustment duplicate parent scan: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+    drop(stmt);
+
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let rebound_at = Utc::now().to_rfc3339();
+    let mut rebound = 0usize;
+    let mut stale_payment_ids = HashSet::new();
+
+    for (adjustment_id, stale_payment_id) in candidates {
+        let Some((canonical_payment_id, canonical_remote_payment_id)) =
+            find_canonical_duplicate_payment_target_with_conn(&conn, &stale_payment_id)?
+        else {
+            continue;
+        };
+
+        if normalize_optional_uuid_str(canonical_remote_payment_id.as_deref()).is_none() {
+            continue;
+        }
+
+        let updated = conn
+            .execute(
+                "UPDATE payment_adjustments
+                 SET payment_id = ?1,
+                     sync_last_error = NULL,
+                     updated_at = ?2
+                 WHERE id = ?3
+                   AND sync_state = 'waiting_parent'
+                   AND payment_id = ?4",
+                params![
+                    canonical_payment_id.as_str(),
+                    rebound_at.as_str(),
+                    adjustment_id.as_str(),
+                    stale_payment_id.as_str()
+                ],
+            )
+            .map_err(|e| format!("rebind waiting adjustment to canonical payment: {e}"))?;
+
+        if updated == 0 {
+            continue;
+        }
+
+        let mut queue_stmt = conn
+            .prepare(
+                "SELECT id, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id = ?1
+                   AND status != 'synced'",
+            )
+            .map_err(|e| format!("prepare waiting adjustment queue payload rewrite: {e}"))?;
+        let queue_rows: Vec<(i64, String)> = queue_stmt
+            .query_map(params![adjustment_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("query waiting adjustment queue payload rewrite: {e}"))?
+            .filter_map(|row| row.ok())
+            .collect();
+        drop(queue_stmt);
+
+        for (queue_id, payload) in queue_rows {
+            let rewritten_payload =
+                rewrite_adjustment_sync_payload_payment_id(&payload, &canonical_payment_id)?;
+            conn.execute(
+                "UPDATE sync_queue
+                 SET payload = ?1,
+                     updated_at = datetime('now')
+                 WHERE id = ?2",
+                params![rewritten_payload, queue_id],
+            )
+            .map_err(|e| format!("persist rebound adjustment queue payload: {e}"))?;
+        }
+
+        info!(
+            adjustment_id = %adjustment_id,
+            stale_payment_id = %stale_payment_id,
+            canonical_payment_id = %canonical_payment_id,
+            canonical_remote_payment_id = %canonical_remote_payment_id.unwrap_or_default(),
+            "Rebound waiting adjustment to canonical sibling payment after payment repair"
+        );
+
+        rebound += 1;
+        stale_payment_ids.insert(stale_payment_id);
+    }
+
+    for stale_payment_id in stale_payment_ids {
+        if let Some(canonical_payment_id) =
+            resolve_duplicate_payment_total_conflict_with_conn(&conn, &stale_payment_id, &rebound_at)?
+        {
+            info!(
+                stale_payment_id = %stale_payment_id,
+                canonical_payment_id = %canonical_payment_id,
+                "Void stale duplicate parent payment after adjustment rebind"
+            );
+        }
+    }
+
+    Ok(rebound)
+}
+
+fn resolve_duplicate_payment_total_conflict_with_conn(
+    conn: &Connection,
+    payment_id: &str,
+    resolved_at: &str,
+) -> Result<Option<String>, String> {
+    let order_id: Option<String> = conn
+        .query_row(
+            "SELECT order_id
+             FROM order_payments
+             WHERE id = ?1
+             LIMIT 1",
+            params![payment_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load duplicate payment order id: {e}"))?;
+    let Some(order_id) = order_id else {
+        return Ok(None);
+    };
+
+    let adjustment_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM payment_adjustments
+             WHERE payment_id = ?1",
+            params![payment_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load duplicate payment adjustment count: {e}"))?;
 
     if adjustment_count > 0 {
         return Ok(None);
     }
 
-    let canonical: Option<(String, Option<String>)> = conn
-        .query_row(
-            "SELECT
-                 id,
-                 NULLIF(TRIM(COALESCE(remote_payment_id, '')), '')
-             FROM order_payments
-             WHERE order_id = ?1
-               AND id != ?2
-               AND status = 'completed'
-               AND method = ?3
-               AND ABS(amount - ?4) < 0.01
-               AND (
-                    NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NOT NULL
-                    OR COALESCE(sync_state, '') = 'applied'
-               )
-               AND (
-                    ?5 IS NULL
-                    OR NULLIF(TRIM(COALESCE(transaction_ref, '')), '') = ?5
-                    OR NULLIF(TRIM(COALESCE(transaction_ref, '')), '') IS NULL
-               )
-             ORDER BY
-                 CASE
-                     WHEN NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NOT NULL THEN 0
-                     ELSE 1
-                 END,
-                 COALESCE(updated_at, created_at, '') ASC,
-                 id ASC
-             LIMIT 1",
-            params![order_id, payment_id, method, amount, transaction_ref],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(|e| format!("resolve canonical duplicate payment target: {e}"))?;
-
-    let Some((canonical_payment_id, _canonical_remote_payment_id)) = canonical else {
+    let Some((canonical_payment_id, _canonical_remote_payment_id)) =
+        find_canonical_duplicate_payment_target_with_conn(conn, payment_id)?
+    else {
         return Ok(None);
     };
 
@@ -6136,21 +6297,25 @@ where
     } else {
         repair_orders(order_ids).await?
     };
+    let rebound_adjustments = rebind_waiting_adjustments_to_canonical_duplicate_payments(db)?;
     let promoted_adjustments = reconcile_deferred_adjustments(db)?;
 
     let summary = DeferredAdjustmentAutoHealSummary {
         candidate_orders,
         repaired_payment_mirrors,
+        rebound_adjustments,
         promoted_adjustments,
     };
 
     if summary.candidate_orders > 0
         || summary.repaired_payment_mirrors > 0
+        || summary.rebound_adjustments > 0
         || summary.promoted_adjustments > 0
     {
         info!(
             candidate_orders = summary.candidate_orders,
             repaired_payment_mirrors = summary.repaired_payment_mirrors,
+            rebound_adjustments = summary.rebound_adjustments,
             promoted_adjustments = summary.promoted_adjustments,
             "Auto-healed waiting adjustments before adjustment sync dispatch"
         );
@@ -13566,6 +13731,212 @@ mod tests {
         let final_queue_state: String = conn
             .query_row(
                 "SELECT status FROM sync_queue WHERE entity_id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(final_adjustment_state, "applied");
+        assert_eq!(final_queue_state, "synced");
+        ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync").unwrap();
+    }
+
+    #[test]
+    fn test_auto_heal_rebinds_waiting_adjustment_from_duplicate_parent_to_canonical_payment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let queue_payload = serde_json::json!({
+            "paymentId": "pay-adj-stale-parent",
+            "orderId": "ord-adj-duplicate-parent",
+            "adjustmentType": "refund",
+            "amount": 8.0,
+            "reason": "Duplicate parent"
+        })
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-duplicate-parent', '[]', 40.0, 'completed', 'synced', 'sup-adj-duplicate-parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, transaction_ref, created_at, updated_at)
+             VALUES ('pay-adj-stale-parent', 'ord-adj-duplicate-parent', 'cash', 40.0, 'EUR', 'completed', 'failed', 'applied', 'txn-adj-dup', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, transaction_ref, created_at, updated_at)
+             VALUES ('pay-adj-canonical-parent', 'ord-adj-duplicate-parent', 'cash', 40.0, 'EUR', 'completed', 'synced', 'applied', 'txn-adj-dup', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, sync_last_error, created_at, updated_at)
+             VALUES ('adj-duplicate-parent', 'pay-adj-stale-parent', 'ord-adj-duplicate-parent', 'refund', 8.0, 'Duplicate parent', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
+            params![ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, last_error)
+             VALUES ('payment_adjustment', 'adj-duplicate-parent', 'insert', ?1, 'adjustment:adj-duplicate-parent', 'deferred', ?2)",
+            params![
+                queue_payload,
+                ADJUSTMENT_QUEUE_ERROR_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID
+            ],
+        )
+        .unwrap();
+        let adjustment_queue_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error)
+             VALUES ('payment', 'pay-adj-stale-parent', 'insert', '{}', 'payment:pay-adj-stale-parent', 'failed', 5, 5, 'Payment exceeds order total')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error)
+             VALUES ('order_payments', 'pay-adj-stale-parent', 'insert', '{}', 'order_payments:pay-adj-stale-parent', 'failed', 5, 5, 'Payment exceeds order total')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let canonical_remote_payment_id = Uuid::new_v4().to_string();
+        let heal_summary = tauri::async_runtime::block_on(
+            auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
+                &db,
+                |order_ids| {
+                    assert_eq!(order_ids, vec!["ord-adj-duplicate-parent".to_string()]);
+                    let canonical_remote_payment_id = canonical_remote_payment_id.clone();
+                    let db = &db;
+                    async move {
+                        let conn = db.conn.lock().unwrap();
+                        conn.execute(
+                            "UPDATE order_payments
+                             SET remote_payment_id = CASE id
+                                 WHEN 'pay-adj-canonical-parent' THEN ?1
+                                 ELSE remote_payment_id
+                             END,
+                             updated_at = datetime('now')
+                             WHERE order_id = 'ord-adj-duplicate-parent'",
+                            params![canonical_remote_payment_id],
+                        )
+                        .map_err(|e| e.to_string())?;
+                        Ok(1usize)
+                    }
+                },
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(heal_summary.candidate_orders, 1);
+        assert_eq!(heal_summary.repaired_payment_mirrors, 1);
+        assert_eq!(heal_summary.rebound_adjustments, 1);
+        assert_eq!(heal_summary.promoted_adjustments, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (adjustment_payment_id, adjustment_state, adjustment_error): (
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT payment_id, sync_state, sync_last_error
+                 FROM payment_adjustments
+                 WHERE id = 'adj-duplicate-parent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(adjustment_payment_id, "pay-adj-canonical-parent");
+        assert_eq!(adjustment_state, "pending");
+        assert!(adjustment_error.is_none());
+
+        let (queue_state, queue_error, queue_payload_after): (String, Option<String>, String) = conn
+            .query_row(
+                "SELECT status, last_error, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id = 'adj-duplicate-parent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(queue_state, "pending");
+        assert!(queue_error.is_none());
+        let queue_payload_after: Value = serde_json::from_str(&queue_payload_after).unwrap();
+        assert_eq!(
+            str_any(&queue_payload_after, &["paymentId"]).as_deref(),
+            Some("pay-adj-canonical-parent")
+        );
+
+        let (stale_status, stale_void_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, void_reason
+                 FROM order_payments
+                 WHERE id = 'pay-adj-stale-parent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stale_status, "voided");
+        assert!(stale_void_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("pay-adj-canonical-parent"));
+        let stale_payment_queue_synced: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sync_queue
+                 WHERE entity_id = 'pay-adj-stale-parent'
+                   AND entity_type IN ('payment', 'order_payments')
+                   AND status = 'synced'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_payment_queue_synced, 2);
+        drop(conn);
+
+        let (mock_url, server_handle) = spawn_single_json_response_server(
+            "{\"success\":true}".to_string(),
+            {
+                let canonical_remote_payment_id = canonical_remote_payment_id.clone();
+                move |request| {
+                    assert!(request.starts_with("POST /api/pos/payments/adjustments/sync HTTP/1.1"));
+                    assert!(request.contains("pay-adj-canonical-parent"));
+                    assert!(request.contains(&canonical_remote_payment_id));
+                    assert!(!request.contains("pay-adj-stale-parent"));
+                }
+            },
+        );
+        let item = load_sync_item(&db, adjustment_queue_id);
+        let items = vec![&item];
+        let api_key = r#"{"key":"test-key","tid":"term-heal"}"#;
+        let synced = tauri::async_runtime::block_on(sync_adjustment_items(
+            &mock_url,
+            api_key,
+            "term-heal",
+            "branch-1",
+            &db,
+            &items,
+        ));
+        assert_eq!(synced, 1);
+        server_handle.join().expect("join mock server");
+
+        let conn = db.conn.lock().unwrap();
+        let final_adjustment_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM payment_adjustments WHERE id = 'adj-duplicate-parent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let final_queue_state: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_id = 'adj-duplicate-parent'",
                 [],
                 |row| row.get(0),
             )
