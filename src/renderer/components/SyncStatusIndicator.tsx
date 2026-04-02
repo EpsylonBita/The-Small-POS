@@ -24,6 +24,7 @@ import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import { formatDate } from '../utils/format';
 import { cn } from '../utils/cn';
 import { buildHealthSupportContext } from '../support';
+import { getLocalizedSyncBlockerReason } from '../../lib/payment-integrity';
 import {
   getBridge,
   offEvent,
@@ -777,6 +778,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         );
       }, 0)
     : 0;
+  const syncBlockerDetails = systemHealth?.syncBlockerDetails ?? [];
 
   const totalPending =
     syncStatus.pendingItems + syncStatus.pendingPaymentItems;
@@ -1361,6 +1363,46 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   )}
                 </div>
               </div>
+
+              {syncBlockerDetails.length > 0 && (
+                <div className={cn(modalInsetClass, 'xl:col-span-2')}>
+                  <div className="flex items-center justify-between">
+                    <div className={modalEyebrowClass}>{t('sync.system.blockingItems', { defaultValue: 'Blocking Items' })}</div>
+                    <span className="text-xs font-semibold text-amber-600 dark:text-amber-300">
+                      {t('sync.system.pending', { count: syncBlockerDetails.length })}
+                    </span>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {syncBlockerDetails.map((blocker) => {
+                      const orderReference =
+                        blocker.orderNumber || blocker.orderId || blocker.entityId;
+                      return (
+                        <div
+                          key={`${blocker.queueId}-${blocker.entityType}-${blocker.entityId}`}
+                          className="rounded-[18px] border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-sm dark:border-amber-400/25 dark:bg-amber-500/10"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="font-semibold text-slate-900 dark:text-white">
+                              {ENTITY_TYPE_KEYS[blocker.entityType]
+                                ? t(ENTITY_TYPE_KEYS[blocker.entityType], { defaultValue: blocker.entityType })
+                                : blocker.entityType}
+                            </div>
+                            <div className="font-mono text-xs text-amber-700 dark:text-amber-200">
+                              {blocker.queueStatus}
+                            </div>
+                          </div>
+                          <div className="mt-2 text-sm text-slate-700 dark:text-slate-200">
+                            {orderReference}
+                          </div>
+                          <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                            {getLocalizedSyncBlockerReason(blocker, t)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {(systemHealth.invalidOrders?.count ?? 0) > 0 && (
                 <div className="rounded-[22px] border border-red-200/90 bg-red-50/90 p-4 dark:border-red-400/30 dark:bg-red-500/10">

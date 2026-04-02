@@ -1,0 +1,60 @@
+{
+  "paymentIntegrity": {
+    "multipleOrdersSummary": "{{count}} commandes sont bloquées. Premier blocage {{orderNumber}} : {{reason}}",
+    "methods": {
+      "cash": "Espèces",
+      "card": "Carte",
+      "split": "Partagé",
+      "pending": "En attente",
+      "other": "Autre",
+      "unknown": "Inconnu"
+    },
+    "statuses": {
+      "pending": "En attente",
+      "paid": "Payée",
+      "partially_paid": "Partiellement payée",
+      "completed": "Terminée",
+      "applied": "Appliquée",
+      "failed": "Échouée",
+      "in_progress": "En cours",
+      "waiting_parent": "En attente du paiement parent"
+    },
+    "reasonCodes": {
+      "missing_cash_payment": "La commande {{orderNumber}} n'a pas de paiement en espèces enregistré.",
+      "missing_card_payment": "La commande {{orderNumber}} n'a pas de paiement par carte enregistré.",
+      "missing_local_payment_row": "La commande {{orderNumber}} n'a pas sa ligne de paiement locale.",
+      "partial_cash_payment": "La commande {{orderNumber}} a encore un reste en espèces à encaisser.",
+      "partial_card_payment": "La commande {{orderNumber}} a encore un reste par carte à encaisser.",
+      "split_payment_incomplete": "Le paiement partagé de la commande {{orderNumber}} n'est pas terminé.",
+      "unsupported_payment_method": "La commande {{orderNumber}} utilise un mode de paiement à encaisser manuellement."
+    },
+    "fixCodes": {
+      "missing_cash_payment": "Ouvrez la commande et encaissez le paiement en espèces.",
+      "missing_card_payment": "Ouvrez la commande et encaissez le paiement par carte.",
+      "missing_local_payment_row": "Ouvrez la commande et enregistrez à nouveau le paiement attendu.",
+      "partial_cash_payment": "Encaissez le montant restant en espèces pour continuer.",
+      "partial_card_payment": "Encaissez le montant restant par carte pour continuer.",
+      "split_payment_incomplete": "Terminez toutes les parties du paiement partagé avant de continuer.",
+      "unsupported_payment_method": "Vérifiez la commande et encaissez le paiement manuellement."
+    }
+  },
+  "sync": {
+    "system": {
+      "blockingItems": "Éléments bloquants"
+    },
+    "blockerReasons": {
+      "parent_payment_not_synced": "En attente de la synchronisation du paiement parent.",
+      "parent_payment_missing_canonical_remote_id": "En attente de l'identifiant de paiement distant du paiement parent.",
+      "ambiguous_canonical_remote_payment": "Plusieurs paiements réparés correspondent à cet ajustement. Vérification manuelle requise."
+    },
+    "closeoutStages": {
+      "pre_z_report_sync": "synchronisation avant rapport Z",
+      "z_report_submission": "soumission du rapport Z",
+      "closeout_sync": "synchronisation de clôture"
+    },
+    "closeoutBlocked": {
+      "single": "Impossible de clôturer la journée pendant {{stage}}, car {{orderReference}} est toujours bloqué : {{reason}}.",
+      "multiple": "Impossible de clôturer la journée pendant {{stage}}, car {{count}} éléments de synchronisation sont toujours bloqués."
+    }
+  }
+}

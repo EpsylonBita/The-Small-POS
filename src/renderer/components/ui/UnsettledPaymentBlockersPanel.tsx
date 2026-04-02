@@ -2,6 +2,12 @@ import { AlertTriangle, Banknote, CreditCard } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { UnsettledPaymentBlocker } from "../../../lib/ipc-contracts";
+import {
+  getLocalizedPaymentBlockerFix,
+  getLocalizedPaymentBlockerReason,
+  getLocalizedPaymentMethod,
+  getLocalizedPaymentStatus,
+} from "../../../lib/payment-integrity";
 import { formatCurrency } from "../../utils/format";
 
 interface UnsettledPaymentBlockersPanelProps {
@@ -114,7 +120,7 @@ export function UnsettledPaymentBlockersPanel({
                     })}
                   </div>
                   <div className="mt-1 text-sm font-medium text-slate-100">
-                    {blocker.reasonText}
+                    {getLocalizedPaymentBlockerReason(blocker, t)}
                   </div>
                 </div>
 
@@ -160,10 +166,10 @@ export function UnsettledPaymentBlockersPanel({
                     )}`}
                   >
                     {getMethodIcon(blocker.paymentMethod || "")}
-                    {blocker.paymentMethod || "pending"}
+                    {getLocalizedPaymentMethod(blocker.paymentMethod || "pending", t)}
                   </span>
                   <span className="inline-flex rounded-full border border-slate-400/20 bg-slate-500/10 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-200">
-                    {blocker.paymentStatus || "pending"}
+                    {getLocalizedPaymentStatus(blocker.paymentStatus || "pending", t)}
                   </span>
                 </div>
 
@@ -173,7 +179,7 @@ export function UnsettledPaymentBlockersPanel({
                       defaultValue: "Fix",
                     })}
                   </span>
-                  {blocker.suggestedFix}
+                  {getLocalizedPaymentBlockerFix(blocker, t)}
                 </div>
               </div>
 

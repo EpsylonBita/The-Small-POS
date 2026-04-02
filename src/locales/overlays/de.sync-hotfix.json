@@ -1,0 +1,60 @@
+{
+  "paymentIntegrity": {
+    "multipleOrdersSummary": "{{count}} Bestellungen sind blockiert. Erster Blocker {{orderNumber}}: {{reason}}",
+    "methods": {
+      "cash": "Bar",
+      "card": "Karte",
+      "split": "Geteilt",
+      "pending": "Ausstehend",
+      "other": "Andere",
+      "unknown": "Unbekannt"
+    },
+    "statuses": {
+      "pending": "Ausstehend",
+      "paid": "Bezahlt",
+      "partially_paid": "Teilweise bezahlt",
+      "completed": "Abgeschlossen",
+      "applied": "Übernommen",
+      "failed": "Fehlgeschlagen",
+      "in_progress": "In Bearbeitung",
+      "waiting_parent": "Wartet auf Elternzahlung"
+    },
+    "reasonCodes": {
+      "missing_cash_payment": "Für Bestellung {{orderNumber}} fehlt eine erfasste Barzahlung.",
+      "missing_card_payment": "Für Bestellung {{orderNumber}} fehlt eine erfasste Kartenzahlung.",
+      "missing_local_payment_row": "Für Bestellung {{orderNumber}} fehlt der lokale Zahlungseintrag.",
+      "partial_cash_payment": "Für Bestellung {{orderNumber}} steht noch ein Bar-Restbetrag aus.",
+      "partial_card_payment": "Für Bestellung {{orderNumber}} steht noch ein Karten-Restbetrag aus.",
+      "split_payment_incomplete": "Für Bestellung {{orderNumber}} ist die geteilte Zahlung noch nicht vollständig.",
+      "unsupported_payment_method": "Bestellung {{orderNumber}} verwendet eine Zahlungsart, die manuell eingezogen werden muss."
+    },
+    "fixCodes": {
+      "missing_cash_payment": "Bestellung öffnen und die Barzahlung kassieren.",
+      "missing_card_payment": "Bestellung öffnen und die Kartenzahlung kassieren.",
+      "missing_local_payment_row": "Bestellung öffnen und die erwartete Zahlung erneut erfassen.",
+      "partial_cash_payment": "Restbetrag in bar kassieren, um fortzufahren.",
+      "partial_card_payment": "Restbetrag per Karte kassieren, um fortzufahren.",
+      "split_payment_incomplete": "Alle Teile der geteilten Zahlung abschließen, bevor Sie fortfahren.",
+      "unsupported_payment_method": "Bestellung prüfen und die Zahlung manuell kassieren."
+    }
+  },
+  "sync": {
+    "system": {
+      "blockingItems": "Blockierende Einträge"
+    },
+    "blockerReasons": {
+      "parent_payment_not_synced": "Wartet darauf, dass die übergeordnete Zahlung zuerst synchronisiert wird.",
+      "parent_payment_missing_canonical_remote_id": "Wartet darauf, dass die übergeordnete Zahlung ihre Remote-Zahlungs-ID erhält.",
+      "ambiguous_canonical_remote_payment": "Mehrere reparierte Zahlungen passen zu dieser Anpassung. Manuelle Prüfung erforderlich."
+    },
+    "closeoutStages": {
+      "pre_z_report_sync": "Vor-Z-Bericht-Synchronisierung",
+      "z_report_submission": "Z-Bericht-Übermittlung",
+      "closeout_sync": "Abschluss-Synchronisierung"
+    },
+    "closeoutBlocked": {
+      "single": "Der Tag kann während {{stage}} nicht geschlossen werden, weil {{orderReference}} noch blockiert ist: {{reason}}.",
+      "multiple": "Der Tag kann während {{stage}} nicht geschlossen werden, weil noch {{count}} Synchronisierungseinträge blockiert sind."
+    }
+  }
+}

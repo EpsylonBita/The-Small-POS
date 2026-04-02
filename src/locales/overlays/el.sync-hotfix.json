@@ -1,0 +1,60 @@
+{
+  "paymentIntegrity": {
+    "multipleOrdersSummary": "{{count}} παραγγελίες είναι μπλοκαρισμένες. Πρώτο εμπόδιο {{orderNumber}}: {{reason}}",
+    "methods": {
+      "cash": "Μετρητά",
+      "card": "Κάρτα",
+      "split": "Μικτή πληρωμή",
+      "pending": "Σε εκκρεμότητα",
+      "other": "Άλλο",
+      "unknown": "Άγνωστο"
+    },
+    "statuses": {
+      "pending": "Σε εκκρεμότητα",
+      "paid": "Πληρωμένη",
+      "partially_paid": "Μερικώς πληρωμένη",
+      "completed": "Ολοκληρωμένη",
+      "applied": "Εφαρμοσμένη",
+      "failed": "Αποτυχημένη",
+      "in_progress": "Σε εξέλιξη",
+      "waiting_parent": "Αναμονή γονικής πληρωμής"
+    },
+    "reasonCodes": {
+      "missing_cash_payment": "Η παραγγελία {{orderNumber}} δεν έχει καταγεγραμμένη πληρωμή με μετρητά.",
+      "missing_card_payment": "Η παραγγελία {{orderNumber}} δεν έχει καταγεγραμμένη πληρωμή με κάρτα.",
+      "missing_local_payment_row": "Η παραγγελία {{orderNumber}} δεν έχει την τοπική εγγραφή πληρωμής της.",
+      "partial_cash_payment": "Η παραγγελία {{orderNumber}} έχει υπόλοιπο σε μετρητά που δεν έχει εισπραχθεί.",
+      "partial_card_payment": "Η παραγγελία {{orderNumber}} έχει υπόλοιπο σε κάρτα που δεν έχει εισπραχθεί.",
+      "split_payment_incomplete": "Η παραγγελία {{orderNumber}} έχει μη ολοκληρωμένη μικτή πληρωμή.",
+      "unsupported_payment_method": "Η παραγγελία {{orderNumber}} χρησιμοποιεί τρόπο πληρωμής που πρέπει να εισπραχθεί χειροκίνητα."
+    },
+    "fixCodes": {
+      "missing_cash_payment": "Άνοιξε την παραγγελία και εισέπραξε τα μετρητά.",
+      "missing_card_payment": "Άνοιξε την παραγγελία και εισέπραξε την πληρωμή με κάρτα.",
+      "missing_local_payment_row": "Άνοιξε την παραγγελία και καταχώρισε ξανά την αναμενόμενη πληρωμή.",
+      "partial_cash_payment": "Εισέπραξε το υπόλοιπο ποσό με μετρητά για να συνεχίσεις.",
+      "partial_card_payment": "Εισέπραξε το υπόλοιπο ποσό με κάρτα για να συνεχίσεις.",
+      "split_payment_incomplete": "Ολοκλήρωσε όλα τα μέρη της μικτής πληρωμής πριν συνεχίσεις.",
+      "unsupported_payment_method": "Έλεγξε την παραγγελία και εισέπραξε την πληρωμή χειροκίνητα."
+    }
+  },
+  "sync": {
+    "system": {
+      "blockingItems": "Στοιχεία που μπλοκάρουν"
+    },
+    "blockerReasons": {
+      "parent_payment_not_synced": "Αναμονή να συγχρονιστεί πρώτα η γονική πληρωμή.",
+      "parent_payment_missing_canonical_remote_id": "Αναμονή να πάρει η γονική πληρωμή το απομακρυσμένο αναγνωριστικό της.",
+      "ambiguous_canonical_remote_payment": "Πολλαπλές διορθωμένες πληρωμές ταιριάζουν με αυτή την προσαρμογή. Απαιτείται χειροκίνητος έλεγχος."
+    },
+    "closeoutStages": {
+      "pre_z_report_sync": "προ-συγχρονισμό αναφοράς Ζ",
+      "z_report_submission": "υποβολή αναφοράς Ζ",
+      "closeout_sync": "τελικό συγχρονισμό κλεισίματος"
+    },
+    "closeoutBlocked": {
+      "single": "Δεν μπορεί να κλείσει η ημέρα κατά τον {{stage}}, επειδή το {{orderReference}} παραμένει μπλοκαρισμένο: {{reason}}.",
+      "multiple": "Δεν μπορεί να κλείσει η ημέρα κατά τον {{stage}}, επειδή {{count}} στοιχεία συγχρονισμού παραμένουν μπλοκαρισμένα."
+    }
+  }
+}

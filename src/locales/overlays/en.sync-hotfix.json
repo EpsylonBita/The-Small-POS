@@ -1,0 +1,60 @@
+{
+  "paymentIntegrity": {
+    "multipleOrdersSummary": "{{count}} orders are blocked. First blocker {{orderNumber}}: {{reason}}",
+    "methods": {
+      "cash": "Cash",
+      "card": "Card",
+      "split": "Split",
+      "pending": "Pending",
+      "other": "Other",
+      "unknown": "Unknown"
+    },
+    "statuses": {
+      "pending": "Pending",
+      "paid": "Paid",
+      "partially_paid": "Partially paid",
+      "completed": "Completed",
+      "applied": "Applied",
+      "failed": "Failed",
+      "in_progress": "In progress",
+      "waiting_parent": "Waiting for parent"
+    },
+    "reasonCodes": {
+      "missing_cash_payment": "Order {{orderNumber}} is missing a recorded cash payment.",
+      "missing_card_payment": "Order {{orderNumber}} is missing a recorded card payment.",
+      "missing_local_payment_row": "Order {{orderNumber}} is missing its local payment record.",
+      "partial_cash_payment": "Order {{orderNumber}} still has unpaid cash remaining.",
+      "partial_card_payment": "Order {{orderNumber}} still has unpaid card remaining.",
+      "split_payment_incomplete": "Order {{orderNumber}} still has an incomplete split payment.",
+      "unsupported_payment_method": "Order {{orderNumber}} uses a payment method that must be collected manually."
+    },
+    "fixCodes": {
+      "missing_cash_payment": "Open the order and collect the cash payment.",
+      "missing_card_payment": "Open the order and collect the card payment.",
+      "missing_local_payment_row": "Open the order and collect the expected payment again.",
+      "partial_cash_payment": "Collect the remaining cash amount to continue.",
+      "partial_card_payment": "Collect the remaining card amount to continue.",
+      "split_payment_incomplete": "Complete all split-payment portions before continuing.",
+      "unsupported_payment_method": "Review the order and collect the payment manually."
+    }
+  },
+  "sync": {
+    "system": {
+      "blockingItems": "Blocking items"
+    },
+    "blockerReasons": {
+      "parent_payment_not_synced": "Waiting for the parent payment to sync first.",
+      "parent_payment_missing_canonical_remote_id": "Waiting for the parent payment to receive its remote payment id.",
+      "ambiguous_canonical_remote_payment": "Multiple repaired payments match this adjustment. Manual review is required."
+    },
+    "closeoutStages": {
+      "pre_z_report_sync": "pre-Z-report sync",
+      "z_report_submission": "Z-report submission",
+      "closeout_sync": "closeout sync"
+    },
+    "closeoutBlocked": {
+      "single": "Cannot close the day during {{stage}} because {{orderReference}} is still blocked: {{reason}}.",
+      "multiple": "Cannot close the day during {{stage}} because {{count}} sync items are still blocked."
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "paymentIntegrity": {
+    "multipleOrdersSummary": "{{count}} ordini sono bloccati. Primo blocco {{orderNumber}}: {{reason}}",
+    "methods": {
+      "cash": "Contanti",
+      "card": "Carta",
+      "split": "Misto",
+      "pending": "In sospeso",
+      "other": "Altro",
+      "unknown": "Sconosciuto"
+    },
+    "statuses": {
+      "pending": "In sospeso",
+      "paid": "Pagato",
+      "partially_paid": "Parzialmente pagato",
+      "completed": "Completato",
+      "applied": "Applicato",
+      "failed": "Fallito",
+      "in_progress": "In corso",
+      "waiting_parent": "In attesa del pagamento padre"
+    },
+    "reasonCodes": {
+      "missing_cash_payment": "L'ordine {{orderNumber}} non ha un pagamento in contanti registrato.",
+      "missing_card_payment": "L'ordine {{orderNumber}} non ha un pagamento con carta registrato.",
+      "missing_local_payment_row": "L'ordine {{orderNumber}} non ha la riga di pagamento locale.",
+      "partial_cash_payment": "L'ordine {{orderNumber}} ha ancora un importo in contanti da incassare.",
+      "partial_card_payment": "L'ordine {{orderNumber}} ha ancora un importo con carta da incassare.",
+      "split_payment_incomplete": "Il pagamento misto dell'ordine {{orderNumber}} non è completo.",
+      "unsupported_payment_method": "L'ordine {{orderNumber}} usa un metodo di pagamento da incassare manualmente."
+    },
+    "fixCodes": {
+      "missing_cash_payment": "Apri l'ordine e incassa il pagamento in contanti.",
+      "missing_card_payment": "Apri l'ordine e incassa il pagamento con carta.",
+      "missing_local_payment_row": "Apri l'ordine e registra di nuovo il pagamento previsto.",
+      "partial_cash_payment": "Incassa l'importo residuo in contanti per continuare.",
+      "partial_card_payment": "Incassa l'importo residuo con carta per continuare.",
+      "split_payment_incomplete": "Completa tutte le parti del pagamento misto prima di continuare.",
+      "unsupported_payment_method": "Controlla l'ordine e incassa il pagamento manualmente."
+    }
+  },
+  "sync": {
+    "system": {
+      "blockingItems": "Elementi bloccanti"
+    },
+    "blockerReasons": {
+      "parent_payment_not_synced": "In attesa che il pagamento padre venga sincronizzato.",
+      "parent_payment_missing_canonical_remote_id": "In attesa che il pagamento padre riceva il suo id remoto.",
+      "ambiguous_canonical_remote_payment": "Più pagamenti riparati corrispondono a questa rettifica. È necessaria una verifica manuale."
+    },
+    "closeoutStages": {
+      "pre_z_report_sync": "sincronizzazione pre-report Z",
+      "z_report_submission": "invio report Z",
+      "closeout_sync": "sincronizzazione di chiusura"
+    },
+    "closeoutBlocked": {
+      "single": "Impossibile chiudere la giornata durante {{stage}} perché {{orderReference}} è ancora bloccato: {{reason}}.",
+      "multiple": "Impossibile chiudere la giornata durante {{stage}} perché {{count}} elementi di sincronizzazione sono ancora bloccati."
+    }
+  }
+}

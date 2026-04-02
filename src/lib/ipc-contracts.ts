@@ -199,6 +199,20 @@ export interface PaymentIntegrityErrorPayload {
   blockers?: UnsettledPaymentBlocker[];
 }
 
+export interface SyncBlockerDetail {
+  queueId: number;
+  entityType: string;
+  entityId: string;
+  operation: string;
+  queueStatus: string;
+  blockerReason: string;
+  orderId?: string | null;
+  orderNumber?: string | null;
+  paymentId?: string | null;
+  adjustmentId?: string | null;
+  lastError?: string | null;
+}
+
 export type ZReportSyncState =
   | 'pending'
   | 'syncing'
@@ -233,6 +247,11 @@ export interface ZReportSubmitResponse extends PaymentIntegrityErrorPayload {
   localDayClosed?: boolean;
   syncQueued?: boolean;
   syncState?: ZReportSyncState | null;
+  stage?: string;
+  stageCode?: string;
+  syncItemCount?: number;
+  blockersSummary?: string;
+  syncBlockerDetails?: SyncBlockerDetail[];
   message?: string;
   error?: string;
 }
@@ -376,9 +395,17 @@ export interface DiagnosticsInvalidOrder {
   reason: string;
 }
 
+export interface DiagnosticsPaymentAdjustmentBacklog {
+  genericDeferred: number;
+  waitingForParentPayment: number;
+  waitingForCanonicalRemotePaymentId: number;
+}
+
 export interface DiagnosticsSystemHealth {
   schemaVersion: number;
   syncBacklog: Record<string, Record<string, number>>;
+  paymentAdjustmentBacklog: DiagnosticsPaymentAdjustmentBacklog;
+  syncBlockerDetails?: SyncBlockerDetail[];
   lastSyncTimes: Record<string, string | null>;
   printerStatus: {
     configured: boolean;

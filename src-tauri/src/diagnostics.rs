@@ -9,6 +9,7 @@
 
 use crate::db::DbState;
 use crate::sync::normalize_optional_uuid_str;
+use crate::sync::SyncBlockerDetail;
 use rusqlite::params;
 use serde_json::{json, Value};
 use std::fs;
@@ -131,11 +132,13 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         .and_then(|v| v.get("invalid_orders").cloned())
         .unwrap_or(json!([]));
     let invalid_orders_count = invalid_orders.as_array().map(|arr| arr.len()).unwrap_or(0);
+    let sync_blocker_details = crate::sync::get_sync_blocker_details(db, 10).unwrap_or_default();
 
     Ok(json!({
         "schemaVersion": schema_version,
         "syncBacklog": sync_backlog,
         "paymentAdjustmentBacklog": payment_adjustment_backlog,
+        "syncBlockerDetails": sync_blocker_details,
         "lastSyncTimes": last_sync_times,
         "printerStatus": printer_status,
         "lastZReport": last_zreport,
@@ -248,6 +251,12 @@ fn get_payment_adjustment_backlog(conn: &rusqlite::Connection) -> Value {
         "waitingForParentPayment": waiting_for_parent_payment,
         "waitingForCanonicalRemotePaymentId": waiting_for_canonical_remote_payment_id,
     })
+}
+
+fn get_sync_blocker_details_json(
+    details: Vec<SyncBlockerDetail>,
+) -> Value {
+    serde_json::to_value(details).unwrap_or_else(|_| json!([]))
 }
 
 fn get_last_sync_times(conn: &rusqlite::Connection) -> Value {
@@ -398,6 +407,19 @@ pub fn export_diagnostics_with_options(
     let payment_adjustment_backlog_json = serde_json::to_string_pretty(&payment_adjustment_backlog)
         .map_err(|e| format!("Failed to serialize payment adjustment backlog: {e}"))?;
     zip.write_all(payment_adjustment_backlog_json.as_bytes())
+        .map_err(|e| e.to_string())?;
+
+    drop(conn);
+    let sync_blocker_details = redact_value_for_export(
+        get_sync_blocker_details_json(crate::sync::get_sync_blocker_details(db, 25)?),
+        export_options.redact_sensitive,
+    );
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    zip.start_file("sync_blocker_details.json", zip_options)
+        .map_err(|e| e.to_string())?;
+    let sync_blocker_details_json = serde_json::to_string_pretty(&sync_blocker_details)
+        .map_err(|e| format!("Failed to serialize sync blocker details: {e}"))?;
+    zip.write_all(sync_blocker_details_json.as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 5. Last 20 sync errors

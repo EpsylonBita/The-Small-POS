@@ -28,6 +28,7 @@ import type {
 } from '../../../lib/ipc-contracts';
 import {
   extractPaymentIntegrityPayload,
+  formatOperatorFacingError,
   formatPaymentIntegrityError,
 } from '../../../lib/payment-integrity';
 
@@ -39,29 +40,12 @@ interface ZReportModalProps {
   lockDate?: boolean;
 }
 
-function extractErrorMessage(error: unknown, fallback: string): string {
-  const paymentIntegrityMessage = formatPaymentIntegrityError(error, '');
-  if (paymentIntegrityMessage.trim()) {
-    return paymentIntegrityMessage.trim();
-  }
-
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
-  }
-
-  if (typeof error === 'string' && error.trim()) {
-    return error;
-  }
-
-  if (error && typeof error === 'object') {
-    const candidate = error as Record<string, unknown>;
-    const directMessage = candidate.message ?? candidate.error ?? candidate.reason;
-    if (typeof directMessage === 'string' && directMessage.trim()) {
-      return directMessage;
-    }
-  }
-
-  return fallback;
+function extractErrorMessage(
+  error: unknown,
+  fallback: string,
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  return formatOperatorFacingError(error, fallback, t);
 }
 
 const ZReportModal: React.FC<ZReportModalProps> = ({
@@ -217,6 +201,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               formatPaymentIntegrityError(
                 result,
                 t('modals.zReport.loadFailed'),
+                t,
               ),
             );
           }
@@ -242,7 +227,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           return;
         }
 
-        setError(extractErrorMessage(e, t('modals.zReport.loadFailed')));
+        setError(extractErrorMessage(e, t('modals.zReport.loadFailed'), t));
       } finally {
         if (!active || silent) return;
         setLoading(false);
@@ -294,6 +279,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           const errorMessage = formatPaymentIntegrityError(
             result,
             t('modals.zReport.submissionFailed'),
+            t,
           );
           setSubmitResult(
             t('modals.zReport.resolveBlockerFailed', {
@@ -324,6 +310,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         const errorMessage = extractErrorMessage(
           e,
           t('modals.zReport.submissionFailed'),
+          t,
         );
         setSubmitResult(
           t('modals.zReport.resolveBlockerFailed', {
@@ -1268,6 +1255,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                   const errorMessage = formatPaymentIntegrityError(
                     res,
                     res?.error || res?.message || t('modals.zReport.unknownError'),
+                    t,
                   );
                   console.error('[ZReportModal] IPC error response:', { error: errorMessage, fullResponse: res });
                   setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
@@ -1311,7 +1299,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 // Display specific error message to user
                 const paymentIntegrityPayload = extractPaymentIntegrityPayload(e);
                 setPaymentBlockers(paymentIntegrityPayload?.blockers || []);
-                const errorMessage = extractErrorMessage(e, t('modals.zReport.submissionFailed'));
+                const errorMessage = extractErrorMessage(
+                  e,
+                  t('modals.zReport.submissionFailed'),
+                  t,
+                );
                 setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
               } finally {
                 // Always reset button state (Requirements 5.2, 5.4)

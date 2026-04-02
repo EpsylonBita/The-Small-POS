@@ -1326,7 +1326,11 @@ pub async fn report_submit_z_report(
         },
         "Pre-closeout sync drain finished"
     );
-    crate::sync::ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync")?;
+    if let Some(response) =
+        crate::sync::build_sync_closeout_blocked_response_for_stage(&db, "pre-Z-report sync")?
+    {
+        return Ok(response);
+    }
 
     let initial_blockers = zreport::unsettled_payment_blockers(&db, &payload)?;
     let blockers = if initial_blockers
@@ -1387,7 +1391,11 @@ pub async fn report_submit_z_report(
         },
         "Post-submission sync drain finished"
     );
-    crate::sync::ensure_sync_queue_clear_for_z_report(&db, "Z-report submission")?;
+    if let Some(response) =
+        crate::sync::build_sync_closeout_blocked_response_for_stage(&db, "Z-report submission")?
+    {
+        return Ok(response);
+    }
 
     let mut result = zreport::finalize_prepared_z_report_submission(&db, &prepared)?;
 
