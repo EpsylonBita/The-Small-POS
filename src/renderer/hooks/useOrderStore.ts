@@ -8,6 +8,11 @@ import { TIMING, RETRY, ERROR_MESSAGES } from '../../shared/constants';
 import type { Order } from '../../shared/types/orders';
 import { OrderService } from '../../services/OrderService';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import {
+  extractPaymentIntegrityPayload,
+  summarizeUnsettledPaymentBlockers,
+} from '../../lib/payment-integrity';
+import type { PaymentIntegrityErrorPayload } from '../../lib/ipc-contracts';
 import { pollFiscalReceiptStatus } from '../services/fiscal-status';
 import { sortOrdersOldestFirst } from '../utils/order-sorting';
 
@@ -33,6 +38,12 @@ interface SyncRetryInfo {
   nextRetryAt: string;
   retryDelayMs: number;
   lastError?: string;
+}
+
+interface UpdateOrderStatusDetailedResult {
+  success: boolean;
+  errorMessage?: string;
+  paymentIntegrityPayload?: PaymentIntegrityErrorPayload | null;
 }
 
 // IPC response interfaces for bridge calls
@@ -87,6 +98,10 @@ interface OrderStore {
   loadOrders: () => Promise<void>;
   getOrderById: (orderId: string) => Promise<Order | null>;
   updateOrderStatus: (orderId: string, status: Order['status']) => Promise<boolean>;
+  updateOrderStatusDetailed: (
+    orderId: string,
+    status: Order['status'],
+  ) => Promise<UpdateOrderStatusDetailedResult>;
   returnCancelledToPending: (orderId: string) => Promise<boolean>;
   createOrder: (orderData: Partial<Order>) => Promise<{ success: boolean; orderId?: string; orderNumber?: string; error?: string; savedForRetry?: boolean }>;
   setSelectedOrder: (order: Order | null) => void;
@@ -829,7 +844,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       }
     },
 
-    updateOrderStatus: async (orderId: string, status: Order['status']) => {
+    updateOrderStatusDetailed: async (orderId: string, status: Order['status']) => {
       const operation = `updateOrderStatus_${orderId}`;
       get()._setLoading(operation, true);
       get().clearError();
@@ -870,22 +885,52 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
         get()._invalidateCache();
         get()._setLoading(operation, false);
-
-        toast.success('Order status updated');
-        return true;
+        return { success: true };
       } catch (error) {
+        const paymentIntegrityPayload =
+          ((error as any)?.paymentIntegrityPayload as PaymentIntegrityErrorPayload | undefined) ||
+          extractPaymentIntegrityPayload((error as any)?.details) ||
+          extractPaymentIntegrityPayload((error as any)?.cause) ||
+          extractPaymentIntegrityPayload((error as any)?.message) ||
+          extractPaymentIntegrityPayload(error);
+        if (paymentIntegrityPayload) {
+          get()._setLoading(operation, false);
+          return {
+            success: false,
+            errorMessage:
+              paymentIntegrityPayload.error ||
+              paymentIntegrityPayload.message ||
+              summarizeUnsettledPaymentBlockers(paymentIntegrityPayload.blockers || []) ||
+              'Order status update blocked by unsettled payment',
+            paymentIntegrityPayload,
+          };
+        }
+
         // Handle error
         const posError = errorHandler.handle(error);
         get()._setError(posError);
         get()._setLoading(operation, false);
-
-        // Show user-friendly error message
-        const userMessage = errorHandler.getUserMessage(posError);
-        console.error('Failed to update order status:', userMessage);
-        toast.error(userMessage || ERROR_MESSAGES.GENERIC_ERROR);
-
-        return false;
+        return {
+          success: false,
+          errorMessage:
+            errorHandler.getUserMessage(posError) || ERROR_MESSAGES.GENERIC_ERROR,
+        };
       }
+    },
+
+    updateOrderStatus: async (orderId: string, status: Order['status']) => {
+      const result = await get().updateOrderStatusDetailed(orderId, status);
+      if (result.success) {
+        toast.success('Order status updated');
+        return true;
+      }
+
+      if (!result.paymentIntegrityPayload) {
+        console.error('Failed to update order status:', result.errorMessage);
+        toast.error(result.errorMessage || ERROR_MESSAGES.GENERIC_ERROR);
+      }
+
+      return false;
     },
 
     createOrder: async (orderData: Partial<Order>) => {

@@ -6,7 +6,10 @@ import { debugLogger } from '../shared/utils/debug-logger';
 import { ErrorFactory } from '../shared/utils/error-handler';
 import { isBrowser } from '../lib/platform-detect';
 import { getBridge } from '../lib';
-import { formatPaymentIntegrityError } from '../lib/payment-integrity';
+import {
+  extractPaymentIntegrityPayload,
+  formatPaymentIntegrityError,
+} from '../lib/payment-integrity';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -293,16 +296,45 @@ export class OrderService {
             return;
           }
           // Bridge returned a non-success response
+          const paymentIntegrityPayload = extractPaymentIntegrityPayload(resp);
           const ipcError = formatPaymentIntegrityError(
             resp,
             resp?.error || 'Bridge updateStatus returned unexpected response',
           );
+          if (paymentIntegrityPayload) {
+            const paymentBlockerError = new Error(
+              typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
+            );
+            (paymentBlockerError as any).paymentIntegrityPayload =
+              paymentIntegrityPayload;
+            throw paymentBlockerError;
+          }
           if (!this.allowAdminApiFallback()) {
             throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
           }
           console.warn('[RENDERER OrderService] ⚠️ Bridge returned error:', ipcError);
           debugLogger.warn('Bridge update-status returned error; will try Admin API', ipcError, 'OrderService');
         } catch (ipcErr) {
+          const paymentIntegrityPayload =
+            ((ipcErr as any)?.paymentIntegrityPayload as
+              | ReturnType<typeof extractPaymentIntegrityPayload>
+              | undefined) ||
+            extractPaymentIntegrityPayload((ipcErr as any)?.details) ||
+            extractPaymentIntegrityPayload((ipcErr as any)?.cause) ||
+            extractPaymentIntegrityPayload((ipcErr as any)?.message) ||
+            extractPaymentIntegrityPayload(ipcErr);
+          if (paymentIntegrityPayload) {
+            const paymentBlockerError = new Error(
+              formatPaymentIntegrityError(
+                ipcErr,
+                (ipcErr as any)?.message ||
+                  "Order status update blocked by unsettled payment",
+              ),
+            );
+            (paymentBlockerError as any).paymentIntegrityPayload =
+              paymentIntegrityPayload;
+            throw paymentBlockerError;
+          }
           if (!this.allowAdminApiFallback()) {
             const errMsg = (ipcErr as any)?.message || String(ipcErr);
             debugLogger.error('Native bridge updateOrderStatus failed', ipcErr, 'OrderService');
@@ -363,6 +395,19 @@ export class OrderService {
           bodyText = await response.text()
           try { bodyJson = JSON.parse(bodyText) } catch { }
         } catch { }
+
+        const paymentIntegrityPayload = extractPaymentIntegrityPayload(bodyJson)
+        if (paymentIntegrityPayload) {
+          const paymentBlockerError = new Error(
+            formatPaymentIntegrityError(
+              bodyJson,
+              bodyJson?.error || 'Order status update blocked by unsettled payment',
+            ),
+          )
+          ;(paymentBlockerError as any).paymentIntegrityPayload =
+            paymentIntegrityPayload
+          throw paymentBlockerError
+        }
 
         const details = bodyJson || bodyText || null
         const statusCode = response.status
@@ -555,6 +600,29 @@ export class OrderService {
         (orderData as any).initialPayment ??
         (orderData as any).initial_payment ??
         undefined;
+      const normalizedInitialPaymentMethod =
+        typeof initialPayment?.payment_method === "string" &&
+        initialPayment.payment_method.trim().length > 0
+          ? initialPayment.payment_method.trim().toLowerCase()
+          : typeof initialPayment?.method === "string" &&
+              initialPayment.method.trim().length > 0
+            ? initialPayment.method.trim().toLowerCase()
+            : typeof initialPayment?.paymentMethod === "string" &&
+                initialPayment.paymentMethod.trim().length > 0
+              ? initialPayment.paymentMethod.trim().toLowerCase()
+              : undefined;
+      const normalizedInitialPayment =
+        initialPayment &&
+        Number(initialPayment.amount || 0) > 0 &&
+        typeof normalizedInitialPaymentMethod === "string" &&
+        normalizedInitialPaymentMethod.length > 0
+          ? {
+              ...initialPayment,
+              amount: Number(initialPayment.amount),
+              method: normalizedInitialPaymentMethod,
+              payment_method: normalizedInitialPaymentMethod,
+            }
+          : undefined;
 
       const normalized: any = {
         // Include customerId for backend address fallback resolution
@@ -595,8 +663,8 @@ export class OrderService {
         paymentStatus: orderData.paymentStatus ?? orderData.payment_status,
         paymentMethod: orderData.paymentMethod ?? orderData.payment_method,
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
-        initialPayment,
-        initial_payment: initialPayment,
+        initialPayment: normalizedInitialPayment,
+        initial_payment: normalizedInitialPayment,
         staffShiftId: (orderData as any).staffShiftId ?? (orderData as any).staff_shift_id ?? null,
         staffId: (orderData as any).staffId ?? (orderData as any).staff_id ?? null,
       };
@@ -663,9 +731,25 @@ export class OrderService {
       let orderType = orderData.order_type || orderDataAny.orderType || 'pickup';
       if (orderType === 'takeaway' || orderType === 'takeout') orderType = 'pickup';
 
+      const normalizedIsGhost =
+        orderDataAny.is_ghost === true ||
+        orderDataAny.isGhost === true ||
+        orderDataAny.ghost === true;
+      const normalizedGhostSource =
+        orderDataAny.ghost_source ?? orderDataAny.ghostSource ?? null;
+      const normalizedGhostMetadata =
+        orderDataAny.ghost_metadata ?? orderDataAny.ghostMetadata ?? null;
+
       // Map payment_status: 'completed' -> 'paid'
       let paymentStatus = orderData.payment_status || orderDataAny.paymentStatus || 'pending';
       if (paymentStatus === 'completed') paymentStatus = 'paid';
+      if (
+        !normalizedIsGhost &&
+        !normalizedInitialPayment &&
+        (paymentStatus === 'paid' || paymentStatus === 'partially_paid')
+      ) {
+        paymentStatus = 'pending';
+      }
 
       // Try to resolve active cashier shift to attribute revenue properly
       let activeCashierShiftId: string | null = null;
@@ -696,14 +780,6 @@ export class OrderService {
         0,
         Number(orderDataAny.coupon_discount_amount ?? orderDataAny.couponDiscountAmount ?? 0)
       );
-      const normalizedIsGhost =
-        orderDataAny.is_ghost === true ||
-        orderDataAny.isGhost === true ||
-        orderDataAny.ghost === true;
-      const normalizedGhostSource =
-        orderDataAny.ghost_source ?? orderDataAny.ghostSource ?? null;
-      const normalizedGhostMetadata =
-        orderDataAny.ghost_metadata ?? orderDataAny.ghostMetadata ?? null;
 
       const apiPayload: any = {
         // Required fields
@@ -814,6 +890,8 @@ export class OrderService {
         payment_status: paymentStatus,
         total_amount: orderData.total_amount || orderDataAny.totalAmount || 0,
         client_request_id: requestId,
+        initialPayment: normalizedInitialPayment,
+        initial_payment: normalizedInitialPayment,
 
         // Optional fields - use ?? for numbers to handle 0 values correctly
         customer_id: orderData.customer_id || null,

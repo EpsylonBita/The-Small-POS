@@ -24,38 +24,43 @@ function showFatalError(err: unknown) {
   console.error('[FATAL]', err);
 }
 
-try {
-  // IPC abstraction layer -- must run before React renders
-  const { getBridge } = await import('./lib');
-
-  // Hydrate secure terminal identity before React renders.
+async function hydrateStartupSupabaseContext(): Promise<void> {
   try {
-    const config = await getBridge().terminalConfig.getFullConfig();
+    const { getBridge } = await import('./lib');
+    const config = await Promise.race([
+      getBridge().terminalConfig.getFullConfig(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('startup config hydration timed out')), 2500),
+      ),
+    ]);
     const terminalId = toOptionalTrimmedString(config?.terminal_id);
     const organizationId = toOptionalTrimmedString(config?.organization_id);
     const branchId = toOptionalTrimmedString(config?.branch_id);
 
-    // Also store terminal context for Supabase headers
-    if (terminalId || organizationId || branchId) {
-      const { setSupabaseContext } = await import('./shared/supabase-config');
-      setSupabaseContext({
-        terminalId,
-        organizationId,
-        branchId,
-      });
-      // Remove legacy persisted terminal identity cache from localStorage.
-      try {
-        localStorage.removeItem('terminal_id');
-        localStorage.removeItem('organization_id');
-        localStorage.removeItem('branch_id');
-      } catch {
-        // Ignore storage errors in restricted contexts.
-      }
+    if (!terminalId && !organizationId && !branchId) {
+      return;
+    }
+
+    const { setSupabaseContext } = await import('./shared/supabase-config');
+    setSupabaseContext({
+      terminalId,
+      organizationId,
+      branchId,
+    });
+
+    try {
+      localStorage.removeItem('terminal_id');
+      localStorage.removeItem('organization_id');
+      localStorage.removeItem('branch_id');
+    } catch {
+      // Ignore storage errors in restricted contexts.
     }
   } catch (e) {
-    console.warn('[Startup] Supabase hydration failed (non-fatal):', e);
+    console.warn('[Startup] Supabase hydration skipped (non-fatal):', e);
   }
+}
 
+try {
   // Global styles (must load before App)
   await import('./index.css');
   await import('./renderer/styles/globals.css');
@@ -70,6 +75,7 @@ try {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
   );
+  void hydrateStartupSupabaseContext();
 } catch (err) {
   showFatalError(err);
 }

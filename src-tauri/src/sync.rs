@@ -187,6 +187,7 @@ pub(crate) struct ZReportSyncResponse {
 }
 
 const CLOSEOUT_SYNC_DRAIN_MAX_PASSES: usize = 4;
+const STALE_IN_PROGRESS_SYNC_LEASE_SECS: i64 = 120;
 const CLOSEOUT_SYNC_BLOCKER_SUMMARY_LIMIT: i64 = 5;
 const ADJUSTMENT_BLOCKER_PARENT_PAYMENT_NOT_SYNCED: &str = "parent_payment_not_synced";
 const ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID: &str =
@@ -269,8 +270,10 @@ pub struct SyncState {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct RecurringSyncRecoverySummary {
     business_day_repairs: usize,
+    z_report_business_date_repairs: usize,
     cashier_reference_requeues: usize,
     retryable_shift_requeues: usize,
+    stale_in_progress_requeues: usize,
     failed_shift_bound_financial_recoveries: usize,
     deferred_payment_promotions: usize,
     deferred_adjustment_promotions: usize,
@@ -280,8 +283,10 @@ struct RecurringSyncRecoverySummary {
 impl RecurringSyncRecoverySummary {
     fn total_actions(&self) -> usize {
         self.business_day_repairs
+            + self.z_report_business_date_repairs
             + self.cashier_reference_requeues
             + self.retryable_shift_requeues
+            + self.stale_in_progress_requeues
             + self.failed_shift_bound_financial_recoveries
             + self.deferred_payment_promotions
             + self.deferred_adjustment_promotions
@@ -1667,6 +1672,22 @@ pub async fn check_network_status() -> Value {
 fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
     let mut summary = RecurringSyncRecoverySummary::default();
 
+    match requeue_stale_in_progress_sync_rows(db) {
+        Ok(requeued) => {
+            summary.stale_in_progress_requeues = requeued;
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    lease_secs = STALE_IN_PROGRESS_SYNC_LEASE_SECS,
+                    "Recurring sync recovery requeued stale in-progress sync rows"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to requeue stale in-progress rows");
+        }
+    }
+
     match backfill_active_shift_business_day_context(db) {
         Ok(repaired) => {
             summary.business_day_repairs = repaired;
@@ -1679,6 +1700,24 @@ fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
         }
         Err(error) => {
             warn!(error = %error, "Recurring sync recovery failed to repair business-day metadata");
+        }
+    }
+
+    match crate::zreport::repair_retryable_z_report_business_dates(db) {
+        Ok(repaired) => {
+            summary.z_report_business_date_repairs = repaired;
+            if repaired > 0 {
+                info!(
+                    repaired,
+                    "Recurring sync recovery repaired retryable z-report business-date mismatches"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Recurring sync recovery failed to repair retryable z-report business-date mismatches"
+            );
         }
     }
 
@@ -1755,6 +1794,60 @@ fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
     }
 
     summary
+}
+
+fn requeue_stale_in_progress_sync_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let lease_modifier = format!("-{} seconds", STALE_IN_PROGRESS_SYNC_LEASE_SECS);
+
+    let stale_rows: Vec<(i64, String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, entity_type, entity_id
+                 FROM sync_queue
+                 WHERE status = 'in_progress'
+                   AND julianday(COALESCE(updated_at, created_at))
+                       <= julianday('now', ?1)",
+            )
+            .map_err(|e| format!("prepare stale in-progress selector: {e}"))?;
+
+        let rows = stmt
+            .query_map(params![lease_modifier.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| format!("query stale in-progress selector: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+        rows
+    };
+
+    if stale_rows.is_empty() {
+        return Ok(0);
+    }
+
+    let requeued = conn
+        .execute(
+            "UPDATE sync_queue
+             SET status = 'pending',
+                 next_retry_at = NULL,
+                 updated_at = datetime('now')
+             WHERE status = 'in_progress'
+               AND julianday(COALESCE(updated_at, created_at))
+                   <= julianday('now', ?1)",
+            params![lease_modifier.as_str()],
+        )
+        .map_err(|e| format!("requeue stale in-progress rows: {e}"))?;
+
+    for (_, entity_type, entity_id) in stale_rows.into_iter().take(5) {
+        info!(
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            lease_secs = STALE_IN_PROGRESS_SYNC_LEASE_SECS,
+            "Recovered stale in-progress sync row"
+        );
+    }
+
+    Ok(requeued)
 }
 
 fn has_actionable_remote_sync_work(db: &DbState) -> Result<bool, String> {
@@ -4356,6 +4449,20 @@ fn find_canonical_adjustment_payment_target_with_conn(
     conn: &Connection,
     payment_id: &str,
 ) -> Result<Option<(String, String)>, String> {
+    // First try the strict duplicate-payment resolver used for stale payment
+    // conflicts. It already prefers exact transaction_ref matches and then a
+    // deterministic method+amount+status candidate when the parent payment is a
+    // duplicate local mirror missing its canonical remote id.
+    if let Some((canonical_payment_id, canonical_remote_payment_id)) =
+        find_canonical_duplicate_payment_target_with_conn(conn, payment_id)?
+    {
+        if let Some(canonical_remote_payment_id) =
+            normalize_optional_uuid_str(canonical_remote_payment_id.as_deref())
+        {
+            return Ok(Some((canonical_payment_id, canonical_remote_payment_id)));
+        }
+    }
+
     let payment_context: Option<(String, Option<String>, f64, Option<String>)> = conn
         .query_row(
             "SELECT
@@ -6837,55 +6944,9 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
 
     cleanup_order_update_queue_rows_for_order(db, None)?;
 
-    // Read pending items (limit 10)
-    let pending_items: Vec<SyncItem> = {
+    let pending_items = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, entity_type, entity_id, operation, payload, idempotency_key,
-                        retry_count, max_retries, next_retry_at,
-                        COALESCE(retry_delay_ms, 5000), remote_receipt_id
-                 FROM sync_queue
-                 WHERE status IN ('pending', 'in_progress')
-                   AND retry_count < max_retries
-                   AND (
-                        next_retry_at IS NULL
-                        OR julianday(next_retry_at) <= julianday('now')
-                   )
-                 ORDER BY COALESCE(next_retry_at, created_at) ASC, created_at ASC
-                 LIMIT 25",
-            )
-            .map_err(|e| e.to_string())?;
-
-        let items: Vec<SyncItem> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        // Mark as in_progress
-        for (id, _, _, _, _, _, _, _, _, _, _) in &items {
-            let _ = conn.execute(
-                "UPDATE sync_queue SET status = 'in_progress', updated_at = datetime('now') WHERE id = ?1",
-                params![id],
-            );
-        }
-
-        items
+        claim_pending_sync_items(&conn, 25)?
     };
 
     if pending_items.is_empty() {
@@ -7110,6 +7171,57 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     }
 
     Ok(total_progress)
+}
+
+fn claim_pending_sync_items(conn: &Connection, limit: usize) -> Result<Vec<SyncItem>, String> {
+    let limit = i64::try_from(limit).map_err(|_| "sync item limit overflow".to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_type, entity_id, operation, payload, idempotency_key,
+                    retry_count, max_retries, next_retry_at,
+                    COALESCE(retry_delay_ms, 5000), remote_receipt_id
+             FROM sync_queue
+             WHERE status = 'pending'
+               AND retry_count < max_retries
+               AND (
+                    next_retry_at IS NULL
+                    OR julianday(next_retry_at) <= julianday('now')
+               )
+             ORDER BY COALESCE(next_retry_at, created_at) ASC, created_at ASC
+             LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let items: Vec<SyncItem> = stmt
+        .query_map(params![limit], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    for (id, _, _, _, _, _, _, _, _, _, _) in &items {
+        let _ = conn.execute(
+            "UPDATE sync_queue
+             SET status = 'in_progress', updated_at = datetime('now')
+             WHERE id = ?1 AND status = 'pending'",
+            params![id],
+        );
+    }
+
+    Ok(items)
 }
 
 fn str_any(v: &Value, keys: &[&str]) -> Option<String> {
@@ -7845,20 +7957,24 @@ async fn sync_order_batch_via_direct_api(
 
     for item in items {
         let (queue_id, _etype, entity_id, operation, payload, _idem, _ret, _max, _, _, _) = item;
-        if operation.trim().to_lowercase() != "insert" {
-            continue;
-        }
-
+        let operation_name = operation.trim().to_lowercase();
         let local_order = get_order_by_id(db, entity_id).unwrap_or_else(|e| {
             warn!(order_id = %entity_id, "get_order_by_id fallback: {e}");
             Value::Null
         });
-        if local_order
+        let has_remote_id = local_order
             .get("supabaseId")
+            .or_else(|| local_order.get("supabase_id"))
             .and_then(Value::as_str)
             .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let create_from_local_state =
+            operation_name == "insert" || (operation_name == "update" && !has_remote_id);
+        if !create_from_local_state {
+            continue;
+        }
+
+        if has_remote_id {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let now = Utc::now().to_rfc3339();
             let _ = conn.execute(
@@ -7879,7 +7995,7 @@ async fn sync_order_batch_via_direct_api(
         let normalized = match build_normalized_order_operation(
             db,
             entity_id,
-            operation,
+            "insert",
             &payload_value,
             fallback_branch_id,
         ) {
@@ -8028,6 +8144,7 @@ async fn sync_order_batch_via_direct_api(
             "branch_id": branch_id,
             "items": direct_items,
             "order_type": order_type_normalized,
+            "status": str_any(&data, &["status"]).unwrap_or_else(|| "pending".to_string()),
             "payment_method": payment_method_normalized,
             "payment_status": str_any(&data, &["payment_status"]).unwrap_or_else(|| "pending".to_string()),
             "total_amount": num_any(&data, &["total_amount"]).unwrap_or(0.0),
@@ -8079,6 +8196,7 @@ async fn sync_order_batch_via_direct_api(
                 info!(
                     queue_id = *queue_id,
                     entity_id = %entity_id,
+                    source_operation = %operation_name,
                     remote_order_id = %remote_id,
                     "Order synced via direct API fallback"
                 );
@@ -13613,6 +13731,122 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_order_batch_via_direct_api_creates_orphaned_update_rows_before_patch() {
+        let db = test_db();
+        let fallback_branch_id = Uuid::new_v4().to_string();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, subtotal, status, payment_status, payment_method, order_type,
+                 sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-orphan-update',
+                 ?1,
+                 12.0,
+                 12.0,
+                 'completed',
+                 'paid',
+                 'cash',
+                 'pickup',
+                 'pending',
+                 datetime('now'),
+                 datetime('now')
+             )",
+            params![r#"[{"name":"Coffee","quantity":1,"price":12.0}]"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'pay-orphan-update',
+                 'ord-orphan-update',
+                 'cash',
+                 12.0,
+                 'completed',
+                 'pending',
+                 'waiting_parent',
+                 datetime('now'),
+                 datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key, status
+             ) VALUES (
+                 'payment', 'pay-orphan-update', 'insert', '{}', 'payment:ord-orphan-update', 'deferred'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let queue_id = insert_order_update_queue_row(
+            &db,
+            "ord-orphan-update",
+            "pending",
+            Some("completed"),
+            None,
+            None,
+        );
+        let item = load_sync_item(&db, queue_id);
+        let items = vec![&item];
+
+        let (mock_url, server_handle) = spawn_single_json_response_server(
+            "{\"data\":{\"id\":\"remote-orphan-update\"}}".to_string(),
+            move |request| {
+                assert!(request.starts_with("POST /api/pos/orders HTTP/1.1"));
+                assert!(request.contains("\"client_order_id\":\"ord-orphan-update\""));
+                assert!(request.contains("\"status\":\"completed\""));
+                assert!(request.contains("\"payment_method\":\"cash\""));
+                assert!(request.contains("\"items\""));
+            },
+        );
+
+        let outcome = tauri::async_runtime::block_on(sync_order_batch_via_direct_api(
+            &db,
+            &mock_url,
+            "test-api-key",
+            &fallback_branch_id,
+            &items,
+        ))
+        .unwrap();
+        server_handle.join().expect("join mock server");
+
+        assert!(outcome.synced_queue_ids.contains(&queue_id));
+
+        let conn = db.conn.lock().unwrap();
+        let (order_supabase_id, order_sync_status, order_queue_status): (String, String, String) =
+            conn.query_row(
+                "SELECT
+                    COALESCE((SELECT supabase_id FROM orders WHERE id = 'ord-orphan-update'), ''),
+                    (SELECT sync_status FROM orders WHERE id = 'ord-orphan-update'),
+                    (SELECT status FROM sync_queue WHERE id = ?1)",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let (payment_sync_state, payment_queue_status): (String, String) = conn
+            .query_row(
+                "SELECT
+                    (SELECT sync_state FROM order_payments WHERE id = 'pay-orphan-update'),
+                    (SELECT status FROM sync_queue WHERE entity_type = 'payment' AND entity_id = 'pay-orphan-update')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(order_supabase_id, "remote-orphan-update");
+        assert_eq!(order_sync_status, "synced");
+        assert_eq!(order_queue_status, "synced");
+        assert_eq!(payment_sync_state, "pending");
+        assert_eq!(payment_queue_status, "pending");
+    }
+
+    #[test]
     fn test_reconcile_promotes_waiting_parent_payments() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -14244,6 +14478,86 @@ mod tests {
     }
 
     #[test]
+    fn test_auto_heal_rebinds_waiting_adjustment_when_duplicate_candidates_tie_on_generic_score() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-tie-parent', '[]', 40.0, 'completed', 'synced', 'sup-adj-tie-parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-tie-stale', 'ord-adj-tie-parent', 'cash', 40.0, 'EUR', 'completed', 'failed', 'applied', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES ('pay-adj-tie-canonical-a', 'ord-adj-tie-parent', 'cash', 40.0, 'EUR', 'completed', 'synced', 'applied', '11111111-1111-1111-1111-111111111111', datetime('now', '-2 minutes'), datetime('now', '-2 minutes'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES ('pay-adj-tie-canonical-b', 'ord-adj-tie-parent', 'cash', 40.0, 'EUR', 'completed', 'synced', 'applied', '22222222-2222-2222-2222-222222222222', datetime('now', '-1 minutes'), datetime('now', '-1 minutes'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, sync_last_error, created_at, updated_at)
+             VALUES ('adj-tie-parent', 'pay-adj-tie-stale', 'ord-adj-tie-parent', 'refund', 8.0, 'Tie parent', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
+            params![ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, last_error)
+             VALUES ('payment_adjustment', 'adj-tie-parent', 'insert', '{\"paymentId\":\"pay-adj-tie-stale\"}', 'adjustment:adj-tie-parent', 'deferred', ?1)",
+            params![ADJUSTMENT_QUEUE_ERROR_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID],
+        )
+        .unwrap();
+        drop(conn);
+
+        let heal_summary = tauri::async_runtime::block_on(
+            auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
+                &db,
+                |_order_ids| async move { Ok(0usize) },
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(heal_summary.candidate_orders, 1);
+        assert_eq!(heal_summary.repaired_payment_mirrors, 0);
+        assert_eq!(heal_summary.rebound_adjustments, 1);
+        assert_eq!(heal_summary.promoted_adjustments, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let rebound_payment_id: String = conn
+            .query_row(
+                "SELECT payment_id
+                 FROM payment_adjustments
+                 WHERE id = 'adj-tie-parent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rebound_payment_id, "pay-adj-tie-canonical-a");
+        let queue_state: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id = 'adj-tie-parent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queue_state, "pending");
+    }
+
+    #[test]
     fn test_auto_heal_waiting_adjustments_repairs_each_order_once_and_promotes_all_children() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -14695,6 +15009,269 @@ mod tests {
         assert!(period_start_at.is_some());
         assert_eq!(sync_status, "pending");
         assert_eq!(queue_status, "pending");
+    }
+
+    #[test]
+    fn test_run_recurring_sync_recovery_repairs_retryable_z_report_business_dates() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                 check_in_time, check_out_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-z-report-repair', 'staff-1', 'Cashier One', 'branch-1', 'term-1', 'cashier',
+                 '2026-04-01T20:00:00Z', '2026-04-01T23:38:24Z', 'closed', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        let poisoned_report_json = serde_json::json!({
+            "date": "2026-04-01",
+            "reportDate": "2026-04-01",
+            "report_date": "2026-04-01",
+            "periodStart": "2026-04-01T22:44:47.248Z",
+            "periodEnd": "2026-04-01T23:38:24.403Z",
+            "period": {
+                "start": "2026-04-01T22:44:47.248Z",
+                "end": "2026-04-01T23:38:24.403Z"
+            }
+        });
+        conn.execute(
+            "INSERT INTO z_reports (
+                id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                gross_sales, net_sales, total_orders, cash_sales, card_sales,
+                refunds_total, voids_total, discounts_total, tips_total,
+                expenses_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                payments_breakdown_json, report_json, sync_state, sync_last_error, sync_retry_count,
+                created_at, updated_at
+             ) VALUES (
+                'zr-business-date-repair', 'shift-z-report-repair', 'branch-1', 'term-1', '2026-04-01', '2026-04-01T23:40:00Z',
+                12, 12, 1, 12, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0, 0,
+                '{}', ?1, 'failed', 'report_date must match the branch business date for periodStart (2026-04-02)', 5,
+                '2026-04-01T23:40:00Z', '2026-04-01T23:40:00Z'
+             )",
+            params![poisoned_report_json.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, last_error, next_retry_at
+             ) VALUES (
+                 'z_report', 'zr-business-date-repair', 'insert', ?1, 'zreport:zr-business-date-repair',
+                 'failed', 5, 5, 'report_date must match the branch business date for periodStart (2026-04-02)',
+                 '2026-04-02T00:00:00Z'
+             )",
+            params![serde_json::json!({
+                "terminal_id": "term-1",
+                "branch_id": "branch-1",
+                "report_date": "2026-04-01",
+                "report_data": poisoned_report_json,
+            })
+            .to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let summary = run_recurring_sync_recovery(&db);
+        assert_eq!(summary.z_report_business_date_repairs, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (report_date, sync_state, sync_last_error): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT report_date, sync_state, sync_last_error
+                 FROM z_reports
+                 WHERE id = 'zr-business-date-repair'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let (queue_status, queue_retry_count, queue_last_error, queue_payload): (
+            String,
+            i64,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'z_report'
+                   AND entity_id = 'zr-business-date-repair'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(report_date, "2026-04-02");
+        assert_eq!(sync_state, "pending");
+        assert!(sync_last_error.is_none());
+        assert_eq!(queue_status, "pending");
+        assert_eq!(queue_retry_count, 0);
+        assert!(queue_last_error.is_none());
+
+        let queue_payload: Value =
+            serde_json::from_str(&queue_payload).expect("queue payload should parse");
+        assert_eq!(queue_payload["report_date"], "2026-04-02");
+        assert_eq!(queue_payload["report_data"]["date"], "2026-04-02");
+        assert_eq!(
+            queue_payload["report_data"]["periodStart"],
+            "2026-04-01T22:44:47.248Z"
+        );
+        assert_eq!(
+            queue_payload["report_data"]["periodEnd"],
+            "2026-04-01T23:38:24.403Z"
+        );
+    }
+
+    #[test]
+    fn test_requeue_stale_in_progress_sync_rows_requeues_abandoned_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, created_at, updated_at
+             ) VALUES (
+                 'order', 'ord-stale', 'insert', '{}', 'order:ord-stale',
+                 'in_progress', datetime('now', '-300 seconds'), datetime('now', '-300 seconds')
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_stale_in_progress_sync_rows(&db).unwrap();
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_type = 'order' AND entity_id = 'ord-stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn test_requeue_stale_in_progress_sync_rows_keeps_fresh_rows_in_progress() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, created_at, updated_at
+             ) VALUES (
+                 'order', 'ord-fresh', 'insert', '{}', 'order:ord-fresh',
+                 'in_progress', datetime('now', '-30 seconds'), datetime('now', '-30 seconds')
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_stale_in_progress_sync_rows(&db).unwrap();
+        assert_eq!(requeued, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_type = 'order' AND entity_id = 'ord-fresh'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_progress");
+    }
+
+    #[test]
+    fn test_claim_pending_sync_items_ignores_existing_in_progress_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, created_at, updated_at
+             ) VALUES (
+                 'order', 'ord-pending', 'insert', '{}', 'order:ord-pending',
+                 'pending', datetime('now', '-60 seconds'), datetime('now', '-60 seconds')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, created_at, updated_at
+             ) VALUES (
+                 'order', 'ord-in-progress', 'insert', '{}', 'order:ord-in-progress',
+                 'in_progress', datetime('now', '-60 seconds'), datetime('now', '-60 seconds')
+             )",
+            [],
+        )
+        .unwrap();
+
+        let claimed = claim_pending_sync_items(&conn, 25).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].2, "ord-pending");
+
+        let pending_status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_id = 'ord-pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let in_progress_status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_id = 'ord-in-progress'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(pending_status, "in_progress");
+        assert_eq!(in_progress_status, "in_progress");
+    }
+
+    #[test]
+    fn test_claim_pending_sync_items_keeps_stale_timestamp_until_recovery() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, created_at, updated_at
+             ) VALUES (
+                 'order', 'ord-stale-preserved', 'insert', '{}', 'order:ord-stale-preserved',
+                 'in_progress', datetime('now', '-300 seconds'), datetime('now', '-300 seconds')
+             )",
+            [],
+        )
+        .unwrap();
+
+        claim_pending_sync_items(&conn, 25).unwrap();
+
+        let age_seconds: i64 = conn
+            .query_row(
+                "SELECT CAST((julianday('now') - julianday(updated_at)) * 86400 AS INTEGER)
+                 FROM sync_queue
+                 WHERE entity_id = 'ord-stale-preserved'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(age_seconds >= 240, "expected stale in-progress age to be preserved, got {age_seconds}");
     }
 
     #[test]

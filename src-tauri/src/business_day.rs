@@ -128,10 +128,6 @@ pub(crate) fn current_business_day_report_date_at(
     business_day_report_date_at_minutes(now, resolve_business_day_start_minutes(conn))
 }
 
-pub(crate) fn current_business_day_report_date(conn: &Connection) -> String {
-    current_business_day_report_date_at(conn, Local::now())
-}
-
 pub(crate) fn local_report_date_from_timestamp(value: &str) -> String {
     DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())

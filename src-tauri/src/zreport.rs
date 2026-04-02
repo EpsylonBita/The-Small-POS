@@ -194,12 +194,12 @@ fn resolve_lower_bound_mode(conn: &Connection) -> LowerBoundMode {
     }
 }
 
-fn default_report_date(conn: &Connection) -> String {
-    business_day::current_business_day_report_date(conn)
-}
-
 fn report_date_for_business_window(period_start_at: &str, cutoff_at: &str) -> String {
     business_day::report_date_for_business_window(period_start_at, cutoff_at)
+}
+
+fn active_window_report_date(period_start_at: &str, fallback_now: &str) -> String {
+    report_date_for_business_window(period_start_at, fallback_now)
 }
 
 fn resolve_period_start_at(conn: &Connection, branch_id: &str, cutoff_at: Option<&str>) -> String {
@@ -317,8 +317,13 @@ fn load_pending_z_report_context_at(
 
         let normalized_period_start =
             resolve_period_start_at(conn, branch_id, Some(stored.cutoff_at.as_str()));
-        if stored.period_start_at != normalized_period_start {
+        let normalized_report_date =
+            report_date_for_business_window(&normalized_period_start, &stored.cutoff_at);
+        if stored.period_start_at != normalized_period_start
+            || stored.report_date != normalized_report_date
+        {
             stored.period_start_at = normalized_period_start;
+            stored.report_date = normalized_report_date;
             let _ = persist_pending_z_report_context(conn, &stored);
         }
 
@@ -397,12 +402,158 @@ fn resolve_effective_z_report_window(
         };
     }
 
+    let period_start_at = resolve_period_start_at(conn, branch_id, None);
+    let fallback_now = Utc::now().to_rfc3339();
     EffectiveZReportWindow {
-        report_date: str_field(payload, "date").unwrap_or_else(|| default_report_date(conn)),
-        period_start_at: resolve_period_start_at(conn, branch_id, None),
+        report_date: str_field(payload, "date")
+            .unwrap_or_else(|| active_window_report_date(&period_start_at, &fallback_now)),
+        period_start_at,
         cutoff_at: None,
         lower_bound_mode,
     }
+}
+
+fn canonicalize_report_json_report_date(report_json: &mut Value, report_date: &str) {
+    if let Some(obj) = report_json.as_object_mut() {
+        obj.insert(
+            "date".to_string(),
+            Value::String(report_date.to_string()),
+        );
+        obj.insert(
+            "reportDate".to_string(),
+            Value::String(report_date.to_string()),
+        );
+        obj.insert(
+            "report_date".to_string(),
+            Value::String(report_date.to_string()),
+        );
+    }
+}
+
+pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let mut repaired = 0usize;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT zr.id, zr.report_date, zr.report_json, sq.id, sq.status, COALESCE(sq.payload, '')
+             FROM z_reports zr
+             JOIN sync_queue sq
+               ON sq.entity_type = 'z_report'
+              AND sq.entity_id = zr.id
+             WHERE sq.status IN ('failed', 'pending', 'in_progress')
+               AND COALESCE(zr.sync_state, '') != 'applied'
+             ORDER BY zr.created_at ASC, zr.id ASC",
+        )
+        .map_err(|e| format!("prepare z-report business-date repair selector: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|e| format!("query z-report business-date repair selector: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect z-report business-date repair selector: {e}"))?;
+
+    for (
+        z_report_id,
+        stored_report_date,
+        report_json_str,
+        queue_id,
+        queue_status,
+        queue_payload_str,
+    ) in rows
+    {
+        let mut report_json =
+            serde_json::from_str::<Value>(&report_json_str).unwrap_or_else(|_| serde_json::json!({}));
+        let mut sync_payload_value = serde_json::from_str::<Value>(&queue_payload_str)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let (period_start, period_end) = extract_period_bounds_from_report_json(&report_json);
+        let Some(period_start) = period_start else {
+            continue;
+        };
+        let fallback_end = period_end.as_deref().unwrap_or(now.as_str());
+        let normalized_report_date = report_date_for_business_window(&period_start, fallback_end);
+
+        if normalized_report_date == stored_report_date {
+            continue;
+        }
+
+        canonicalize_report_json_report_date(&mut report_json, &normalized_report_date);
+        if !sync_payload_value.is_object() {
+            sync_payload_value = serde_json::json!({});
+        }
+        let terminal_id = str_field(&sync_payload_value, "terminal_id")
+            .or_else(|| str_field(&sync_payload_value, "terminalId"))
+            .or_else(|| storage::get_credential("terminal_id"))
+            .unwrap_or_default();
+        let branch_id = str_field(&sync_payload_value, "branch_id")
+            .or_else(|| str_field(&sync_payload_value, "branchId"))
+            .or_else(|| storage::get_credential("branch_id"))
+            .unwrap_or_default();
+        if let Some(sync_payload_obj) = sync_payload_value.as_object_mut() {
+            sync_payload_obj.insert(
+                "terminal_id".to_string(),
+                Value::String(terminal_id.clone()),
+            );
+            sync_payload_obj.insert("branch_id".to_string(), Value::String(branch_id.clone()));
+            sync_payload_obj.insert(
+                "report_date".to_string(),
+                Value::String(normalized_report_date.clone()),
+            );
+            sync_payload_obj.insert(
+                "report_data".to_string(),
+                report_json.clone(),
+            );
+        }
+        let sync_payload = sync_payload_value.to_string();
+
+        conn.execute(
+            "UPDATE z_reports
+             SET report_date = ?2,
+                 report_json = ?3,
+                 sync_state = 'pending',
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 sync_next_retry_at = NULL,
+                 updated_at = ?4
+             WHERE id = ?1",
+            params![z_report_id, normalized_report_date, report_json.to_string(), now],
+        )
+        .map_err(|e| format!("update repaired z_report business date: {e}"))?;
+
+        conn.execute(
+            "UPDATE sync_queue
+             SET payload = ?2,
+                 status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?3
+             WHERE id = ?1",
+            params![queue_id, sync_payload, now],
+        )
+        .map_err(|e| format!("update repaired z-report sync queue payload: {e}"))?;
+
+        repaired += 1;
+        info!(
+            z_report_id = %z_report_id,
+            previous_report_date = %stored_report_date,
+            normalized_report_date = %normalized_report_date,
+            previous_queue_status = %queue_status,
+            "Repaired retryable z-report business-date mismatch"
+        );
+    }
+
+    Ok(repaired)
 }
 
 fn load_unsettled_payment_blockers_for_window(
@@ -5861,6 +6012,163 @@ mod tests {
         assert!(
             actionable.is_some(),
             "pending context should become actionable after 07:00"
+        );
+    }
+
+    #[test]
+    fn test_active_window_report_date_uses_period_start_local_date() {
+        let period_start = utc_rfc3339_from_local(2026, 4, 2, 0, 44, 47);
+        let fallback_now = utc_rfc3339_from_local(2026, 4, 2, 1, 38, 24);
+
+        assert_eq!(
+            active_window_report_date(&period_start, &fallback_now),
+            "2026-04-02",
+            "active report date must follow the local date implied by periodStart"
+        );
+    }
+
+    #[test]
+    fn test_repair_retryable_z_report_business_dates_requeues_failed_rows() {
+        let db = test_db();
+        seed_closed_shift(&db);
+
+        let generated = generate_z_report_for_date(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+                "date": "2026-02-16",
+            }),
+        )
+        .expect("generate should persist z-report");
+
+        let z_report_id = generated["zReportId"]
+            .as_str()
+            .or_else(|| generated["report"]["id"].as_str())
+            .expect("z_report_id should be present")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        let report_json_str: String = conn
+            .query_row(
+                "SELECT report_json FROM z_reports WHERE id = ?1",
+                params![z_report_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("load report_json");
+        let mut report_json: Value =
+            serde_json::from_str(&report_json_str).expect("report_json should parse");
+        canonicalize_report_json_period(
+            &mut report_json,
+            "2026-04-01T22:44:47.248Z",
+            "2026-04-01T23:38:24.403Z",
+        );
+        canonicalize_report_json_report_date(&mut report_json, "2026-04-01");
+
+        conn.execute(
+            "UPDATE z_reports
+             SET report_date = '2026-04-01',
+                 report_json = ?2,
+                 sync_state = 'failed',
+                 sync_retry_count = 5,
+                 sync_last_error = 'report_date must match the branch business date for periodStart (2026-04-02)'
+             WHERE id = ?1",
+            params![z_report_id.as_str(), report_json.to_string()],
+        )
+        .expect("poison z_report");
+
+        let poisoned_payload = serde_json::json!({
+            "terminal_id": "term-1",
+            "branch_id": "branch-1",
+            "report_date": "2026-04-01",
+            "report_data": report_json,
+        });
+        conn.execute(
+            "UPDATE sync_queue
+             SET payload = ?2,
+                 status = 'failed',
+                 retry_count = 5,
+                 last_error = 'report_date must match the branch business date for periodStart (2026-04-02)',
+                 next_retry_at = '2026-04-02T00:00:00Z'
+             WHERE entity_type = 'z_report'
+               AND entity_id = ?1",
+            params![z_report_id.as_str(), poisoned_payload.to_string()],
+        )
+        .expect("poison z_report queue row");
+        drop(conn);
+
+        let repaired = repair_retryable_z_report_business_dates(&db).expect("repair should succeed");
+        assert_eq!(repaired, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (report_date, sync_state, sync_retry_count, sync_last_error, repaired_report_json): (
+            String,
+            String,
+            i64,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT report_date, sync_state, sync_retry_count, sync_last_error, report_json
+                 FROM z_reports
+                 WHERE id = ?1",
+                params![z_report_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("load repaired z_report");
+        let (queue_status, queue_retry_count, queue_last_error, queue_payload): (
+            String,
+            i64,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'z_report'
+                   AND entity_id = ?1",
+                params![z_report_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load repaired queue row");
+
+        assert_eq!(report_date, "2026-04-02");
+        assert_eq!(sync_state, "pending");
+        assert_eq!(sync_retry_count, 0);
+        assert!(sync_last_error.is_none());
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(queue_retry_count, 0);
+        assert!(queue_last_error.is_none());
+
+        let repaired_report_json: Value =
+            serde_json::from_str(&repaired_report_json).expect("repaired report_json should parse");
+        assert_eq!(repaired_report_json["date"], "2026-04-02");
+        assert_eq!(repaired_report_json["reportDate"], "2026-04-02");
+        assert_eq!(repaired_report_json["report_date"], "2026-04-02");
+        assert_eq!(repaired_report_json["periodStart"], "2026-04-01T22:44:47.248Z");
+        assert_eq!(repaired_report_json["periodEnd"], "2026-04-01T23:38:24.403Z");
+
+        let repaired_queue_payload: Value =
+            serde_json::from_str(&queue_payload).expect("repaired queue payload should parse");
+        assert_eq!(repaired_queue_payload["report_date"], "2026-04-02");
+        assert_eq!(repaired_queue_payload["terminal_id"], "term-1");
+        assert_eq!(repaired_queue_payload["branch_id"], "branch-1");
+        assert_eq!(repaired_queue_payload["report_data"]["date"], "2026-04-02");
+        assert_eq!(
+            repaired_queue_payload["report_data"]["periodStart"],
+            "2026-04-01T22:44:47.248Z"
+        );
+        assert_eq!(
+            repaired_queue_payload["report_data"]["periodEnd"],
+            "2026-04-01T23:38:24.403Z"
         );
     }
 

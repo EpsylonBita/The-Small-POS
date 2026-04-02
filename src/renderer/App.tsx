@@ -47,6 +47,10 @@ const INVALID_SESSION_IDENTITY_VALUES = new Set([
   'default-org',
 ]);
 
+const STARTUP_IPC_TIMEOUT_MS = 4000;
+const STARTUP_CONFIG_SYNC_TIMEOUT_MS = 2500;
+const CONFIGURED_TERMINAL_HINT_KEY = 'pos-terminal-configured';
+
 function normalizeSessionIdentityValue(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -59,6 +63,67 @@ function normalizeSessionIdentityValue(value: unknown): string | undefined {
     return undefined;
   }
   return trimmed;
+}
+
+function getConfiguredTerminalHint(): boolean {
+  try {
+    return localStorage.getItem(CONFIGURED_TERMINAL_HINT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setConfiguredTerminalHint(configured: boolean): void {
+  try {
+    if (configured) {
+      localStorage.setItem(CONFIGURED_TERMINAL_HINT_KEY, '1');
+    } else {
+      localStorage.removeItem(CONFIGURED_TERMINAL_HINT_KEY);
+    }
+  } catch {
+    // Ignore storage failures in restricted contexts.
+  }
+}
+
+function inferConfiguredTerminalFallback(): boolean {
+  const cached = getCachedTerminalCredentials();
+  try {
+    return (
+      getConfiguredTerminalHint() ||
+      Boolean(localStorage.getItem('pos-user')) ||
+      Boolean(localStorage.getItem('admin_dashboard_url')) ||
+      Boolean(cached.terminalId || cached.branchId || cached.organizationId)
+    );
+  } catch {
+    return Boolean(
+      getConfiguredTerminalHint() ||
+        cached.terminalId ||
+        cached.branchId ||
+        cached.organizationId,
+    );
+  }
+}
+
+async function withStartupTimeout<T>(
+  promise: Promise<T>,
+  label: string,
+  timeoutMs: number = STARTUP_IPC_TIMEOUT_MS,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function resolveSessionOrganizationId(userData: any): Promise<string | undefined> {
@@ -74,7 +139,10 @@ async function resolveSessionOrganizationId(userData: any): Promise<string | und
   }
 
   try {
-    const refreshed = await refreshTerminalCredentialCache();
+    const refreshed = await withStartupTimeout(
+      refreshTerminalCredentialCache(),
+      'refreshTerminalCredentialCache',
+    );
     const refreshedOrganizationId = normalizeSessionIdentityValue(refreshed.organizationId);
     if (refreshedOrganizationId) {
       return refreshedOrganizationId;
@@ -122,10 +190,19 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
         await new Promise(resolve => setTimeout(resolve, 0));
         
         // Update admin URL from stored settings (for API calls)
-        await updateAdminUrlFromSettings();
+        await withStartupTimeout(
+          updateAdminUrlFromSettings(),
+          'updateAdminUrlFromSettings',
+          STARTUP_CONFIG_SYNC_TIMEOUT_MS,
+        ).catch((error) => {
+          console.warn('[ConfigGuard] Admin URL refresh skipped:', error);
+        });
 
         console.log('[ConfigGuard] Calling settings:is-configured...');
-        const result: any = await bridge.settings.isConfigured();
+        const result: any = await withStartupTimeout(
+          bridge.settings.isConfigured(),
+          'settings.isConfigured',
+        );
         console.log('[ConfigGuard] settings:is-configured result:', JSON.stringify(result));
         
         // Handle both direct response and handleIPCError wrapped response
@@ -136,6 +213,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
         const reason = configData?.reason ?? 'Unknown';
         
         console.log('[ConfigGuard] Parsed: configured=%s, reason=%s', isConfiguredValue, reason);
+        setConfiguredTerminalHint(Boolean(isConfiguredValue));
         setIsConfigured(isConfiguredValue);
         console.log('[ConfigGuard] isConfigured set to:', isConfiguredValue);
 
@@ -149,8 +227,16 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
           // in-memory cache. Native admin fetches handle POS authentication.
           try {
             const [settings, config] = await Promise.all([
-              bridge.terminalConfig.getSettings(),
-              bridge.terminalConfig.getFullConfig(),
+              withStartupTimeout(
+                bridge.terminalConfig.getSettings(),
+                'terminalConfig.getSettings',
+                STARTUP_CONFIG_SYNC_TIMEOUT_MS,
+              ).catch(() => null),
+              withStartupTimeout(
+                bridge.terminalConfig.getFullConfig(),
+                'terminalConfig.getFullConfig',
+                STARTUP_CONFIG_SYNC_TIMEOUT_MS,
+              ).catch(() => null),
             ]);
 
             const terminalId =
@@ -193,7 +279,12 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
         }
       } catch (err) {
         console.error('Failed to check configuration:', err);
-        setIsConfigured(false); // Default to not configured on error
+        const fallbackConfigured = inferConfiguredTerminalFallback();
+        console.warn('[ConfigGuard] Falling back to cached configured hint:', {
+          fallbackConfigured,
+        });
+        setConfiguredTerminalHint(fallbackConfigured);
+        setIsConfigured(fallbackConfigured);
       }
     };
 
@@ -213,6 +304,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       localStorage.removeItem("organization_id");
       localStorage.removeItem("admin_dashboard_url");
       clearTerminalCredentialCache();
+      setConfiguredTerminalHint(false);
 
       setIsConfigured(false);
 
@@ -268,6 +360,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       if (organizationId) {
         updateTerminalCredentialCache({ organizationId });
       }
+      setConfiguredTerminalHint(true);
       const cached = getCachedTerminalCredentials();
       setSupabaseContext({
         terminalId: cached.terminalId || undefined,
@@ -302,6 +395,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       if (data?.organization_id) {
         updateTerminalCredentialCache({ organizationId: data.organization_id });
       }
+      setConfiguredTerminalHint(true);
       const cached = getCachedTerminalCredentials();
       setSupabaseContext({
         terminalId: cached.terminalId || undefined,
@@ -334,7 +428,10 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       unsubscribeRealtimeDeletes = null;
 
       try {
-        const credentials = await refreshTerminalCredentialCache();
+        const credentials = await withStartupTimeout(
+          refreshTerminalCredentialCache(),
+          'refreshTerminalCredentialCache',
+        );
         const terminalId = normalizeSessionIdentityValue(credentials.terminalId);
         const organizationId = normalizeSessionIdentityValue(credentials.organizationId);
         const branchId = normalizeSessionIdentityValue(credentials.branchId);
@@ -542,90 +639,110 @@ function AppContent() {
 
   // Check if user is logged in on app start and validate session
   useEffect(() => {
+    let disposed = false;
+
     const validateAndRestoreSession = async () => {
-      const storedUser = localStorage.getItem("pos-user");
-      if (storedUser) {
-        try {
-          const parsedUser = JSON.parse(storedUser);
+      try {
+        const storedUser = localStorage.getItem("pos-user");
+        if (storedUser) {
+          try {
+            const parsedUser = JSON.parse(storedUser);
 
-          // For local simple PIN login, just restore the session directly
-          // (no database validation needed)
-          if (parsedUser.staffId === 'local-simple-pin') {
-            const enrichedUser = await enrichSessionUserWithOrganization(parsedUser);
-            localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
-            setUser(enrichedUser);
-            setStaff({
-              staffId: enrichedUser.staffId,
-              databaseStaffId: enrichedUser.databaseStaffId,
-              name: enrichedUser.staffName,
-              role: enrichedUser.role?.name || 'staff',
-              branchId: enrichedUser.branchId || 'default-branch',
-              terminalId: enrichedUser.terminalId || 'default-terminal',
-              organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
-            });
-            try {
-              ActivityTracker.setContext({
-                staffId: enrichedUser.staffId,
-                sessionId: enrichedUser.sessionId,
-                terminalId: enrichedUser.terminalId,
-                branchId: enrichedUser.branchId,
-              })
-            } catch { }
-            setIsLoading(false);
-            return;
-          }
-
-          // For database-backed staff, validate session with main process
-          if (!isBrowser()) {
-            try {
-              // Validate session
-              const validationResult = await bridge.staffAuth.validateSession();
-
-              if (!validationResult || !validationResult.valid) {
-                console.warn('Session invalid or expired, clearing local storage');
-                localStorage.removeItem("pos-user");
-                setIsLoading(false);
-                return;
+            // For local simple PIN login, just restore the session directly
+            // (no database validation needed)
+            if (parsedUser.staffId === 'local-simple-pin') {
+              const enrichedUser = await withStartupTimeout(
+                enrichSessionUserWithOrganization(parsedUser),
+                'enrichSessionUserWithOrganization',
+              ).catch(() => parsedUser);
+              if (!disposed) {
+                localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
+                setUser(enrichedUser);
+                setStaff({
+                  staffId: enrichedUser.staffId,
+                  databaseStaffId: enrichedUser.databaseStaffId,
+                  name: enrichedUser.staffName,
+                  role: enrichedUser.role?.name || 'staff',
+                  branchId: enrichedUser.branchId || 'default-branch',
+                  terminalId: enrichedUser.terminalId || 'default-terminal',
+                  organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
+                });
+                try {
+                  ActivityTracker.setContext({
+                    staffId: enrichedUser.staffId,
+                    sessionId: enrichedUser.sessionId,
+                    terminalId: enrichedUser.terminalId,
+                    branchId: enrichedUser.branchId,
+                  })
+                } catch { }
               }
-            } catch (err) {
-              console.error('Session validation failed:', err);
-              localStorage.removeItem("pos-user");
-              setIsLoading(false);
               return;
             }
+
+            // For database-backed staff, validate session with main process
+            if (!isBrowser()) {
+              try {
+                const validationResult = await withStartupTimeout(
+                  bridge.staffAuth.validateSession(),
+                  'staffAuth.validateSession',
+                );
+
+                if (!validationResult || !validationResult.valid) {
+                  console.warn('Session invalid or expired, clearing local storage');
+                  localStorage.removeItem("pos-user");
+                  return;
+                }
+              } catch (err) {
+                console.error('Session validation failed:', err);
+                localStorage.removeItem("pos-user");
+                return;
+              }
+            }
+
+            const enrichedUser = await withStartupTimeout(
+              enrichSessionUserWithOrganization(parsedUser),
+              'enrichSessionUserWithOrganization',
+            ).catch(() => parsedUser);
+            if (!disposed) {
+              localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
+              setUser(enrichedUser);
+              // Set staff in shift context
+              setStaff({
+                staffId: enrichedUser.staffId,
+                databaseStaffId: enrichedUser.databaseStaffId,
+                name: enrichedUser.staffName,
+                role: enrichedUser.role?.name || 'staff',
+                branchId: enrichedUser.branchId || 'default-branch',
+                terminalId: enrichedUser.terminalId || 'default-terminal',
+                organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
+              });
+              try {
+                ActivityTracker.setContext({
+                  staffId: enrichedUser.staffId,
+                  sessionId: enrichedUser.sessionId,
+                  terminalId: enrichedUser.terminalId,
+                  branchId: enrichedUser.branchId,
+                })
+              } catch { }
+            }
+
+          } catch (err) {
+            console.error('Error restoring session:', err);
+            localStorage.removeItem("pos-user");
           }
-
-          const enrichedUser = await enrichSessionUserWithOrganization(parsedUser);
-          localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
-          setUser(enrichedUser);
-          // Set staff in shift context
-          setStaff({
-            staffId: enrichedUser.staffId,
-            databaseStaffId: enrichedUser.databaseStaffId,
-            name: enrichedUser.staffName,
-            role: enrichedUser.role?.name || 'staff',
-            branchId: enrichedUser.branchId || 'default-branch',
-            terminalId: enrichedUser.terminalId || 'default-terminal',
-            organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
-          });
-          try {
-            ActivityTracker.setContext({
-              staffId: enrichedUser.staffId,
-              sessionId: enrichedUser.sessionId,
-              terminalId: enrichedUser.terminalId,
-              branchId: enrichedUser.branchId,
-            })
-          } catch { }
-
-        } catch (err) {
-          console.error('Error restoring session:', err);
-          localStorage.removeItem("pos-user");
+        }
+      } finally {
+        if (!disposed) {
+          setIsLoading(false);
         }
       }
-      setIsLoading(false);
     };
 
-    validateAndRestoreSession();
+    void validateAndRestoreSession();
+
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   // Periodic session validation - DISABLED
@@ -647,7 +764,11 @@ function AppContent() {
     try {
       // Call secure auth login through typed bridge
       console.log('[App.tsx handleLogin] Invoking auth:login bridge method...');
-      const result: any = await bridge.auth.login(pin);
+      const result: any = await withStartupTimeout(
+        bridge.auth.login(pin),
+        'auth.login',
+        6000,
+      );
       console.log('[App.tsx handleLogin] IPC result:', JSON.stringify(result, null, 2));
 
       // Handle both response structures:
@@ -658,7 +779,14 @@ function AppContent() {
       if (result && result.success && userData) {
         console.log('[App.tsx handleLogin] Login successful, setting user state...');
 
-        const enrichedUser = await enrichSessionUserWithOrganization(userData);
+        const enrichedUser = await withStartupTimeout(
+          enrichSessionUserWithOrganization(userData),
+          'enrichSessionUserWithOrganization(login)',
+          2500,
+        ).catch((error) => {
+          console.warn('[App.tsx handleLogin] Proceeding without enriched organization context:', error);
+          return userData;
+        });
 
         // Store session in localStorage
         localStorage.setItem('pos-user', JSON.stringify(enrichedUser));

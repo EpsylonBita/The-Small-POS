@@ -12,6 +12,8 @@ interface LoginPageProps {
     onLogin: (pin: string) => Promise<boolean>;
 }
 
+const LOGIN_REQUEST_TIMEOUT_MS = 8000;
+
 export default function LoginPage({ onLogin }: LoginPageProps) {
     const { t } = useI18n();
     const { resolvedTheme } = useTheme();
@@ -165,7 +167,12 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             // Add a small delay for better UX
             await new Promise(resolve => setTimeout(resolve, 500));
 
-            const success = await onLogin(pin);
+            const success = await Promise.race<boolean>([
+                onLogin(pin),
+                new Promise<boolean>((resolve) => {
+                    setTimeout(() => resolve(false), LOGIN_REQUEST_TIMEOUT_MS);
+                }),
+            ]);
             if (!success) {
                 setError(t('login.errors.invalidPin'));
             }

@@ -63,6 +63,7 @@ const OnboardingPage: React.FC = () => {
             if (result && result.success) {
                 await bridge.terminalConfig.syncFromAdmin();
                 localStorage.setItem('admin_dashboard_url', normalizedAdminUrl);
+                localStorage.setItem('pos-terminal-configured', '1');
                 toast.success(t('onboarding.success', { defaultValue: 'Terminal configured successfully!' }));
                 // A renderer reload is sufficient here because onboarding runs before any
                 // authenticated admin session exists, while native restart is now guarded.

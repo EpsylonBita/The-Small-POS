@@ -1,4 +1,11 @@
-import React, { memo, useState, useEffect, useCallback, useRef } from "react";
+import React, {
+  memo,
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import { useOrderStore } from "../hooks/useOrderStore";
 import { useShift } from "../contexts/shift-context";
 import type { OrderItem } from "../types/orders";
@@ -21,6 +28,10 @@ import { AddCustomerModal } from "./modals/AddCustomerModal";
 import { MenuModal } from "./modals/MenuModal";
 import { EditOrderRefundSettlementModal } from "./modals/EditOrderRefundSettlementModal";
 import { SplitPaymentModal } from "./modals/SplitPaymentModal";
+import {
+  SinglePaymentCollectionModal,
+  type SinglePaymentCollectionResult,
+} from "./modals/SinglePaymentCollectionModal";
 import OrderDetailsModal from "./modals/OrderDetailsModal";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import type {
@@ -46,6 +57,10 @@ import { OrderDashboardSkeleton } from "./skeletons";
 import { ErrorDisplay } from "./error";
 import type { Order } from "../types/orders";
 import type { RestaurantTable, TableStatus } from "../types/tables";
+import type {
+  PaymentIntegrityErrorPayload,
+  UnsettledPaymentBlocker,
+} from "../../lib/ipc-contracts";
 import type { DeliveryBoundaryValidationResponse } from "../../shared/types/delivery-validation";
 import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
@@ -136,6 +151,16 @@ interface PickupToDeliveryContext {
   orderNumber: string;
 }
 
+type StatusTransitionTarget = Extract<Order["status"], "completed" | "delivered">;
+
+interface PendingStatusPaymentCollection {
+  orderId: string;
+  orderNumber?: string;
+  targetStatus: StatusTransitionTarget;
+  method: "cash" | "card";
+  blocker: UnsettledPaymentBlocker;
+}
+
 const toLatLngCoordinates = (
   coordinates:
     | { lat: number; lng: number }
@@ -217,6 +242,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setFilter,
       isLoading,
       updateOrderStatus,
+      updateOrderStatusDetailed,
       loadOrders,
       silentRefresh,
       getLastError,
@@ -407,7 +433,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // State for split payment flow (rendered independently of MenuModal)
     const [splitPaymentData, setSplitPaymentData] = useState<{
-      kind: "new-order" | "edit-settlement";
+      kind: "new-order" | "edit-settlement" | "status-blocker";
       orderId: string;
       orderTotal: number;
       existingPayments?: any[];
@@ -421,7 +447,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       isGhostOrder: boolean;
       initialMode?: "by-amount" | "by-items";
       collectionMode?: SplitPaymentCollectionMode;
+      statusAfterCollection?: StatusTransitionTarget;
     } | null>(null);
+    const [singlePaymentCollectionData, setSinglePaymentCollectionData] =
+      useState<PendingStatusPaymentCollection | null>(null);
     const [pendingEditRefundSettlement, setPendingEditRefundSettlement] =
       useState<PendingEditRefundSettlement | null>(null);
 
@@ -476,6 +505,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const alertingOrderIdRef = useRef<string | null>(null);
     const shiftRefreshArmedRef = useRef(false);
     const splitPaymentCompletedRef = useRef(false);
+    const singlePaymentReasonCodes = useMemo(
+      () =>
+        new Set([
+          "missing_cash_payment",
+          "missing_card_payment",
+          "missing_local_payment_row",
+          "partial_cash_payment",
+          "partial_card_payment",
+        ]),
+      [],
+    );
 
     // Ref to track if menu modals are open (used in interval callback to avoid re-creating interval)
     const isMenuModalOpenRef = React.useRef(false);
@@ -2920,8 +2960,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const handleSplitComplete = async (_result: SplitPaymentResult) => {
       splitPaymentCompletedRef.current = true;
+      const closingSplitPayment = splitPaymentData;
       setSplitPaymentData(null);
       await silentRefresh().catch(() => {});
+      if (
+        closingSplitPayment?.kind === "status-blocker" &&
+        closingSplitPayment.statusAfterCollection
+      ) {
+        await retryBlockedStatusTransition(
+          closingSplitPayment.orderId,
+          closingSplitPayment.statusAfterCollection,
+        );
+      }
     };
 
     const handleSplitPaymentClose = useCallback(() => {
@@ -2939,6 +2989,174 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
       void silentRefresh().catch(() => {});
     }, [silentRefresh, splitPaymentData, t]);
+
+    const buildStatusBlockerSplitPaymentData = useCallback(
+      (
+        order: Order,
+        targetStatus: StatusTransitionTarget,
+        blocker: UnsettledPaymentBlocker,
+      ) => ({
+        kind: "status-blocker" as const,
+        orderId: order.id,
+        orderTotal: Number(blocker.totalAmount || order.total_amount || 0),
+        existingPayments: [],
+        items: buildSplitPaymentItems({
+          items: (order.items || []).map((item: any, index: number) => ({
+            name: item.name || "Item",
+            quantity: Number(item.quantity || 1),
+            price: Number(item.unit_price ?? item.unitPrice ?? item.price ?? 0),
+            totalPrice: Number(
+              item.total_price ??
+                item.totalPrice ??
+                (item.unit_price ?? item.unitPrice ?? item.price ?? 0) *
+                  (item.quantity || 1),
+            ),
+            itemIndex: Number(item.itemIndex ?? index),
+          })),
+          orderTotal: Number(blocker.totalAmount || order.total_amount || 0),
+          deliveryFee: Number(order.deliveryFee ?? (order as any).delivery_fee ?? 0),
+          discountAmount: Number(
+            order.discount_amount ?? (order as any).discountAmount ?? 0,
+          ),
+          deliveryFeeLabel: t("payment.fields.deliveryFee", {
+            defaultValue: "Delivery Fee",
+          }),
+          discountLabel: t("modals.payment.discount", {
+            defaultValue: "Discount",
+          }),
+          adjustmentLabel: t("splitPayment.adjustment", {
+            defaultValue: "Adjustment",
+          }),
+        }),
+        isGhostOrder: order.is_ghost === true,
+        initialMode: "by-amount" as const,
+        statusAfterCollection: targetStatus,
+      }),
+      [t],
+    );
+
+    const handlePaymentIntegrityBlocker = useCallback(
+      (
+        order: Order,
+        targetStatus: StatusTransitionTarget,
+        payload: PaymentIntegrityErrorPayload,
+      ) => {
+        const blocker = payload.blockers?.[0];
+        if (!blocker) {
+          toast.error(
+            payload.error ||
+              payload.message ||
+              t("orderDashboard.collectPaymentFailed", {
+                defaultValue: "Payment collection is required before continuing.",
+              }),
+          );
+          return false;
+        }
+
+        if (
+          blocker.reasonCode === "split_payment_incomplete" ||
+          blocker.paymentMethod === "split"
+        ) {
+          setSinglePaymentCollectionData(null);
+          setSplitPaymentData(
+            buildStatusBlockerSplitPaymentData(order, targetStatus, blocker),
+          );
+          return true;
+        }
+
+        if (singlePaymentReasonCodes.has(blocker.reasonCode)) {
+          const resolvedMethod: "cash" | "card" =
+            blocker.reasonCode.includes("card") ||
+            blocker.paymentMethod === "card"
+              ? "card"
+              : "cash";
+          setSplitPaymentData(null);
+          setSinglePaymentCollectionData({
+            orderId: order.id,
+            orderNumber: order.orderNumber || order.order_number,
+            targetStatus,
+            method: resolvedMethod,
+            blocker,
+          });
+          return true;
+        }
+
+        toast.error(
+          payload.error ||
+            payload.message ||
+            t("orderDashboard.collectPaymentFailed", {
+              defaultValue: "Payment collection is required before continuing.",
+            }),
+        );
+        return false;
+      },
+      [buildStatusBlockerSplitPaymentData, singlePaymentReasonCodes, t],
+    );
+
+    const retryBlockedStatusTransition = useCallback(
+      async (
+        orderId: string,
+        targetStatus: StatusTransitionTarget,
+      ): Promise<boolean> => {
+        const result = await updateOrderStatusDetailed(orderId, targetStatus);
+        if (result.success) {
+          await silentRefresh().catch(() => {});
+          toast.success(
+            t("orderDashboard.orderStatusUpdated", {
+              defaultValue: "Order status updated.",
+            }),
+          );
+          return true;
+        }
+
+        if (result.paymentIntegrityPayload) {
+          const targetOrder =
+            orders.find((order) => order.id === orderId) ||
+            pendingExternalOrders.find((order) => order.id === orderId);
+          if (targetOrder) {
+            handlePaymentIntegrityBlocker(
+              targetOrder,
+              targetStatus,
+              result.paymentIntegrityPayload,
+            );
+            return false;
+          }
+        }
+
+        toast.error(
+          result.errorMessage ||
+            t("orderDashboard.markDeliveredFailed", {
+              defaultValue: "Failed to update order status.",
+            }),
+        );
+        return false;
+      },
+      [
+        handlePaymentIntegrityBlocker,
+        orders,
+        pendingExternalOrders,
+        silentRefresh,
+        t,
+        updateOrderStatusDetailed,
+      ],
+    );
+
+    const handleSinglePaymentCollected = useCallback(
+      async (_result: SinglePaymentCollectionResult) => {
+        const pendingCollection = singlePaymentCollectionData;
+        setSinglePaymentCollectionData(null);
+        if (!pendingCollection) {
+          return;
+        }
+
+        await silentRefresh().catch(() => {});
+        await retryBlockedStatusTransition(
+          pendingCollection.orderId,
+          pendingCollection.targetStatus,
+        );
+      },
+      [retryBlockedStatusTransition, silentRefresh, singlePaymentCollectionData],
+    );
 
     const closePickupConversionConfirm = useCallback(() => {
       setPendingPickupConversion({
@@ -3121,12 +3339,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           // Handle pickup orders immediately (mark as completed)
           if (pickupOrders.length > 0) {
             for (const order of pickupOrders) {
-              const success = await updateOrderStatus(order.id, "completed");
-              if (!success) {
+              const result = await updateOrderStatusDetailed(
+                order.id,
+                "completed",
+              );
+              if (!result.success) {
+                if (
+                  result.paymentIntegrityPayload &&
+                  handlePaymentIntegrityBlocker(
+                    order,
+                    "completed",
+                    result.paymentIntegrityPayload,
+                  )
+                ) {
+                  return;
+                }
                 toast.error(
-                  t("orderDashboard.markDeliveredFailed", {
-                    orderNumber: order.orderNumber,
-                  }),
+                  result.errorMessage ||
+                    t("orderDashboard.markDeliveredFailed", {
+                      orderNumber: order.orderNumber,
+                    }),
                 );
                 return;
               }
@@ -3150,12 +3382,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
           if (deliveryOrdersInTransit.length > 0) {
             for (const order of deliveryOrdersInTransit) {
-              const success = await updateOrderStatus(order.id, "delivered");
-              if (!success) {
+              const result = await updateOrderStatusDetailed(
+                order.id,
+                "delivered",
+              );
+              if (!result.success) {
+                if (
+                  result.paymentIntegrityPayload &&
+                  handlePaymentIntegrityBlocker(
+                    order,
+                    "delivered",
+                    result.paymentIntegrityPayload,
+                  )
+                ) {
+                  return;
+                }
                 toast.error(
-                  t("orderDashboard.markDeliveredFailed", {
-                    orderNumber: order.orderNumber,
-                  }),
+                  result.errorMessage ||
+                    t("orderDashboard.markDeliveredFailed", {
+                      orderNumber: order.orderNumber,
+                    }),
                 );
                 return;
               }
@@ -4260,6 +4506,28 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             collectionMode={splitPaymentData.collectionMode}
             allowDiscounts={splitPaymentData.kind !== "edit-settlement"}
             onSplitComplete={handleSplitComplete}
+          />
+        )}
+
+        {singlePaymentCollectionData && (
+          <SinglePaymentCollectionModal
+            isOpen={true}
+            onClose={() => setSinglePaymentCollectionData(null)}
+            onPaymentCollected={handleSinglePaymentCollected}
+            orderId={singlePaymentCollectionData.orderId}
+            orderNumber={singlePaymentCollectionData.orderNumber}
+            method={singlePaymentCollectionData.method}
+            outstandingAmount={Math.max(
+              0,
+              Number(singlePaymentCollectionData.blocker.totalAmount || 0) -
+                Number(singlePaymentCollectionData.blocker.settledAmount || 0),
+            )}
+            settledAmount={Number(
+              singlePaymentCollectionData.blocker.settledAmount || 0,
+            )}
+            totalAmount={Number(
+              singlePaymentCollectionData.blocker.totalAmount || 0,
+            )}
           />
         )}
 
