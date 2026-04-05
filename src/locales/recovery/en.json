@@ -1,0 +1,157 @@
+{
+  "center": {
+    "eyebrow": "Recovery center",
+    "title": "Self-service recovery",
+    "subtitle": "Use guided repair actions to resolve blocked orders, payments, shifts, Z-reports, and printer issues without leaving the POS.",
+    "needsAttentionTitle": "Needs attention now",
+    "needsAttentionSubtitle": "Blocking issues require user action before sync can return to a clean state.",
+    "noBlockingIssues": "No blocking issues are currently visible.",
+    "recoveringTitle": "Recovering automatically",
+    "recoveringSubtitle": "These issues are being retried or can be nudged safely without destructive cleanup.",
+    "noRecoveringIssues": "No active automatic recovery is in progress.",
+    "recentActionsTitle": "Resolved recently",
+    "recentActionsSubtitle": "Every repair attempt is audited locally so staff can see what was tried and what succeeded.",
+    "noRecentActions": "No recovery actions have been recorded yet."
+  },
+  "context": {
+    "terminalId": "Terminal ID",
+    "branchId": "Branch ID",
+    "organizationId": "Organization ID",
+    "syncHealthState": "Sync health"
+  },
+  "status": {
+    "blocking": "Blocking",
+    "recovering": "Recovering",
+    "resolved": "Resolved",
+    "healthy": "Healthy",
+    "pending": "Pending",
+    "blocked": "Blocked",
+    "error": "Error",
+    "stale": "Stale"
+  },
+  "common": {
+    "reference": "Reference",
+    "entityId": "Entity ID",
+    "order": "Order",
+    "payment": "Payment",
+    "adjustment": "Adjustment",
+    "issueCount_one": "{{count}} issue",
+    "issueCount_other": "{{count}} issues",
+    "unknownActor": "Unknown actor"
+  },
+  "messages": {
+    "actionSucceeded": "{{action}} completed successfully.",
+    "actionFailed": "{{action}} failed. Review the issue details and try again.",
+    "orderNotFound": "The requested order {{orderNumber}} could not be found locally."
+  },
+  "issues": {
+    "genericSyncBlocker": {
+      "title": "Sync item needs review",
+      "summary": "A local sync item is still blocked and needs attention before the terminal can fully recover.",
+      "guidance": "Use the available actions to retry, requeue, or open the related entity and finish the repair."
+    },
+    "paymentAdjustmentOrderNotFound": {
+      "title": "Return or void cannot find its order",
+      "summary": "The local financial adjustment for {{orderNumber}} points to an order that is no longer available on the server.",
+      "guidance": "Open the order to confirm its history. If the order cannot be recovered, discard the local adjustment from this terminal."
+    },
+    "paymentAdjustmentMissingParent": {
+      "title": "Adjustment is waiting for its parent payment",
+      "summary": "The financial adjustment for {{orderNumber}} cannot sync until the original payment is synced first.",
+      "guidance": "Retry sync or open the order settlement flow and confirm that the original payment exists and is completed."
+    },
+    "paymentAdjustmentMissingCanonicalParent": {
+      "title": "Adjustment is waiting for a canonical payment record",
+      "summary": "The terminal found the parent payment for {{orderNumber}}, but it still does not have a valid canonical remote payment ID.",
+      "guidance": "Retry sync first. If the issue stays blocked, open the order settlement flow and fix the payment chain before running Z-report."
+    },
+    "paymentAdjustmentAmbiguousParent": {
+      "title": "Adjustment has more than one possible parent payment",
+      "summary": "The terminal repaired multiple payment records for {{orderNumber}} and cannot safely decide which one owns this adjustment.",
+      "guidance": "Open the order settlement flow, keep the correct payment, and remove or void the duplicate lineage before retrying sync."
+    },
+    "orderSyncBlocked": {
+      "title": "Order sync is blocked",
+      "summary": "The order {{orderNumber}} is still waiting in the sync queue and is blocking dependent work.",
+      "guidance": "Open the order, verify the latest data, and retry or requeue the sync item from this screen."
+    },
+    "shiftSyncConflict": {
+      "title": "Shift sync conflict",
+      "summary": "This shift cannot sync because the server still sees another unresolved active shift for the same staff member.",
+      "guidance": "Open shift repair to close or repair the conflicting shift before continuing with other sync work."
+    },
+    "zReportSubmissionFailed": {
+      "title": "Z-report submission failed",
+      "summary": "The local Z-report for {{reportDate}} could not be submitted successfully.",
+      "guidance": "Open the Z-report for the affected business day, review the blocking items, and retry or discard the local draft only if recovery is impossible."
+    },
+    "invalidOrderReference": {
+      "title": "Order references items that no longer exist",
+      "summary": "A local order contains menu references that no longer match the cached catalog.",
+      "guidance": "Open the order to review the invalid items. If the order is no longer recoverable, delete the failed local order after confirming."
+    },
+    "printerNotConfigured": {
+      "title": "Receipt printer is not configured",
+      "summary": "The terminal cannot print operational documents because no suitable receipt printer profile is configured.",
+      "guidance": "Open printer setup, configure a receipt printer, and retry the failed print job afterwards."
+    }
+  },
+  "actions": {
+    "confirmTitle": "Confirm recovery action",
+    "confirmMessage": "This action changes local recovery data for the selected issue.",
+    "refresh": {
+      "label": "Refresh issues"
+    },
+    "retrySync": {
+      "label": "Retry sync"
+    },
+    "openOrder": {
+      "label": "Open order"
+    },
+    "openOrderPaymentFix": {
+      "label": "Open payment fix"
+    },
+    "openOrderSettlementFix": {
+      "label": "Open settlement fix"
+    },
+    "retryZReportSubmit": {
+      "label": "Retry Z-report submit"
+    },
+    "openZReport": {
+      "label": "Open Z-report"
+    },
+    "openShiftRepair": {
+      "label": "Open shift repair"
+    },
+    "forceCloseShift": {
+      "label": "Force-close stuck shift",
+      "confirmTitle": "Force-close this shift?",
+      "confirmMessage": "This marks the stuck shift as abandoned and zeroes out cash fields. The action is logged and cannot be undone.",
+      "confirmCheckbox": "I understand that this permanently closes the shift with zeroed financial data."
+    },
+    "openPrinterSetup": {
+      "label": "Open printer setup"
+    },
+    "requeueSyncItem": {
+      "label": "Requeue sync item"
+    },
+    "discardLocalAdjustment": {
+      "label": "Discard local adjustment",
+      "confirmTitle": "Discard local financial adjustment?",
+      "confirmMessage": "This removes the local-only financial adjustment linked to {{orderNumber}} from this terminal. The action is audited and cannot be undone without restoring a local backup.",
+      "confirmCheckbox": "I understand that this deletes the local adjustment from this terminal only."
+    },
+    "discardLocalZReport": {
+      "label": "Discard local Z-report draft",
+      "confirmTitle": "Discard local Z-report draft?",
+      "confirmMessage": "This removes the local Z-report draft for {{reportDate}} from this terminal. Use this only when the report cannot be recovered safely.",
+      "confirmCheckbox": "I understand that this deletes the local Z-report draft from this terminal only."
+    },
+    "deleteLocalFailedOrder": {
+      "label": "Delete failed local order",
+      "confirmTitle": "Delete failed local order?",
+      "confirmMessage": "This permanently removes the failed local order {{orderNumber}} and its dependent local sync rows from this terminal.",
+      "confirmCheckbox": "I understand that this deletes the local failed order and cannot be undone without a backup."
+    }
+  }
+}

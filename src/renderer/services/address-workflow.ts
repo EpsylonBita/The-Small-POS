@@ -19,6 +19,7 @@ export {
 export type ValidationStatus =
   | 'in_zone'
   | 'out_of_zone'
+  | 'module_disabled'
   | 'unverified_offline'
   | 'requires_selection'
   | 'validating';
@@ -76,10 +77,12 @@ interface SearchOptions {
   location?: { latitude: number; longitude: number } | null;
   radius?: number;
   limit?: number;
+  sessionToken?: string;
 }
 
 interface ResolveOptions {
   branchId?: string;
+  sessionToken?: string;
 }
 
 interface ValidateOptions {
@@ -97,6 +100,14 @@ const CACHE_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 let runtimeInitialized = false;
 let lastCacheRefreshMs = 0;
 let activeBranchId: string | undefined;
+
+export function createAddressSessionToken(): string {
+  return [
+    'addr',
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 12),
+  ].join('_');
+}
 
 function isOnline(): boolean {
   if (typeof navigator === 'undefined') {
@@ -386,6 +397,7 @@ async function fetchOnlineSuggestions(
     location: options.location || undefined,
     radius: options.radius || undefined,
     language,
+    session_token: options.sessionToken || undefined,
   };
 
   try {
@@ -397,17 +409,6 @@ async function fetchOnlineSuggestions(
           .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
           .slice(0, options.limit || 5);
       }
-    }
-  } catch {
-    // Continue to search-places fallback.
-  }
-
-  try {
-    const response = await posApiPost<any>('pos/google-maps/search-places', payload);
-    if (response.success) {
-      return selectPrimaryOnlineSuggestions(null, response.data)
-        .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
-        .slice(0, options.limit || 5);
     }
   } catch {
     // Continue to offline fallback.
@@ -437,7 +438,7 @@ export async function searchAddressSuggestions(
   query: string,
   options: SearchOptions = {}
 ): Promise<AddressSuggestion[]> {
-  if (query.trim().length < 2) {
+  if (query.trim().length < 3) {
     return [];
   }
 
@@ -548,35 +549,39 @@ export async function resolveAddressSuggestion(
     location: suggestion.location || undefined,
     formatted_address: suggestion.formatted_address || undefined,
     language,
+    session_token: options.sessionToken || undefined,
   };
 
-  for (const path of ['pos/address/details', 'pos/google-maps/place-details']) {
-    try {
-      const response = await posApiPost<any>(path, payload);
-      if (!response.success) {
-        continue;
-      }
-
+  try {
+    const response = await posApiPost<any>('pos/address/details', payload);
+    if (response.success) {
       const result = response.data?.result || response.data;
       return buildResolvedAddressDetails(suggestion, result);
-    } catch {
-      // continue
     }
+  } catch {
+    // Fall through to offline/caller error handling.
   }
 
   throw new Error('Unable to resolve suggestion details');
 }
 
 function normalizeDeliveryValidation(raw: any, fallbackSource: 'online' | 'offline_cache'): DeliveryValidationResult {
-  const status: ValidationStatus = raw?.validation_status
-    || (raw?.isValid ? 'in_zone' : 'out_of_zone');
+  const status: ValidationStatus =
+    raw?.validation_status === 'module_disabled'
+      ? 'module_disabled'
+      : raw?.validation_status || (raw?.isValid ? 'in_zone' : 'out_of_zone');
   const requiresOverride = Boolean(
     raw?.requires_override ?? (status === 'out_of_zone' || status === 'unverified_offline')
   );
   return {
     success: raw?.success !== false,
-    isValid: Boolean(raw?.isValid || status === 'in_zone'),
-    deliveryAvailable: Boolean(raw?.deliveryAvailable ?? raw?.isValid ?? status === 'in_zone'),
+    isValid: Boolean(raw?.isValid || status === 'in_zone' || status === 'module_disabled'),
+    deliveryAvailable: Boolean(
+      raw?.deliveryAvailable
+        ?? raw?.delivery_available
+        ?? raw?.isValid
+        ?? (status === 'in_zone' || status === 'module_disabled')
+    ),
     validation_status: status,
     requires_override: requiresOverride,
     house_number_match: Boolean(raw?.house_number_match ?? true),

@@ -82,6 +82,16 @@ export type {
   DiagnosticsSystemHealth,
   DiagnosticsExportOptions,
   DiagnosticsExportResponse,
+  DiagnosticsTerminalContext,
+  RecoveryIssueSeverity,
+  RecoveryIssueStatus,
+  RecoveryRouteTarget,
+  RecoveryActionSafetyLevel,
+  RecoveryActionDescriptor,
+  RecoveryIssue,
+  RecoveryActionRequest,
+  RecoveryActionResult,
+  RecoveryActionLogEntry,
 } from './ipc-contracts';
 
 // Tauri event bridge

@@ -61,20 +61,134 @@ fn settings_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
 fn customer_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(serde_json::json!({
         "id":               row.get::<_, String>(0)?,
-        "user_profile_id":  row.get::<_, String>(1)?,
-        "organization_id":  row.get::<_, String>(2)?,
-        "points_balance":   row.get::<_, i64>(3)?,
-        "total_earned":     row.get::<_, i64>(4)?,
-        "total_redeemed":   row.get::<_, i64>(5)?,
-        "tier":             row.get::<_, String>(6)?,
-        "customer_name":    row.get::<_, Option<String>>(7)?,
-        "customer_email":   row.get::<_, Option<String>>(8)?,
-        "customer_phone":   row.get::<_, Option<String>>(9)?,
-        "loyalty_card_uid": row.get::<_, Option<String>>(10)?,
-        "last_synced_at":   row.get::<_, Option<String>>(11)?,
-        "created_at":       row.get::<_, String>(12)?,
-        "updated_at":       row.get::<_, String>(13)?,
+        "user_profile_id":  row.get::<_, Option<String>>(1)?,
+        "customer_id":      row.get::<_, Option<String>>(2)?,
+        "organization_id":  row.get::<_, String>(3)?,
+        "points_balance":   row.get::<_, i64>(4)?,
+        "total_earned":     row.get::<_, i64>(5)?,
+        "total_redeemed":   row.get::<_, i64>(6)?,
+        "tier":             row.get::<_, String>(7)?,
+        "customer_name":    row.get::<_, Option<String>>(8)?,
+        "customer_email":   row.get::<_, Option<String>>(9)?,
+        "customer_phone":   row.get::<_, Option<String>>(10)?,
+        "loyalty_card_uid": row.get::<_, Option<String>>(11)?,
+        "last_synced_at":   row.get::<_, Option<String>>(12)?,
+        "created_at":       row.get::<_, String>(13)?,
+        "updated_at":       row.get::<_, String>(14)?,
     }))
+}
+
+fn loyalty_customer_select_clause() -> &'static str {
+    "SELECT id, user_profile_id, customer_id, organization_id, points_balance, total_earned,
+            total_redeemed, tier, customer_name, customer_email, customer_phone,
+            loyalty_card_uid, last_synced_at, created_at, updated_at
+     FROM loyalty_customers"
+}
+
+fn find_loyalty_customer_row(
+    conn: &rusqlite::Connection,
+    org_id: &str,
+    customer_key: &str,
+) -> Result<Option<Value>, String> {
+    let resolved_customer_id = resolve_loyalty_customer_lookup_key(conn, org_id, customer_key)?;
+    let sql = format!(
+        "{} WHERE organization_id = ?1
+           AND (
+             customer_id = ?2
+             OR (?3 IS NOT NULL AND user_profile_id = ?3)
+           )
+         LIMIT 1",
+        loyalty_customer_select_clause()
+    );
+
+    conn.query_row(
+        &sql,
+        params![org_id, resolved_customer_id, Some(customer_key)],
+        customer_row_to_json,
+    )
+    .optional()
+    .map_err(|e| format!("find loyalty customer row: {e}"))
+}
+
+fn ensure_local_loyalty_customer_row(
+    conn: &rusqlite::Connection,
+    org_id: &str,
+    customer_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id
+             FROM loyalty_customers
+             WHERE organization_id = ?1
+               AND customer_id = ?2
+             LIMIT 1",
+            params![org_id, customer_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("ensure loyalty customer lookup: {e}"))?;
+
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT INTO loyalty_customers (
+            id, user_profile_id, customer_id, organization_id, points_balance,
+            total_earned, total_redeemed, tier, customer_name, customer_email,
+            customer_phone, loyalty_card_uid, last_synced_at, created_at, updated_at
+        ) VALUES (?1, NULL, ?2, ?3, 0, 0, 0, 'none', NULL, NULL, NULL, NULL, NULL, ?4, ?4)",
+        params![Uuid::new_v4().to_string(), customer_id, org_id, now],
+    )
+    .map_err(|e| format!("ensure loyalty customer insert: {e}"))?;
+
+    Ok(())
+}
+
+fn resolve_loyalty_customer_lookup_key(
+    conn: &rusqlite::Connection,
+    org_id: &str,
+    customer_key: &str,
+) -> Result<String, String> {
+    let customer_id = customer_key.trim();
+    if customer_id.is_empty() {
+        return Err("Missing customerId or customer_id".to_string());
+    }
+
+    let existing_customer_id: Option<String> = conn
+        .query_row(
+            "SELECT customer_id
+             FROM loyalty_customers
+             WHERE organization_id = ?1
+               AND customer_id = ?2
+             LIMIT 1",
+            params![org_id, customer_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
+        .map_err(|e| format!("resolve loyalty customer by customer_id: {e}"))?;
+
+    if let Some(found_customer_id) = existing_customer_id {
+        return Ok(found_customer_id);
+    }
+
+    let legacy_customer_id: Option<String> = conn
+        .query_row(
+            "SELECT customer_id
+             FROM loyalty_customers
+             WHERE organization_id = ?1
+               AND user_profile_id = ?2
+             LIMIT 1",
+            params![org_id, customer_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
+        .map_err(|e| format!("resolve loyalty customer by user_profile_id: {e}"))?;
+
+    Ok(legacy_customer_id.unwrap_or_else(|| customer_id.to_string()))
 }
 
 /// Build a JSON object from a loyalty_transactions row.
@@ -248,16 +362,24 @@ pub async fn loyalty_sync_customers(db: tauri::State<'_, db::DbState>) -> Result
         }
         conn.execute(
             "INSERT OR REPLACE INTO loyalty_customers (
-                id, user_profile_id, organization_id, points_balance, total_earned,
-                total_redeemed, tier, customer_name, customer_email, customer_phone,
-                loyalty_card_uid, last_synced_at, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                      COALESCE(?13, datetime('now')), ?14)",
+                id, user_profile_id, customer_id, organization_id, points_balance,
+                total_earned, total_redeemed, tier, customer_name, customer_email,
+                customer_phone, loyalty_card_uid, last_synced_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                      COALESCE(?14, datetime('now')), ?15)",
             params![
                 id,
                 c.get("user_profile_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(id),
+                    .map(|value| value.to_string()),
+                c.get("customer_id")
+                    .and_then(|v| v.as_str())
+                    .map(|value| value.to_string())
+                    .or_else(|| {
+                        c.get("user_profile_id")
+                            .and_then(|v| v.as_str())
+                            .map(|value| value.to_string())
+                    }),
                 org_id,
                 c.get("points_balance")
                     .and_then(|v| v.as_i64())
@@ -303,16 +425,14 @@ pub async fn loyalty_get_customers(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let customers: Vec<Value> = if search.is_empty() {
+        let sql = format!(
+            "{} WHERE organization_id = ?1
+             ORDER BY points_balance DESC
+             LIMIT 100",
+            loyalty_customer_select_clause()
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT id, user_profile_id, organization_id, points_balance, total_earned,
-                        total_redeemed, tier, customer_name, customer_email, customer_phone,
-                        loyalty_card_uid, last_synced_at, created_at, updated_at
-                 FROM loyalty_customers
-                 WHERE organization_id = ?1
-                 ORDER BY points_balance DESC
-                 LIMIT 100",
-            )
+            .prepare(&sql)
             .map_err(|e| format!("loyalty_get_customers prepare: {e}"))?;
 
         let rows = stmt
@@ -323,17 +443,15 @@ pub async fn loyalty_get_customers(
         rows
     } else {
         let pattern = format!("%{search}%");
+        let sql = format!(
+            "{} WHERE organization_id = ?1
+               AND (customer_name LIKE ?2 OR customer_email LIKE ?2 OR customer_phone LIKE ?2)
+             ORDER BY points_balance DESC
+             LIMIT 100",
+            loyalty_customer_select_clause()
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT id, user_profile_id, organization_id, points_balance, total_earned,
-                        total_redeemed, tier, customer_name, customer_email, customer_phone,
-                        loyalty_card_uid, last_synced_at, created_at, updated_at
-                 FROM loyalty_customers
-                 WHERE organization_id = ?1
-                   AND (customer_name LIKE ?2 OR customer_email LIKE ?2 OR customer_phone LIKE ?2)
-                 ORDER BY points_balance DESC
-                 LIMIT 100",
-            )
+            .prepare(&sql)
             .map_err(|e| format!("loyalty_get_customers prepare: {e}"))?;
 
         let rows = stmt
@@ -347,14 +465,15 @@ pub async fn loyalty_get_customers(
     Ok(serde_json::json!({ "customers": customers }))
 }
 
-/// Look up a single loyalty customer by user_profile_id (or customer_id alias).
+/// Look up a single loyalty customer by canonical customer_id, with legacy
+/// user_profile_id accepted as a compatibility alias.
 #[tauri::command]
 pub async fn loyalty_get_customer_balance(
     arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let user_profile_id = value_str(
+    let customer_key = value_str(
         &payload,
         &["customerId", "customer_id", "user_profile_id", "id"],
     )
@@ -366,19 +485,7 @@ pub async fn loyalty_get_customer_balance(
     };
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let row: Option<Value> = conn
-        .query_row(
-            "SELECT id, user_profile_id, organization_id, points_balance, total_earned,
-                    total_redeemed, tier, customer_name, customer_email, customer_phone,
-                    loyalty_card_uid, last_synced_at, created_at, updated_at
-             FROM loyalty_customers
-             WHERE user_profile_id = ?1 AND organization_id = ?2
-             LIMIT 1",
-            params![user_profile_id, org_id],
-            customer_row_to_json,
-        )
-        .optional()
-        .map_err(|e| format!("loyalty_get_customer_balance query: {e}"))?;
+    let row = find_loyalty_customer_row(&conn, &org_id, &customer_key)?;
 
     Ok(serde_json::json!({ "customer": row }))
 }
@@ -399,17 +506,12 @@ pub async fn loyalty_lookup_by_phone(
     };
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let sql = format!(
+        "{} WHERE customer_phone = ?1 AND organization_id = ?2 LIMIT 1",
+        loyalty_customer_select_clause()
+    );
     let row: Option<Value> = conn
-        .query_row(
-            "SELECT id, user_profile_id, organization_id, points_balance, total_earned,
-                    total_redeemed, tier, customer_name, customer_email, customer_phone,
-                    loyalty_card_uid, last_synced_at, created_at, updated_at
-             FROM loyalty_customers
-             WHERE customer_phone = ?1 AND organization_id = ?2
-             LIMIT 1",
-            params![phone, org_id],
-            customer_row_to_json,
-        )
+        .query_row(&sql, params![phone, org_id], customer_row_to_json)
         .optional()
         .map_err(|e| format!("loyalty_lookup_by_phone query: {e}"))?;
 
@@ -435,17 +537,12 @@ pub async fn loyalty_lookup_by_card(
     };
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let sql = format!(
+        "{} WHERE loyalty_card_uid = ?1 AND organization_id = ?2 LIMIT 1",
+        loyalty_customer_select_clause()
+    );
     let row: Option<Value> = conn
-        .query_row(
-            "SELECT id, user_profile_id, organization_id, points_balance, total_earned,
-                    total_redeemed, tier, customer_name, customer_email, customer_phone,
-                    loyalty_card_uid, last_synced_at, created_at, updated_at
-             FROM loyalty_customers
-             WHERE loyalty_card_uid = ?1 AND organization_id = ?2
-             LIMIT 1",
-            params![uid, org_id],
-            customer_row_to_json,
-        )
+        .query_row(&sql, params![uid, org_id], customer_row_to_json)
         .optional()
         .map_err(|e| format!("loyalty_lookup_by_card query: {e}"))?;
 
@@ -461,7 +558,7 @@ pub async fn loyalty_earn_points(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let customer_id = value_str(&payload, &["customerId", "customer_id", "id"])
+    let customer_key = value_str(&payload, &["customerId", "customer_id", "id"])
         .ok_or_else(|| "Missing customerId".to_string())?;
     let order_id = value_str(&payload, &["orderId", "order_id"]);
     let amount = value_f64(&payload, &["amount", "total", "orderTotal"])
@@ -471,6 +568,8 @@ pub async fn loyalty_earn_points(
         get_organization_id(&db).ok_or_else(|| "Organization not configured".to_string())?;
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let canonical_customer_id =
+        resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
 
     // Read loyalty settings to determine points_per_euro
     let points_per_euro: f64 = conn
@@ -496,6 +595,7 @@ pub async fn loyalty_earn_points(
     let tx_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let description = format!("Earned {} points for order", points_earned);
+    ensure_local_loyalty_customer_row(&conn, &org_id, &canonical_customer_id, &now)?;
 
     // Insert loyalty transaction
     conn.execute(
@@ -505,7 +605,7 @@ pub async fn loyalty_earn_points(
         ) VALUES (?1, ?2, ?3, ?4, 'earn', ?5, ?6, 'pending', ?7)",
         params![
             tx_id,
-            customer_id,
+            canonical_customer_id,
             org_id,
             points_earned,
             order_id,
@@ -541,8 +641,8 @@ pub async fn loyalty_earn_points(
          SET points_balance = points_balance + ?1,
              total_earned = total_earned + ?1,
              updated_at = ?2
-         WHERE user_profile_id = ?3 AND organization_id = ?4",
-        params![points_earned, now, customer_id, org_id],
+         WHERE customer_id = ?3 AND organization_id = ?4",
+        params![points_earned, now, canonical_customer_id, org_id],
     )
     .map_err(|e| format!("loyalty_earn_points update balance: {e}"))?;
 
@@ -550,16 +650,16 @@ pub async fn loyalty_earn_points(
     let (new_balance, new_total_earned): (i64, i64) = conn
         .query_row(
             "SELECT points_balance, total_earned FROM loyalty_customers
-             WHERE user_profile_id = ?1 AND organization_id = ?2",
-            params![customer_id, org_id],
+             WHERE customer_id = ?1 AND organization_id = ?2",
+            params![canonical_customer_id, org_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| format!("loyalty_earn_points read balance: {e}"))?;
 
     let new_tier = calculate_tier(new_total_earned, bronze, silver, gold, platinum);
     conn.execute(
-        "UPDATE loyalty_customers SET tier = ?1 WHERE user_profile_id = ?2 AND organization_id = ?3",
-        params![new_tier, customer_id, org_id],
+        "UPDATE loyalty_customers SET tier = ?1 WHERE customer_id = ?2 AND organization_id = ?3",
+        params![new_tier, canonical_customer_id, org_id],
     )
     .map_err(|e| format!("loyalty_earn_points update tier: {e}"))?;
 
@@ -567,7 +667,7 @@ pub async fn loyalty_earn_points(
     // /api/pos/loyalty/earn endpoint can recalculate points server-side.
     let sync_payload = serde_json::json!({
         "id": tx_id,
-        "customer_id": customer_id,
+        "customer_id": canonical_customer_id,
         "organization_id": org_id,
         "points": points_earned,
         "amount": amount,
@@ -584,7 +684,7 @@ pub async fn loyalty_earn_points(
     );
 
     info!(
-        customer_id = %customer_id,
+        customer_id = %canonical_customer_id,
         points_earned = points_earned,
         new_balance = new_balance,
         "Loyalty points earned"
@@ -605,7 +705,7 @@ pub async fn loyalty_redeem_points(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let customer_id = value_str(&payload, &["customerId", "customer_id", "id"])
+    let customer_key = value_str(&payload, &["customerId", "customer_id", "id"])
         .ok_or_else(|| "Missing customerId".to_string())?;
     let points = payload
         .get("points")
@@ -621,6 +721,8 @@ pub async fn loyalty_redeem_points(
         get_organization_id(&db).ok_or_else(|| "Organization not configured".to_string())?;
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let canonical_customer_id =
+        resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
 
     // Read loyalty settings to validate
     let (is_active, min_redemption, redemption_rate): (bool, i64, f64) = conn
@@ -647,8 +749,8 @@ pub async fn loyalty_redeem_points(
     let current_balance: i64 = conn
         .query_row(
             "SELECT points_balance FROM loyalty_customers
-             WHERE user_profile_id = ?1 AND organization_id = ?2",
-            params![customer_id, org_id],
+             WHERE customer_id = ?1 AND organization_id = ?2",
+            params![canonical_customer_id, org_id],
             |row| row.get(0),
         )
         .optional()
@@ -678,7 +780,7 @@ pub async fn loyalty_redeem_points(
         ) VALUES (?1, ?2, ?3, ?4, 'redeem', ?5, ?6, 'pending', ?7)",
         params![
             tx_id,
-            customer_id,
+            canonical_customer_id,
             org_id,
             negative_points,
             order_id,
@@ -694,8 +796,8 @@ pub async fn loyalty_redeem_points(
          SET points_balance = points_balance - ?1,
              total_redeemed = total_redeemed + ?1,
              updated_at = ?2
-         WHERE user_profile_id = ?3 AND organization_id = ?4",
-        params![points, now, customer_id, org_id],
+         WHERE customer_id = ?3 AND organization_id = ?4",
+        params![points, now, canonical_customer_id, org_id],
     )
     .map_err(|e| format!("loyalty_redeem_points update balance: {e}"))?;
 
@@ -704,7 +806,7 @@ pub async fn loyalty_redeem_points(
     // Enqueue for sync
     let sync_payload = serde_json::json!({
         "id": tx_id,
-        "customer_id": customer_id,
+        "customer_id": canonical_customer_id,
         "organization_id": org_id,
         "points": negative_points,
         "transaction_type": "redeem",
@@ -721,7 +823,7 @@ pub async fn loyalty_redeem_points(
     );
 
     info!(
-        customer_id = %customer_id,
+        customer_id = %canonical_customer_id,
         points_redeemed = points,
         discount_value = discount_value,
         new_balance = new_balance,
@@ -743,24 +845,37 @@ pub async fn loyalty_get_transactions(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let customer_id = value_str(&payload, &["customerId", "customer_id", "id"])
+    let customer_key = value_str(&payload, &["customerId", "customer_id", "id"])
         .ok_or_else(|| "Missing customerId or customer_id".to_string())?;
+    let org_id = match get_organization_id(&db) {
+        Some(id) => id,
+        None => return Ok(serde_json::json!({ "transactions": [] })),
+    };
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let canonical_customer_id =
+        resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
 
     let mut stmt = conn
         .prepare(
             "SELECT id, customer_id, organization_id, points, transaction_type,
                     order_id, description, sync_state, created_at
              FROM loyalty_transactions
-             WHERE customer_id = ?1
+             WHERE organization_id = ?1
+               AND (
+                 customer_id = ?2
+                 OR (?3 IS NOT NULL AND customer_id = ?3)
+               )
              ORDER BY created_at DESC
              LIMIT 50",
         )
         .map_err(|e| format!("loyalty_get_transactions prepare: {e}"))?;
 
     let transactions: Vec<Value> = stmt
-        .query_map(params![customer_id], transaction_row_to_json)
+        .query_map(
+            params![org_id, canonical_customer_id, Some(customer_key)],
+            transaction_row_to_json,
+        )
         .map_err(|e| format!("loyalty_get_transactions query: {e}"))?
         .filter_map(|r| r.ok())
         .collect();
@@ -775,6 +890,32 @@ pub async fn loyalty_get_transactions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
+
+    fn setup_loyalty_customers_table(conn: &Connection) {
+        conn.execute_batch(
+            "
+            CREATE TABLE loyalty_customers (
+                id TEXT PRIMARY KEY,
+                user_profile_id TEXT,
+                customer_id TEXT,
+                organization_id TEXT NOT NULL,
+                points_balance INTEGER NOT NULL DEFAULT 0,
+                total_earned INTEGER NOT NULL DEFAULT 0,
+                total_redeemed INTEGER NOT NULL DEFAULT 0,
+                tier TEXT NOT NULL DEFAULT 'none',
+                customer_name TEXT,
+                customer_email TEXT,
+                customer_phone TEXT,
+                loyalty_card_uid TEXT,
+                last_synced_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+    }
 
     #[test]
     fn test_calculate_tier_none() {
@@ -811,5 +952,57 @@ mod tests {
         // storage::get_credential requires keyring; this test just validates
         // the function compiles and the None path works in isolation.
         // In a real environment, this would require a mock.
+    }
+
+    #[test]
+    fn resolve_loyalty_customer_lookup_key_prefers_canonical_customer_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_loyalty_customers_table(&conn);
+        conn.execute(
+            "INSERT INTO loyalty_customers (
+                id, user_profile_id, customer_id, organization_id, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![
+                "row-1",
+                "user-profile-1",
+                "customer-1",
+                "org-1",
+                "2026-04-05T00:00:00Z"
+            ],
+        )
+        .unwrap();
+
+        let resolved = resolve_loyalty_customer_lookup_key(&conn, "org-1", "user-profile-1")
+            .expect("legacy id should resolve");
+
+        assert_eq!(resolved, "customer-1");
+    }
+
+    #[test]
+    fn ensure_local_loyalty_customer_row_creates_placeholder_balance_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_loyalty_customers_table(&conn);
+
+        ensure_local_loyalty_customer_row(
+            &conn,
+            "org-1",
+            "customer-123",
+            "2026-04-05T00:00:00Z",
+        )
+        .expect("placeholder row should insert");
+
+        let inserted: (Option<String>, String, i64) = conn
+            .query_row(
+                "SELECT user_profile_id, customer_id, points_balance
+                 FROM loyalty_customers
+                 WHERE organization_id = ?1 AND customer_id = ?2",
+                params!["org-1", "customer-123"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(inserted.0, None);
+        assert_eq!(inserted.1, "customer-123");
+        assert_eq!(inserted.2, 0);
     }
 }

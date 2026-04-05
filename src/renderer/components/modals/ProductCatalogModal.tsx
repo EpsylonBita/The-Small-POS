@@ -25,11 +25,13 @@ import {
   refreshTerminalCredentialCache,
 } from '../../services/terminal-credentials';
 import { getDeliveryFeeStatus, resolveDeliveryFee } from '../../utils/delivery-fee';
+import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import {
   buildSavedAddressQuery,
   extractSavedAddressCoordinates,
   resolveSavedAddressCoordinates,
 } from '../../utils/saved-address-geolocation';
+import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
 import {
   isOfferRewardLine,
   mapRewardActionsWithSignatures,
@@ -111,7 +113,9 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const { organizationId: moduleOrgId } = useModules();
   const { maxDiscountPercentage } = useDiscountSettings();
   const { hasModule } = useAcquiredModules();
+  const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
   const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
+  const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
   const { state: scannerState } = useBarcodeScannerContext();
   const isDark = resolvedTheme === 'dark';
 
@@ -124,6 +128,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const [offerEvaluation, setOfferEvaluation] = useState<CatalogOfferEvaluationResult | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [discountPercentage, setDiscountPercentage] = useState<number>(0);
+  const [manualDeliveryFee, setManualDeliveryFee] = useState<number>(0);
+  const [manualDeliveryFeeInput, setManualDeliveryFeeInput] = useState('');
   const [localDeliveryZoneInfo, setLocalDeliveryZoneInfo] =
     useState<DeliveryBoundaryValidationResponse | null>(null);
   const [resolvedSelectedAddressCoordinates, setResolvedSelectedAddressCoordinates] =
@@ -238,12 +244,10 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         setResolvedSelectedAddressCoordinates(resolved.coordinates);
 
         const addressVersion = Number((selectedAddress as any)?.version);
-        const customerId =
-          typeof selectedCustomer?.id === 'string'
-            ? selectedCustomer.id
-            : typeof (selectedAddress as any)?.customer_id === 'string'
-              ? (selectedAddress as any).customer_id
-              : null;
+        const customerId = resolvePersistedCustomerId(
+          selectedCustomer?.id,
+          (selectedAddress as any)?.customer_id,
+        );
         if (typeof (selectedAddress as any)?.id === 'string' && customerId) {
           try {
             await bridge.customers.updateAddress(
@@ -280,7 +284,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   }, [branchId, bridge.customers, isOpen, orderType, selectedAddress, selectedCustomer?.id]);
 
   useEffect(() => {
-    if (!hasDeliveryZonesModule) {
+    if (!hasDeliveryPro) {
       setLocalDeliveryZoneInfo(null);
       return;
     }
@@ -323,7 +327,17 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [deliveryZoneInfo, hasDeliveryZonesModule, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
+  }, [deliveryZoneInfo, hasDeliveryPro, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
+
+  useEffect(() => {
+    if (!hasDeliveryPro) {
+      const normalized = Math.max(0, manualDeliveryFee || 0);
+      setManualDeliveryFeeInput(normalized > 0 ? normalized.toFixed(2).replace('.', ',') : '');
+      return;
+    }
+
+    setManualDeliveryFeeInput('');
+  }, [hasDeliveryPro, manualDeliveryFee]);
 
   // Focus barcode input when modal opens
   useEffect(() => {
@@ -331,6 +345,16 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       setTimeout(() => barcodeInputRef.current?.focus(), 100);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen) {
+      return
+    }
+
+    setManualDeliveryFee(0)
+    setManualDeliveryFeeInput('')
+    setLocalDeliveryZoneInfo(null)
+  }, [isOpen])
 
   // Add to cart function (defined before barcode handlers)
   const addToCart = useCallback((product: Product) => {
@@ -521,15 +545,19 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const deliveryFeeStatus =
       orderType !== 'delivery'
         ? 'resolved'
-        : !deliveryValidationTarget
-          ? 'requires_selection'
-          : !hasExactDeliveryCoordinates
-            ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'requires_selection')
-         : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
+        : !hasDeliveryPro
+          ? 'resolved'
+          : !deliveryValidationTarget
+            ? 'requires_selection'
+            : !hasExactDeliveryCoordinates
+              ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'requires_selection')
+              : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
   const deliveryFee =
-    orderType === 'delivery' && deliveryFeeStatus === 'resolved'
-      ? resolveDeliveryFee(effectiveDeliveryZoneInfo)
-      : 0;
+    orderType !== 'delivery'
+      ? 0
+      : hasDeliveryPro
+        ? (deliveryFeeStatus === 'resolved' ? resolveDeliveryFee(effectiveDeliveryZoneInfo) : 0)
+        : Math.max(0, manualDeliveryFee);
   const subtotalAfterDiscount = Math.max(subtotal - offerDiscountAmount - discountAmount, 0);
   const total = subtotalAfterDiscount + deliveryFee;
   const matchedOfferNames: string[] = Array.from(
@@ -553,7 +581,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const handleCheckout = async () => {
     if (cartItems.length === 0) return;
 
-    if (orderType === 'delivery' && deliveryFeeStatus !== 'resolved') {
+    if (orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus !== 'resolved') {
         if (!deliveryValidationTarget || !hasExactDeliveryCoordinates) {
           return;
         }
@@ -599,6 +627,9 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     setCartItems([]);
     setOfferEvaluation(null);
     setDiscountPercentage(0);
+    setManualDeliveryFee(0);
+    setManualDeliveryFeeInput('');
+    setLocalDeliveryZoneInfo(null);
   };
 
   if (!isOpen) return null;
@@ -848,7 +879,22 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               {orderType === 'delivery' && (
                 <div className="flex justify-between text-gray-400 mb-1">
                   <span>{t('menu.cart.deliveryFee')}</span>
-                  <span>{deliveryFeeText}</span>
+                  {hasDeliveryPro ? (
+                    <span>{deliveryFeeText}</span>
+                  ) : (
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={manualDeliveryFeeInput}
+                      onChange={(event) => {
+                        const formatted = formatMoneyInputWithCents(event.target.value)
+                        setManualDeliveryFeeInput(formatted)
+                        setManualDeliveryFee(parseMoneyInputValue(formatted))
+                      }}
+                      placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
+                      className="w-24 rounded-lg border bg-white/10 px-2 py-1 text-right text-white border-white/20 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  )}
                 </div>
               )}
               <div className="flex justify-between text-white text-xl font-bold mt-2">
@@ -862,7 +908,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               disabled={
                 cartItems.length === 0 ||
                 isProcessingOrder ||
-                (orderType === 'delivery' && deliveryFeeStatus !== 'resolved')
+                (orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus !== 'resolved')
               }
               className="mt-4 w-full py-3 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold flex items-center justify-center gap-2 transition"
             >
@@ -883,6 +929,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         discountAmount={discountAmount + offerDiscountAmount}
         deliveryFee={deliveryFee}
         orderType={orderType}
+        minimumOrderAmount={hasDeliveryPro ? (effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0) : 0}
         onPaymentComplete={handlePaymentComplete}
       />
     </>

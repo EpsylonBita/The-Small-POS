@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 42;
+const CURRENT_SCHEMA_VERSION: i32 = 43;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -270,6 +270,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 42 {
         migrate_v42(conn)?;
+    }
+    if current < 43 {
+        migrate_v43(conn)?;
     }
 
     Ok(())
@@ -2683,6 +2686,33 @@ fn migrate_v42(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v42 caller_id_log: {e}"))?;
 
     info!("Applied migration v42 (caller_id_log table)");
+    Ok(())
+}
+
+fn migrate_v43(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "loyalty_customers", "customer_id")? {
+        conn.execute_batch("ALTER TABLE loyalty_customers ADD COLUMN customer_id TEXT;")
+            .map_err(|e| format!("migration v43 add loyalty_customers.customer_id: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        UPDATE loyalty_customers
+        SET customer_id = COALESCE(customer_id, user_profile_id)
+        WHERE customer_id IS NULL OR TRIM(customer_id) = '';
+
+        CREATE INDEX IF NOT EXISTS idx_loyalty_customers_customer_id
+            ON loyalty_customers(customer_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_loyalty_customers_customer_org
+            ON loyalty_customers(customer_id, organization_id)
+            WHERE customer_id IS NOT NULL AND TRIM(customer_id) <> '';
+
+        INSERT INTO schema_version (version) VALUES (43);
+        ",
+    )
+    .map_err(|e| format!("migration v43 loyalty_customers.customer_id: {e}"))?;
+
+    info!("Applied migration v43 (loyalty_customers.customer_id)");
     Ok(())
 }
 

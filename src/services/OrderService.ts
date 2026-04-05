@@ -15,6 +15,7 @@ import {
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from '../renderer/services/terminal-credentials';
+import { resolvePersistedCustomerId } from '../renderer/utils/persisted-customer-id';
 
 // Utility functions - now using centralized debug logger
 
@@ -624,9 +625,15 @@ export class OrderService {
             }
           : undefined;
 
+      const persistedCustomerId = resolvePersistedCustomerId(
+        (orderData as any).customerId,
+        orderData.customer_id,
+      );
+
       const normalized: any = {
         // Include customerId for backend address fallback resolution
-        customerId: (orderData as any).customerId ?? orderData.customer_id ?? null,
+        customerId: persistedCustomerId,
+        customer_id: persistedCustomerId,
         customerName: (orderData as any).customerName ?? orderData.customer_name,
         customerPhone: orderData.customerPhone ?? orderData.customer_phone,
         customerEmail: (orderData as any).customerEmail ?? orderData.customer_email,
@@ -894,7 +901,11 @@ export class OrderService {
         initial_payment: normalizedInitialPayment,
 
         // Optional fields - use ?? for numbers to handle 0 values correctly
-        customer_id: orderData.customer_id || null,
+        customer_id:
+          resolvePersistedCustomerId(
+            orderData.customer_id,
+            orderDataAny.customerId,
+          ) || null,
         customer_name: orderData.customer_name || orderDataAny.customerName || null,
         customer_phone: orderData.customer_phone || orderDataAny.customerPhone || null,
         subtotal: orderDataAny.subtotal ?? 0,

@@ -8,6 +8,7 @@ import { useTheme } from '../../contexts/theme-context';
 import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
   buildAddressFingerprint,
+  createAddressSessionToken,
   ensureAddressOfflineRuntime,
   extractStreetNumber,
   getSuggestionStreetLabel,
@@ -23,6 +24,7 @@ import {
   getResolvedTerminalCredentials,
 } from '../../services/terminal-credentials';
 import { parseSpecialAddressInput } from '../../utils/specialAddress';
+import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 
 import { inputBase } from '../../styles/designSystem';
 
@@ -63,6 +65,7 @@ interface AddressAutocompleteProps {
   onChange: (value: string, details?: AddressSelectionDetails) => void;
   placeholder?: string;
   className?: string;
+  searchEnabled?: boolean;
 }
 
 interface AddressSelectionDetails {
@@ -95,11 +98,63 @@ const extractErrorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
+const getStoredCoordinates = (source: any): { lat: number; lng: number } | null => {
+  const directCoordinates = source?.coordinates;
+  if (
+    directCoordinates
+    && typeof directCoordinates.lat === 'number'
+    && typeof directCoordinates.lng === 'number'
+  ) {
+    return { lat: directCoordinates.lat, lng: directCoordinates.lng };
+  }
+
+  if (
+    directCoordinates
+    && Array.isArray(directCoordinates.coordinates)
+    && directCoordinates.coordinates.length >= 2
+  ) {
+    const [lng, lat] = directCoordinates.coordinates;
+    if (typeof lat === 'number' && typeof lng === 'number') {
+      return { lat, lng };
+    }
+  }
+
+  if (typeof source?.latitude === 'number' && typeof source?.longitude === 'number') {
+    return { lat: source.latitude, lng: source.longitude };
+  }
+
+  return null;
+};
+
+const getStoredAddressSelectionDetails = (source: any): AddressSelectionDetails | null => {
+  if (!source) {
+    return null;
+  }
+
+  const details: AddressSelectionDetails = {
+    city: typeof source.city === 'string' ? source.city : undefined,
+    postalCode: typeof source.postal_code === 'string' ? source.postal_code : undefined,
+    coordinates: getStoredCoordinates(source) || undefined,
+    placeId: typeof source.place_id === 'string' ? source.place_id : undefined,
+    resolvedStreetNumber:
+      typeof source.resolved_street_number === 'string' ? source.resolved_street_number : undefined,
+    addressFingerprint:
+      typeof source.address_fingerprint === 'string' ? source.address_fingerprint : undefined,
+    validationSource:
+      source.validation_source === 'online' || source.validation_source === 'offline_cache'
+        ? source.validation_source
+        : undefined,
+  };
+
+  return Object.values(details).some(Boolean) ? details : null;
+};
+
 const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   value,
   onChange,
   placeholder,
-  className = ""
+  className = "",
+  searchEnabled = true,
 }) => {
   const { t } = useTranslation();
   const placeholderText = placeholder ?? t('modals.addNewAddress.addressPlaceholder');
@@ -109,6 +164,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const searchRequestRef = useRef(0);
+  const sessionTokenRef = useRef<string | null>(null);
   const [terminalBranchId, setTerminalBranchId] = useState<string | null>(null);
   const bridge = getBridge();
 
@@ -141,6 +197,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       const results = await searchAddressSuggestions(input, {
         branchId: terminalBranchId || undefined,
         limit: 5,
+        sessionToken: sessionTokenRef.current || undefined,
       });
       if (requestId !== searchRequestRef.current) {
         return;
@@ -161,7 +218,6 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newValue = e.target.value;
-    const parsedAddressInput = parseSpecialAddressInput(newValue);
     onChange(newValue);
 
     // Debounce the search
@@ -169,8 +225,9 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       clearTimeout(timeoutRef.current);
     }
 
-    if (parsedAddressInput.isSpecialLabelInput) {
+    if (!searchEnabled) {
       searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
       setIsLoading(false);
       setSuggestions([]);
       setShowSuggestions(false);
@@ -179,14 +236,18 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
 
     setShowSuggestions(true);
 
-    if (newValue.length < 2) {
+    if (newValue.length < 3) {
       searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
       setIsLoading(false);
       setSuggestions([]);
       return;
     }
 
     const requestId = ++searchRequestRef.current;
+    if (!sessionTokenRef.current) {
+      sessionTokenRef.current = createAddressSessionToken();
+    }
     setIsLoading(true);
     timeoutRef.current = setTimeout(() => {
       void searchAddresses(newValue, requestId);
@@ -197,6 +258,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
     try {
       const resolved = await resolveAddressSuggestion(suggestion, value, {
         branchId: terminalBranchId || undefined,
+        sessionToken: sessionTokenRef.current || undefined,
       });
       void upsertVerifiedLocalCandidate({
         place_id: resolved.placeId || suggestion.place_id,
@@ -224,6 +286,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       });
       setSuggestions([]);
       setShowSuggestions(false);
+      sessionTokenRef.current = null;
     } catch (error) {
       console.error('Error getting place details:', error);
       const streetAddress =
@@ -233,8 +296,22 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       onChange(streetAddress, { fromSuggestion: false });
       setSuggestions([]);
       setShowSuggestions(false);
+      sessionTokenRef.current = null;
     }
   };
+
+  useEffect(() => {
+    if (!searchEnabled) {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+      searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
+      setSuggestions([]);
+      setShowSuggestions(false);
+      setIsLoading(false);
+    }
+  }, [searchEnabled]);
 
   useEffect(() => {
     return () => {
@@ -242,6 +319,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
         clearTimeout(timeoutRef.current);
       }
       searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
     };
   }, []);
 
@@ -254,7 +332,11 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
           value={value}
           onChange={handleInputChange}
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); } }}
-          onFocus={() => setShowSuggestions(true)}
+          onFocus={() => {
+            if (searchEnabled) {
+              setShowSuggestions(true);
+            }
+          }}
           placeholder={placeholderText}
           autoComplete="off"
           className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${className}`}
@@ -262,7 +344,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       </div>
 
       {/* Suggestions Dropdown */}
-      {showSuggestions && (suggestions.length > 0 || isLoading) && (
+      {searchEnabled && showSuggestions && (suggestions.length > 0 || isLoading) && (
         <div className="absolute left-0 right-0 top-full z-[9999] mt-1 liquid-glass-modal-card shadow-2xl max-h-60 overflow-y-auto scrollbar-hide">
           {isLoading && (
             <div className="p-3 text-center text-gray-500 dark:text-gray-400">
@@ -307,6 +389,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const bridge = getBridge();
+  const { hasModule } = useAcquiredModules();
+  const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
+  const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
+  const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
 
   const [terminalBranchId, setTerminalBranchId] = useState<string | null>(null);
   const validationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -367,14 +453,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       formInitializedRef.current = true;
 
       // Reset delivery validation state when modal opens
-      setDeliveryValidationResult(null);
-      setDeliveryValidationStatus('idle');
-      setShowDeliveryValidation(false);
-      setAddressCoordinates(null);
-      setSelectedAddressDetails(null);
-      setValidationSnapshot(null);
-      setOverrideApplied(false);
-      setOverrideReason('');
+        setDeliveryValidationResult(null);
+        setDeliveryValidationStatus('idle');
+        setShowDeliveryValidation(false);
+        setAddressCoordinates(null);
+        setSelectedAddressDetails(null);
+        setValidationSnapshot(null);
+        setOverrideApplied(false);
+        setOverrideReason('');
       setIsValidatingDelivery(false);
       setErrors({});
 
@@ -385,6 +471,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             (addr: any) => addr.id === initialCustomer.editAddressId
           );
           if (addressToEdit) {
+            const storedCoordinates = hasDeliveryPro ? getStoredCoordinates(addressToEdit) : null;
+            const storedDetails = hasDeliveryPro ? getStoredAddressSelectionDetails(addressToEdit) : null;
             setFormData({
               phone: initialCustomer.phone || '',
               name: initialCustomer.name || '',
@@ -396,6 +484,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               floorNumber: addressToEdit.floor_number || '',
               notes: addressToEdit.notes || '',
             });
+            setAddressCoordinates(storedCoordinates);
+            setSelectedAddressDetails(storedDetails);
+            setValidationSnapshot(storedDetails?.addressFingerprint || null);
           } else {
             // Address not found, fall back to empty address fields
             setFormData({
@@ -425,6 +516,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           });
         } else {
           // Edit mode - prefill all fields
+          const storedCoordinates = hasDeliveryPro ? getStoredCoordinates(initialCustomer) : null;
+          const storedDetails = hasDeliveryPro ? getStoredAddressSelectionDetails(initialCustomer) : null;
           setFormData({
             phone: initialCustomer.phone || '',
             name: initialCustomer.name || '',
@@ -436,6 +529,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             floorNumber: initialCustomer.floor_number || '',
             notes: initialCustomer.notes || '',
           });
+          setAddressCoordinates(storedCoordinates);
+          setSelectedAddressDetails(storedDetails);
+          setValidationSnapshot(storedDetails?.addressFingerprint || null);
         }
       } else if (initialPhone) {
         // New customer with just phone prefilled
@@ -465,7 +561,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         });
       }
     }
-  }, [isOpen, initialPhone, initialCustomer, isAddAddressMode, isEditAddressMode]);
+  }, [isOpen, initialPhone, initialCustomer, isAddAddressMode, isEditAddressMode, hasDeliveryPro]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -482,8 +578,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     () => parseSpecialAddressInput(formData.address),
     [formData.address],
   );
-  const isSpecialAddressMode = parsedAddressInput.shouldSkipZoneValidation;
-  const normalizedStreetAddress = parsedAddressInput.normalizedAddress;
+  const isSpecialAddressMode =
+    !hasDeliveryPro && parsedAddressInput.shouldSkipZoneValidation;
+  const normalizedStreetAddress = hasDeliveryPro
+    ? formData.address.trim()
+    : parsedAddressInput.normalizedAddress;
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -495,6 +594,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
   const clearAddressValidation = (addressValue: string) => {
     const parsedAddress = parseSpecialAddressInput(addressValue);
+    const normalizedAddress = hasDeliveryPro
+      ? addressValue.trim()
+      : parsedAddress.normalizedAddress;
     setSelectedAddressDetails(null);
     setAddressCoordinates(null);
     setDeliveryValidationResult(null);
@@ -502,13 +604,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     setOverrideApplied(false);
     setOverrideReason('');
 
-    if (!parsedAddress.normalizedAddress) {
+    if (!normalizedAddress) {
       setShowDeliveryValidation(false);
       setDeliveryValidationStatus('idle');
       return;
     }
 
-    if (parsedAddress.shouldSkipZoneValidation) {
+    if (!hasDeliveryPro) {
       setShowDeliveryValidation(false);
       setDeliveryValidationStatus('idle');
       return;
@@ -532,12 +634,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     details?: AddressSelectionDetails | null
   ): Promise<DeliveryValidationResult | null> => {
     const parsedAddress = parseSpecialAddressInput(address);
-    const trimmedAddress = parsedAddress.normalizedAddress;
+    const trimmedAddress = hasDeliveryPro
+      ? address.trim()
+      : parsedAddress.normalizedAddress;
     if (!trimmedAddress) {
       return null;
     }
 
-    if (parsedAddress.shouldSkipZoneValidation) {
+    if (!hasDeliveryPro) {
       setShowDeliveryValidation(false);
       setDeliveryValidationStatus('idle');
       return null;
@@ -561,7 +665,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
       setDeliveryValidationResult(validation);
       setDeliveryValidationStatus(validation.validation_status);
-      setShowDeliveryValidation(true);
+      setShowDeliveryValidation(validation.validation_status !== 'module_disabled');
       setValidationSnapshot(validation.address_fingerprint || fallbackFingerprint);
       if (validation.coordinates) {
         setAddressCoordinates(validation.coordinates);
@@ -569,7 +673,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         setAddressCoordinates(coords);
       }
 
-      if (validation.validation_status === 'in_zone') {
+      if (
+        validation.validation_status === 'in_zone'
+        || validation.validation_status === 'module_disabled'
+      ) {
         setOverrideApplied(false);
         setOverrideReason('');
       }
@@ -601,7 +708,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       return null;
     }
 
-    if (isSpecialAddressMode) {
+    if (!hasDeliveryPro) {
       return null;
     }
 
@@ -616,11 +723,15 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   };
 
   const evaluateValidationDecision = (result: DeliveryValidationResult | null): string | null => {
+    if (!hasDeliveryPro) {
+      return null;
+    }
+
     if (!result) {
       return t('modals.addCustomer.selectAddressForValidation', 'Select a real address from suggestions to validate delivery.');
     }
 
-    if (result.validation_status === 'in_zone') {
+    if (result.validation_status === 'in_zone' || result.validation_status === 'module_disabled') {
       return null;
     }
 
@@ -711,11 +822,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.overrideReason = t('modals.addCustomer.overrideReasonRequired', 'Override reason must be at least 6 characters.');
     }
 
-    if (!isSpecialAddressMode && !formData.nameOnRinger.trim()) {
+    if (!formData.nameOnRinger.trim()) {
       newErrors.nameOnRinger = t('modals.addCustomer.nameOnRingerRequired', 'Name on ringer is required');
     }
 
-    if (!isSpecialAddressMode && !formData.floorNumber.trim()) {
+    if (!formData.floorNumber.trim()) {
       newErrors.floorNumber = t('modals.addCustomer.floorRequired', 'Floor number is required');
     }
 
@@ -738,7 +849,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     }
 
     let validationForSubmit: DeliveryValidationResult | null = null;
-    if (!isSpecialAddressMode) {
+    if (hasDeliveryPro) {
       validationForSubmit = await ensureAddressValidationForSubmit();
       const validationDecisionError = evaluateValidationDecision(validationForSubmit);
       if (validationDecisionError) {
@@ -761,18 +872,17 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       const refreshed = await getResolvedTerminalCredentials().catch(() => ({
         branchId: terminalBranchId || undefined,
       } as any));
-      const activeValidation = isSpecialAddressMode
-        ? null
-        : (validationForSubmit || deliveryValidationResult);
+      const activeValidation = hasDeliveryPro
+        ? (validationForSubmit || deliveryValidationResult)
+        : null;
       // Persist the exact selected suggestion point first (Google/OSM details), then fallback.
-      const persistedCoords = isSpecialAddressMode
-        ? null
-        : (selectedAddressDetails?.coordinates || addressCoordinates || activeValidation?.coordinates || null);
-      const validatedAt = !isSpecialAddressMode && activeValidation ? new Date().toISOString() : null;
+      const persistedCoords = hasDeliveryPro
+        ? (selectedAddressDetails?.coordinates || addressCoordinates || activeValidation?.coordinates || null)
+        : null;
+      const validatedAt = hasDeliveryPro && activeValidation ? new Date().toISOString() : null;
       const normalizedOverrideReason = overrideApplied ? overrideReason.trim() : '';
-      const validationMetadata = isSpecialAddressMode
-        ? null
-        : {
+      const validationMetadata = hasDeliveryPro
+        ? {
             override_applied: overrideApplied,
             override_reason: normalizedOverrideReason || null,
             validation_status: activeValidation?.validation_status || null,
@@ -787,7 +897,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             input_street_number: extractStreetNumber(normalizedStreetAddress) || null,
             resolved_street_number: selectedAddressDetails?.resolvedStreetNumber || null,
             house_number_match: activeValidation?.house_number_match ?? true,
-          };
+          }
+        : null;
 
       // Handle ADD ADDRESS mode - save new address to existing customer via IPC
       if (mode === 'addAddress' && initialCustomer?.id) {
@@ -803,7 +914,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             notes: formData.notes ? formData.notes.trim() : null,
             address_type: 'delivery',
             is_default: false,
-            coordinates: isSpecialAddressMode ? null : persistedCoords,
+            coordinates: hasDeliveryPro ? persistedCoords : null,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
             ...(validationMetadata ?? {}),
@@ -860,7 +971,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
             notes: formData.notes ? formData.notes.trim() : null,
             name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
-            coordinates: isSpecialAddressMode ? null : persistedCoords,
+            coordinates: hasDeliveryPro ? persistedCoords : null,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
             customer_id: initialCustomer.id,
@@ -924,7 +1035,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             notes: formData.notes ? formData.notes.trim() : undefined,
             name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
             // Pass coordinates if available
-            coordinates: isSpecialAddressMode ? null : persistedCoords,
+            coordinates: hasDeliveryPro ? persistedCoords : null,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
             delivery_validation: validationMetadata,
@@ -1021,10 +1132,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         // Branch association - assign customer to the terminal's branch
         branch_id: terminalBranchId || refreshed.branchId || undefined,
         // Include delivery validation data and coordinates
-        coordinates: isSpecialAddressMode ? null : persistedCoords,
+        coordinates: hasDeliveryPro ? persistedCoords : null,
         latitude: persistedCoords?.lat ?? null,
         longitude: persistedCoords?.lng ?? null,
-        delivery_validation: !isSpecialAddressMode && activeValidation ? {
+        delivery_validation: hasDeliveryPro && activeValidation ? {
           validated: true,
           delivery_available: activeValidation.deliveryAvailable,
           zone_name: activeValidation.selectedZone?.name ?? null,
@@ -1163,19 +1274,26 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             <AddressAutocomplete
               value={formData.address}
               onChange={handleAddressChange}
-              placeholder={t('modals.addCustomer.streetPlaceholder')}
+              placeholder={
+                hasDeliveryPro
+                  ? t('modals.addCustomer.streetPlaceholder')
+                  : t('modals.addCustomer.manualAddressPlaceholder', 'Enter address manually')
+              }
               className="pr-3"
+              searchEnabled={hasDeliveryPro}
             />
           </div>
           {errors.address && (
             <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.address}</p>
           )}
-          <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-            {t(
-              'modals.addCustomer.specialAddressHint',
-              'Use #E-food to save a special address label and skip delivery zone validation.',
-            )}
-          </p>
+          {!hasDeliveryPro && (
+            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              {t(
+                'modals.addCustomer.manualAddressEntryHint',
+                'Delivery Pro is not enabled for this terminal. Address search and zone validation are off, so the address will be saved manually.',
+              )}
+            </p>
+          )}
         </div>
 
         {isSpecialAddressMode && (
@@ -1202,7 +1320,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         )}
 
         {/* Delivery Validation */}
-        {showDeliveryValidation && !isSpecialAddressMode && (
+        {hasDeliveryPro && showDeliveryValidation && (
           <div className="liquid-glass-modal-card">
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">

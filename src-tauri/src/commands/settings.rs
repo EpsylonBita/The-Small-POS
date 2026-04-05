@@ -14,7 +14,7 @@ use crate::terminal_helpers::{
     extract_source_terminal_id_from_terminal_settings_response,
     extract_terminal_type_from_terminal_settings_response,
 };
-use crate::{api, auth, db, menu, storage};
+use crate::{api, auth, db, menu, reset, storage};
 
 const TERMINAL_RUNTIME_STALE_AFTER_MS: i64 = 15 * 60 * 1000;
 
@@ -577,6 +577,15 @@ pub async fn settings_is_configured(db: tauri::State<'_, db::DbState>) -> Result
 }
 
 #[tauri::command]
+pub async fn settings_get_reset_status() -> Result<Value, String> {
+    match reset::get_reset_status()? {
+        Some(status) => serde_json::to_value(status)
+            .map_err(|e| format!("serialize reset status: {e}")),
+        None => Ok(Value::Null),
+    }
+}
+
+#[tauri::command]
 pub async fn settings_get(
     arg0: Option<Value>,
     arg1: Option<Value>,
@@ -701,6 +710,8 @@ pub async fn settings_factory_reset(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
     auth_state: tauri::State<'_, auth::AuthState>,
+    cancel_token: tauri::State<'_, tokio_util::sync::CancellationToken>,
+    device_manager: tauri::State<'_, crate::ecr::DeviceManager>,
 ) -> Result<Value, auth::GuardedCommandError> {
     auth::authorize_privileged_action(
         auth::PrivilegedActionScope::SystemControl,
@@ -711,27 +722,14 @@ pub async fn settings_factory_reset(
         &db,
         crate::recovery::RecoveryPointKind::PreFactoryReset,
     )?;
-    let _ = crate::clear_operational_data_inner(&db);
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM local_settings WHERE setting_category != 'staff'",
-            [],
-        )
-        .map_err(|e| format!("clear local settings: {e}"))?;
-        conn.execute("DELETE FROM menu_cache", [])
-            .map_err(|e| format!("clear menu cache: {e}"))?;
-    }
-    let result = storage::factory_reset()?;
-    let _ = app.emit(
-        "app_reset",
-        serde_json::json!({ "source": "factory_reset" }),
-    );
-    let _ = app.emit(
-        "terminal_disabled",
-        serde_json::json!({ "reason": "factory_reset" }),
-    );
-    Ok(result)
+    reset::clear_reset_status()?;
+    reset::launch_reset(
+        &app,
+        reset::ResetMode::FactoryReset,
+        cancel_token.inner(),
+        device_manager.inner(),
+    )
+    .map_err(Into::into)
 }
 
 /// Emergency reset — same as factory reset but without admin PIN authorization.
@@ -742,33 +740,21 @@ pub async fn settings_factory_reset(
 pub async fn settings_emergency_reset(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
+    cancel_token: tauri::State<'_, tokio_util::sync::CancellationToken>,
+    device_manager: tauri::State<'_, crate::ecr::DeviceManager>,
 ) -> Result<Value, String> {
     tracing::warn!("emergency reset initiated — clearing all terminal data");
     crate::recovery::snapshot_before_destructive_action(
         &db,
         crate::recovery::RecoveryPointKind::PreEmergencyReset,
     )?;
-    let _ = crate::clear_operational_data_inner(&db);
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM local_settings WHERE setting_category != 'staff'",
-            [],
-        )
-        .map_err(|e| format!("clear local settings: {e}"))?;
-        conn.execute("DELETE FROM menu_cache", [])
-            .map_err(|e| format!("clear menu cache: {e}"))?;
-    }
-    storage::factory_reset()?;
-    let _ = app.emit(
-        "app_reset",
-        serde_json::json!({ "source": "emergency_reset" }),
-    );
-    let _ = app.emit(
-        "terminal_disabled",
-        serde_json::json!({ "reason": "emergency_reset" }),
-    );
-    Ok(serde_json::json!({ "success": true }))
+    reset::clear_reset_status()?;
+    reset::launch_reset(
+        &app,
+        reset::ResetMode::EmergencyReset,
+        cancel_token.inner(),
+        device_manager.inner(),
+    )
 }
 
 #[tauri::command]

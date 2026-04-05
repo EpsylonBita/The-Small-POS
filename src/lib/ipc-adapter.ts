@@ -16,6 +16,8 @@ import type {
   AuthSetupPinRequest,
   PrivilegedActionConfirmRequest,
   PrivilegedActionConfirmResponse,
+  ResetStartResponse,
+  ResetStatus,
   StaffCheckInPinVerifyRequest,
   StaffCheckInPinVerifyResponse,
   DiagnosticsAboutInfo,
@@ -25,6 +27,8 @@ import type {
   DiagnosticsSystemHealth,
   EndOfDayStatusResponse,
   UnsettledPaymentBlocker,
+  RecoveryActionRequest,
+  RecoveryActionResult,
   RecoveryExportResponse,
   RecoveryListResponse,
   RecoveryPoint,
@@ -1204,8 +1208,9 @@ export interface PlatformBridge {
       payload: UpdateTerminalCredentialsPayload,
     ): Promise<IpcResult>;
     isConfigured(): Promise<SettingsConfiguredResponse>;
-    factoryReset(): Promise<IpcResult>;
-    emergencyReset(): Promise<IpcResult>;
+    getResetStatus(): Promise<ResetStatus | null>;
+    factoryReset(): Promise<ResetStartResponse>;
+    emergencyReset(): Promise<ResetStartResponse>;
   };
 
   // -- Terminal config -------------------------------------------------------
@@ -1756,6 +1761,7 @@ export interface PlatformBridge {
     exportPoint(pointId: string): Promise<RecoveryExportResponse>;
     restorePoint(pointId: string): Promise<RecoveryRestoreResponse>;
     openDir(path?: string): Promise<{ success: boolean; path: string }>;
+    executeAction(request: RecoveryActionRequest): Promise<RecoveryActionResult>;
   };
 
   /**
@@ -2166,6 +2172,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "recovery:export-point": "recovery.exportPoint",
   "recovery:restore-point": "recovery.restorePoint",
   "recovery:open-dir": "recovery.openDir",
+  "recovery:execute-action": "recovery.executeAction",
 
   // Service dashboard metrics
   "rooms:get-availability": "rooms.getAvailability",
@@ -2486,6 +2493,7 @@ export class TauriBridge implements PlatformBridge {
     updateTerminalCredentials: (p: UpdateTerminalCredentialsPayload) =>
       this.inv("settings:update-terminal-credentials", p),
     isConfigured: () => this.inv("settings:is-configured"),
+    getResetStatus: () => this.inv("settings:get-reset-status"),
     factoryReset: () => this.inv("settings:factory-reset"),
     emergencyReset: () => this.inv("settings:emergency-reset"),
   };
@@ -3026,6 +3034,8 @@ export class TauriBridge implements PlatformBridge {
       path
         ? this.inv("recovery:open-dir", { path })
         : this.inv("recovery:open-dir"),
+    executeAction: (request: RecoveryActionRequest) =>
+      this.inv("recovery:execute-action", request),
   };
 }
 

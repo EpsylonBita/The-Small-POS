@@ -1,0 +1,157 @@
+{
+  "center": {
+    "eyebrow": "Wiederherstellungscenter",
+    "title": "Selbstbediente Wiederherstellung",
+    "subtitle": "Nutzen Sie geführte Reparaturaktionen, um blockierte Bestellungen, Zahlungen, Schichten, Z-Berichte und Druckerprobleme zu lösen, ohne das POS zu verlassen.",
+    "needsAttentionTitle": "Jetzt Aufmerksamkeit erforderlich",
+    "needsAttentionSubtitle": "Blockierende Probleme erfordern eine Benutzeraktion, bevor der Sync wieder in einen sauberen Zustand zurückkehren kann.",
+    "noBlockingIssues": "Derzeit sind keine blockierenden Probleme sichtbar.",
+    "recoveringTitle": "Wird automatisch wiederhergestellt",
+    "recoveringSubtitle": "Diese Probleme werden erneut versucht oder können sicher angestoßen werden, ohne destruktive Bereinigung.",
+    "noRecoveringIssues": "Es läuft aktuell keine automatische Wiederherstellung.",
+    "recentActionsTitle": "Kürzlich gelöst",
+    "recentActionsSubtitle": "Jeder Reparaturversuch wird lokal protokolliert, damit das Team sehen kann, was versucht wurde und was erfolgreich war.",
+    "noRecentActions": "Es wurden noch keine Wiederherstellungsaktionen protokolliert."
+  },
+  "context": {
+    "terminalId": "Terminal-ID",
+    "branchId": "Filial-ID",
+    "organizationId": "Organisations-ID",
+    "syncHealthState": "Sync-Zustand"
+  },
+  "status": {
+    "blocking": "Blockierend",
+    "recovering": "Wird wiederhergestellt",
+    "resolved": "Gelöst",
+    "healthy": "Gesund",
+    "pending": "Ausstehend",
+    "blocked": "Blockiert",
+    "error": "Fehler",
+    "stale": "Veraltet"
+  },
+  "common": {
+    "reference": "Referenz",
+    "entityId": "Entitäts-ID",
+    "order": "Bestellung",
+    "payment": "Zahlung",
+    "adjustment": "Anpassung",
+    "issueCount_one": "{{count}} Problem",
+    "issueCount_other": "{{count}} Probleme",
+    "unknownActor": "Unbekannter Benutzer"
+  },
+  "messages": {
+    "actionSucceeded": "{{action}} wurde erfolgreich ausgeführt.",
+    "actionFailed": "{{action}} ist fehlgeschlagen. Prüfen Sie die Details und versuchen Sie es erneut.",
+    "orderNotFound": "Die angeforderte Bestellung {{orderNumber}} wurde lokal nicht gefunden."
+  },
+  "issues": {
+    "genericSyncBlocker": {
+      "title": "Sync-Element muss geprüft werden",
+      "summary": "Ein lokales Sync-Element ist weiterhin blockiert und benötigt Aufmerksamkeit, bevor sich das Terminal vollständig erholen kann.",
+      "guidance": "Nutzen Sie die verfügbaren Aktionen, um den Sync erneut zu versuchen, das Element neu einzureihen oder die verknüpfte Entität zu öffnen und die Reparatur abzuschließen."
+    },
+    "paymentAdjustmentOrderNotFound": {
+      "title": "Rückerstattung oder Storno findet die Bestellung nicht",
+      "summary": "Die lokale Finanzanpassung für {{orderNumber}} verweist auf eine Bestellung, die auf dem Server nicht mehr verfügbar ist.",
+      "guidance": "Öffnen Sie die Bestellung, um den Verlauf zu prüfen. Wenn die Bestellung nicht wiederhergestellt werden kann, verwerfen Sie die lokale Anpassung auf diesem Terminal."
+    },
+    "paymentAdjustmentMissingParent": {
+      "title": "Anpassung wartet auf die zugehörige Zahlung",
+      "summary": "Die Finanzanpassung für {{orderNumber}} kann erst synchronisiert werden, wenn die ursprüngliche Zahlung synchronisiert ist.",
+      "guidance": "Versuchen Sie zuerst den Sync erneut oder öffnen Sie die Zahlungsabwicklung der Bestellung und prüfen Sie, ob die ursprüngliche Zahlung vorhanden und abgeschlossen ist."
+    },
+    "paymentAdjustmentMissingCanonicalParent": {
+      "title": "Anpassung wartet auf einen kanonischen Zahlungseintrag",
+      "summary": "Das Terminal hat die zugehörige Zahlung für {{orderNumber}} gefunden, aber sie hat noch keine gültige kanonische Remote-Zahlungs-ID.",
+      "guidance": "Versuchen Sie zuerst den Sync erneut. Wenn das Problem bestehen bleibt, öffnen Sie die Zahlungsabwicklung und korrigieren Sie die Zahlungskette, bevor Sie den Z-Bericht ausführen."
+    },
+    "paymentAdjustmentAmbiguousParent": {
+      "title": "Anpassung hat mehr als eine mögliche zugehörige Zahlung",
+      "summary": "Das Terminal hat mehrere Zahlungseinträge für {{orderNumber}} repariert und kann nicht sicher bestimmen, welcher zu dieser Anpassung gehört.",
+      "guidance": "Öffnen Sie die Zahlungsabwicklung der Bestellung, behalten Sie die richtige Zahlung und entfernen oder stornieren Sie die doppelte Kette, bevor Sie den Sync erneut versuchen."
+    },
+    "orderSyncBlocked": {
+      "title": "Bestell-Sync ist blockiert",
+      "summary": "Die Bestellung {{orderNumber}} wartet weiterhin in der Sync-Warteschlange und blockiert abhängige Vorgänge.",
+      "guidance": "Öffnen Sie die Bestellung, prüfen Sie die aktuellen Daten und versuchen Sie den Sync erneut oder reihen Sie das Element von hier neu ein."
+    },
+    "shiftSyncConflict": {
+      "title": "Konflikt beim Schicht-Sync",
+      "summary": "Diese Schicht kann nicht synchronisiert werden, weil der Server noch eine andere offene aktive Schicht für denselben Mitarbeiter sieht.",
+      "guidance": "Öffnen Sie die Schichtreparatur, um die kollidierende Schicht zu schließen oder zu reparieren, bevor Sie fortfahren."
+    },
+    "zReportSubmissionFailed": {
+      "title": "Übermittlung des Z-Berichts fehlgeschlagen",
+      "summary": "Der lokale Z-Bericht für {{reportDate}} konnte nicht erfolgreich übermittelt werden.",
+      "guidance": "Öffnen Sie den Z-Bericht für den betroffenen Geschäftstag, prüfen Sie die blockierenden Elemente und wiederholen Sie die Übermittlung oder verwerfen Sie den lokalen Entwurf nur, wenn keine sichere Wiederherstellung möglich ist."
+    },
+    "invalidOrderReference": {
+      "title": "Bestellung verweist auf nicht mehr vorhandene Artikel",
+      "summary": "Eine lokale Bestellung enthält Menüverweise, die nicht mehr zum zwischengespeicherten Katalog passen.",
+      "guidance": "Öffnen Sie die Bestellung, um die ungültigen Artikel zu prüfen. Wenn die Bestellung nicht mehr wiederherstellbar ist, löschen Sie die fehlgeschlagene lokale Bestellung nach Bestätigung."
+    },
+    "printerNotConfigured": {
+      "title": "Belegdrucker ist nicht konfiguriert",
+      "summary": "Das Terminal kann keine operativen Dokumente drucken, weil kein geeigneter Belegdrucker konfiguriert ist.",
+      "guidance": "Öffnen Sie die Druckereinrichtung, konfigurieren Sie einen Belegdrucker und wiederholen Sie danach den fehlgeschlagenen Druckauftrag."
+    }
+  },
+  "actions": {
+    "confirmTitle": "Wiederherstellungsaktion bestätigen",
+    "confirmMessage": "Diese Aktion ändert lokale Wiederherstellungsdaten für das ausgewählte Problem.",
+    "refresh": {
+      "label": "Probleme aktualisieren"
+    },
+    "retrySync": {
+      "label": "Sync erneut versuchen"
+    },
+    "openOrder": {
+      "label": "Bestellung öffnen"
+    },
+    "openOrderPaymentFix": {
+      "label": "Zahlungskorrektur öffnen"
+    },
+    "openOrderSettlementFix": {
+      "label": "Abwicklungskorrektur öffnen"
+    },
+    "retryZReportSubmit": {
+      "label": "Z-Bericht erneut senden"
+    },
+    "openZReport": {
+      "label": "Z-Bericht öffnen"
+    },
+    "openShiftRepair": {
+      "label": "Schichtreparatur öffnen"
+    },
+    "forceCloseShift": {
+      "label": "Schicht zwangsschließen",
+      "confirmTitle": "Diese Schicht zwangsschließen?",
+      "confirmMessage": "Dies markiert die Schicht als aufgegeben und setzt alle Kassenwerte auf null. Die Aktion wird protokolliert und kann nicht rückgängig gemacht werden.",
+      "confirmCheckbox": "Ich verstehe, dass dies die Schicht dauerhaft mit genullten Finanzdaten schließt."
+    },
+    "openPrinterSetup": {
+      "label": "Druckereinrichtung öffnen"
+    },
+    "requeueSyncItem": {
+      "label": "Sync-Element neu einreihen"
+    },
+    "discardLocalAdjustment": {
+      "label": "Lokale Anpassung verwerfen",
+      "confirmTitle": "Lokale Finanzanpassung verwerfen?",
+      "confirmMessage": "Dadurch wird die nur lokal vorhandene Finanzanpassung für {{orderNumber}} von diesem Terminal entfernt. Die Aktion wird protokolliert und kann ohne Backup nicht rückgängig gemacht werden.",
+      "confirmCheckbox": "Ich verstehe, dass dadurch die lokale Anpassung nur auf diesem Terminal gelöscht wird."
+    },
+    "discardLocalZReport": {
+      "label": "Lokalen Z-Berichts-Entwurf verwerfen",
+      "confirmTitle": "Lokalen Z-Berichts-Entwurf verwerfen?",
+      "confirmMessage": "Dadurch wird der lokale Z-Berichts-Entwurf für {{reportDate}} von diesem Terminal entfernt. Verwenden Sie dies nur, wenn der Bericht nicht sicher wiederhergestellt werden kann.",
+      "confirmCheckbox": "Ich verstehe, dass dadurch der lokale Z-Berichts-Entwurf nur auf diesem Terminal gelöscht wird."
+    },
+    "deleteLocalFailedOrder": {
+      "label": "Fehlgeschlagene lokale Bestellung löschen",
+      "confirmTitle": "Fehlgeschlagene lokale Bestellung löschen?",
+      "confirmMessage": "Dadurch wird die fehlgeschlagene lokale Bestellung {{orderNumber}} und die zugehörigen lokalen Sync-Einträge dauerhaft von diesem Terminal entfernt.",
+      "confirmCheckbox": "Ich verstehe, dass dadurch die fehlgeschlagene lokale Bestellung gelöscht wird und dies ohne Backup nicht rückgängig gemacht werden kann."
+    }
+  }
+}

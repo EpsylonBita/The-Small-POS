@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { posApiFetch, posApiGet } from '../utils/api-helpers';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
@@ -50,6 +50,40 @@ interface CustomerAddress {
   address_type?: string;
   is_default: boolean;
   delivery_notes?: string;
+  latitude?: number;
+  longitude?: number;
+  place_id?: string;
+  formatted_address?: string;
+  resolved_street_number?: string;
+  address_fingerprint?: string;
+}
+
+function createAddressSessionToken(): string {
+  return [
+    'addr',
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 12),
+  ].join('_');
+}
+
+function buildAddressFingerprint(
+  address: string,
+  latitude?: number,
+  longitude?: number
+): string {
+  const normalized = String(address || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0370-\u03ff\s]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return normalized;
+  }
+
+  return `${normalized}|${Number(latitude).toFixed(5)}|${Number(longitude).toFixed(5)}`;
 }
 
 const UsersPage: React.FC = () => {
@@ -69,6 +103,7 @@ const UsersPage: React.FC = () => {
   const [addressSuggestions, setAddressSuggestions] = useState<any[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isLoadingAddresses, setIsLoadingAddresses] = useState(false);
+  const addressSessionTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     loadUsers();
@@ -169,6 +204,12 @@ const UsersPage: React.FC = () => {
             address_type: addr.address_type || 'delivery',
             is_default: addr.is_default,
             delivery_notes: addr.delivery_notes || addr.notes,
+            latitude: addr.latitude,
+            longitude: addr.longitude,
+            place_id: addr.place_id || addr.google_place_id,
+            formatted_address: addr.formatted_address,
+            resolved_street_number: addr.resolved_street_number,
+            address_fingerprint: addr.address_fingerprint,
           })));
         } else {
           setUserAddresses([]);
@@ -192,9 +233,16 @@ const UsersPage: React.FC = () => {
       address_type: address.address_type,
       is_default: address.is_default,
       delivery_notes: address.delivery_notes,
+      latitude: address.latitude,
+      longitude: address.longitude,
+      place_id: address.place_id,
+      formatted_address: address.formatted_address,
+      resolved_street_number: address.resolved_street_number,
+      address_fingerprint: address.address_fingerprint,
     });
     setAddressSuggestions([]);
     setShowSuggestions(false);
+    addressSessionTokenRef.current = null;
   };
 
   const handleCancelEdit = () => {
@@ -202,10 +250,12 @@ const UsersPage: React.FC = () => {
     setEditedAddress({});
     setAddressSuggestions([]);
     setShowSuggestions(false);
+    addressSessionTokenRef.current = null;
   };
 
   const searchAddresses = async (input: string) => {
     if (input.length < 3) {
+      addressSessionTokenRef.current = null;
       setAddressSuggestions([]);
       setShowSuggestions(false);
       return;
@@ -213,11 +263,16 @@ const UsersPage: React.FC = () => {
 
     setIsLoadingAddresses(true);
     try {
-      const result = await posApiFetch<any>('pos/google-maps/search-places', {
+      if (!addressSessionTokenRef.current) {
+        addressSessionTokenRef.current = createAddressSessionToken();
+      }
+
+      const result = await posApiFetch<any>('pos/address/autocomplete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          input: input.trim(),
+          query: input.trim(),
+          session_token: addressSessionTokenRef.current,
           location: { latitude: 37.9755, longitude: 23.7348 }, // Athens center
           radius: 20000 // 20km radius
         }),
@@ -247,11 +302,12 @@ const UsersPage: React.FC = () => {
   const handleAddressSuggestionClick = async (suggestion: any) => {
     try {
       // Get place details to extract postal code and city
-      const result = await posApiFetch<any>('pos/google-maps/place-details', {
+      const result = await posApiFetch<any>('pos/address/details', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          place_id: suggestion.place_id
+          place_id: suggestion.place_id,
+          session_token: addressSessionTokenRef.current || undefined,
         }),
       });
 
@@ -268,6 +324,9 @@ const UsersPage: React.FC = () => {
         const streetNumber = addressComponents.find((c: any) => c.types.includes('street_number'))?.long_name || '';
         const route = addressComponents.find((c: any) => c.types.includes('route'))?.long_name || '';
         const streetAddress = `${route} ${streetNumber}`.trim();
+        const latitude = payload.result.geometry?.location?.lat;
+        const longitude = payload.result.geometry?.location?.lng;
+        const formattedAddress = payload.result.formatted_address || suggestion.description;
 
         // Extract city
         const city = addressComponents.find((c: any) =>
@@ -277,18 +336,30 @@ const UsersPage: React.FC = () => {
         // Extract postal code
         const postalCode = addressComponents.find((c: any) => c.types.includes('postal_code'))?.long_name || '';
 
-        setEditedAddress({
-          ...editedAddress,
+        setEditedAddress(prev => ({
+          ...prev,
           street_address: streetAddress || suggestion.description,
-          city: city,
-          postal_code: postalCode
-        });
+          city,
+          postal_code: postalCode,
+          latitude,
+          longitude,
+          place_id: payload.result.place_id || suggestion.place_id,
+          formatted_address: formattedAddress,
+          resolved_street_number: streetNumber || undefined,
+          address_fingerprint: buildAddressFingerprint(formattedAddress, latitude, longitude),
+        }));
       } else {
         // Fallback: use the description
-        setEditedAddress({
-          ...editedAddress,
-          street_address: suggestion.description
-        });
+        setEditedAddress(prev => ({
+          ...prev,
+          street_address: suggestion.description,
+          latitude: undefined,
+          longitude: undefined,
+          place_id: undefined,
+          formatted_address: undefined,
+          resolved_street_number: undefined,
+          address_fingerprint: undefined,
+        }));
       }
 
       setShowSuggestions(false);
@@ -296,12 +367,20 @@ const UsersPage: React.FC = () => {
     } catch (error) {
       console.error('Error getting place details:', error);
       // Fallback: use the description
-      setEditedAddress({
-        ...editedAddress,
-        street_address: suggestion.description
-      });
+      setEditedAddress(prev => ({
+        ...prev,
+        street_address: suggestion.description,
+        latitude: undefined,
+        longitude: undefined,
+        place_id: undefined,
+        formatted_address: undefined,
+        resolved_street_number: undefined,
+        address_fingerprint: undefined,
+      }));
       setShowSuggestions(false);
       setAddressSuggestions([]);
+    } finally {
+      addressSessionTokenRef.current = null;
     }
   };
 
@@ -311,6 +390,11 @@ const UsersPage: React.FC = () => {
     try {
       // Combine street_address and city into a single address field for the API
       const combinedAddress = `${editedAddress.street_address || ''}, ${editedAddress.city || ''}`.trim();
+      const fallbackFingerprint = buildAddressFingerprint(
+        combinedAddress,
+        editedAddress.latitude,
+        editedAddress.longitude
+      );
       const result = await posApiFetch<any>(`pos/customers/${selectedUser.id}/addresses/${addressId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -321,6 +405,12 @@ const UsersPage: React.FC = () => {
           address_type: editedAddress.address_type || 'delivery',
           is_default: editedAddress.is_default || false,
           notes: editedAddress.delivery_notes,
+          latitude: editedAddress.latitude,
+          longitude: editedAddress.longitude,
+          place_id: editedAddress.place_id,
+          formatted_address: editedAddress.formatted_address || combinedAddress,
+          resolved_street_number: editedAddress.resolved_street_number,
+          address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint,
         }),
       });
 
@@ -343,12 +433,19 @@ const UsersPage: React.FC = () => {
                 delivery_notes: editedAddress.delivery_notes || addr.delivery_notes,
                 address_type: editedAddress.address_type || addr.address_type,
                 is_default: editedAddress.is_default !== undefined ? editedAddress.is_default : addr.is_default,
+                latitude: editedAddress.latitude ?? addr.latitude,
+                longitude: editedAddress.longitude ?? addr.longitude,
+                place_id: editedAddress.place_id || addr.place_id,
+                formatted_address: editedAddress.formatted_address || combinedAddress || addr.formatted_address,
+                resolved_street_number: editedAddress.resolved_street_number || addr.resolved_street_number,
+                address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint || addr.address_fingerprint,
               }
             : addr
         ));
 
         setEditingAddressId(null);
         setEditedAddress({});
+        addressSessionTokenRef.current = null;
       } else {
         throw new Error(result.error || 'Failed to update address');
       }
@@ -794,7 +891,17 @@ const UsersPage: React.FC = () => {
                                   type="text"
                                   value={editedAddress.street_address || ''}
                                   onChange={(e) => {
-                                    setEditedAddress({ ...editedAddress, street_address: e.target.value });
+                                    const streetAddress = e.target.value;
+                                    setEditedAddress(prev => ({
+                                      ...prev,
+                                      street_address: streetAddress,
+                                      latitude: undefined,
+                                      longitude: undefined,
+                                      place_id: undefined,
+                                      formatted_address: undefined,
+                                      resolved_street_number: undefined,
+                                      address_fingerprint: undefined,
+                                    }));
                                     searchAddresses(e.target.value);
                                   }}
                                   onFocus={() => {
@@ -855,7 +962,16 @@ const UsersPage: React.FC = () => {
                                 <input
                                   type="text"
                                   value={editedAddress.city || ''}
-                                  onChange={(e) => setEditedAddress({ ...editedAddress, city: e.target.value })}
+                                  onChange={(e) => setEditedAddress(prev => ({
+                                    ...prev,
+                                    city: e.target.value,
+                                    latitude: undefined,
+                                    longitude: undefined,
+                                    place_id: undefined,
+                                    formatted_address: undefined,
+                                    resolved_street_number: undefined,
+                                    address_fingerprint: undefined,
+                                  }))}
                                   className={`w-full px-3 py-2 rounded-lg text-sm ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
@@ -872,7 +988,16 @@ const UsersPage: React.FC = () => {
                                 <input
                                   type="text"
                                   value={editedAddress.postal_code || ''}
-                                  onChange={(e) => setEditedAddress({ ...editedAddress, postal_code: e.target.value })}
+                                  onChange={(e) => setEditedAddress(prev => ({
+                                    ...prev,
+                                    postal_code: e.target.value,
+                                    latitude: undefined,
+                                    longitude: undefined,
+                                    place_id: undefined,
+                                    formatted_address: undefined,
+                                    resolved_street_number: undefined,
+                                    address_fingerprint: undefined,
+                                  }))}
                                   className={`w-full px-3 py-2 rounded-lg text-sm ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'

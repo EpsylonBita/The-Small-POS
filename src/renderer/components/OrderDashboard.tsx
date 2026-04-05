@@ -94,6 +94,7 @@ import {
   getPickupToDeliveryValidationAmount,
   resolvePickupToDeliveryAddress,
 } from "../utils/pickup-to-delivery";
+import { resolvePersistedCustomerId } from "../utils/persisted-customer-id";
 
 interface OrderDashboardProps {
   className?: string;
@@ -1925,7 +1926,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return result;
       } else if (customerInfo) {
         const result = {
-          id: "new",
           name: customerInfo.name,
           phone: customerInfo.phone,
           email: customerInfo.email,
@@ -2233,18 +2233,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           );
 
           // Final fallback: Query customer from database if we have customerId but no address yet
-          if (
-            !deliveryAddress &&
-            (existingCustomer?.id || orderData.customer?.id)
-          ) {
-            const customerId = existingCustomer?.id || orderData.customer?.id;
+          const persistedCustomerId = resolvePersistedCustomerId(
+            existingCustomer?.id,
+            orderData.customer?.id,
+          );
+          if (!deliveryAddress && persistedCustomerId) {
             console.log(
               "[OrderDashboard.handleOrderComplete] Attempting database fallback for customerId:",
-              customerId,
+              persistedCustomerId,
             );
             try {
               const dbCustomer = (await bridge.customers.lookupById(
-                customerId,
+                persistedCustomerId,
               )) as Customer | null;
               if (dbCustomer) {
                 console.log(
@@ -2322,7 +2322,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 selectedAddress: getSelectedAddress(),
                 existingCustomerAddress: legacyCustomerAddress,
                 customerInfoAddress: customerInfoAddress,
-                customerId: existingCustomer?.id || orderData.customer?.id,
+                customerId: persistedCustomerId,
               },
             );
             toast.error(t("orderDashboard.addressRequired"));
@@ -2433,12 +2433,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 existingCustomer?.name,
               );
 
+        const persistedCustomerId = resolvePersistedCustomerId(
+          orderData.customer?.id,
+          existingCustomer?.id,
+        );
+
         // Create order object
         const orderToCreate = {
-          customer_id:
-            orderData.customer?.id !== "pickup-customer"
-              ? orderData.customer?.id
-              : null,
+          customer_id: persistedCustomerId,
+          customerId: persistedCustomerId,
           customer_name: persistedCustomerName ?? undefined,
           customer_phone:
             orderData.customer?.phone_number ||
@@ -3998,6 +4001,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           firstOrder?.special_instructions ||
           firstOrder?.notes ||
           "",
+        coordinates: toLatLngCoordinates(
+          firstOrder?.coordinates,
+          firstOrder?.latitude,
+          firstOrder?.longitude,
+        ),
+        latitude:
+          typeof firstOrder?.latitude === "number" ? firstOrder.latitude : null,
+        longitude:
+          typeof firstOrder?.longitude === "number"
+            ? firstOrder.longitude
+            : null,
       };
     };
 

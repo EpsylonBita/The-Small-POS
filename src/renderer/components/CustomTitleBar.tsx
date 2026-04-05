@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useRef, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
+import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
 import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useWindowState } from '../hooks/useWindowState';
 import { getBridge } from '../../lib';
+import { getResetStartingMessage, startResetAction } from '../utils/reset-actions';
 import {
   Minus,
   Square,
@@ -52,6 +55,7 @@ interface CustomTitleBarProps {
 
 const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false, onCheckForUpdates }) => {
   const { resolvedTheme } = useTheme();
+  const { t } = useTranslation();
   const isDark = resolvedTheme === 'dark';
   const bridge = getBridge();
   const { isMaximized, isFullScreen } = useWindowState();
@@ -520,13 +524,21 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
                 onClick={async () => {
                   if (resetConfirmText !== 'RESET') return;
                   setIsResetting(true);
+                  let resetStarted = false;
                   try {
-                    await bridge.settings.emergencyReset();
+                    const result = await startResetAction(() => bridge.settings.emergencyReset(), t);
+                    if (!result?.success) {
+                      throw new Error(result?.error || 'Failed to start emergency reset');
+                    }
+                    resetStarted = true;
                     localStorage.clear();
-                    await bridge.app.restart();
+                    setShowResetDialog(false);
+                    toast.success(getResetStartingMessage(t));
                   } catch (err) {
                     console.error('[CustomTitleBar] Emergency reset failed:', err);
-                    setIsResetting(false);
+                    if (!resetStarted) {
+                      setIsResetting(false);
+                    }
                   }
                 }}
                 disabled={resetConfirmText !== 'RESET' || isResetting}

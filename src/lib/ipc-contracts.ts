@@ -53,6 +53,26 @@ export interface SettingsConfiguredResponse {
   reason?: string;
 }
 
+export interface ResetStartResponse {
+  success: boolean;
+  started?: boolean;
+  operationId?: string | null;
+  mode?: string | null;
+  error?: string;
+}
+
+export interface ResetStatus {
+  operationId: string;
+  mode: string;
+  phase: string;
+  state: string;
+  updatedAt: string;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  failingKey?: string | null;
+  failingPath?: string | null;
+}
+
 export interface SettingsGetRequest {
   category?: string;
   key?: string;
@@ -450,4 +470,104 @@ export interface DiagnosticsOpenExportDirResponse {
   success: boolean;
   path?: string;
   error?: string;
+}
+
+// -- Recovery Center ---------------------------------------------------------
+
+export interface DiagnosticsTerminalContext {
+  terminalId: string | null;
+  branchId: string | null;
+  organizationId: string | null;
+  syncHealthState: string | null;
+}
+
+export type RecoveryIssueSeverity = 'critical' | 'error' | 'warning' | 'info';
+export type RecoveryIssueStatus = 'blocking' | 'recovering' | 'resolved';
+
+export interface RecoveryRouteTarget {
+  screen: string;
+  orderId?: string | null;
+  orderNumber?: string | null;
+  shiftId?: string | null;
+  zReportDate?: string | null;
+  params?: Record<string, unknown>;
+}
+
+export type RecoveryActionSafetyLevel =
+  | 'safe'
+  | 'destructive_local'
+  | 'destructive_server';
+
+export interface RecoveryActionDescriptor {
+  id: string;
+  labelKey: string;
+  safetyLevel: RecoveryActionSafetyLevel;
+  requiresOnline: boolean;
+  confirmationRequired: boolean;
+  confirmTitleKey?: string;
+  confirmMessageKey?: string;
+  confirmCheckboxKey?: string;
+  routeTarget?: RecoveryRouteTarget | null;
+}
+
+export interface RecoveryIssue {
+  id: string;
+  code: string;
+  severity: RecoveryIssueSeverity;
+  status: RecoveryIssueStatus;
+  entityType: string;
+  entityId: string;
+  titleKey: string;
+  summaryKey: string;
+  guidanceKey: string;
+  actions: RecoveryActionDescriptor[];
+  params?: Record<string, unknown>;
+  orderId?: string | null;
+  orderNumber?: string | null;
+  paymentId?: string | null;
+  adjustmentId?: string | null;
+  zReportId?: string | null;
+  shiftId?: string | null;
+  queueId?: number | null;
+}
+
+export interface RecoveryActionRequest {
+  actionId: string;
+  issueId: string;
+  issueCode: string;
+  queueId: number | null;
+  entityType: string;
+  entityId: string;
+  orderId: string | null;
+  orderNumber: string | null;
+  paymentId: string | null;
+  adjustmentId: string | null;
+  zReportId: string | null;
+  shiftId: string | null;
+  reportDate: string | null;
+}
+
+export interface RecoveryActionResult {
+  success: boolean;
+  requiresRefresh: boolean;
+  routeTarget?: RecoveryRouteTarget | null;
+  message?: string;
+}
+
+export interface RecoveryActionLogEntry {
+  id: string;
+  actionId: string;
+  issueCode: string;
+  success: boolean;
+  timestamp: string;
+  actor: {
+    staffId: string | null;
+    staffName: string | null;
+  };
+  targetRefs: {
+    entityId?: string;
+    orderId?: string | null;
+    orderNumber?: string | null;
+    shiftId?: string | null;
+  };
 }

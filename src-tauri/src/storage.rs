@@ -228,6 +228,7 @@ pub fn update_terminal_credentials(payload: &Value) -> Result<Value, String> {
     Ok(serde_json::json!({ "success": true }))
 }
 
+#[allow(dead_code)]
 /// Delete every stored credential (factory reset).
 pub fn factory_reset() -> Result<Value, String> {
     info!("performing factory reset – deleting all credentials");
@@ -235,6 +236,11 @@ pub fn factory_reset() -> Result<Value, String> {
         delete_credential(key)?;
     }
     Ok(serde_json::json!({ "success": true }))
+}
+
+/// Returns the full set of credential keys managed by this module.
+pub fn managed_keys() -> &'static [&'static str] {
+    ALL_KEYS
 }
 
 /// Read a single terminal config value by key name.

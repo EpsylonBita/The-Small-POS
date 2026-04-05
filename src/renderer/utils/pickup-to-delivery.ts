@@ -1,5 +1,6 @@
 import type { Customer, CustomerAddress } from '../../shared/types/customer';
 import type { Order } from '../../shared/types/orders';
+import { resolvePersistedCustomerId } from './persisted-customer-id';
 
 export interface ResolvedPickupToDeliveryAddress {
   addressId: string | null;
@@ -68,7 +69,10 @@ export const resolvePickupToDeliveryAddress = (
 
   return {
     addressId: normalizeText(selectedAddress?.id) || null,
-    customerId: normalizeText(selectedAddress?.customer_id) || normalizeText(customer.id) || null,
+    customerId: resolvePersistedCustomerId(
+      selectedAddress?.customer_id,
+      customer.id,
+    ),
     streetAddress,
     city: normalizeText(selectedAddress?.city) || normalizeText(customer.city || undefined),
     postalCode:

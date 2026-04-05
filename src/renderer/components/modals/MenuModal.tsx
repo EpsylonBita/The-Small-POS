@@ -38,6 +38,7 @@ import {
   extractSavedAddressCoordinates,
   resolveSavedAddressCoordinates,
 } from '../../utils/saved-address-geolocation';
+import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge, isBrowser } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
@@ -132,7 +133,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     limit: 20,
   });
   const { hasModule } = useAcquiredModules();
+  const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
   const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
+  const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
   const bridge = getBridge();
   const [selectedCategory, setSelectedCategory] = useState<string>("featured");
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("");
@@ -143,6 +146,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Split payment state managed by OrderDashboard (SplitPaymentModal renders there)
   const [manualDiscountMode, setManualDiscountMode] = useState<'percentage' | 'fixed'>('percentage');
   const [manualDiscountValue, setManualDiscountValue] = useState<number>(0);
+  const [manualDeliveryFee, setManualDeliveryFee] = useState<number>(0);
   const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false);
   const [ghostModeArmed, setGhostModeArmed] = useState(false);
   const [ghostModeArmedAt, setGhostModeArmedAt] = useState<string | null>(null);
@@ -240,7 +244,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const effectiveDeliveryZoneInfo = deliveryZoneInfo || localDeliveryZoneInfo;
 
   // Effective minimum order amount - prefer zone-specific, fallback to default
-  const effectiveMinimumOrderAmount = effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? defaultMinimumOrderAmount;
+  const effectiveMinimumOrderAmount = hasDeliveryPro
+    ? (effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? defaultMinimumOrderAmount)
+    : 0;
 
   const buildSelectedAddressString = useCallback(() => {
     return buildSavedAddressQuery(selectedAddress);
@@ -293,12 +299,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         setResolvedSelectedAddressCoordinates(resolved.coordinates);
 
         const addressVersion = Number((selectedAddress as any)?.version);
-        const customerId =
-          typeof selectedCustomer?.id === 'string'
-            ? selectedCustomer.id
-            : typeof (selectedAddress as any)?.customer_id === 'string'
-              ? (selectedAddress as any).customer_id
-              : null;
+        const customerId = resolvePersistedCustomerId(
+          selectedCustomer?.id,
+          (selectedAddress as any)?.customer_id,
+        );
         if (typeof (selectedAddress as any)?.id === 'string' && customerId) {
           try {
             await bridge.customers.updateAddress(
@@ -380,6 +384,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // Clear locally fetched delivery zone info and default minimum
       setLocalDeliveryZoneInfo(null);
       setDefaultMinimumOrderAmount(0);
+      setManualDeliveryFee(0);
       // Clear combos/coupon state
       setAppliedCoupon(null);
       setCouponError(null);
@@ -429,7 +434,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     const fetchDeliveryZoneInfo = async () => {
       // Skip delivery zone validation if the delivery_zones module is not acquired.
       // Orders can still be placed with fee = 0.
-      if (!hasDeliveryZonesModule) {
+      if (!hasDeliveryPro) {
         setLocalDeliveryZoneInfo(null);
         return;
       }
@@ -472,12 +477,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
 
     fetchDeliveryZoneInfo();
-    }, [deliveryZoneInfo, editMode, getSelectedAddressCoordinates, hasDeliveryZonesModule, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
+    }, [deliveryZoneInfo, editMode, getSelectedAddressCoordinates, hasDeliveryPro, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
 
   // Fetch delivery zones to get default minimum order amount (fallback when validation doesn't work)
   useEffect(() => {
     const fetchDeliveryZones = async () => {
-      if (!hasDeliveryZonesModule) return;
+      if (!hasDeliveryPro) {
+        setDefaultMinimumOrderAmount(0);
+        return;
+      }
       // Only fetch if: modal is open, order type is delivery, no zone info yet, not in edit mode
       if (!isOpen || orderType !== 'delivery' || editMode) {
         return;
@@ -516,7 +524,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
 
     fetchDeliveryZones();
-  }, [hasDeliveryZonesModule, isOpen, orderType, editMode, staff?.branchId, effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount]);
+  }, [hasDeliveryPro, isOpen, orderType, editMode, staff?.branchId, effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount]);
 
   // Transform customizations from Supabase format to MenuCart format
   const transformCustomizations = (customizations: any): any[] => {
@@ -1073,15 +1081,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates();
   const selectedAddressValidationTarget = selectedAddressCoordinates ?? getSelectedAddressValidationTarget();
   const resolvedDeliveryFee =
-    orderType === 'delivery' ? resolveDeliveryFee(effectiveDeliveryZoneInfo) : 0;
+    orderType !== 'delivery'
+      ? 0
+      : hasDeliveryPro
+        ? resolveDeliveryFee(effectiveDeliveryZoneInfo)
+        : Math.max(0, manualDeliveryFee);
   const deliveryFeeStatus =
       orderType !== 'delivery'
         ? 'resolved'
-        : !selectedAddressValidationTarget
-          ? 'requires_selection'
-          : !selectedAddressCoordinates
-            ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'requires_selection')
-         : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
+        : !hasDeliveryPro
+          ? 'resolved'
+          : !selectedAddressValidationTarget
+            ? 'requires_selection'
+            : !selectedAddressCoordinates
+              ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'requires_selection')
+              : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
   const deliveryFeeResolved = deliveryFeeStatus === 'resolved';
   const cartSubtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
   const offerDiscountAmount = offerEvaluation?.discount_total ?? 0;
@@ -1225,6 +1239,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return effectiveDeliveryZoneInfo;
     }
 
+    if (!hasDeliveryPro) {
+      return null;
+    }
+
     if (deliveryFeeResolved) {
       return effectiveDeliveryZoneInfo;
     }
@@ -1245,6 +1263,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       deliveryFeeResolved,
       discountedSubtotal,
       effectiveDeliveryZoneInfo,
+      hasDeliveryPro,
       orderType,
       resolvedSelectedAddressCoordinates,
       selectedAddressCoordinates,
@@ -1299,7 +1318,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return;
     }
 
-    if (orderType === 'delivery') {
+    if (orderType === 'delivery' && hasDeliveryPro) {
       const validationResult = await ensureDeliveryValidationForCheckout();
       if (!selectedAddressCoordinates) {
         toast.error(t('menu.cart.deliveryFeeNeedsExactAddress'));
@@ -1665,6 +1684,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               minimumOrderAmount={effectiveMinimumOrderAmount}
               deliveryFee={resolvedDeliveryFee}
               deliveryFeeStatus={deliveryFeeStatus}
+              allowManualDeliveryFee={orderType === 'delivery' && hasDeliveryModule && !hasDeliveryPro}
+              manualDeliveryFeeValue={manualDeliveryFee}
+              onManualDeliveryFeeChange={editMode ? undefined : setManualDeliveryFee}
               appliedCoupon={appliedCoupon}
               onApplyCoupon={editMode ? undefined : handleApplyCoupon}
               onRemoveCoupon={handleRemoveCoupon}
@@ -1721,7 +1743,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           discountAmount={totalDiscountAmount}
           deliveryFee={resolvedDeliveryFee}
           orderType={orderType}
-          minimumOrderAmount={effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0}
+          minimumOrderAmount={hasDeliveryPro ? (effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0) : 0}
           onPaymentComplete={handlePaymentComplete}
           onSplitPayment={onOrderComplete ? handleSplitPayment : undefined}
           isProcessing={effectiveProcessing}

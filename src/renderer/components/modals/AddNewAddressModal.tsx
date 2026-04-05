@@ -5,6 +5,7 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { posApiPost } from '../../utils/api-helpers';
 import {
   buildAddressFingerprint,
+  createAddressSessionToken,
   ensureAddressOfflineRuntime,
   extractStreetNumber,
   getSuggestionStreetLabel,
@@ -17,6 +18,7 @@ import {
   type ValidationStatus,
 } from '../../services/address-workflow';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
+import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 
 interface Customer {
   id: string;
@@ -61,6 +63,10 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   onAddressAdded,
 }) => {
   const { t } = useTranslation();
+  const { hasModule } = useAcquiredModules();
+  const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
+  const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
+  const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
   const [formData, setFormData] = useState({
     address: '',
     postalCode: '',
@@ -80,6 +86,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   const [overrideReason, setOverrideReason] = useState('');
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRequestRef = useRef(0);
+  const sessionTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -122,6 +129,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       searchDebounceRef.current = null;
     }
     searchRequestRef.current += 1;
+    sessionTokenRef.current = null;
   }, [isOpen]);
 
   const clearValidation = (addressValue: string) => {
@@ -133,6 +141,11 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     setOverrideReason('');
 
     if (!addressValue.trim()) {
+      setValidationStatus('idle');
+      return;
+    }
+
+    if (!hasDeliveryPro) {
       setValidationStatus('idle');
       return;
     }
@@ -155,6 +168,11 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   ): Promise<DeliveryValidationResult | null> => {
     const trimmedAddress = address.trim();
     if (!trimmedAddress) {
+      return null;
+    }
+
+    if (!hasDeliveryPro) {
+      setValidationStatus('idle');
       return null;
     }
 
@@ -214,6 +232,10 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       return null;
     }
 
+    if (!hasDeliveryPro) {
+      return null;
+    }
+
     const coords = selectedAddressDetails?.coordinates || addressCoordinates || undefined;
     const currentFingerprint = buildAddressFingerprint(address, coords);
 
@@ -225,11 +247,15 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   };
 
   const evaluateValidationDecision = (result: DeliveryValidationResult | null): string | null => {
+    if (!hasDeliveryPro) {
+      return null;
+    }
+
     if (!result) {
       return t('modals.addCustomer.selectAddressForValidation', 'Select a real address from suggestions to validate delivery.');
     }
 
-    if (result.validation_status === 'in_zone') {
+    if (result.validation_status === 'in_zone' || result.validation_status === 'module_disabled') {
       return null;
     }
 
@@ -251,6 +277,12 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   };
 
   const searchAddresses = async (input: string, requestId: number) => {
+    if (!hasDeliveryPro) {
+      setSuggestions([]);
+      setIsLoadingAddresses(false);
+      return;
+    }
+
     try {
       const creds = await getResolvedTerminalCredentials();
       await ensureAddressOfflineRuntime(creds.branchId || undefined);
@@ -258,6 +290,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       const results = await searchAddressSuggestions(input, {
         branchId: creds.branchId || undefined,
         limit: 5,
+        sessionToken: sessionTokenRef.current || undefined,
       });
 
       if (requestId !== searchRequestRef.current) {
@@ -283,14 +316,26 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       searchDebounceRef.current = null;
     }
 
-    if (input.length < 2) {
+    if (!hasDeliveryPro) {
       searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
+      setIsLoadingAddresses(false);
+      setSuggestions([]);
+      return;
+    }
+
+    if (input.length < 3) {
+      searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
       setIsLoadingAddresses(false);
       setSuggestions([]);
       return;
     }
 
     const requestId = ++searchRequestRef.current;
+    if (!sessionTokenRef.current) {
+      sessionTokenRef.current = createAddressSessionToken();
+    }
     setIsLoadingAddresses(true);
     searchDebounceRef.current = setTimeout(() => {
       void searchAddresses(input, requestId);
@@ -302,6 +347,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       const creds = await getResolvedTerminalCredentials();
       const resolved = await resolveAddressSuggestion(suggestion, formData.address, {
         branchId: creds.branchId || undefined,
+        sessionToken: sessionTokenRef.current || undefined,
       });
 
       void upsertVerifiedLocalCandidate({
@@ -337,6 +383,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       setSelectedAddressDetails(details);
       setAddressCoordinates(details.coordinates || null);
       setSuggestions([]);
+      sessionTokenRef.current = null;
 
       await runValidation(resolved.streetAddress, details);
     } catch (error) {
@@ -348,6 +395,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
 
       setFormData((prev) => ({ ...prev, address: fallback }));
       setSuggestions([]);
+      sessionTokenRef.current = null;
       clearValidation(fallback);
     }
   };
@@ -367,6 +415,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
         clearTimeout(searchDebounceRef.current);
       }
       searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
     };
   }, []);
 
@@ -386,22 +435,26 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     setIsSubmitting(true);
     try {
       // Keep exact selected suggestion coordinates when persisting.
-      const coords = selectedAddressDetails?.coordinates || addressCoordinates || validation?.coordinates || null;
-      const metadata = {
-        override_applied: overrideApplied,
-        override_reason: overrideApplied ? overrideReason.trim() : null,
-        validation_status: validation?.validation_status || null,
-        zone_id: validation?.selectedZone?.id || null,
-        validated_at: validation ? new Date().toISOString() : null,
-        validation_source: validation?.validation_source || null,
-        address_fingerprint:
-          validation?.address_fingerprint
-          || validationSnapshot
-          || buildAddressFingerprint(formData.address.trim(), coords || undefined),
-        place_id: selectedAddressDetails?.placeId || null,
-        input_street_number: extractStreetNumber(formData.address.trim()) || null,
-        resolved_street_number: selectedAddressDetails?.resolvedStreetNumber || null,
-      };
+      const coords = hasDeliveryPro
+        ? selectedAddressDetails?.coordinates || addressCoordinates || validation?.coordinates || null
+        : null;
+      const metadata = hasDeliveryPro
+        ? {
+            override_applied: overrideApplied,
+            override_reason: overrideApplied ? overrideReason.trim() : null,
+            validation_status: validation?.validation_status || null,
+            zone_id: validation?.selectedZone?.id || null,
+            validated_at: validation ? new Date().toISOString() : null,
+            validation_source: validation?.validation_source || null,
+            address_fingerprint:
+              validation?.address_fingerprint
+              || validationSnapshot
+              || buildAddressFingerprint(formData.address.trim(), coords || undefined),
+            place_id: selectedAddressDetails?.placeId || null,
+            input_street_number: extractStreetNumber(formData.address.trim()) || null,
+            resolved_street_number: selectedAddressDetails?.resolvedStreetNumber || null,
+          }
+        : {};
 
       const addressResult = await posApiPost<any>(`pos/customers/${customer.id}/addresses`, {
         street: formData.address.trim(),
@@ -486,18 +539,31 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                 value={formData.address}
                 onChange={(e) => handleInputChange('address', e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder={t('modals.addNewAddress.addressPlaceholder')}
+                placeholder={
+                  hasDeliveryPro
+                    ? t('modals.addNewAddress.addressPlaceholder')
+                    : t('modals.addNewAddress.manualAddressPlaceholder', 'Enter address manually')
+                }
                 className="w-full px-4 py-2 pl-10 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 required
               />
-              {isLoadingAddresses && (
+              {hasDeliveryPro && isLoadingAddresses && (
                 <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
                   <div className="w-4 h-4 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin"></div>
                 </div>
               )}
             </div>
 
-            {suggestions.length > 0 && (
+            {!hasDeliveryPro && (
+              <p className="mt-2 text-xs liquid-glass-modal-text-muted">
+                {t(
+                  'modals.addNewAddress.manualAddressEntryHint',
+                  'Delivery zones are disabled for this terminal. Address search and zone validation are off, so the address will be saved manually.'
+                )}
+              </p>
+            )}
+
+            {hasDeliveryPro && suggestions.length > 0 && (
               <div className="absolute z-10 w-full mt-1 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border liquid-glass-modal-border rounded-xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {suggestions.map((suggestion, index) => (
                   <button
@@ -522,7 +588,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
             )}
           </div>
 
-          {validationResult && (
+          {hasDeliveryPro && validationResult && (
             <div className="liquid-glass-modal-card space-y-3">
               <div className="text-sm font-medium liquid-glass-modal-text flex items-center gap-2">
                 <MapPin className="w-4 h-4" />
@@ -536,7 +602,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                 </div>
               )}
 
-              {!isValidatingDelivery && validationStatus === 'in_zone' && (
+              {!isValidatingDelivery && (validationStatus === 'in_zone' || validationStatus === 'module_disabled') && (
                 <div className="flex items-center gap-2 text-green-500 text-sm">
                   <CheckCircle className="w-4 h-4" />
                   {t('modals.addCustomer.deliveryAvailable')}

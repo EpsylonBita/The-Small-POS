@@ -30,6 +30,10 @@ import {
   normalizeAdminDashboardUrl,
 } from '../../utils/connection-code';
 import { getErrorMessage } from '../../utils/privileged-actions';
+import {
+  getResetStartingMessage,
+  startResetAction,
+} from '../../utils/reset-actions';
 
 interface Props {
   isOpen: boolean
@@ -739,10 +743,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   // Called when user confirms final dialog - performs the actual reset
   const handleFactoryResetFinalConfirm = async () => {
     setIsResetting(true)
+    let resetStarted = false
     try {
       const result = await runWithPrivilegedConfirmation({
         scope: 'system_control',
-        action: () => bridge.settings.factoryReset(),
+        action: () => startResetAction(() => bridge.settings.factoryReset(), t),
         title: t('settings.database.factoryResetPinTitle', 'Confirm factory reset'),
         subtitle: t(
           'settings.database.factoryResetPinSubtitle',
@@ -751,29 +756,12 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       })
 
       if (result?.success) {
+        resetStarted = true
         // Clear all localStorage
         localStorage.clear()
 
         setShowFactoryResetFinal(false)
-        toast.success(t('settings.database.resetSuccess') || 'Factory reset complete. App will restart...')
-
-        // Restart the app to go back to onboarding
-        setTimeout(async () => {
-          try {
-            await runWithPrivilegedConfirmation({
-              scope: 'system_control',
-              action: () => bridge.app.restart(),
-              title: t('settings.database.restartPinTitle', 'Confirm restart'),
-              subtitle: t(
-                'settings.database.restartPinSubtitle',
-                'Enter the admin PIN to restart the POS.'
-              ),
-            })
-          } catch (e) {
-            console.error('Failed to restart app, falling back to reload:', e)
-            window.location.reload()
-          }
-        }, 1500)
+        toast.success(getResetStartingMessage(t))
       } else {
         throw new Error(result?.error || 'Unknown error')
       }
@@ -783,7 +771,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         getErrorMessage(e, t('settings.database.clearFailed'))
       )
     } finally {
-      setIsResetting(false)
+      if (!resetStarted) {
+        setIsResetting(false)
+      }
     }
   }
 

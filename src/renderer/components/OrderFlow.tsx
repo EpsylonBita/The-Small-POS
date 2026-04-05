@@ -35,6 +35,7 @@ import {
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
+import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 
 
 interface OrderFlowProps {
@@ -697,7 +698,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       const orderToCreate = {
         // API required fields
-        customer_id: selectedCustomer?.id !== 'pickup-customer' ? selectedCustomer?.id : null,
+        customer_id: resolvePersistedCustomerId(selectedCustomer?.id),
+        customerId: resolvePersistedCustomerId(selectedCustomer?.id),
         clientRequestId,
         items: normalizedItems,
         branch_id: effectiveBranchId,

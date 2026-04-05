@@ -3015,6 +3015,13 @@ fn classify_queue_failure(entity_type: &str, last_error: &str) -> &'static str {
         }
     }
 
+    if entity_type == "shift" {
+        if is_retryable_shift_sync_error(Some(last_error)) {
+            return "transient";
+        }
+        return "permanent";
+    }
+
     "unknown"
 }
 
@@ -7715,6 +7722,18 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                             if !failure.backpressure_deferred {
                                 had_non_backpressure_failure = true;
                             }
+                            // Emit recovery event for shift sync conflicts
+                            if err_msg.contains("unresolved active shift")
+                                || err_msg.contains("already has another active shift")
+                            {
+                                let _ = app.emit(
+                                    "recovery:shift-conflict",
+                                    serde_json::json!({
+                                        "shiftId": entity_id,
+                                        "errorMessage": *err_msg,
+                                    }),
+                                );
+                            }
                         }
                     }
                 }
@@ -11155,7 +11174,7 @@ fn mark_batch_failed(
     let retry_after_secs = extract_retry_after_seconds(error).unwrap_or(5).max(1);
 
     for item in items {
-        let (id, _, _, _, _, _, retry_count, max_retries, _, retry_delay_ms, _) = item;
+        let (id, entity_type, _, _, _, _, retry_count, max_retries, _, retry_delay_ms, _) = item;
         if is_backpressure {
             let delay_ms = (retry_after_secs * 1000).clamp(1_000, MAX_RETRY_DELAY_MS);
             let next_retry_at = schedule_next_retry(delay_ms, *id);
@@ -11172,7 +11191,10 @@ fn mark_batch_failed(
             continue;
         }
 
-        let is_permanent = is_permanent_order_sync_error(error);
+        let is_permanent = match entity_type.as_str() {
+            "shift" => !is_retryable_shift_sync_error(Some(error)),
+            _ => is_permanent_order_sync_error(error),
+        };
         let new_count = retry_count + 1;
         let exhausted = is_permanent || new_count >= *max_retries;
         let new_status = if exhausted { "failed" } else { "pending" };
@@ -13716,6 +13738,17 @@ mod tests {
             "transient"
         );
         assert_eq!(
+            classify_queue_failure(
+                "shift",
+                "Staff already has an unresolved active shift from 2026-03-25",
+            ),
+            "permanent"
+        );
+        assert_eq!(
+            classify_queue_failure("shift", "Network error while syncing shift"),
+            "transient"
+        );
+        assert_eq!(
             classify_queue_failure("payment", "Some unexpected validation branch"),
             "unknown"
         );
@@ -14252,6 +14285,63 @@ mod tests {
         assert_eq!(status, "pending");
         assert_eq!(retry_count, 0);
         assert!(next_retry_at.is_some());
+    }
+
+    #[test]
+    fn test_mark_batch_failed_marks_active_shift_conflict_as_permanent() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-conflict', 'cashier-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries
+             ) VALUES (
+                 'shift', 'shift-conflict', 'insert', '{}', 'shift-conflict:open',
+                 'pending', 0, 5
+             )",
+            [],
+        )
+        .unwrap();
+        let queue_id = conn.last_insert_rowid();
+        drop(conn);
+
+        let item = load_sync_item(&db, queue_id);
+        let item_ref = [&item];
+        let error =
+            "Staff already has an unresolved active shift from 2026-03-25 (5690cbe0-a1d5-425f-b3c1-513c2451515c). Close or repair it before opening a new shift.";
+
+        let outcome = mark_batch_failed(&db, &item_ref, error).unwrap();
+        assert!(!outcome.backpressure_deferred);
+
+        let conn = db.conn.lock().unwrap();
+        let (status, retry_count, next_retry_at, last_error): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, retry_count, next_retry_at, last_error
+                 FROM sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(status, "failed");
+        assert_eq!(retry_count, 1);
+        assert_eq!(next_retry_at, None);
+        assert_eq!(last_error.as_deref(), Some(error));
     }
 
     #[test]

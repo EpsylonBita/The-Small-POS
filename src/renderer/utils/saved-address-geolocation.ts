@@ -1,4 +1,5 @@
 import {
+  createAddressSessionToken,
   extractStreetNumber,
   houseNumbersMatch,
   resolveAddressSuggestion,
@@ -173,9 +174,11 @@ export async function resolveSavedAddressCoordinates(
     return null;
   }
 
+  const sessionToken = createAddressSessionToken();
   const suggestions = await searchAddressSuggestions(query, {
     branchId,
     limit: 5,
+    sessionToken,
   });
 
   if (!Array.isArray(suggestions) || suggestions.length === 0) {
@@ -191,6 +194,7 @@ export async function resolveSavedAddressCoordinates(
 
   const resolved = await resolveAddressSuggestion(bestSuggestion, query, {
     branchId,
+    sessionToken,
   });
 
   if (!resolved.coordinates) {

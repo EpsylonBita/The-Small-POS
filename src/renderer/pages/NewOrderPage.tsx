@@ -25,6 +25,7 @@ import { ActivityTracker } from '../services/ActivityTracker';
 import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
+import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { AlertTriangle } from 'lucide-react';
 import { getBridge } from '../../lib';
 
@@ -524,7 +525,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
       const orderToCreate = {
-        customer_id: currentCustomer?.id !== 'pickup-customer' ? currentCustomer?.id : null,
+        customer_id: resolvePersistedCustomerId(currentCustomer?.id),
+        customerId: resolvePersistedCustomerId(currentCustomer?.id),
         clientRequestId,
         items: normalizedItems,
         branch_id: resolvedBranchId,
@@ -711,8 +713,10 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       };
     }
 
+    const persistedCustomerId = resolvePersistedCustomerId(existingCustomer?.id);
+
     return {
-      id: existingCustomer?.id || 'new-customer',
+      ...(persistedCustomerId ? { id: persistedCustomerId } : {}),
       name: customerInfo.name,
       phone_number: customerInfo.phone,
       email: customerInfo.email || '',

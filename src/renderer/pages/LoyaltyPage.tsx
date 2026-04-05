@@ -25,7 +25,8 @@ interface LoyaltySettings {
 
 interface CustomerLoyalty {
   id: string;
-  user_profile_id: string;
+  customer_id?: string | null;
+  user_profile_id?: string | null;
   points_balance: number;
   total_earned: number;
   total_redeemed: number;

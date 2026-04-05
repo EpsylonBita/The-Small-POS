@@ -1,0 +1,157 @@
+{
+  "center": {
+    "eyebrow": "Centro di recupero",
+    "title": "Recupero self-service",
+    "subtitle": "Usa azioni guidate di ripristino per risolvere ordini, pagamenti, turni, report Z e problemi di stampante bloccati senza uscire dal POS.",
+    "needsAttentionTitle": "Richiede attenzione ora",
+    "needsAttentionSubtitle": "I problemi bloccanti richiedono un'azione dell'utente prima che la sincronizzazione torni pulita.",
+    "noBlockingIssues": "Al momento non sono visibili problemi bloccanti.",
+    "recoveringTitle": "Recupero automatico",
+    "recoveringSubtitle": "Questi problemi vengono ritentati o possono essere riattivati in modo sicuro senza una pulizia distruttiva.",
+    "noRecoveringIssues": "Nessun recupero automatico attivo in corso.",
+    "recentActionsTitle": "Risolto di recente",
+    "recentActionsSubtitle": "Ogni tentativo di riparazione viene registrato localmente così lo staff può vedere cosa è stato provato e cosa ha funzionato.",
+    "noRecentActions": "Nessuna azione di recupero è stata ancora registrata."
+  },
+  "context": {
+    "terminalId": "ID terminale",
+    "branchId": "ID filiale",
+    "organizationId": "ID organizzazione",
+    "syncHealthState": "Stato sincronizzazione"
+  },
+  "status": {
+    "blocking": "Bloccante",
+    "recovering": "In recupero",
+    "resolved": "Risolto",
+    "healthy": "Sano",
+    "pending": "In attesa",
+    "blocked": "Bloccato",
+    "error": "Errore",
+    "stale": "Obsoleto"
+  },
+  "common": {
+    "reference": "Riferimento",
+    "entityId": "ID entità",
+    "order": "Ordine",
+    "payment": "Pagamento",
+    "adjustment": "Rettifica",
+    "issueCount_one": "{{count}} problema",
+    "issueCount_other": "{{count}} problemi",
+    "unknownActor": "Utente sconosciuto"
+  },
+  "messages": {
+    "actionSucceeded": "{{action}} completata con successo.",
+    "actionFailed": "{{action}} non riuscita. Controlla i dettagli e riprova.",
+    "orderNotFound": "L'ordine richiesto {{orderNumber}} non è stato trovato localmente."
+  },
+  "issues": {
+    "genericSyncBlocker": {
+      "title": "Un elemento di sincronizzazione richiede verifica",
+      "summary": "Un elemento locale di sincronizzazione è ancora bloccato e richiede attenzione prima che il terminale possa tornare completamente operativo.",
+      "guidance": "Usa le azioni disponibili per ritentare la sincronizzazione, reinserire l'elemento in coda o aprire l'entità collegata e completare la riparazione."
+    },
+    "paymentAdjustmentOrderNotFound": {
+      "title": "Il reso o annullo non trova l'ordine",
+      "summary": "La rettifica finanziaria locale per {{orderNumber}} punta a un ordine che non è più disponibile sul server.",
+      "guidance": "Apri l'ordine per confermarne la cronologia. Se l'ordine non è recuperabile, scarta la rettifica locale da questo terminale."
+    },
+    "paymentAdjustmentMissingParent": {
+      "title": "La rettifica attende il pagamento padre",
+      "summary": "La rettifica finanziaria per {{orderNumber}} non può essere sincronizzata finché il pagamento originale non viene sincronizzato.",
+      "guidance": "Riprova la sincronizzazione oppure apri il flusso di regolazione dell'ordine e conferma che il pagamento originale esista e sia completato."
+    },
+    "paymentAdjustmentMissingCanonicalParent": {
+      "title": "La rettifica attende un pagamento canonico",
+      "summary": "Il terminale ha trovato il pagamento padre per {{orderNumber}}, ma non ha ancora un identificativo remoto canonico valido.",
+      "guidance": "Riprova prima la sincronizzazione. Se il blocco resta, apri il flusso di regolazione dell'ordine e correggi la catena di pagamento prima di eseguire il report Z."
+    },
+    "paymentAdjustmentAmbiguousParent": {
+      "title": "La rettifica ha più di un possibile pagamento padre",
+      "summary": "Il terminale ha riparato più pagamenti per {{orderNumber}} e non può decidere in modo sicuro quale sia associato a questa rettifica.",
+      "guidance": "Apri il flusso di regolazione dell'ordine, conserva il pagamento corretto e rimuovi o annulla la duplicazione prima di riprovare la sincronizzazione."
+    },
+    "orderSyncBlocked": {
+      "title": "La sincronizzazione dell'ordine è bloccata",
+      "summary": "L'ordine {{orderNumber}} è ancora in coda di sincronizzazione e blocca il lavoro dipendente.",
+      "guidance": "Apri l'ordine, verifica i dati più recenti e ritenta o reinserisci l'elemento in coda da questa schermata."
+    },
+    "shiftSyncConflict": {
+      "title": "Conflitto di sincronizzazione del turno",
+      "summary": "Questo turno non può essere sincronizzato perché il server vede ancora un altro turno attivo non risolto per lo stesso membro dello staff.",
+      "guidance": "Apri la riparazione del turno per chiudere o correggere il turno in conflitto prima di continuare."
+    },
+    "zReportSubmissionFailed": {
+      "title": "Invio del report Z non riuscito",
+      "summary": "Il report Z locale per {{reportDate}} non è stato inviato con successo.",
+      "guidance": "Apri il report Z del giorno operativo interessato, controlla gli elementi bloccanti e riprova oppure elimina la bozza locale solo se il recupero è impossibile."
+    },
+    "invalidOrderReference": {
+      "title": "L'ordine fa riferimento ad articoli non più esistenti",
+      "summary": "Un ordine locale contiene riferimenti al menu che non corrispondono più al catalogo in cache.",
+      "guidance": "Apri l'ordine per verificare gli articoli non validi. Se l'ordine non è più recuperabile, elimina l'ordine locale non riuscito dopo conferma."
+    },
+    "printerNotConfigured": {
+      "title": "La stampante ricevute non è configurata",
+      "summary": "Il terminale non può stampare documenti operativi perché non è configurato un profilo stampante adatto.",
+      "guidance": "Apri la configurazione stampante, configura una stampante per ricevute e poi ripeti il lavoro di stampa non riuscito."
+    }
+  },
+  "actions": {
+    "confirmTitle": "Conferma azione di recupero",
+    "confirmMessage": "Questa azione modifica i dati locali di recupero per il problema selezionato.",
+    "refresh": {
+      "label": "Aggiorna problemi"
+    },
+    "retrySync": {
+      "label": "Riprova sincronizzazione"
+    },
+    "openOrder": {
+      "label": "Apri ordine"
+    },
+    "openOrderPaymentFix": {
+      "label": "Apri correzione pagamento"
+    },
+    "openOrderSettlementFix": {
+      "label": "Apri correzione regolazione"
+    },
+    "retryZReportSubmit": {
+      "label": "Riprova invio report Z"
+    },
+    "openZReport": {
+      "label": "Apri report Z"
+    },
+    "openShiftRepair": {
+      "label": "Apri riparazione turno"
+    },
+    "forceCloseShift": {
+      "label": "Chiusura forzata del turno",
+      "confirmTitle": "Chiudere forzatamente questo turno?",
+      "confirmMessage": "Questo segna il turno come abbandonato e azzera i campi di cassa. L'azione viene registrata e non può essere annullata.",
+      "confirmCheckbox": "Capisco che questo chiude definitivamente il turno con dati finanziari azzerati."
+    },
+    "openPrinterSetup": {
+      "label": "Apri configurazione stampante"
+    },
+    "requeueSyncItem": {
+      "label": "Reinserisci elemento in coda"
+    },
+    "discardLocalAdjustment": {
+      "label": "Scarta rettifica locale",
+      "confirmTitle": "Scartare la rettifica finanziaria locale?",
+      "confirmMessage": "Questa azione rimuove da questo terminale la rettifica finanziaria solo locale collegata a {{orderNumber}}. L'azione viene registrata e non può essere annullata senza ripristinare un backup.",
+      "confirmCheckbox": "Comprendo che questo elimina la rettifica locale solo da questo terminale."
+    },
+    "discardLocalZReport": {
+      "label": "Scarta bozza locale del report Z",
+      "confirmTitle": "Scartare la bozza locale del report Z?",
+      "confirmMessage": "Questa azione rimuove da questo terminale la bozza locale del report Z per {{reportDate}}. Usala solo quando il report non può essere recuperato in sicurezza.",
+      "confirmCheckbox": "Comprendo che questo elimina la bozza locale del report Z solo da questo terminale."
+    },
+    "deleteLocalFailedOrder": {
+      "label": "Elimina ordine locale non riuscito",
+      "confirmTitle": "Eliminare l'ordine locale non riuscito?",
+      "confirmMessage": "Questa azione rimuove definitivamente da questo terminale l'ordine locale non riuscito {{orderNumber}} e le relative righe di sincronizzazione dipendenti.",
+      "confirmCheckbox": "Comprendo che questo elimina l'ordine locale non riuscito e non può essere annullato senza un backup."
+    }
+  }
+}

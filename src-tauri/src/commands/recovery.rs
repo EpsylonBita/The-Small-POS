@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{auth, db, recovery};
 
@@ -152,4 +152,130 @@ pub async fn recovery_open_dir(
         "success": true,
         "path": target.to_string_lossy().to_string(),
     }))
+}
+
+#[tauri::command]
+pub async fn recovery_execute_action(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, auth::AuthState>,
+) -> Result<Value, auth::GuardedCommandError> {
+    auth::authorize_privileged_action(
+        auth::PrivilegedActionScope::CashDrawerControl,
+        &db,
+        &auth_state,
+    )?;
+
+    let request = arg0.ok_or_else(|| "Missing recovery action request".to_string())?;
+    let action_id = request
+        .get("actionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    match action_id {
+        "openShiftRepair" | "forceCloseShift" => {
+            let shift_id = request
+                .get("shiftId")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing shiftId for shift repair action")?;
+
+            let reason = request
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Stuck shift recovery via POS");
+
+            let body = json!({
+                "shift_id": shift_id,
+                "reason": reason,
+            });
+
+            let api_result = crate::admin_fetch(
+                Some(&db),
+                "/api/pos/shifts/force-close",
+                "POST",
+                Some(body),
+            )
+            .await
+            .map_err(|e| format!("Force-close API call failed: {e}"))?;
+
+            let api_success = api_result
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if !api_success {
+                let api_error = api_result
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown server error");
+                return Err(format!("Server rejected force-close: {api_error}").into());
+            }
+
+            // Update local SQLite to match
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Ok(conn) = db.conn.lock() {
+                let _ = conn.execute(
+                    "UPDATE staff_shifts
+                     SET status = 'abandoned',
+                         check_out_time = ?1,
+                         closing_cash_amount = 0,
+                         expected_cash_amount = 0,
+                         cash_variance = 0,
+                         sync_status = 'synced',
+                         updated_at = ?1
+                     WHERE id = ?2",
+                    rusqlite::params![now, shift_id],
+                );
+
+                // Close associated cash_drawer_sessions
+                let _ = conn.execute(
+                    "UPDATE cash_drawer_sessions
+                     SET closed_at = ?1,
+                         closing_amount = 0,
+                         updated_at = ?1
+                     WHERE staff_shift_id = ?2 AND closed_at IS NULL",
+                    rusqlite::params![now, shift_id],
+                );
+            }
+
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "message": "Shift force-closed successfully",
+            }))
+        }
+
+        "retrySync" => {
+            let queue_id = request
+                .get("queueId")
+                .and_then(|v| v.as_i64());
+            let entity_id = request
+                .get("entityId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if let Some(qid) = queue_id {
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = conn.execute(
+                        "UPDATE sync_queue SET status = 'pending', retry_count = 0, updated_at = datetime('now') WHERE id = ?1",
+                        rusqlite::params![qid],
+                    );
+                }
+            } else if !entity_id.is_empty() {
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = conn.execute(
+                        "UPDATE sync_queue SET status = 'pending', retry_count = 0, updated_at = datetime('now') WHERE entity_id = ?1 AND status IN ('failed', 'blocked')",
+                        rusqlite::params![entity_id],
+                    );
+                }
+            }
+
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+            }))
+        }
+
+        _ => Err(format!("Unknown recovery action: {action_id}").into()),
+    }
 }

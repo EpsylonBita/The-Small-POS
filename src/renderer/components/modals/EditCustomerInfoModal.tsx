@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import {
   buildAddressFingerprint,
+  createAddressSessionToken,
   ensureAddressOfflineRuntime,
   extractStreetNumber,
   getSuggestionStreetLabel,
@@ -17,6 +18,7 @@ import {
   type ValidationStatus,
 } from '../../services/address-workflow';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
+import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 
 export interface EditCustomerInfoFormData {
   name: string;
@@ -24,6 +26,9 @@ export interface EditCustomerInfoFormData {
   address: string;
   postal_code?: string;
   notes?: string;
+  coordinates?: { lat: number; lng: number } | null;
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 interface EditCustomerInfoModalProps {
@@ -53,6 +58,10 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   onClose,
 }) => {
   const { t } = useTranslation();
+  const { hasModule } = useAcquiredModules();
+  const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
+  const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
+  const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
   const [customerInfo, setCustomerInfo] = useState<EditCustomerInfoFormData>(initialCustomerInfo);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingAddresses, setIsLoadingAddresses] = useState(false);
@@ -67,6 +76,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   const [overrideReason, setOverrideReason] = useState('');
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRequestRef = useRef(0);
+  const sessionTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
@@ -76,7 +86,15 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     setCustomerInfo(initialCustomerInfo);
     setAddressSuggestions([]);
     setSelectedAddressDetails(null);
-    setAddressCoordinates(null);
+    const initialCoordinates =
+      initialCustomerInfo.coordinates
+      || (
+        typeof initialCustomerInfo.latitude === 'number'
+        && typeof initialCustomerInfo.longitude === 'number'
+          ? { lat: initialCustomerInfo.latitude, lng: initialCustomerInfo.longitude }
+          : null
+      );
+    setAddressCoordinates(hasDeliveryPro ? initialCoordinates : null);
     setValidationResult(null);
     setValidationStatus('idle');
     setValidationSnapshot(null);
@@ -88,6 +106,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       searchDebounceRef.current = null;
     }
     searchRequestRef.current += 1;
+    sessionTokenRef.current = null;
   }, [isOpen, initialCustomerInfo]);
 
   const clearValidation = (addressValue: string) => {
@@ -99,6 +118,11 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     setOverrideReason('');
 
     if (!addressValue.trim()) {
+      setValidationStatus('idle');
+      return;
+    }
+
+    if (!hasDeliveryPro) {
       setValidationStatus('idle');
       return;
     }
@@ -121,6 +145,11 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   ): Promise<DeliveryValidationResult | null> => {
     const trimmedAddress = address.trim();
     if (!trimmedAddress) {
+      return null;
+    }
+
+    if (!hasDeliveryPro) {
+      setValidationStatus('idle');
       return null;
     }
 
@@ -180,6 +209,10 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       return null;
     }
 
+    if (!hasDeliveryPro) {
+      return null;
+    }
+
     const coords = selectedAddressDetails?.coordinates || addressCoordinates || undefined;
     const currentFingerprint = buildAddressFingerprint(address, coords);
 
@@ -191,11 +224,15 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   };
 
   const evaluateValidationDecision = (result: DeliveryValidationResult | null): string | null => {
+    if (!hasDeliveryPro) {
+      return null;
+    }
+
     if (!result) {
       return t('modals.addCustomer.selectAddressForValidation', 'Select a real address from suggestions to validate delivery.');
     }
 
-    if (result.validation_status === 'in_zone') {
+    if (result.validation_status === 'in_zone' || result.validation_status === 'module_disabled') {
       return null;
     }
 
@@ -217,12 +254,19 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   };
 
   const searchAddresses = async (input: string, requestId: number) => {
+    if (!hasDeliveryPro) {
+      setAddressSuggestions([]);
+      setIsLoadingAddresses(false);
+      return;
+    }
+
     try {
       const creds = await getResolvedTerminalCredentials();
       await ensureAddressOfflineRuntime(creds.branchId || undefined);
       const results = await searchAddressSuggestions(input, {
         branchId: creds.branchId || undefined,
         limit: 5,
+        sessionToken: sessionTokenRef.current || undefined,
       });
       if (requestId !== searchRequestRef.current) {
         return;
@@ -248,14 +292,26 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       searchDebounceRef.current = null;
     }
 
-    if (input.length < 2) {
+    if (!hasDeliveryPro) {
       searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
+      setIsLoadingAddresses(false);
+      setAddressSuggestions([]);
+      return;
+    }
+
+    if (input.length < 3) {
+      searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
       setIsLoadingAddresses(false);
       setAddressSuggestions([]);
       return;
     }
 
     const requestId = ++searchRequestRef.current;
+    if (!sessionTokenRef.current) {
+      sessionTokenRef.current = createAddressSessionToken();
+    }
     setIsLoadingAddresses(true);
     searchDebounceRef.current = setTimeout(() => {
       void searchAddresses(input, requestId);
@@ -267,6 +323,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       const creds = await getResolvedTerminalCredentials();
       const resolved = await resolveAddressSuggestion(suggestion, customerInfo.address, {
         branchId: creds.branchId || undefined,
+        sessionToken: sessionTokenRef.current || undefined,
       });
 
       void upsertVerifiedLocalCandidate({
@@ -302,6 +359,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       setSelectedAddressDetails(details);
       setAddressCoordinates(details.coordinates || null);
       setAddressSuggestions([]);
+      sessionTokenRef.current = null;
 
       await runValidation(resolved.streetAddress, details);
       toast.success(t('modals.editCustomer.addressAndPostalUpdated'));
@@ -317,6 +375,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         address: fallback,
       }));
       setAddressSuggestions([]);
+      sessionTokenRef.current = null;
       clearValidation(fallback);
       toast.success(t('modals.editCustomer.addressUpdated'));
     }
@@ -387,6 +446,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         clearTimeout(searchDebounceRef.current);
       }
       searchRequestRef.current += 1;
+      sessionTokenRef.current = null;
     };
   }, []);
 
@@ -440,17 +500,30 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                 type="text"
                 value={customerInfo.address}
                 onChange={(e) => handleInputChange('address', e.target.value)}
-                placeholder={t('modals.editCustomer.addressPlaceholder')}
+                placeholder={
+                  hasDeliveryPro
+                    ? t('modals.editCustomer.addressPlaceholder')
+                    : t('modals.editCustomer.manualAddressPlaceholder', 'Enter address manually')
+                }
                 className="w-full px-4 py-2 pl-10 pr-4 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
-              {isLoadingAddresses && (
+              {hasDeliveryPro && isLoadingAddresses && (
                 <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
                   <div className="w-4 h-4 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin"></div>
                 </div>
               )}
             </div>
 
-            {addressSuggestions.length > 0 && (
+            {!hasDeliveryPro && (
+              <p className="mt-2 text-xs liquid-glass-modal-text-muted">
+                {t(
+                  'modals.editCustomer.manualAddressEntryHint',
+                  'Delivery zones are disabled for this terminal. Address search and zone validation are off, so the address will be saved manually.'
+                )}
+              </p>
+            )}
+
+            {hasDeliveryPro && addressSuggestions.length > 0 && (
               <div className="absolute z-[9999] w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-lg shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {addressSuggestions.map((suggestion, index) => (
                   <button
@@ -475,7 +548,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             )}
           </div>
 
-          {validationResult && (
+          {hasDeliveryPro && validationResult && (
             <div className="liquid-glass-modal-card space-y-3">
               <div className="text-sm font-medium liquid-glass-modal-text flex items-center gap-2">
                 <MapPin className="w-4 h-4" />
@@ -489,7 +562,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                 </div>
               )}
 
-              {!isValidatingDelivery && validationStatus === 'in_zone' && (
+              {!isValidatingDelivery && (validationStatus === 'in_zone' || validationStatus === 'module_disabled') && (
                 <div className="flex items-center gap-2 text-green-500 text-sm">
                   <CheckCircle className="w-4 h-4" />
                   {t('modals.addCustomer.deliveryAvailable')}

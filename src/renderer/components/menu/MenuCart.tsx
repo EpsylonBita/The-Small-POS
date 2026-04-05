@@ -77,6 +77,9 @@ interface MenuCartProps {
   minimumOrderAmount?: number; // Minimum order amount for delivery zones
   deliveryFee?: number;
   deliveryFeeStatus?: DeliveryFeeStatus;
+  allowManualDeliveryFee?: boolean;
+  manualDeliveryFeeValue?: number;
+  onManualDeliveryFeeChange?: (value: number) => void;
   // Coupon props
   appliedCoupon?: AppliedCoupon | null;
   onApplyCoupon?: (code: string) => void;
@@ -111,6 +114,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   minimumOrderAmount = 0,
   deliveryFee = 0,
   deliveryFeeStatus = 'resolved',
+  allowManualDeliveryFee = false,
+  manualDeliveryFeeValue = 0,
+  onManualDeliveryFeeChange,
   appliedCoupon,
   onApplyCoupon,
   onRemoveCoupon,
@@ -146,6 +152,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const [showManualInput, setShowManualInput] = React.useState(false);
   const [manualPrice, setManualPrice] = React.useState('');
   const [manualName, setManualName] = React.useState('');
+  const [manualDeliveryFeeInput, setManualDeliveryFeeInput] = React.useState('');
   const [isDiscountModalOpen, setIsDiscountModalOpen] = React.useState(false);
   const [discountModeDraft, setDiscountModeDraft] = React.useState<'percentage' | 'fixed'>(
     onManualDiscountChange ? manualDiscountMode : 'percentage'
@@ -218,6 +225,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       window.clearTimeout(focusTimer);
     };
   }, [isCouponModalOpen]);
+
+  React.useEffect(() => {
+    if (!allowManualDeliveryFee) {
+      setManualDeliveryFeeInput('');
+      return;
+    }
+
+    const normalized = Math.max(0, manualDeliveryFeeValue || 0);
+    setManualDeliveryFeeInput(
+      normalized > 0 ? normalized.toFixed(2).replace('.', ',') : ''
+    );
+  }, [allowManualDeliveryFee, manualDeliveryFeeValue]);
 
   useOnBarcodeScan((barcode) => {
     if (!isCouponModalOpen || !onApplyCoupon) {
@@ -587,7 +606,13 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
   // Minimum order validation for delivery orders
   const isDeliveryOrder = orderType === 'delivery';
-  const appliedDeliveryFee = isDeliveryOrder && deliveryFeeStatus === 'resolved' ? deliveryFee : 0;
+  const appliedDeliveryFee = isDeliveryOrder
+    ? (allowManualDeliveryFee
+        ? Math.max(0, manualDeliveryFeeValue || 0)
+        : deliveryFeeStatus === 'resolved'
+          ? deliveryFee
+          : 0)
+    : 0;
   const totalWithDeliveryFee = totalAfterDiscount + appliedDeliveryFee;
   const isBelowMinimum = isDeliveryOrder && minimumOrderAmount > 0 && totalAfterDiscount < minimumOrderAmount;
   const shortfall = isBelowMinimum ? minimumOrderAmount - totalAfterDiscount : 0;
@@ -608,7 +633,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     isAppliedDiscountOverMax ||
     isSaving ||
     (isBelowMinimum && !editMode) ||
-    (isDeliveryOrder && deliveryFeeStatus !== 'resolved' && !editMode);
+    (isDeliveryOrder && !allowManualDeliveryFee && deliveryFeeStatus !== 'resolved' && !editMode);
 
   return (
     <div
@@ -1101,9 +1126,24 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             <span className="liquid-glass-modal-text-muted">
               {t('menu.cart.deliveryFee')}
             </span>
-            <span className="liquid-glass-modal-text">
-              {deliveryFeeDisplay}
-            </span>
+            {allowManualDeliveryFee ? (
+              <input
+                type="text"
+                inputMode="decimal"
+                value={manualDeliveryFeeInput}
+                onChange={(event) => {
+                  const formatted = formatMoneyInputWithCents(event.target.value);
+                  setManualDeliveryFeeInput(formatted);
+                  onManualDeliveryFeeChange?.(parseMoneyInputValue(formatted));
+                }}
+                placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
+                className="w-24 rounded-lg border bg-black/5 px-2.5 py-1.5 text-right text-sm antialiased dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            ) : (
+              <span className="liquid-glass-modal-text">
+                {deliveryFeeDisplay}
+              </span>
+            )}
           </div>
         )}
 

@@ -43,6 +43,7 @@ mod print;
 mod printers;
 mod receipt_renderer;
 mod recovery;
+mod reset;
 mod refunds;
 mod scale;
 mod scanner;
@@ -401,6 +402,15 @@ pub(crate) fn write_system_clipboard_text(text: &str) -> Result<(), String> {
 // ============================================================================
 
 pub fn run() {
+    match reset::maybe_run_reset_helper_from_args() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("reset helper failed: {error}");
+            std::process::exit(1);
+        }
+    }
+
     // Record start time for uptime tracking
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -767,6 +777,7 @@ pub fn run() {
             commands::settings::settings_is_configured,
             commands::settings::settings_get,
             commands::settings::settings_get_local,
+            commands::settings::settings_get_reset_status,
             commands::settings::settings_set,
             commands::settings::settings_update_local,
             commands::settings::settings_factory_reset,
@@ -1120,6 +1131,7 @@ pub fn run() {
             commands::recovery::recovery_export_point,
             commands::recovery::recovery_restore_point,
             commands::recovery::recovery_open_dir,
+            commands::recovery::recovery_execute_action,
             // Updates
             commands::updates::update_get_state,
             commands::updates::update_check,

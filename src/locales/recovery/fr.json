@@ -1,0 +1,157 @@
+{
+  "center": {
+    "eyebrow": "Centre de récupération",
+    "title": "Récupération en libre-service",
+    "subtitle": "Utilisez des actions guidées pour résoudre les commandes, paiements, shifts, rapports Z et problèmes d'imprimante bloqués sans quitter le POS.",
+    "needsAttentionTitle": "Action requise maintenant",
+    "needsAttentionSubtitle": "Les problèmes bloquants nécessitent une action utilisateur avant que la synchronisation revienne à un état propre.",
+    "noBlockingIssues": "Aucun problème bloquant n'est actuellement visible.",
+    "recoveringTitle": "Récupération automatique",
+    "recoveringSubtitle": "Ces problèmes sont en cours de nouvelle tentative ou peuvent être relancés en toute sécurité sans nettoyage destructif.",
+    "noRecoveringIssues": "Aucune récupération automatique n'est en cours.",
+    "recentActionsTitle": "Résolu récemment",
+    "recentActionsSubtitle": "Chaque tentative de réparation est auditée localement afin que l'équipe puisse voir ce qui a été tenté et ce qui a réussi.",
+    "noRecentActions": "Aucune action de récupération n'a encore été enregistrée."
+  },
+  "context": {
+    "terminalId": "ID du terminal",
+    "branchId": "ID de la succursale",
+    "organizationId": "ID de l'organisation",
+    "syncHealthState": "État de synchronisation"
+  },
+  "status": {
+    "blocking": "Bloquant",
+    "recovering": "En récupération",
+    "resolved": "Résolu",
+    "healthy": "Sain",
+    "pending": "En attente",
+    "blocked": "Bloqué",
+    "error": "Erreur",
+    "stale": "Obsolète"
+  },
+  "common": {
+    "reference": "Référence",
+    "entityId": "ID d'entité",
+    "order": "Commande",
+    "payment": "Paiement",
+    "adjustment": "Ajustement",
+    "issueCount_one": "{{count}} problème",
+    "issueCount_other": "{{count}} problèmes",
+    "unknownActor": "Utilisateur inconnu"
+  },
+  "messages": {
+    "actionSucceeded": "{{action}} s'est terminé avec succès.",
+    "actionFailed": "{{action}} a échoué. Vérifiez les détails puis réessayez.",
+    "orderNotFound": "La commande demandée {{orderNumber}} est introuvable localement."
+  },
+  "issues": {
+    "genericSyncBlocker": {
+      "title": "Un élément de synchronisation doit être vérifié",
+      "summary": "Un élément local de synchronisation reste bloqué et nécessite une attention avant que le terminal ne retrouve un état normal.",
+      "guidance": "Utilisez les actions disponibles pour relancer la synchronisation, remettre l'élément en file d'attente ou ouvrir l'entité liée afin de terminer la réparation."
+    },
+    "paymentAdjustmentOrderNotFound": {
+      "title": "Le retour ou l'annulation ne trouve pas sa commande",
+      "summary": "L'ajustement financier local pour {{orderNumber}} pointe vers une commande qui n'est plus disponible sur le serveur.",
+      "guidance": "Ouvrez la commande pour confirmer son historique. Si la commande ne peut pas être récupérée, supprimez l'ajustement local sur ce terminal."
+    },
+    "paymentAdjustmentMissingParent": {
+      "title": "L'ajustement attend son paiement parent",
+      "summary": "L'ajustement financier pour {{orderNumber}} ne peut pas être synchronisé tant que le paiement d'origine n'est pas synchronisé.",
+      "guidance": "Relancez la synchronisation ou ouvrez le flux de règlement de la commande et confirmez que le paiement d'origine existe et est terminé."
+    },
+    "paymentAdjustmentMissingCanonicalParent": {
+      "title": "L'ajustement attend un paiement canonique",
+      "summary": "Le terminal a trouvé le paiement parent pour {{orderNumber}}, mais il n'a pas encore d'identifiant canonique distant valide.",
+      "guidance": "Essayez d'abord de relancer la synchronisation. Si le blocage persiste, ouvrez le flux de règlement et corrigez la chaîne de paiement avant d'exécuter le rapport Z."
+    },
+    "paymentAdjustmentAmbiguousParent": {
+      "title": "L'ajustement a plusieurs paiements parents possibles",
+      "summary": "Le terminal a réparé plusieurs paiements pour {{orderNumber}} et ne peut pas décider en sécurité lequel possède cet ajustement.",
+      "guidance": "Ouvrez le flux de règlement de la commande, gardez le bon paiement et supprimez ou annulez la lignée en double avant de relancer la synchronisation."
+    },
+    "orderSyncBlocked": {
+      "title": "La synchronisation de la commande est bloquée",
+      "summary": "La commande {{orderNumber}} attend toujours dans la file de synchronisation et bloque les tâches dépendantes.",
+      "guidance": "Ouvrez la commande, vérifiez les dernières données puis relancez ou remettez en file cet élément depuis cet écran."
+    },
+    "shiftSyncConflict": {
+      "title": "Conflit de synchronisation de shift",
+      "summary": "Ce shift ne peut pas être synchronisé car le serveur voit encore un autre shift actif non résolu pour le même membre du personnel.",
+      "guidance": "Ouvrez la réparation de shift pour fermer ou corriger le shift en conflit avant de continuer."
+    },
+    "zReportSubmissionFailed": {
+      "title": "L'envoi du rapport Z a échoué",
+      "summary": "Le rapport Z local du {{reportDate}} n'a pas pu être envoyé avec succès.",
+      "guidance": "Ouvrez le rapport Z du jour d'activité concerné, examinez les éléments bloquants, puis réessayez ou supprimez le brouillon local uniquement si la récupération est impossible."
+    },
+    "invalidOrderReference": {
+      "title": "La commande référence des éléments qui n'existent plus",
+      "summary": "Une commande locale contient des références au menu qui ne correspondent plus au catalogue en cache.",
+      "guidance": "Ouvrez la commande pour examiner les articles invalides. Si la commande n'est plus récupérable, supprimez la commande locale en échec après confirmation."
+    },
+    "printerNotConfigured": {
+      "title": "L'imprimante de tickets n'est pas configurée",
+      "summary": "Le terminal ne peut pas imprimer les documents opérationnels car aucun profil d'imprimante approprié n'est configuré.",
+      "guidance": "Ouvrez la configuration de l'imprimante, configurez une imprimante de tickets puis relancez l'impression échouée."
+    }
+  },
+  "actions": {
+    "confirmTitle": "Confirmer l'action de récupération",
+    "confirmMessage": "Cette action modifie les données locales de récupération pour le problème sélectionné.",
+    "refresh": {
+      "label": "Actualiser les problèmes"
+    },
+    "retrySync": {
+      "label": "Relancer la synchronisation"
+    },
+    "openOrder": {
+      "label": "Ouvrir la commande"
+    },
+    "openOrderPaymentFix": {
+      "label": "Ouvrir la correction de paiement"
+    },
+    "openOrderSettlementFix": {
+      "label": "Ouvrir la correction de règlement"
+    },
+    "retryZReportSubmit": {
+      "label": "Réessayer l'envoi du rapport Z"
+    },
+    "openZReport": {
+      "label": "Ouvrir le rapport Z"
+    },
+    "openShiftRepair": {
+      "label": "Ouvrir la réparation du shift"
+    },
+    "forceCloseShift": {
+      "label": "Fermer le shift de force",
+      "confirmTitle": "Fermer ce shift de force ?",
+      "confirmMessage": "Cela marque le shift comme abandonné et met à zéro les champs de caisse. L'action est journalisée et ne peut pas être annulée.",
+      "confirmCheckbox": "Je comprends que cela ferme définitivement le shift avec des données financières à zéro."
+    },
+    "openPrinterSetup": {
+      "label": "Ouvrir la configuration de l'imprimante"
+    },
+    "requeueSyncItem": {
+      "label": "Remettre l'élément en file"
+    },
+    "discardLocalAdjustment": {
+      "label": "Supprimer l'ajustement local",
+      "confirmTitle": "Supprimer l'ajustement financier local ?",
+      "confirmMessage": "Cette action supprime du terminal l'ajustement financier uniquement local lié à {{orderNumber}}. L'action est auditée et ne peut pas être annulée sans restauration depuis une sauvegarde.",
+      "confirmCheckbox": "Je comprends que cela supprime l'ajustement local uniquement sur ce terminal."
+    },
+    "discardLocalZReport": {
+      "label": "Supprimer le brouillon local du rapport Z",
+      "confirmTitle": "Supprimer le brouillon local du rapport Z ?",
+      "confirmMessage": "Cette action supprime du terminal le brouillon local du rapport Z pour {{reportDate}}. Utilisez-la uniquement si le rapport ne peut pas être récupéré en sécurité.",
+      "confirmCheckbox": "Je comprends que cela supprime le brouillon local du rapport Z uniquement sur ce terminal."
+    },
+    "deleteLocalFailedOrder": {
+      "label": "Supprimer la commande locale en échec",
+      "confirmTitle": "Supprimer la commande locale en échec ?",
+      "confirmMessage": "Cette action supprime définitivement du terminal la commande locale en échec {{orderNumber}} et ses lignes de synchronisation dépendantes.",
+      "confirmCheckbox": "Je comprends que cela supprime la commande locale en échec et qu'une sauvegarde est nécessaire pour l'annuler."
+    }
+  }
+}
