@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Lock, Sparkles, Check } from 'lucide-react';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { liquidGlassModalButton } from '../../styles/designSystem';
-import { getModuleMetadata } from '../../../shared/services/moduleRegistry';
+import { getFallbackModuleMetadata } from '../../../shared/services/moduleMetadataFallback';
 import { useTheme } from '../../contexts/theme-context';
 import type { ModuleId } from '../../../shared/types/modules';
 
@@ -24,8 +24,8 @@ const UpgradePromptModal: React.FC<UpgradePromptModalProps> = ({
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
 
-  // Get module metadata for display
-  const moduleMetadata = moduleId ? getModuleMetadata(moduleId as ModuleId) : null;
+  // Use local fallback metadata when the synced module payload is unavailable here.
+  const moduleMetadata = moduleId ? getFallbackModuleMetadata(moduleId as ModuleId) : null;
   const moduleName = moduleMetadata?.name || moduleId || t('modules.unknownModule', { defaultValue: 'This feature' });
   const moduleDescription = moduleMetadata?.description || '';
 

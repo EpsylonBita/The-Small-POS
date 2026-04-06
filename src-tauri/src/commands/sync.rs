@@ -514,9 +514,31 @@ pub async fn sync_validate_financial_integrity(
 #[tauri::command]
 pub async fn sync_requeue_orphaned_financial(
     db: tauri::State<'_, db::DbState>,
+    sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let _ = db;
-    Ok(serde_json::json!({ "success": true, "requeued": 0 }))
+    let admin_url = storage::get_credential("admin_url")
+        .ok_or_else(|| "Admin URL not configured".to_string())?;
+    let api_key = load_zeroized_pos_api_key()?;
+    let stats = sync::repair_orphaned_financial_queue_items(&db, &admin_url, &api_key).await?;
+
+    let _ = app.emit(
+        "sync_retry_scheduled",
+        serde_json::json!({
+            "repair": "orphaned_financial",
+            "repaired": stats.repaired,
+            "requeued": stats.requeued,
+            "skipped": stats.skipped,
+        }),
+    );
+    emit_sync_status_snapshot(&app, &db, &sync_state).await;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "repaired": stats.repaired,
+        "requeued": stats.requeued,
+        "skipped": stats.skipped
+    }))
 }
 
 #[tauri::command]

@@ -51,7 +51,7 @@
 //! 5. Mark rows as `applied` or schedule retry on failure
 //! 6. Emit `sync_status` event to the frontend
 
-use chrono::{DateTime, Duration as ChronoDuration, Local, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -361,6 +361,8 @@ static SYNC_FAILURE_PRUNE_DONE: AtomicBool = AtomicBool::new(false);
 static FAILED_FINANCIAL_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 /// Requeue payment adjustments that failed against the old missing backend endpoint.
 static PAYMENT_ADJUSTMENT_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
+/// Repair orphaned payment adjustments whose payload still points at local order ids.
+static ORPHANED_FINANCIAL_REPAIR_DONE: AtomicBool = AtomicBool::new(false);
 /// Re-enqueue shifts that were wrongly marked synced due to ignored per-event errors.
 static SHIFT_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 /// Repair historical local z-report rows after cutoff so stale duplicates stop blocking close-day.
@@ -6632,6 +6634,32 @@ fn load_local_order_remote_lookup(
     .map_err(|e| format!("load local order lookup context for payment recovery: {e}"))
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct OrphanedFinancialRepairStats {
+    pub repaired: usize,
+    pub requeued: usize,
+    pub skipped: usize,
+}
+
+fn parse_remote_order_repair_timestamp(raw_value: &str) -> Option<DateTime<Utc>> {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+
+    for format in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(trimmed, format) {
+            return Some(DateTime::<Utc>::from_naive_utc_and_offset(parsed, Utc));
+        }
+    }
+
+    None
+}
+
 fn build_remote_order_repair_since_cursor(lookup: &LocalOrderRemoteLookup) -> String {
     for candidate in [&lookup.updated_at, &lookup.created_at] {
         let Some(raw_value) = candidate
@@ -6642,9 +6670,8 @@ fn build_remote_order_repair_since_cursor(lookup: &LocalOrderRemoteLookup) -> St
             continue;
         };
 
-        if let Ok(parsed) = DateTime::parse_from_rfc3339(raw_value) {
+        if let Some(parsed) = parse_remote_order_repair_timestamp(raw_value) {
             return parsed
-                .with_timezone(&Utc)
                 .checked_sub_signed(ChronoDuration::days(1))
                 .unwrap_or_else(|| DateTime::<Utc>::from(UNIX_EPOCH))
                 .to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -6912,6 +6939,14 @@ async fn resolve_remote_order_for_local_order(
     let Some(lookup) = lookup else {
         return Ok(None);
     };
+
+    if let Some(remote_order_id) = lookup
+        .supabase_id
+        .as_deref()
+        .and_then(|value| normalize_optional_uuid_str(Some(value)))
+    {
+        return Ok(Some((remote_order_id, None)));
+    }
 
     let mut search_terms = Vec::new();
     if let Some(remote_order_id) = lookup.supabase_id.as_ref() {
@@ -7512,6 +7547,29 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
         }
     }
 
+    if ORPHANED_FINANCIAL_REPAIR_DONE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .is_ok()
+    {
+        match repair_orphaned_financial_queue_items(db, &admin_url, &api_key).await {
+            Ok(stats) if stats.requeued > 0 || stats.skipped > 0 => {
+                info!(
+                    repaired = stats.repaired,
+                    requeued = stats.requeued,
+                    skipped = stats.skipped,
+                    "Repaired orphaned payment adjustments with stale order references"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Orphaned payment adjustment repair did not complete"
+                );
+            }
+        }
+    }
+
     // One-time recovery: re-enqueue shifts that were wrongly marked as synced
     // due to the old sync_shift_batch ignoring per-event server errors.
     if SHIFT_REQUEUE_DONE
@@ -7960,11 +8018,100 @@ fn normalize_adjustment_staff_ids(
     (staff_id, staff_shift_id)
 }
 
+fn rewrite_adjustment_queue_payload(
+    payload: &str,
+    order_id: Option<&str>,
+    client_order_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut value: Value =
+        serde_json::from_str(payload).unwrap_or_else(|_| Value::Object(Map::new()));
+    if !value.is_object() {
+        value = Value::Object(Map::new());
+    }
+    let object = value
+        .as_object_mut()
+        .expect("adjustment payload fallback should always be an object");
+
+    let mut changed = false;
+
+    if let Some(order_id) = order_id {
+        let current = str_any(&Value::Object(object.clone()), &["orderId", "order_id"]);
+        if current.as_deref() != Some(order_id) {
+            object.insert("orderId".to_string(), Value::String(order_id.to_string()));
+            changed = true;
+        }
+    }
+
+    if let Some(client_order_id) = client_order_id {
+        let current = str_any(
+            &Value::Object(object.clone()),
+            &["clientOrderId", "client_order_id"],
+        );
+        if current.as_deref() != Some(client_order_id) {
+            object.insert(
+                "clientOrderId".to_string(),
+                Value::String(client_order_id.to_string()),
+            );
+            changed = true;
+        }
+    }
+
+    if changed {
+        serde_json::to_string(&value)
+            .map(Some)
+            .map_err(|e| format!("serialize repaired adjustment queue payload: {e}"))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn resolve_adjustment_order_reference(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+    payload: &Value,
+    parent_order_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let mut order_id_for_sync =
+        normalize_optional_uuid_str(str_any(payload, &["orderId", "order_id"]).as_deref());
+    let client_order_id = normalize_optional_uuid_str(
+        str_any(payload, &["clientOrderId", "client_order_id"]).as_deref(),
+    )
+    .or_else(|| normalize_optional_uuid_str(parent_order_id));
+
+    if let Some(local_order_id) = client_order_id.as_deref() {
+        match resolve_remote_order_for_local_order(db, admin_url, api_key, local_order_id).await {
+            Ok(Some((remote_order_id, _))) => {
+                if let Some(normalized_remote_order_id) =
+                    normalize_optional_uuid_str(Some(remote_order_id.as_str()))
+                {
+                    order_id_for_sync = Some(normalized_remote_order_id);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    local_order_id = %local_order_id,
+                    error = %error,
+                    "Adjustment order recovery fell back to client_order_id"
+                );
+            }
+        }
+    }
+
+    if order_id_for_sync.is_none() {
+        order_id_for_sync = client_order_id.clone();
+    }
+
+    (order_id_for_sync, client_order_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_adjustment_sync_body(
     adjustment_id: &str,
     payment_id: &str,
     order_id: Option<&str>,
+    client_order_id: Option<&str>,
     adjustment_type: Option<&str>,
     amount: Option<f64>,
     reason: Option<&str>,
@@ -7990,6 +8137,12 @@ fn build_adjustment_sync_body(
     );
     if let Some(order_id) = order_id {
         body.insert("order_id".to_string(), Value::String(order_id.to_string()));
+    }
+    if let Some(client_order_id) = client_order_id {
+        body.insert(
+            "client_order_id".to_string(),
+            Value::String(client_order_id.to_string()),
+        );
     }
     if let Some(adjustment_type) = adjustment_type {
         body.insert(
@@ -10786,6 +10939,36 @@ async fn sync_adjustment_items(
             continue;
         };
 
+        let (mut order_id_for_sync, client_order_id_for_sync) = resolve_adjustment_order_reference(
+            db,
+            admin_url,
+            api_key,
+            &data,
+            parent_order_id.as_deref(),
+        )
+        .await;
+
+        if order_id_for_sync.is_none() {
+            order_id_for_sync =
+                normalize_optional_uuid_str(str_any(&data, &["orderId", "order_id"]).as_deref());
+        }
+
+        if let Ok(Some(rewritten_payload)) = rewrite_adjustment_queue_payload(
+            payload,
+            order_id_for_sync.as_deref(),
+            client_order_id_for_sync.as_deref(),
+        ) {
+            if let Ok(conn) = db.conn.lock() {
+                let _ = conn.execute(
+                    "UPDATE sync_queue
+                     SET payload = ?1,
+                         updated_at = datetime('now')
+                     WHERE id = ?2",
+                    params![rewritten_payload, id],
+                );
+            }
+        }
+
         let (staff_id, staff_shift_id) = match db.conn.lock() {
             Ok(conn) => normalize_adjustment_staff_ids(&conn, &data),
             Err(_) => (None, None),
@@ -10803,7 +10986,8 @@ async fn sync_adjustment_items(
         let body = build_adjustment_sync_body(
             entity_id,
             payment_id,
-            str_any(&data, &["orderId", "order_id"]).as_deref(),
+            order_id_for_sync.as_deref(),
+            client_order_id_for_sync.as_deref(),
             str_any(&data, &["adjustmentType", "adjustment_type"]).as_deref(),
             num_any(&data, &["amount"]),
             str_any(&data, &["reason"]).as_deref(),
@@ -10828,9 +11012,24 @@ async fn sync_adjustment_items(
         )
         .await
         {
-            Ok(_resp) => {
+            Ok(resp) => {
                 let now = Utc::now().to_rfc3339();
+                let resolved_canonical_order_id =
+                    normalize_optional_uuid_str(str_any(&resp, &["order_id"]).as_deref());
                 if let Ok(conn) = db.conn.lock() {
+                    if let (Some(local_order_id), Some(canonical_order_id)) = (
+                        parent_order_id.as_deref(),
+                        resolved_canonical_order_id.as_deref(),
+                    ) {
+                        let _ = conn.execute(
+                            "UPDATE orders
+                             SET supabase_id = ?1,
+                                 updated_at = ?2
+                             WHERE id = ?3
+                               AND COALESCE(NULLIF(TRIM(COALESCE(supabase_id, '')), ''), '') != ?1",
+                            params![canonical_order_id, now, local_order_id],
+                        );
+                    }
                     let _ = conn.execute(
                         "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
                         params![now, id],
@@ -12342,6 +12541,143 @@ fn requeue_failed_adjustment_legacy_validation_rows(db: &DbState) -> Result<usiz
     Ok(requeued)
 }
 
+fn is_orphaned_adjustment_order_reference_error(error: &str) -> bool {
+    let normalized = error.trim().to_ascii_lowercase();
+    normalized.contains("order not found")
+        || normalized.contains("payment does not belong to the provided order")
+}
+
+fn load_local_adjustment_order_id(
+    conn: &Connection,
+    adjustment_id: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT order_id
+         FROM payment_adjustments
+         WHERE id = ?1",
+        params![adjustment_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(|e| format!("load local payment adjustment order id: {e}"))
+    .map(|value| {
+        value
+            .flatten()
+            .and_then(|candidate| normalize_optional_uuid_str(Some(candidate.as_str())))
+    })
+}
+
+pub(crate) async fn repair_orphaned_financial_queue_items(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+) -> Result<OrphanedFinancialRepairStats, String> {
+    let rows: Vec<(i64, String, String)> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, entity_id, payload, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND status = 'failed'",
+            )
+            .map_err(|e| format!("load orphaned financial queue rows: {e}"))?;
+
+        let rows: Vec<(i64, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|e| format!("iterate orphaned financial queue rows: {e}"))?
+            .filter_map(|row| row.ok())
+            .filter_map(|(queue_id, adjustment_id, payload, last_error)| {
+                last_error
+                    .as_deref()
+                    .filter(|error| is_orphaned_adjustment_order_reference_error(error))
+                    .map(|_| (queue_id, adjustment_id, payload))
+            })
+            .collect();
+        drop(stmt);
+        rows
+    };
+
+    let mut stats = OrphanedFinancialRepairStats::default();
+
+    for (queue_id, adjustment_id, payload) in rows {
+        let local_order_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            load_local_adjustment_order_id(&conn, &adjustment_id)?
+        };
+        let payload_value: Value =
+            serde_json::from_str(&payload).unwrap_or_else(|_| Value::Object(Map::new()));
+        let (resolved_order_id, client_order_id) = resolve_adjustment_order_reference(
+            db,
+            admin_url,
+            api_key,
+            &payload_value,
+            local_order_id.as_deref(),
+        )
+        .await;
+
+        let repaired_payload = match rewrite_adjustment_queue_payload(
+            &payload,
+            resolved_order_id.as_deref(),
+            client_order_id.as_deref().or(local_order_id.as_deref()),
+        ) {
+            Ok(payload) => payload,
+            Err(error) => {
+                warn!(
+                    queue_id,
+                    adjustment_id = %adjustment_id,
+                    error = %error,
+                    "Serialize orphaned payment adjustment repair payload failed"
+                );
+                stats.skipped += 1;
+                continue;
+            }
+        };
+
+        let payload_for_requeue = repaired_payload.as_deref().unwrap_or(payload.as_str());
+
+        let now = Utc::now().to_rfc3339();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE sync_queue
+             SET payload = ?1,
+                 status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![payload_for_requeue, now, queue_id],
+        )
+        .map_err(|e| format!("repair orphaned financial queue row: {e}"))?;
+        conn.execute(
+            "UPDATE payment_adjustments
+             SET sync_state = 'pending',
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 sync_next_retry_at = NULL,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, adjustment_id],
+        )
+        .map_err(|e| format!("repair orphaned payment adjustment state: {e}"))?;
+
+        if repaired_payload.is_some() {
+            stats.repaired += 1;
+        }
+        stats.requeued += 1;
+    }
+
+    Ok(stats)
+}
+
 /// Inline reconciliation: after successfully syncing an order that received
 /// a supabase_id, immediately promote any waiting_parent payments for that
 /// order. This provides low-latency sync for the common case (order + payment
@@ -13009,6 +13345,20 @@ mod tests {
             order_number: Some("ORD-REPAIR-WINDOW".to_string()),
             created_at: Some("2026-03-23T04:15:00Z".to_string()),
             updated_at: Some("2026-03-25T05:10:00Z".to_string()),
+        };
+
+        let since_cursor = build_remote_order_repair_since_cursor(&lookup);
+        assert_eq!(since_cursor, "2026-03-24T05:10:00Z");
+    }
+
+    #[test]
+    fn test_build_remote_order_repair_since_cursor_normalizes_sqlite_timestamps() {
+        let lookup = LocalOrderRemoteLookup {
+            local_order_id: "ord-repair-window-sqlite".to_string(),
+            supabase_id: Some("remote-order-repair-window-sqlite".to_string()),
+            order_number: Some("ORD-REPAIR-WINDOW-SQLITE".to_string()),
+            created_at: Some("2026-03-23 04:15:00".to_string()),
+            updated_at: Some("2026-03-25 05:10:00".to_string()),
         };
 
         let since_cursor = build_remote_order_repair_since_cursor(&lookup);
@@ -15655,6 +16005,7 @@ mod tests {
             "adj-1",
             "pay-1",
             Some("4c78393f-2fc0-4c35-ac85-f5f09917e3e6"),
+            Some("5d78393f-2fc0-4c35-ac85-f5f09917e3e6"),
             Some("refund"),
             Some(14.0),
             Some("Operator correction"),
@@ -15671,6 +16022,10 @@ mod tests {
         );
 
         let object = body.as_object().expect("body should be an object");
+        assert_eq!(
+            object.get("client_order_id").and_then(Value::as_str),
+            Some("5d78393f-2fc0-4c35-ac85-f5f09917e3e6")
+        );
         assert!(!object.contains_key("staff_id"));
         assert!(!object.contains_key("staff_shift_id"));
         assert!(!object.contains_key("remote_payment_id"));
@@ -16556,6 +16911,145 @@ mod tests {
         assert_eq!(adjustment_state, "pending");
         assert_eq!(adjustment_retry_count, 0);
         assert_eq!(adjustment_error, None);
+    }
+
+    #[test]
+    fn test_repair_orphaned_financial_queue_items_rewrites_adjustment_order_reference() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                '[]',
+                8.0,
+                'completed',
+                'synced',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+                'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                'cash',
+                8.0,
+                'completed',
+                'synced',
+                'applied',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, reason,
+                sync_state, sync_retry_count, sync_last_error, sync_next_retry_at, created_at, updated_at
+             ) VALUES (
+                'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+                'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+                'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                'refund',
+                2.0,
+                'Repair me',
+                'failed',
+                4,
+                'Order not found (HTTP 404)',
+                datetime('now', '+5 minutes'),
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error, next_retry_at
+             ) VALUES (
+                'payment_adjustment',
+                'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+                'insert',
+                '{\"paymentId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"orderId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"adjustmentType\":\"refund\",\"amount\":2,\"reason\":\"Repair me\"}',
+                'adjustment:dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+                'failed',
+                4,
+                5,
+                'Order not found (HTTP 404)',
+                datetime('now', '+5 minutes')
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let stats = runtime
+            .block_on(repair_orphaned_financial_queue_items(
+                &db,
+                "https://admin.example",
+                "test-api-key",
+            ))
+            .unwrap();
+
+        assert_eq!(
+            stats,
+            OrphanedFinancialRepairStats {
+                repaired: 1,
+                requeued: 1,
+                skipped: 0,
+            }
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, queue_retry_count, payload): (String, i64, String) = conn
+            .query_row(
+                "SELECT status, retry_count, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let (adjustment_state, adjustment_retry_count, adjustment_error): (
+            String,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT sync_state, sync_retry_count, sync_last_error
+                 FROM payment_adjustments
+                 WHERE id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let payload_json: Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(queue_retry_count, 0);
+        assert_eq!(adjustment_state, "pending");
+        assert_eq!(adjustment_retry_count, 0);
+        assert_eq!(adjustment_error, None);
+        assert_eq!(
+            payload_json.get("orderId").and_then(Value::as_str),
+            Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        );
+        assert_eq!(
+            payload_json.get("clientOrderId").and_then(Value::as_str),
+            Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        );
     }
 
     #[test]

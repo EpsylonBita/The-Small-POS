@@ -146,10 +146,31 @@ fn resolve_adjustment_staff_context(
     (staff_id, staff_shift_id)
 }
 
+fn load_adjustment_remote_order_id(conn: &Connection, local_order_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT supabase_id FROM orders WHERE id = ?1",
+        params![local_order_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn build_adjustment_queue_payload(
     adjustment_id: &str,
     payment_id: &str,
-    order_id: &str,
+    local_order_id: &str,
+    remote_order_id: Option<&str>,
     adjustment_type: &str,
     amount: f64,
     reason: &str,
@@ -170,7 +191,14 @@ fn build_adjustment_queue_payload(
         "paymentId".to_string(),
         Value::String(payment_id.to_string()),
     );
-    payload.insert("orderId".to_string(), Value::String(order_id.to_string()));
+    payload.insert(
+        "orderId".to_string(),
+        Value::String(remote_order_id.unwrap_or(local_order_id).trim().to_string()),
+    );
+    payload.insert(
+        "clientOrderId".to_string(),
+        Value::String(local_order_id.to_string()),
+    );
     payload.insert(
         "adjustmentType".to_string(),
         Value::String(adjustment_type.to_string()),
@@ -336,6 +364,7 @@ pub(crate) fn refund_payment_in_connection(
             .or(payment_shift_id.as_deref())
             .or(order_shift_id.as_deref()),
     );
+    let remote_order_id = load_adjustment_remote_order_id(conn, &order_id);
 
     conn.execute(
         "INSERT INTO payment_adjustments (
@@ -446,6 +475,7 @@ pub(crate) fn refund_payment_in_connection(
         &adjustment_id,
         &payment_id,
         &order_id,
+        remote_order_id.as_deref(),
         "refund",
         amount,
         &reason,
@@ -569,6 +599,7 @@ pub fn void_payment_with_adjustment(
         staff_id,
         staff_shift_id.or(order_shift_id.as_deref()),
     );
+    let remote_order_id = load_adjustment_remote_order_id(&conn, &order_id);
 
     let now = Utc::now().to_rfc3339();
     let adjustment_id = Uuid::new_v4().to_string();
@@ -684,6 +715,7 @@ pub fn void_payment_with_adjustment(
             &adjustment_id,
             payment_id,
             &order_id,
+            remote_order_id.as_deref(),
             "void",
             amount,
             reason,
@@ -881,7 +913,7 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES (?1, '[]', ?2, 'completed', 'synced', 'sup-123', datetime('now'), datetime('now'))",
+             VALUES (?1, '[]', ?2, 'completed', 'synced', '11111111-1111-4111-8111-111111111111', datetime('now'), datetime('now'))",
             params![order_id, amount],
         )
         .expect("insert order");
@@ -933,6 +965,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sq_count, 1);
+    }
+
+    #[test]
+    fn test_refund_adjustment_queue_payload_prefers_remote_order_id_and_keeps_client_order_id() {
+        let db = test_db();
+        let pay_id = seed_order_and_payment(&db, "ord-r1-queue", 50.0);
+
+        let payload = serde_json::json!({
+            "paymentId": pay_id,
+            "amount": 5.0,
+            "reason": "Queue payload check",
+        });
+        refund_payment(&db, &payload).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let payload: String = conn
+            .query_row(
+                "SELECT payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload_json: Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            payload_json.get("orderId").and_then(Value::as_str),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(
+            payload_json.get("clientOrderId").and_then(Value::as_str),
+            Some("ord-r1-queue")
+        );
     }
 
     #[test]

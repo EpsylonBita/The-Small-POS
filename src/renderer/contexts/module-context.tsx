@@ -18,9 +18,7 @@ import type {
   POSModuleInfo,
   POSModulesEnabledResponse,
 } from '../../shared/types/modules';
-import {
-  getModuleMetadata,
-} from '../../shared/services/moduleRegistry';
+import { getFallbackModuleMetadata } from '../../shared/services/moduleMetadataFallback';
 import {
   isCoreModule,
   getCoreModuleIds,
@@ -78,7 +76,7 @@ interface ModuleProviderProps {
 
 /**
  * Cache data structure - stores only module IDs to decouple from EnabledModule type evolution.
- * Full EnabledModule objects are reconstructed from MODULE_REGISTRY on cache load.
+ * Full EnabledModule objects are reconstructed from fallback metadata on cache load.
  */
 interface ModuleCacheData {
   enabledModuleIds: ModuleId[];
@@ -143,8 +141,8 @@ function ensureCoreModulesPresent(modules: EnabledModule[]): EnabledModule[] {
   
   for (const coreModuleId of getCoreModuleIds()) {
     if (!moduleIds.has(coreModuleId)) {
-      // Core module is missing - add it with default or registry metadata
-      const metadata = getModuleMetadata(coreModuleId as ModuleId) || 
+      // Core module is missing - add it with default or fallback metadata
+      const metadata = getFallbackModuleMetadata(coreModuleId as ModuleId) || 
                        DEFAULT_CORE_MODULE_METADATA[coreModuleId];
       
       if (metadata) {
@@ -202,7 +200,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
   /**
    * Reconstruct EnabledModule array from cached module IDs.
-   * Looks up each ID in MODULE_REGISTRY and drops unknown IDs.
+   * Looks up each ID in the local fallback metadata helper and drops unknown IDs.
    */
   const reconstructModulesFromIds = useCallback(
     (
@@ -216,7 +214,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         if (isModuleExcludedFromPos(id)) {
           continue;
         }
-        const metadata = getModuleMetadata(id);
+        const metadata = getFallbackModuleMetadata(id);
         if (metadata) {
           const requiredPlan = lockedPlans[id];
           if (requiredPlan) {
@@ -447,7 +445,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
   /**
    * Load cached modules from localStorage.
-   * Reconstructs EnabledModule objects from stored IDs using MODULE_REGISTRY.
+   * Reconstructs EnabledModule objects from stored IDs using fallback metadata.
    * Also loads apiModules if available in cache.
    * 
    * Requirements: 5.1, 5.2
@@ -512,7 +510,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
       // Rebuild locked modules with their required plans
       for (const id of data.lockedModuleIds) {
-        const metadata = getModuleMetadata(id as ModuleId);
+        const metadata = getFallbackModuleMetadata(id as ModuleId);
         if (metadata) {
           lockedModules.push({
             module: metadata,
@@ -942,7 +940,7 @@ export const getModuleAccessStatic = (
   }
 
   // Module not found in either list - get metadata directly
-  const metadata = getModuleMetadata(moduleId as ModuleId);
+  const metadata = getFallbackModuleMetadata(moduleId as ModuleId);
   return {
     isEnabled: false,
     isLocked: false,

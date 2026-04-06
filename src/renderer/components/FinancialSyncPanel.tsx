@@ -142,6 +142,20 @@ const canRetry = (item: SyncFinancialQueueItem): boolean => {
   return status ? RETRYABLE_STATUSES.has(status) : false;
 };
 
+const canRepairOrphanedAdjustment = (item: SyncFinancialQueueItem): boolean => {
+  const status = normalizeStatus(item.status);
+  if (item.entityType !== 'payment_adjustment' || status !== 'failed') {
+    return false;
+  }
+
+  const normalizedError =
+    typeof item.lastError === 'string' ? item.lastError.toLowerCase() : '';
+  return (
+    normalizedError.includes('order not found') ||
+    normalizedError.includes('payment does not belong to the provided order')
+  );
+};
+
 export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
   isOpen,
   onClose,
@@ -226,13 +240,22 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
   const failedItemsCount = actionableItems.filter(
     (item) => item.normalizedStatus === 'failed',
   ).length;
+  const repairableOrphanedAdjustmentCount = actionableItems.filter((item) =>
+    canRepairOrphanedAdjustment(item),
+  ).length;
   const blockerMetadata = useMemo(
     () => ({
       actionableSummaryCount,
       failedItemsCount,
+      repairableOrphanedAdjustmentCount,
       hasQueueDetails,
     }),
-    [actionableSummaryCount, failedItemsCount, hasQueueDetails],
+    [
+      actionableSummaryCount,
+      failedItemsCount,
+      repairableOrphanedAdjustmentCount,
+      hasQueueDetails,
+    ],
   );
 
   useBlockerRegistration({
@@ -264,6 +287,19 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
       onRefresh();
     } catch (err) {
       console.error('Failed to retry all', err);
+    } finally {
+      setProcessing(null);
+    }
+  };
+
+  const handleRepairOrphanedAdjustments = async () => {
+    setProcessing('repair-orphaned');
+    try {
+      await bridge.sync.requeueOrphanedFinancial();
+      await loadItems();
+      onRefresh();
+    } catch (err) {
+      console.error('Failed to repair orphaned financial items', err);
     } finally {
       setProcessing(null);
     }
@@ -399,6 +435,21 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                       {processing === 'all'
                         ? t('sync.financial.retryingAll')
                         : t('sync.financial.retryAll')}
+                    </button>
+                  )}
+                  {repairableOrphanedAdjustmentCount > 0 && (
+                    <button
+                      onClick={handleRepairOrphanedAdjustments}
+                      disabled={!!processing}
+                      className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm font-bold text-amber-700 transition-all hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-400/30 dark:text-amber-200 dark:hover:bg-amber-400/10"
+                    >
+                      {processing === 'repair-orphaned'
+                        ? t('sync.financial.repairingOrphanedAdjustments', {
+                            defaultValue: 'Repairing order links...',
+                          })
+                        : t('sync.financial.repairOrphanedAdjustments', {
+                            defaultValue: 'Repair orphaned adjustments',
+                          })}
                     </button>
                   )}
                 </div>
