@@ -15,6 +15,7 @@ import {
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from '../renderer/services/terminal-credentials';
+import { getSyncQueueBridge } from '../renderer/services/SyncQueueBridge';
 import { resolvePersistedCustomerId } from '../renderer/utils/persisted-customer-id';
 
 // Utility functions - now using centralized debug logger
@@ -200,6 +201,127 @@ export class OrderService {
     })
 
     return headers
+  }
+
+  private shouldQueueOrderCreate(error: unknown): boolean {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return true;
+    }
+
+    const message =
+      error instanceof Error ? error.message.toLowerCase() : String(error || '').toLowerCase();
+    const posError = error as { type?: string; retryable?: boolean } | undefined;
+
+    return (
+      posError?.type === 'network' ||
+      posError?.retryable === true ||
+      message.includes('network') ||
+      message.includes('timeout') ||
+      message.includes('aborterror') ||
+      message.includes('failed to fetch')
+    );
+  }
+
+  private buildQueuedOrderSnapshot(params: {
+    orderData: Partial<Order>;
+    queuedOrderId: string;
+    orderType: string;
+    paymentStatus: string;
+    branchId: string | null;
+    organizationId: string | null;
+    requestId: string;
+  }): Order {
+    const {
+      orderData,
+      queuedOrderId,
+      orderType,
+      paymentStatus,
+      branchId,
+      organizationId,
+      requestId,
+    } = params;
+    const now = new Date().toISOString();
+    const generatedOrderNumber = `OFF-${Date.now().toString(36).toUpperCase()}`;
+    const status = mapStatusForPOS((orderData.status || 'pending') as any) as Order['status'];
+    const orderNumber =
+      (orderData.orderNumber as string | undefined) ||
+      orderData.order_number ||
+      generatedOrderNumber;
+
+    return {
+      ...(orderData as Order),
+      id: queuedOrderId,
+      status,
+      orderType: (orderData.orderType ?? orderData.order_type ?? orderType) as any,
+      order_type: (orderData.order_type ?? orderData.orderType ?? orderType) as any,
+      orderNumber,
+      order_number: orderNumber,
+      totalAmount: (orderData.totalAmount ?? orderData.total_amount ?? 0) as number,
+      total_amount: (orderData.total_amount ?? orderData.totalAmount ?? 0) as number,
+      paymentStatus: (orderData.paymentStatus ?? orderData.payment_status ?? paymentStatus) as any,
+      payment_status: (orderData.payment_status ?? orderData.paymentStatus ?? paymentStatus) as any,
+      createdAt: now,
+      created_at: now,
+      updatedAt: now,
+      updated_at: now,
+      clientRequestId: requestId as any,
+      client_request_id: requestId,
+      branch_id: branchId || (orderData as any).branch_id || undefined,
+      organization_id: organizationId || (orderData as any).organization_id || undefined,
+      sync_status: 'pending' as any,
+      syncStatus: 'pending' as any,
+      savedForRetry: true as any,
+    } as Order;
+  }
+
+  private async enqueueParityOrderCreate(params: {
+    apiPayload: Record<string, unknown>;
+    orderData: Partial<Order>;
+    requestId: string;
+    orderType: string;
+    paymentStatus: string;
+    branchId: string | null;
+    organizationId: string | null;
+  }): Promise<Order> {
+    const {
+      apiPayload,
+      orderData,
+      requestId,
+      orderType,
+      paymentStatus,
+      branchId,
+      organizationId,
+    } = params;
+    const queuedOrderId = globalThis.crypto?.randomUUID?.() ?? `queued-${Date.now()}`;
+    const queuePayload = {
+      ...apiPayload,
+      id: queuedOrderId,
+      client_request_id: requestId,
+      status: (orderData.status || 'pending') as string,
+    };
+
+    await getSyncQueueBridge().enqueue({
+      tableName: 'orders',
+      recordId: queuedOrderId,
+      operation: 'INSERT',
+      data: JSON.stringify(queuePayload),
+      organizationId: organizationId || 'pending-org',
+      priority:
+        paymentStatus === 'paid' || paymentStatus === 'partially_paid' ? 1 : 0,
+      moduleType: 'orders',
+      conflictStrategy: 'server-wins',
+      version: 1,
+    });
+
+    return this.buildQueuedOrderSnapshot({
+      orderData,
+      queuedOrderId,
+      orderType,
+      paymentStatus,
+      branchId,
+      organizationId,
+      requestId,
+    });
   }
 
   // Fetch orders - prefer local (IPC) first, fallback to Admin API
@@ -471,6 +593,17 @@ export class OrderService {
 
   // Create new order - local-first via IPC, fallback to Admin API
   async createOrder(orderData: Partial<Order>): Promise<Order> {
+    let queuedFallbackContext:
+      | {
+          apiPayload: Record<string, unknown>;
+          requestId: string;
+          orderType: string;
+          paymentStatus: string;
+          branchId: string | null;
+          organizationId: string | null;
+        }
+      | null = null;
+
     try {
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
       const requestId =
@@ -676,6 +809,8 @@ export class OrderService {
         staffId: (orderData as any).staffId ?? (orderData as any).staff_id ?? null,
       };
 
+      let bridgeCreateError: Error | null = null;
+
       // 1) Try local-first via IPC (native Rust backend)
       const bridge = this.getBridge();
       if (bridge) {
@@ -711,20 +846,20 @@ export class OrderService {
           // Bridge returned a non-success response
           const ipcError = resp?.error || 'Bridge create returned unexpected response';
           if (!this.allowAdminApiFallback()) {
-            // In desktop runtime, the Rust backend IS the backend. Don't fall through
-            // to the Admin HTTP API — it would bypass local SQLite and hang.
-            throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
+            bridgeCreateError = ErrorFactory.system(
+              typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
+            );
+          } else {
+            debugLogger.warn('Bridge create returned error; will try Admin API', ipcError, 'OrderService');
           }
-          debugLogger.warn('Bridge create returned error; will try Admin API', ipcError, 'OrderService');
         } catch (ipcErr) {
           if (!this.allowAdminApiFallback()) {
-            // In desktop runtime, surface the Rust error immediately instead of
-            // falling through to a slow/unreachable Admin API.
             const errMsg = (ipcErr as any)?.message || String(ipcErr);
             debugLogger.error('Native bridge order create failed', ipcErr, 'OrderService');
-            throw ErrorFactory.system(errMsg);
+            bridgeCreateError = ErrorFactory.system(errMsg);
+          } else {
+            debugLogger.warn('Bridge create failed; will try Admin API', ipcErr, 'OrderService');
           }
-          debugLogger.warn('Bridge create failed; will try Admin API', ipcErr, 'OrderService');
         }
       }
 
@@ -931,6 +1066,15 @@ export class OrderService {
         staff_shift_id: activeCashierShiftId || null
       };
 
+      queuedFallbackContext = {
+        apiPayload,
+        requestId,
+        orderType,
+        paymentStatus,
+        branchId,
+        organizationId,
+      };
+
       // Validate branch_id is present
       if (!apiPayload.branch_id) {
         console.error('[OrderService] Missing branch_id! Please configure terminal in Connection Settings.');
@@ -940,6 +1084,13 @@ export class OrderService {
       // Warn if organization_id could not be resolved
       if (!apiPayload.organization_id) {
         console.warn('[OrderService] organization_id not configured. Order may fail organization validation on the server.');
+      }
+
+      if (bridgeCreateError && !this.allowAdminApiFallback()) {
+        return await this.enqueueParityOrderCreate({
+          ...queuedFallbackContext,
+          orderData,
+        });
       }
 
       console.log('[OrderService] Sending to Admin API:', {
@@ -999,6 +1150,21 @@ export class OrderService {
 
       return newOrder;
     } catch (error) {
+      if (queuedFallbackContext && this.shouldQueueOrderCreate(error)) {
+        try {
+          return await this.enqueueParityOrderCreate({
+            ...queuedFallbackContext,
+            orderData,
+          });
+        } catch (queueError) {
+          debugLogger.error(
+            'Failed to enqueue order in parity sync queue',
+            queueError,
+            'OrderService',
+          );
+        }
+      }
+
       const posError = ErrorFactory.network('Failed to create order');
       debugLogger.error('Failed to create order', error, 'OrderService');
       throw posError;

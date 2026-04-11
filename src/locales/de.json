@@ -1605,6 +1605,80 @@
       "exportSettings": "Einstellungen exportieren",
       "importSettings": "Einstellungen importieren"
     },
+    "connection": {
+      "syncPolicy": "Richtlinie synchronisieren"
+    },
+    "managedByAdmin": {
+      "title": "Von Admin verwaltet",
+      "helpText": "Der Admin steuert die Zugriffsrichtlinie. Dieses Terminal steuert Hardware und lokales Verhalten.",
+      "terminalUnitLabel": "Terminaleinheit",
+      "ownerLabel": "Besitzer {{owner}}",
+      "connectionLabel": "Verbindung",
+      "unassignedTerminal": "Nicht zugewiesenes Terminal",
+      "noAdminUrl": "Keine Admin-URL",
+      "syncStatusLabel": "Sync",
+      "enabledFeaturesLabel": "Aktivierte Funktionen",
+      "noRemoteFeaturesEnabled": "Keine Remote-Funktionen aktiviert",
+      "enabledModulesLabel": "Aktivierte Module",
+      "coreModulesOnly": "Nur Kernmodule",
+      "pinResetRequired": "Admin verlangt beim nächsten Login eine neue lokale PIN.",
+      "pinResetClear": "Keine ausstehende Remote-PIN-Zurücksetzung.",
+      "syncNow": "Richtlinie synchronisieren",
+      "syncHealth": {
+        "offline": "Offline",
+        "polling": "Abfrage",
+        "websocket": "Echtzeit",
+        "online": "Online",
+        "healthy": "Gesund",
+        "error": "Fehler",
+        "blocked": "Blockiert",
+        "unknown": "Unbekannt"
+      }
+    },
+    "paymentTerminals": {
+      "title": "Zahlungsterminals",
+      "label": "Zahlungsterminals",
+      "helpText": "ECR-Zahlungsgeräte konfigurieren",
+      "configureButton": "Konfigurieren"
+    },
+    "printQueue": {
+      "title": "Druckwarteschlange",
+      "helpText": "Jobs, die bereits an den LAN-Drucker gesendet wurden, können nicht vom Gerät zurückgerufen werden. Diese Steuerelemente stoppen oder wiederholen nur Jobs, die lokal auf diesem POS noch in der Warteschlange stehen.",
+      "pausedProfiles": "Pausen aktiv für: {{profiles}}",
+      "refresh": "Aktualisieren",
+      "resume": "Warteschlange fortsetzen",
+      "pause": "Warteschlange pausieren",
+      "cancelPending": "Ausstehende abbrechen",
+      "empty": "Derzeit sind keine lokalen Druckjobs in der Warteschlange.",
+      "defaultPrinter": "Standard",
+      "unknown": "Unbekannt",
+      "cancel": "Abbrechen",
+      "retry": "Erneut versuchen",
+      "loadFailed": "Druckwarteschlange konnte nicht geladen werden",
+      "resumed": "Druckwarteschlange fortgesetzt",
+      "paused": "Druckwarteschlange pausiert",
+      "updateFailed": "Druckwarteschlange konnte nicht aktualisiert werden",
+      "cancelledAll": "Druckjobs in der Warteschlange wurden abgebrochen",
+      "cancelAllFailed": "Druckjobs in der Warteschlange konnten nicht abgebrochen werden",
+      "cancelled": "Druckjob abgebrochen",
+      "cancelFailed": "Druckjob konnte nicht abgebrochen werden",
+      "retried": "Druckjob erneut in die Warteschlange gestellt",
+      "retryFailed": "Druckjob konnte nicht erneut versucht werden",
+      "columns": {
+        "job": "Job",
+        "status": "Status",
+        "printer": "Drucker",
+        "action": "Aktion"
+      },
+      "status": {
+        "pending": "Ausstehend",
+        "printing": "Druckt",
+        "failed": "Fehlgeschlagen",
+        "completed": "Abgeschlossen",
+        "cancelled": "Abgebrochen",
+        "paused": "Pausiert"
+      }
+    },
     "sections": {
       "general": "Allgemein",
       "terminal": "Terminal",
@@ -1658,13 +1732,28 @@
       "expenses": "Ausgaben",
       "staffPayments": "Personalzahlungen",
       "reports": "Berichte",
-      "settings": "Einstellungen"
+      "settings": "Einstellungen",
+      "ghostMode": "Ghost-Modus"
     },
     "printer": {
       "title": "Druckereinstellungen",
       "label": "Druckereinstellungen",
       "helpText": "Thermodrucker für Kassenbons konfigurieren",
       "configureButton": "Drucker konfigurieren",
+      "quickSetup": "Schnelleinrichtung",
+      "expertSettings": "Experteneinstellungen",
+      "verificationFirstHint": "Verwenden Sie zuerst die Schnelleinrichtung. Sie verifiziert einen funktionierenden Übertragungs- und Kodierungspfad, bevor Sie sich im Live-Betrieb auf den Drucker verlassen.",
+      "startQuickSetup": "Verifizierungsassistent starten",
+      "quickWizardAdvanced": "Experteneinstellungen",
+      "quickWizardDetectTitle": "Schritt 1: Drucker erkennen",
+      "quickWizardDetectHint": "Zuerst erkennen wir nahegelegene und installierte Drucker, aber kein Drucker gilt als druckbereit, bis die Verifizierung erfolgreich abgeschlossen ist.",
+      "quickWizardDraftOnlyHint": "Kompatibilitätsorientierte Einrichtung: Der Assistent testet Übertragung und Kodierung mit einem nicht gespeicherten Entwurfsprofil. Es werden keine temporären Druckerprofile erstellt.",
+      "quickWizardStep": {
+        "detect": "Erkennen",
+        "verify": "Prüfen",
+        "style": "Stil",
+        "save": "Speichern"
+      },
       "receiptPrinter": "Kassenbondrucker",
       "kitchenPrinter": "Küchendrucker",
       "labelPrinter": "Etikettendrucker",

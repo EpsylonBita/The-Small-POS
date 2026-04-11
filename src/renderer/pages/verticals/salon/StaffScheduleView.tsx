@@ -15,8 +15,10 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { getBridge, isBrowser } from '../../../../lib';
 import { posApiGet, posApiPost } from '../../../utils/api-helpers';
 import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
+import { offlineCreateStaffShift } from '../../../services/offline-mutations';
 
 interface StaffMember {
   id: string;
@@ -57,9 +59,16 @@ interface ScheduleShift {
 
 interface ApiResponse {
   success: boolean;
-  staff: StaffMember[];
-  shifts: ScheduleShift[];
-  totalCount: number;
+  data?: {
+    success?: boolean;
+    staff?: StaffMember[];
+    shifts?: ScheduleShift[];
+    totalCount?: number;
+    error?: string;
+  };
+  staff?: StaffMember[];
+  shifts?: ScheduleShift[];
+  totalCount?: number;
   error?: string;
 }
 
@@ -187,6 +196,7 @@ export const StaffScheduleView: React.FC = memo(() => {
   const [creatingShift, setCreatingShift] = useState(false);
 
   const isDark = resolvedTheme === 'dark';
+  const bridge = getBridge();
   const branchId = getSetting<string>('terminal', 'branch_id', '');
 
   const weekDays = useMemo(() => {
@@ -216,17 +226,24 @@ export const StaffScheduleView: React.FC = memo(() => {
       if (branchId) {
         params.append('branch_id', branchId);
       }
-      if (roleFilter !== 'all') {
-        params.append('role', roleFilter);
-      }
+      const response = isBrowser()
+        ? await posApiGet<ApiResponse>(`/pos/staff-schedule?${params.toString()}`)
+        : await bridge.staffSchedule.list({
+            start_date: currentWeekStart.toISOString(),
+            end_date: weekEnd.toISOString(),
+            branch_id: branchId || undefined,
+          }) as ApiResponse;
+      const payload = ((response as any).data ?? response) as {
+        staff?: StaffMember[];
+        shifts?: ScheduleShift[];
+        error?: string;
+      };
 
-      const response = await posApiGet<ApiResponse>(`/pos/staff-schedule?${params.toString()}`);
-
-      if (response.success && response.data?.staff) {
-        setStaff(response.data.staff);
-        setShifts(Array.isArray(response.data.shifts) ? response.data.shifts : []);
+      if (response.success && Array.isArray(payload.staff)) {
+        setStaff(payload.staff);
+        setShifts(Array.isArray(payload.shifts) ? payload.shifts : []);
       } else {
-        setError(response.error || response.data?.error || 'Failed to fetch staff data');
+        setError(response.error || payload.error || 'Failed to fetch staff data');
       }
     } catch (err: any) {
       console.error('[StaffScheduleView] Fetch error:', err);
@@ -397,20 +414,35 @@ export const StaffScheduleView: React.FC = memo(() => {
 
     try {
       setCreatingShift(true);
-      const response = await posApiPost<{ success?: boolean; error?: string }>('/pos/staff-schedule', {
-        staff_id: createStaffId,
-        start_time: startIso,
-        end_time: endIso,
-        notes: createNotes.trim() || null,
-        status: 'scheduled',
-      });
+      if (isBrowser()) {
+        const response = await posApiPost<{ success?: boolean; error?: string }>('/pos/staff-schedule', {
+          staff_id: createStaffId,
+          start_time: startIso,
+          end_time: endIso,
+          notes: createNotes.trim() || null,
+          status: 'scheduled',
+        });
 
-      const failed = !response.success || response.data?.success === false;
-      if (failed) {
-        throw new Error(response.error || response.data?.error || 'Failed to create shift');
+        const failed = !response.success || response.data?.success === false;
+        if (failed) {
+          throw new Error(response.error || response.data?.error || 'Failed to create shift');
+        }
+      } else {
+        await offlineCreateStaffShift({
+          staff_id: createStaffId,
+          start_time: startIso,
+          end_time: endIso,
+          notes: createNotes.trim() || null,
+          status: 'scheduled',
+          branch_id: branchId || undefined,
+        });
       }
 
-      toast.success(t('staffSchedule.shiftCreated', 'Shift created'));
+      toast.success(
+        isBrowser()
+          ? t('staffSchedule.shiftCreated', 'Shift created')
+          : t('common.savedLocallyQueued', 'Saved locally and queued'),
+      );
       setCreateModalOpen(false);
       setCreateModalDate(null);
       await fetchStaffData();

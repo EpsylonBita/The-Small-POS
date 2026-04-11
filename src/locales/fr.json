@@ -1605,6 +1605,80 @@
       "exportSettings": "Exporter les paramètres",
       "importSettings": "Importer les paramètres"
     },
+    "connection": {
+      "syncPolicy": "Synchroniser la politique"
+    },
+    "managedByAdmin": {
+      "title": "Géré par l'admin",
+      "helpText": "L'admin contrôle la politique d'accès. Ce terminal contrôle le matériel et le comportement local.",
+      "terminalUnitLabel": "Unité terminal",
+      "ownerLabel": "Propriétaire {{owner}}",
+      "connectionLabel": "Connexion",
+      "unassignedTerminal": "Terminal non attribué",
+      "noAdminUrl": "Aucune URL admin",
+      "syncStatusLabel": "Sync",
+      "enabledFeaturesLabel": "Fonctionnalités activées",
+      "noRemoteFeaturesEnabled": "Aucune fonctionnalité distante activée",
+      "enabledModulesLabel": "Modules activés",
+      "coreModulesOnly": "Modules principaux uniquement",
+      "pinResetRequired": "L'admin exige un nouveau PIN local à la prochaine connexion.",
+      "pinResetClear": "Aucune réinitialisation de PIN distante en attente.",
+      "syncNow": "Synchroniser la politique",
+      "syncHealth": {
+        "offline": "Hors ligne",
+        "polling": "Interrogation",
+        "websocket": "Temps réel",
+        "online": "En ligne",
+        "healthy": "Sain",
+        "error": "Erreur",
+        "blocked": "Bloqué",
+        "unknown": "Inconnu"
+      }
+    },
+    "paymentTerminals": {
+      "title": "Terminaux de paiement",
+      "label": "Terminaux de paiement",
+      "helpText": "Configurer les appareils de paiement ECR",
+      "configureButton": "Configurer"
+    },
+    "printQueue": {
+      "title": "File d'impression",
+      "helpText": "Les tâches déjà envoyées à l'imprimante LAN ne peuvent pas être rappelées depuis l'appareil. Ces contrôles arrêtent ou relancent uniquement les tâches encore en file d'attente localement sur ce POS.",
+      "pausedProfiles": "Profils en pause pour : {{profiles}}",
+      "refresh": "Actualiser",
+      "resume": "Reprendre la file",
+      "pause": "Mettre en pause la file",
+      "cancelPending": "Annuler en attente",
+      "empty": "Aucune tâche d'impression locale n'est actuellement en file d'attente.",
+      "defaultPrinter": "Par défaut",
+      "unknown": "Inconnu",
+      "cancel": "Annuler",
+      "retry": "Réessayer",
+      "loadFailed": "Échec du chargement de la file d'impression",
+      "resumed": "File d'impression reprise",
+      "paused": "File d'impression mise en pause",
+      "updateFailed": "Échec de la mise à jour de la file d'impression",
+      "cancelledAll": "Les tâches d'impression en attente ont été annulées",
+      "cancelAllFailed": "Échec de l'annulation des tâches d'impression en attente",
+      "cancelled": "Tâche d'impression annulée",
+      "cancelFailed": "Échec de l'annulation de la tâche d'impression",
+      "retried": "Tâche d'impression remise en file",
+      "retryFailed": "Échec de la relance de la tâche d'impression",
+      "columns": {
+        "job": "Tâche",
+        "status": "Statut",
+        "printer": "Imprimante",
+        "action": "Action"
+      },
+      "status": {
+        "pending": "En attente",
+        "printing": "Impression",
+        "failed": "Échec",
+        "completed": "Terminée",
+        "cancelled": "Annulée",
+        "paused": "En pause"
+      }
+    },
     "sections": {
       "general": "Général",
       "terminal": "Terminal",
@@ -1658,13 +1732,28 @@
       "expenses": "Dépenses",
       "staffPayments": "Paiements du personnel",
       "reports": "Rapports",
-      "settings": "Paramètres"
+      "settings": "Paramètres",
+      "ghostMode": "Mode fantôme"
     },
     "printer": {
       "title": "Paramètres d'impression",
       "label": "Paramètres d'impression",
       "helpText": "Configurer l'imprimante thermique de reçus",
       "configureButton": "Configurer l'imprimante",
+      "quickSetup": "Configuration rapide",
+      "expertSettings": "Paramètres experts",
+      "verificationFirstHint": "Utilisez d'abord la configuration rapide. Elle vérifie un chemin de transport et d'encodage fonctionnel avant de compter sur une imprimante en service réel.",
+      "startQuickSetup": "Démarrer l'assistant de vérification",
+      "quickWizardAdvanced": "Paramètres experts",
+      "quickWizardDetectTitle": "Étape 1 : détecter les imprimantes",
+      "quickWizardDetectHint": "Nous détectons d'abord les imprimantes proches et installées, mais aucune n'est considérée comme imprimable tant que la vérification n'a pas réussi.",
+      "quickWizardDraftOnlyHint": "Configuration axée sur la compatibilité : l'assistant teste le transport et l'encodage avec un profil brouillon non enregistré. Aucun profil d'imprimante temporaire n'est créé.",
+      "quickWizardStep": {
+        "detect": "Détection",
+        "verify": "Vérification",
+        "style": "Style",
+        "save": "Enregistrer"
+      },
       "receiptPrinter": "Imprimante de reçus",
       "kitchenPrinter": "Imprimante cuisine",
       "labelPrinter": "Imprimante d'étiquettes",

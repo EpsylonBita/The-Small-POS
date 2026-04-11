@@ -17,6 +17,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { useTheme } from '../contexts/theme-context'
 import { getBridge, offEvent, onEvent } from '../../lib'
+import { getOfflineActionState } from '../services/offline-page-capabilities'
 import {
   CreditCard,
   Plus,
@@ -492,6 +493,9 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
   >()
   const [showPaymentDialog, setShowPaymentDialog] = useState(false)
   const [paymentDeviceId, setPaymentDeviceId] = useState<string | undefined>()
+  const discoverAction = getOfflineActionState('payment_terminals', 'discover', isOnline)
+  const connectAction = getOfflineActionState('payment_terminals', 'connect', isOnline)
+  const testAction = getOfflineActionState('payment_terminals', 'test', isOnline)
 
   // Monitor online status
   useEffect(() => {
@@ -605,6 +609,11 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
 
   const handleConnect = useCallback(
     async (deviceId: string) => {
+      if (connectAction.disabled) {
+        toast.error(connectAction.message || t('common.requiresOnline', 'This action requires an online connection.'))
+        return
+      }
+
       try {
         setStatuses((prev) => ({
           ...prev,
@@ -632,11 +641,16 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
         }))
       }
     },
-    [t]
+    [connectAction.disabled, connectAction.message, t]
   )
 
   const handleDisconnect = useCallback(
     async (deviceId: string) => {
+      if (connectAction.disabled) {
+        toast.error(connectAction.message || t('common.requiresOnline', 'This action requires an online connection.'))
+        return
+      }
+
       try {
         await ecrAPI.disconnectDevice(deviceId)
         toast.success(t('ecr.disconnectSuccess', 'Terminal disconnected'))
@@ -648,7 +662,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
         )
       }
     },
-    [t]
+    [connectAction.disabled, connectAction.message, t]
   )
 
   const handleEdit = useCallback((device: ECRDevice) => {
@@ -750,9 +764,14 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
   )
 
   const handleTestPayment = useCallback((deviceId: string) => {
+    if (testAction.disabled) {
+      toast.error(testAction.message || t('common.requiresOnline', 'This action requires an online connection.'))
+      return
+    }
+
     setPaymentDeviceId(deviceId)
     setShowPaymentDialog(true)
-  }, [])
+  }, [testAction.disabled, testAction.message, t])
 
   const handlePaymentComplete = useCallback(
     (response: TransactionResponse) => {
@@ -860,7 +879,9 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
               {/* Discover Button */}
               <button
                 onClick={() => setShowDiscoveryModal(true)}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'}`}
+                disabled={discoverAction.disabled}
+                title={discoverAction.message || undefined}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'} disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 <Search size={18} />
                 {t('ecr.discover', 'Discover')}
@@ -873,7 +894,9 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                   setSelectedDiscoveredDevice(undefined)
                   setShowConfigModal(true)
                 }}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-green-100 text-green-600 hover:bg-green-200'}`}
+                disabled={discoverAction.disabled}
+                title={discoverAction.message || undefined}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-green-100 text-green-600 hover:bg-green-200'} disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 <Plus size={18} />
                 {t('ecr.addManual', 'Add Terminal')}
@@ -936,7 +959,9 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
             </p>
             <button
               onClick={() => setShowDiscoveryModal(true)}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'}`}
+              disabled={discoverAction.disabled}
+              title={discoverAction.message || undefined}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'} disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               <Search size={18} />
               {t('ecr.discoverTerminals', 'Discover Terminals')}
@@ -957,6 +982,8 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                 onEdit={() => handleEdit(device)}
                 onDelete={() => handleDelete(device.id)}
                 onSetDefault={() => handleSetDefault(device.id)}
+                connectionActionsDisabled={connectAction.disabled}
+                connectionActionsDisabledReason={connectAction.message}
               />
             ))}
           </div>
@@ -985,7 +1012,8 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                   <button
                     key={device.id}
                     onClick={() => handleTestPayment(device.id)}
-                    disabled={statuses[device.id]?.state !== 'connected'}
+                    disabled={statuses[device.id]?.state !== 'connected' || testAction.disabled}
+                    title={testAction.message || undefined}
                     className={`px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'}`}
                   >
                     {t('ecr.testPayment.button', 'Test {{name}}', { name: device.name })}

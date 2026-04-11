@@ -32,6 +32,14 @@ import {
   type DiagnosticsSystemHealth,
   type DiagnosticsExportOptions,
 } from '../../lib';
+import {
+  PARITY_QUEUE_STATUS_EVENT,
+  REALTIME_STATUS_EVENT,
+  runParitySyncCycle,
+} from '../services/ParitySyncCoordinator';
+import { getSyncQueueBridge } from '../services/SyncQueueBridge';
+import type { QueueStatus } from '../../../../shared/pos/sync-queue-types';
+import type { SubscriptionConnectionStatus } from '../services/RealtimeManager';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,6 +61,13 @@ interface SyncStatus {
   pendingPaymentItems: number;
   failedPaymentItems: number;
   lastQueueFailure: QueueFailureInfo | null;
+}
+
+interface ParityQueueSnapshot {
+  pending: number;
+  failed: number;
+  conflicts: number;
+  total: number;
 }
 
 interface SyncStatusIndicatorProps {
@@ -264,6 +279,13 @@ const normalizeStatus = (status: any): SyncStatus => {
   };
 };
 
+const normalizeParityQueueStatus = (status: QueueStatus | null | undefined): ParityQueueSnapshot => ({
+  pending: coerceNumber(status?.pending, 0),
+  failed: coerceNumber(status?.failed, 0),
+  conflicts: coerceNumber(status?.conflicts, 0),
+  total: coerceNumber(status?.total, 0),
+});
+
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -412,6 +434,11 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     lastQueueFailure: null,
   }));
   const [financialStats, setFinancialStats] = useState(defaultFinancialStats);
+  const [parityQueueStatus, setParityQueueStatus] = useState<ParityQueueSnapshot>(() =>
+    normalizeParityQueueStatus(null),
+  );
+  const [realtimeStatus, setRealtimeStatus] =
+    useState<SubscriptionConnectionStatus>('disconnected');
 
   // --- UI state ---
   const [showDetailPanel, setShowDetailPanel] = useState(showDetails);
@@ -441,23 +468,44 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   const loadFinancialStats = useCallback(async () => {
     try {
-      const stats = await bridge.sync.getFinancialStats();
+      const queueItems = await getSyncQueueBridge().listItems({
+        limit: 500,
+        moduleType: 'financial',
+      });
+      const stats = {
+        driver_earnings: { pending: 0, failed: 0 },
+        staff_payments: { pending: 0, failed: 0 },
+        shift_expenses: { pending: 0, failed: 0 },
+      };
+      for (const item of queueItems) {
+        const bucket =
+          item.tableName === 'driver_earnings'
+            ? stats.driver_earnings
+            : item.tableName === 'staff_payments'
+              ? stats.staff_payments
+              : item.tableName === 'shift_expenses'
+                ? stats.shift_expenses
+                : null;
+        if (!bucket) {
+          continue;
+        }
+        if (item.status === 'failed' || item.status === 'conflict') {
+          bucket.failed += 1;
+        } else {
+          bucket.pending += 1;
+        }
+      }
       setFinancialStats(normalizeFinancialStats(stats));
     } catch (err) {
       console.error('Failed to load financial stats:', err);
     }
-  }, [bridge.sync]);
+  }, []);
 
   const loadSyncStatus = useCallback(async () => {
     try {
       const status = await bridge.sync.getStatus();
       setSyncStatus(normalizeStatus(status));
-      const fs = (status as any)?.financialStats;
-      if (fs) {
-        setFinancialStats(normalizeFinancialStats(fs));
-      } else {
-        await loadFinancialStats();
-      }
+      await loadFinancialStats();
     } catch (error) {
       console.error('Failed to load sync status:', error);
     }
@@ -466,13 +514,19 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   useEffect(() => {
     loadSyncStatus();
 
+    const handleParityQueueStatus = (status: QueueStatus | null) => {
+      setParityQueueStatus(normalizeParityQueueStatus(status));
+    };
+
+    const handleRealtimeStatus = (payload: {
+      status?: SubscriptionConnectionStatus;
+    }) => {
+      setRealtimeStatus(payload?.status || 'disconnected');
+    };
+
     const handleSyncStatusUpdate = async (status: any) => {
       setSyncStatus(normalizeStatus(status));
-      if (status?.financialStats) {
-        setFinancialStats(normalizeFinancialStats(status.financialStats));
-      } else {
-        await loadFinancialStats();
-      }
+      await loadFinancialStats();
     };
 
     const handleNetworkStatus = ({ isOnline }: { isOnline: boolean }) => {
@@ -481,6 +535,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
     onEvent('sync:status', handleSyncStatusUpdate);
     onEvent('network:status', handleNetworkStatus);
+    onEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
+    onEvent(REALTIME_STATUS_EVENT, handleRealtimeStatus);
 
     const handleMenuRefreshed = () => {
       setJustRefreshed(true);
@@ -494,6 +550,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     return () => {
       offEvent('sync:status', handleSyncStatusUpdate);
       offEvent('network:status', handleNetworkStatus);
+      offEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
+      offEvent(REALTIME_STATUS_EVENT, handleRealtimeStatus);
       window.removeEventListener(
         'menu-sync:refreshed',
         handleMenuRefreshed as EventListener,
@@ -545,19 +603,23 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     financialStats.driver_earnings.failed +
     financialStats.staff_payments.failed +
     financialStats.shift_expenses.failed;
+  const parityPendingCount = parityQueueStatus.pending;
+  const parityFailedCount = parityQueueStatus.failed;
+  const parityConflictCount = parityQueueStatus.conflicts;
 
   const hasErrors =
     !!syncStatus.error ||
-    syncStatus.failedPaymentItems > 0 ||
-    financialFailedCount > 0;
+    financialFailedCount > 0 ||
+    parityFailedCount > 0 ||
+    parityConflictCount > 0;
 
   const hasPending =
     syncStatus.pendingItems > 0 ||
-    syncStatus.pendingPaymentItems > 0 ||
     syncStatus.backpressureDeferred > 0 ||
     syncStatus.queuedRemote > 0 ||
     syncStatus.syncInProgress ||
-    financialPendingCount > 0;
+    financialPendingCount > 0 ||
+    parityPendingCount > 0;
 
   const queueFailure = syncStatus.lastQueueFailure;
   const queueFailureNextRetryTs = queueFailure?.nextRetryAt
@@ -677,7 +739,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const handleForceSync = async () => {
     try {
       setSyncStatus((prev) => ({ ...prev, syncInProgress: true }));
-      await bridge.sync.force();
+      await runParitySyncCycle();
       toast.success(t('sync.messages.syncComplete') || 'Sync completed');
       setTimeout(async () => {
         await loadSyncStatus();
@@ -745,7 +807,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     try {
       setRetryingBlockedOrder(true);
       await bridge.orders.forceSyncRetry(blocker.entityId);
-      await bridge.sync.force();
+      await runParitySyncCycle();
       toast.success(
         t('sync.blocker.retryScheduled', {
           defaultValue: 'Order retry scheduled',
@@ -781,7 +843,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const syncBlockerDetails = systemHealth?.syncBlockerDetails ?? [];
 
   const totalPending =
-    syncStatus.pendingItems + syncStatus.pendingPaymentItems;
+    syncStatus.pendingItems + financialPendingCount + parityPendingCount;
   const nextRetryAt = syncStatus.oldestNextRetryAt ?? queueFailure?.nextRetryAt ?? null;
   const hasInvalidOrders = (systemHealth?.invalidOrders?.count ?? 0) > 0;
   const advancedIssueCount =
@@ -968,6 +1030,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 <span className={cn(metaChipClass, healthColor)}>
                   {t('sync.dashboard.healthScoreLabel')}: {Math.round(syncStatus.terminalHealth)}%
                 </span>
+                <span className={metaChipClass}>
+                  {t('sync.dashboard.realtimeLabel', { defaultValue: 'Realtime' })}: {realtimeStatus}
+                </span>
               </div>
             </div>
           </div>
@@ -1033,18 +1098,38 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               : 'text-emerald-600 dark:text-emerald-300',
         })}
         {renderMetricTile({
-          label: t('sync.dashboard.pendingPayments'),
-          value: syncStatus.pendingPaymentItems,
+          label: t('sync.dashboard.parityQueue', {
+            defaultValue: 'Parity Queue Pending',
+          }),
+          value: parityPendingCount,
           valueClassName:
-            syncStatus.pendingPaymentItems > 0
+            parityPendingCount > 0
+              ? 'text-amber-600 dark:text-amber-300'
+              : 'text-emerald-600 dark:text-emerald-300',
+        })}
+        {renderMetricTile({
+          label: t('sync.dashboard.parityConflicts', {
+            defaultValue: 'Parity Queue Conflicts',
+          }),
+          value: parityConflictCount,
+          valueClassName:
+            parityConflictCount > 0
+              ? 'text-red-600 dark:text-red-300'
+              : 'text-emerald-600 dark:text-emerald-300',
+        })}
+        {renderMetricTile({
+          label: t('sync.dashboard.pendingPayments'),
+          value: financialPendingCount,
+          valueClassName:
+            financialPendingCount > 0
               ? 'text-amber-600 dark:text-amber-300'
               : 'text-emerald-600 dark:text-emerald-300',
         })}
         {renderMetricTile({
           label: t('sync.dashboard.failedPayments'),
-          value: syncStatus.failedPaymentItems,
+          value: financialFailedCount,
           valueClassName:
-            syncStatus.failedPaymentItems > 0
+            financialFailedCount > 0
               ? 'text-red-600 dark:text-red-300'
               : 'text-emerald-600 dark:text-emerald-300',
         })}

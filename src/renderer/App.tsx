@@ -28,9 +28,9 @@ import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
 import { useCallerIdNotifications } from "./hooks/useCallerIdNotifications";
 import { useWindowState } from "./hooks/useWindowState";
-import { updateAdminUrlFromSettings } from "../config/environment";
+import { environment, updateAdminUrlFromSettings } from "../config/environment";
 import { setSupabaseContext } from "../shared/supabase-config";
-import { getBridge, isBrowser, offEvent, onEvent } from "../lib";
+import { emitCompatEvent, getBridge, isBrowser, offEvent, onEvent } from "../lib";
 import {
   getCachedTerminalCredentials,
   clearTerminalCredentialCache,
@@ -38,6 +38,13 @@ import {
   updateTerminalCredentialCache,
 } from "./services/terminal-credentials";
 import { subscribeToAdminOrderDeletedEvents } from "./services/OrderDeleteRealtimeService";
+import { DesktopRealtimeManager } from "./services/RealtimeManager";
+import {
+  emitParityQueueStatus,
+  REALTIME_STATUS_EVENT,
+  runParitySyncCycle,
+} from "./services/ParitySyncCoordinator";
+import { useOrderStore } from "./hooks/useOrderStore";
 
 const INVALID_SESSION_IDENTITY_VALUES = new Set([
   '',
@@ -529,9 +536,14 @@ function AppContent() {
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
   const windowState = useWindowState();
+  const silentRefreshOrders = useOrderStore((state) => state.silentRefresh);
 
   // Auto-check for updates on app startup
   useEffect(() => {
+    if (environment.NODE_ENV === 'development') {
+      return;
+    }
+
     if (
       !autoUpdater.hydrated ||
       autoUpdater.ready ||
@@ -628,6 +640,126 @@ function AppContent() {
       window.removeEventListener('offline', handleOffline);
     };
   }, [user]);
+
+  useEffect(() => {
+    if (!user || isBrowser()) {
+      return;
+    }
+
+    let disposed = false;
+
+    const refreshParityQueueStatus = async () => {
+      await emitParityQueueStatus();
+    };
+
+    const syncNow = async () => {
+      try {
+        await runParitySyncCycle();
+      } catch (error) {
+        if (!disposed) {
+          console.warn('[App] Parity sync cycle failed:', error);
+        }
+      }
+    };
+
+    void refreshParityQueueStatus();
+    void syncNow();
+
+    const intervalId = window.setInterval(() => {
+      void refreshParityQueueStatus();
+    }, 15000);
+
+    const handleOnline = () => {
+      void syncNow();
+    };
+
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || isBrowser()) {
+      return;
+    }
+
+    let disposed = false;
+    let manager: DesktopRealtimeManager | null = null;
+
+    const startRealtime = async () => {
+      try {
+        const credentials = await refreshTerminalCredentialCache();
+        const organizationId = normalizeSessionIdentityValue(credentials.organizationId);
+
+        if (
+          disposed ||
+          !organizationId ||
+          !environment.SUPABASE_URL ||
+          !environment.SUPABASE_ANON_KEY
+        ) {
+          return;
+        }
+
+        manager = new DesktopRealtimeManager({
+          supabaseUrl: environment.SUPABASE_URL,
+          supabaseKey: environment.SUPABASE_ANON_KEY,
+          organizationId,
+          onOrderChange: () => {
+            void silentRefreshOrders().catch(() => {});
+          },
+          onConfigChange: async (payload) => {
+            try {
+              await bridge.terminalConfig.syncFromAdmin();
+            } catch (error) {
+              console.warn('[App] Failed to refresh terminal config after realtime update:', error);
+            }
+            emitCompatEvent('terminal-config-updated', payload.new || payload.old || payload);
+          },
+          onModuleChange: (payload) => {
+            emitCompatEvent('modules:refresh-needed', payload.new || payload.old || payload);
+          },
+          onFullSyncNeeded: () => {
+            void runParitySyncCycle()
+              .then(() => silentRefreshOrders().catch(() => {}))
+              .catch((error) => {
+                console.warn('[App] Full realtime sync failed:', error);
+              });
+          },
+          onApiKeyRevoked: () => {
+            toast.error(
+              t('sync.messages.syncFailed', 'Sync failed') +
+                ': realtime credentials were rejected.',
+            );
+          },
+          onStatusChange: (status) => {
+            emitCompatEvent(REALTIME_STATUS_EVENT, { status });
+          },
+        });
+
+        emitCompatEvent(REALTIME_STATUS_EVENT, {
+          status: manager.getConnectionStatus(),
+        });
+        await manager.connect();
+      } catch (error) {
+        if (!disposed) {
+          console.warn('[App] Failed to start realtime manager:', error);
+          emitCompatEvent(REALTIME_STATUS_EVENT, { status: 'error' });
+        }
+      }
+    };
+
+    void startRealtime();
+
+    return () => {
+      disposed = true;
+      manager?.disconnect();
+      emitCompatEvent(REALTIME_STATUS_EVENT, { status: 'disconnected' });
+    };
+  }, [bridge.terminalConfig, silentRefreshOrders, t, user]);
 
   // Track hash route for unauthenticated screens so UI updates without reload
   const [hash, setHash] = useState<string>(typeof window !== 'undefined' ? window.location.hash : '');

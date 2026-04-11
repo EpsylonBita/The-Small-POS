@@ -4,7 +4,12 @@ import { useTranslation } from 'react-i18next';
 import { Clock, User, Filter, RefreshCw, WifiOff } from 'lucide-react';
 import { useTheme } from '../../../contexts/theme-context';
 import { useSystemClock } from '../../../hooks/useSystemClock';
+import { getBridge, isBrowser } from '../../../../lib';
 import { posApiGet, posApiPatch } from '../../../utils/api-helpers';
+import {
+  offlineAssignHousekeepingStaff,
+  offlineUpdateHousekeepingStatus,
+} from '../../../services/offline-mutations';
 import { toLocalDateString } from '../../../utils/date';
 import { offEvent, onEvent } from '../../../../lib';
 
@@ -45,6 +50,7 @@ export const HousekeepingView: React.FC = memo(() => {
   const now = useSystemClock();
   const isDark = resolvedTheme === 'dark';
   const today = toLocalDateString(now);
+  const bridge = getBridge();
 
   const [tasks, setTasks] = useState<HousekeepingTask[]>([]);
   const [staff, setStaff] = useState<StaffMember[]>([]);
@@ -80,18 +86,30 @@ export const HousekeepingView: React.FC = memo(() => {
     weekEnd.setDate(weekEnd.getDate() + 6);
     weekEnd.setHours(23, 59, 59, 999);
 
-    const response = await posApiGet<{
-      success: boolean;
-      staff?: Array<{ id: string; name: string; firstName?: string; lastName?: string }>;
-    }>(
-      `/api/pos/staff-schedule?start_date=${encodeURIComponent(weekStart.toISOString())}&end_date=${encodeURIComponent(weekEnd.toISOString())}`
-    );
+    const response = isBrowser()
+      ? await posApiGet<{
+          success: boolean;
+          staff?: Array<{ id: string; name: string; firstName?: string; lastName?: string }>;
+        }>(
+          `/api/pos/staff-schedule?start_date=${encodeURIComponent(weekStart.toISOString())}&end_date=${encodeURIComponent(weekEnd.toISOString())}`
+        )
+      : await bridge.staffSchedule.list({
+          start_date: weekStart.toISOString(),
+          end_date: weekEnd.toISOString(),
+        }) as {
+          success: boolean;
+          data?: {
+            success?: boolean;
+            staff?: Array<{ id: string; name: string; firstName?: string; lastName?: string }>;
+          };
+        };
 
-    if (!response.success || !response.data?.success) {
+    const payload = response.data ?? {};
+    if (!response.success || (typeof payload.success === 'boolean' && payload.success === false)) {
       return;
     }
 
-    const loadedStaff = (response.data.staff || []).map((member) => ({
+    const loadedStaff = (payload.staff || []).map((member) => ({
       id: member.id,
       name: member.name || `${member.firstName || ''} ${member.lastName || ''}`.trim() || 'Staff',
     }));
@@ -105,11 +123,19 @@ export const HousekeepingView: React.FC = memo(() => {
       setError(null);
     }
 
-    const response = await posApiGet<{
-      success: boolean;
-      tasks?: HousekeepingTask[];
-      error?: string;
-    }>('/api/pos/housekeeping?status=all');
+    const response = isBrowser()
+      ? await posApiGet<{
+          success: boolean;
+          tasks?: HousekeepingTask[];
+          error?: string;
+        }>('/api/pos/housekeeping?status=all')
+      : await bridge.adminApi.fetchFromAdmin('/api/pos/housekeeping?status=all', {
+          method: 'GET',
+        }) as {
+          success: boolean;
+          data?: { success?: boolean; tasks?: HousekeepingTask[]; error?: string };
+          error?: string;
+        };
 
     if (!response.success || !response.data?.success) {
       const errorMessage = response.error || response.data?.error || 'Failed to load housekeeping tasks';
@@ -191,42 +217,56 @@ export const HousekeepingView: React.FC = memo(() => {
 
   const handleStatusChange = useCallback(async (taskId: string, status: TaskStatus) => {
     setUpdatingTaskId(taskId);
-    const response = await posApiPatch<{ success: boolean; error?: string }>(
-      '/api/pos/housekeeping',
-      { task_id: taskId, status }
-    );
-    if (!response.success || response.data?.success === false) {
-      toast.error(response.error || response.data?.error || 'Failed to update task');
-      setUpdatingTaskId(null);
-      return;
-    }
+    try {
+      if (isBrowser()) {
+        const response = await posApiPatch<{ success: boolean; error?: string }>(
+          '/api/pos/housekeeping',
+          { task_id: taskId, status }
+        );
+        if (!response.success || response.data?.success === false) {
+          throw new Error(response.error || response.data?.error || 'Failed to update task');
+        }
+      } else {
+        await offlineUpdateHousekeepingStatus({ taskId, status });
+      }
 
-    setTasks((prev) =>
-      prev.map((task) => (task.id === taskId ? { ...task, status, updated_at: new Date().toISOString() } : task))
-    );
-    setUpdatingTaskId(null);
+      setTasks((prev) =>
+        prev.map((task) => (task.id === taskId ? { ...task, status, updated_at: new Date().toISOString() } : task))
+      );
+      setUpdatingTaskId(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update task');
+      setUpdatingTaskId(null);
+    }
   }, []);
 
   const handleAssignStaff = useCallback(async (taskId: string, staffId: string | null) => {
     setUpdatingTaskId(taskId);
-    const response = await posApiPatch<{ success: boolean; error?: string }>(
-      `/api/pos/housekeeping/${taskId}`,
-      { assigned_staff_id: staffId }
-    );
+    try {
+      if (isBrowser()) {
+        const response = await posApiPatch<{ success: boolean; error?: string }>(
+          `/api/pos/housekeeping/${taskId}`,
+          { assigned_staff_id: staffId }
+        );
 
-    if (!response.success || response.data?.success === false) {
-      toast.error(response.error || response.data?.error || 'Failed to assign staff');
+        if (!response.success || response.data?.success === false) {
+          throw new Error(response.error || response.data?.error || 'Failed to assign staff');
+        }
+      } else {
+        await offlineAssignHousekeepingStaff({ taskId, assignedStaffId: staffId });
+      }
+
+      const staffName = staff.find((member) => member.id === staffId)?.name || null;
+      setTasks((prev) =>
+        prev.map((task) =>
+          task.id === taskId ? { ...task, assigned_staff_id: staffId, assigned_staff_name: staffName } : task
+        )
+      );
       setUpdatingTaskId(null);
-      return;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to assign staff');
+      setUpdatingTaskId(null);
     }
-
-    const staffName = staff.find((member) => member.id === staffId)?.name || null;
-    setTasks((prev) =>
-      prev.map((task) =>
-        task.id === taskId ? { ...task, assigned_staff_id: staffId, assigned_staff_name: staffName } : task
-      )
-    );
-    setUpdatingTaskId(null);
   }, [staff]);
 
   const floors = useMemo(

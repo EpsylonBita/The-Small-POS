@@ -73,7 +73,7 @@ interface MenuCartProps {
   onManualDiscountChange?: (mode: 'percentage' | 'fixed', value: number) => void;
   editMode?: boolean; // When true, shows "Save Changes" instead of "Complete Order"
   isSaving?: boolean; // When true, shows loading state on save button
-  orderType?: 'pickup' | 'delivery'; // Order type for minimum order validation
+  orderType?: 'pickup' | 'delivery' | 'dine-in'; // Order type for minimum order validation
   minimumOrderAmount?: number; // Minimum order amount for delivery zones
   deliveryFee?: number;
   deliveryFeeStatus?: DeliveryFeeStatus;

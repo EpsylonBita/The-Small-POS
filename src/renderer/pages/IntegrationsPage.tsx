@@ -41,9 +41,9 @@ import {
   Receipt,
   Lock,
 } from 'lucide-react';
-import { getPosAuthHeaders, posApiGet, posApiPost } from '../utils/api-helpers';
+import { posApiGet, posApiPost } from '../utils/api-helpers';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
-import { getApiUrl } from '../../config/environment';
+import { getOfflineActionState } from '../services/offline-page-capabilities';
 
 // ============================================================
 // TYPES
@@ -210,32 +210,19 @@ const calculateStats = (integrations: IntegrationWithStatus[]): IntegrationStats
 
 async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
   try {
-    const url = getApiUrl('/pos/mydata/config');
-    const headers = await getPosAuthHeaders();
-    const response = await fetch(url, {
-      method: 'GET',
-      headers,
-    });
-
-    let payload: any = null;
-    try {
-      payload = await response.json();
-    } catch {
-      payload = null;
-    }
-
-    if (!response.ok) {
+    const result = await posApiGet<{ config?: Record<string, any> }>('/pos/mydata/config');
+    if (!result.success) {
       return {
         ok: false,
-        status: response.status,
-        error: payload?.error || payload?.message || `HTTP ${response.status}`,
+        status: result.status ?? 0,
+        error: result.error || `HTTP ${result.status ?? 0}`,
       };
     }
 
     return {
       ok: true,
-      status: response.status,
-      config: payload?.config,
+      status: result.status ?? 200,
+      config: result.data?.config,
     };
   } catch (error: any) {
     return {
@@ -253,6 +240,7 @@ async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
 interface IntegrationCardProps {
   integration: IntegrationWithStatus;
   isDark: boolean;
+  toggleDisabledMessage?: string | null;
   onToggle: (id: string) => void;
   onConfigure: (integration: IntegrationWithStatus) => void;
 }
@@ -260,6 +248,7 @@ interface IntegrationCardProps {
 const IntegrationCard = memo<IntegrationCardProps>(({
   integration,
   isDark,
+  toggleDisabledMessage,
   onToggle,
   onConfigure,
 }) => {
@@ -284,7 +273,10 @@ const IntegrationCard = memo<IntegrationCardProps>(({
 
   const StatusIcon = isLocked ? AlertCircle : getStatusIcon(integration.status);
   const statusColor = isLocked ? '#f59e0b' : getStatusColor(integration.status);
-  const isToggleDisabled = isLocked || integration.status === 'pending';
+  const isToggleDisabled =
+    isLocked ||
+    integration.status === 'pending' ||
+    Boolean(toggleDisabledMessage);
   const isEnabled = integration.status === 'connected';
 
   return (
@@ -361,6 +353,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
             aria-label={t('integrations.togglePlugin', 'Toggle plugin')}
             onClick={() => !isToggleDisabled && onToggle(integration.id)}
             disabled={isToggleDisabled}
+            title={toggleDisabledMessage || undefined}
             className={`relative inline-flex h-6 w-14 shrink-0 items-center rounded-full border transition-all duration-200 ${
               isEnabled
                 ? 'bg-[#67d75f] border-[#67d75f] shadow-[0_0_12px_rgba(103,215,95,0.45)]'
@@ -400,6 +393,7 @@ interface CategorySectionProps {
   category: IntegrationCategory;
   integrations: IntegrationWithStatus[];
   isDark: boolean;
+  toggleDisabledMessage?: string | null;
   onToggle: (id: string) => void;
   onConfigure: (integration: IntegrationWithStatus) => void;
 }
@@ -408,6 +402,7 @@ const CategorySection = memo<CategorySectionProps>(({
   category,
   integrations,
   isDark,
+  toggleDisabledMessage,
   onToggle,
   onConfigure,
 }) => {
@@ -458,6 +453,7 @@ const CategorySection = memo<CategorySectionProps>(({
               key={integration.id}
               integration={integration}
               isDark={isDark}
+              toggleDisabledMessage={toggleDisabledMessage}
               onToggle={onToggle}
               onConfigure={onConfigure}
             />
@@ -556,6 +552,9 @@ export const IntegrationsPage: React.FC = () => {
   const [terminalsError, setTerminalsError] = useState<string | null>(null);
   const isMyDataMissing = myDataConfigError === 'MyData not configured';
   const canSaveMyData = !myDataSaving && (!myDataConfigError || isMyDataMissing);
+  const toggleAction = getOfflineActionState('integrations', 'toggle', isOnline);
+  const saveAction = getOfflineActionState('integrations', 'save', isOnline);
+  const saveMyDataAction = getOfflineActionState('integrations', 'mydata.save', isOnline);
 
   // Monitor online status
   useEffect(() => {
@@ -720,6 +719,11 @@ export const IntegrationsPage: React.FC = () => {
 
   // Handle toggle
   const handleToggle = useCallback(async (id: string) => {
+    if (toggleAction.disabled) {
+      toast.error(toggleAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
+
     const integration = integrations.find(i => i.id === id);
     if (!integration) return;
 
@@ -787,7 +791,7 @@ export const IntegrationsPage: React.FC = () => {
       setPluginForm(defaults);
       setPluginModalOpen(true);
     }
-  }, [integrations, t]);
+  }, [integrations, t, toggleAction.disabled, toggleAction.message]);
 
   // Handle configure
   const handleConfigure = useCallback((integration: IntegrationWithStatus) => {
@@ -823,6 +827,11 @@ export const IntegrationsPage: React.FC = () => {
   }, [t]);
 
   const handleSaveMyDataConfig = useCallback(async () => {
+    if (saveMyDataAction.disabled) {
+      toast.error(saveMyDataAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
+
     if (myDataConnectionType === 'usb_serial' && !myDataSerialPort.trim()) {
       toast.error('Serial port is required for USB connection');
       return;
@@ -864,9 +873,22 @@ export const IntegrationsPage: React.FC = () => {
     } finally {
       setMyDataSaving(false);
     }
-  }, [myDataBaudRate, myDataBluetoothAddress, myDataConnectionType, myDataSerialPort]);
+  }, [
+    myDataBaudRate,
+    myDataBluetoothAddress,
+    myDataConnectionType,
+    myDataSerialPort,
+    saveMyDataAction.disabled,
+    saveMyDataAction.message,
+    t,
+  ]);
 
   const handleSavePluginConfig = useCallback(async () => {
+    if (saveAction.disabled) {
+      toast.error(saveAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
+
     if (!activePlugin) return;
     const config = PLUGIN_FORM_CONFIG[activePlugin.id] || { requiredFields: [] };
     const missing = config.requiredFields.filter((field) => {
@@ -946,7 +968,7 @@ export const IntegrationsPage: React.FC = () => {
     } finally {
       setPluginSaving(false);
     }
-  }, [activePlugin, pluginForm, t]);
+  }, [activePlugin, pluginForm, saveAction.disabled, saveAction.message, t]);
 
   // Group integrations by category
   const groupedIntegrations = useMemo(() => {
@@ -1111,6 +1133,7 @@ export const IntegrationsPage: React.FC = () => {
             category={category}
             integrations={categoryIntegrations}
             isDark={isDark}
+            toggleDisabledMessage={toggleAction.message}
             onToggle={handleToggle}
             onConfigure={handleConfigure}
           />
@@ -1141,6 +1164,11 @@ export const IntegrationsPage: React.FC = () => {
           closeOnEscape={!myDataSaving}
         >
         <div className="space-y-4">
+            {saveMyDataAction.disabled && (
+              <div className={`rounded-lg p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+                {saveMyDataAction.message}
+              </div>
+            )}
             {myDataConfigError && (
               <div className={`rounded-lg p-3 text-sm ${
                 isMyDataMissing
@@ -1193,7 +1221,7 @@ export const IntegrationsPage: React.FC = () => {
                   value={myDataConnectionType}
                   onChange={(event) => setMyDataConnectionType(event.target.value as 'usb_serial' | 'bluetooth')}
                   className="liquid-glass-modal-input"
-                  disabled={!canSaveMyData}
+                  disabled={!canSaveMyData || saveMyDataAction.disabled}
                 >
                   <option value="usb_serial">{t('integrations.mydata.connectionTypes.usbSerial', 'USB serial')}</option>
                   <option value="bluetooth">{t('integrations.mydata.connectionTypes.bluetooth', 'Bluetooth')}</option>
@@ -1206,6 +1234,7 @@ export const IntegrationsPage: React.FC = () => {
                   value={myDataSerialPort}
                   onChange={(event) => setMyDataSerialPort(event.target.value)}
                   placeholder="COM3 or /dev/ttyUSB0"
+                  disabled={saveMyDataAction.disabled}
                 />
               ) : (
                 <POSGlassInput
@@ -1213,6 +1242,7 @@ export const IntegrationsPage: React.FC = () => {
                   value={myDataBluetoothAddress}
                   onChange={(event) => setMyDataBluetoothAddress(event.target.value)}
                   placeholder="00:11:22:33:44:55"
+                  disabled={saveMyDataAction.disabled}
                 />
               )}
 
@@ -1222,6 +1252,7 @@ export const IntegrationsPage: React.FC = () => {
                   value={myDataBaudRate}
                   onChange={(event) => setMyDataBaudRate(event.target.value)}
                   placeholder="9600"
+                  disabled={saveMyDataAction.disabled}
                 />
               )}
             </div>
@@ -1234,7 +1265,7 @@ export const IntegrationsPage: React.FC = () => {
             <POSGlassButton
               onClick={handleSaveMyDataConfig}
               loading={myDataSaving}
-              disabled={!canSaveMyData || myDataSaving}
+              disabled={!canSaveMyData || myDataSaving || saveMyDataAction.disabled}
             >
               {t('common.actions.save', 'Save')}
             </POSGlassButton>
@@ -1260,6 +1291,11 @@ export const IntegrationsPage: React.FC = () => {
           <div className="space-y-4">
             {activePlugin && (
               <>
+                {saveAction.disabled && (
+                  <div className={`rounded-lg p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+                    {saveAction.message}
+                  </div>
+                )}
                 <div className={`rounded-lg p-3 text-xs ${isDark ? 'bg-white/5 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
                   {t('integrations.credentialsHelp', 'Enter the credentials provided by the platform. Leave fields blank to keep existing values.')}
                 </div>
@@ -1275,6 +1311,7 @@ export const IntegrationsPage: React.FC = () => {
                           value={pluginForm.store_url}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, store_url: event.target.value }))}
                           placeholder={t('integrations.placeholders.storeUrl', 'https://your-store.com')}
+                          disabled={saveAction.disabled}
                         />
                       )}
                       <POSGlassInput
@@ -1283,6 +1320,7 @@ export const IntegrationsPage: React.FC = () => {
                         onChange={(event) => setPluginForm(prev => ({ ...prev, api_key: event.target.value }))}
                         placeholder={t('integrations.placeholders.apiKey', 'Enter API key')}
                         type="password"
+                        disabled={saveAction.disabled}
                       />
                       {(isRequired('api_secret') || activePlugin.id !== 'google-analytics') && (
                         <POSGlassInput
@@ -1291,6 +1329,7 @@ export const IntegrationsPage: React.FC = () => {
                           onChange={(event) => setPluginForm(prev => ({ ...prev, api_secret: event.target.value }))}
                           placeholder={t('integrations.placeholders.apiSecret', 'Enter API secret')}
                           type="password"
+                          disabled={saveAction.disabled}
                         />
                       )}
                       {(isRequired('merchant_id') || ['wolt', 'booking', 'expedia', 'viva'].includes(activePlugin.id)) && (
@@ -1299,6 +1338,7 @@ export const IntegrationsPage: React.FC = () => {
                           value={pluginForm.merchant_id}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, merchant_id: event.target.value }))}
                           placeholder={t('integrations.placeholders.merchantId', 'Merchant ID')}
+                          disabled={saveAction.disabled}
                         />
                       )}
                       {(isRequired('store_id') || ['efood', 'box'].includes(activePlugin.id)) && (
@@ -1307,6 +1347,7 @@ export const IntegrationsPage: React.FC = () => {
                           value={pluginForm.store_id}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, store_id: event.target.value }))}
                           placeholder={t('integrations.placeholders.storeId', 'Store ID')}
+                          disabled={saveAction.disabled}
                         />
                       )}
 
@@ -1317,6 +1358,7 @@ export const IntegrationsPage: React.FC = () => {
                           onChange={(event) => setPluginForm(prev => ({ ...prev, commission_pct: Number(event.target.value || 0) }))}
                           type="number"
                           placeholder="20"
+                          disabled={saveAction.disabled}
                         />
                       )}
 
@@ -1330,6 +1372,7 @@ export const IntegrationsPage: React.FC = () => {
                               type="checkbox"
                               checked={pluginForm.auto_accept_orders}
                               onChange={(event) => setPluginForm(prev => ({ ...prev, auto_accept_orders: event.target.checked }))}
+                              disabled={saveAction.disabled}
                             />
                           </div>
                           {config.supportsPrepMinutes && (
@@ -1339,6 +1382,7 @@ export const IntegrationsPage: React.FC = () => {
                               onChange={(event) => setPluginForm(prev => ({ ...prev, auto_accept_prep_minutes: Number(event.target.value || 20) }))}
                               type="number"
                               placeholder="20"
+                              disabled={saveAction.disabled}
                             />
                           )}
                         </div>
@@ -1363,6 +1407,7 @@ export const IntegrationsPage: React.FC = () => {
                         <select
                           className="liquid-glass-modal-input mt-2"
                           value={pluginForm.target_terminal_id || ''}
+                          disabled={saveAction.disabled}
                           onChange={(event) =>
                             setPluginForm(prev => ({
                               ...prev,
@@ -1402,6 +1447,7 @@ export const IntegrationsPage: React.FC = () => {
                                 type="checkbox"
                                 checked={pluginForm.sync_menu}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_menu: event.target.checked }))}
+                                disabled={saveAction.disabled}
                               />
                               {t('integrations.sync.menu', 'Sync menu')}
                             </label>
@@ -1412,6 +1458,7 @@ export const IntegrationsPage: React.FC = () => {
                                 type="checkbox"
                                 checked={pluginForm.sync_availability}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_availability: event.target.checked }))}
+                                disabled={saveAction.disabled}
                               />
                               {t('integrations.sync.availability', 'Sync availability')}
                             </label>
@@ -1422,6 +1469,7 @@ export const IntegrationsPage: React.FC = () => {
                                 type="checkbox"
                                 checked={pluginForm.sync_products}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_products: event.target.checked }))}
+                                disabled={saveAction.disabled}
                               />
                               {t('integrations.sync.products', 'Sync products')}
                             </label>
@@ -1432,6 +1480,7 @@ export const IntegrationsPage: React.FC = () => {
                                 type="checkbox"
                                 checked={pluginForm.sync_orders}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_orders: event.target.checked }))}
+                                disabled={saveAction.disabled}
                               />
                               {t('integrations.sync.orders', 'Sync orders')}
                             </label>
@@ -1442,6 +1491,7 @@ export const IntegrationsPage: React.FC = () => {
                                 type="checkbox"
                                 checked={pluginForm.sync_inventory}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_inventory: event.target.checked }))}
+                                disabled={saveAction.disabled}
                               />
                               {t('integrations.sync.inventory', 'Sync inventory')}
                             </label>
@@ -1456,7 +1506,7 @@ export const IntegrationsPage: React.FC = () => {
                   <POSGlassButton variant="secondary" onClick={() => { setPluginModalOpen(false); setActivePlugin(null); }} disabled={pluginSaving}>
                     {t('common.actions.cancel', 'Cancel')}
                   </POSGlassButton>
-                  <POSGlassButton onClick={handleSavePluginConfig} loading={pluginSaving} disabled={pluginSaving}>
+                  <POSGlassButton onClick={handleSavePluginConfig} loading={pluginSaving} disabled={pluginSaving || saveAction.disabled}>
                     {t('common.actions.save', 'Save')}
                   </POSGlassButton>
                 </div>

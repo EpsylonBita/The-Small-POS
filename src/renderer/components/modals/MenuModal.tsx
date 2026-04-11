@@ -63,7 +63,7 @@ interface MenuModalProps {
   onClose: () => void;
   selectedCustomer?: any;
   selectedAddress?: any;
-  orderType?: 'pickup' | 'delivery';
+  orderType?: 'pickup' | 'delivery' | 'dine-in';
   isProcessingOrder?: boolean;
   deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
   onOrderComplete?: (orderData: {
@@ -98,6 +98,7 @@ interface MenuModalProps {
     orderId: string;
     items: any[];
     total: number;
+    orderType?: string;
     notes?: string;
   }) => void;
 }
@@ -1301,6 +1302,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             categoryName: item.categoryName // Include category name for display in orders
           })),
           total,
+          orderType,
           notes: ''
         });
         
@@ -1518,7 +1520,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // Generate modal title based on mode
   const getModalTitle = () => {
-    const typeLabel = orderType === 'delivery' ? t('modals.menu.delivery') : t('modals.menu.pickup');
+    const typeLabel =
+      orderType === 'delivery'
+        ? t('modals.menu.delivery')
+        : orderType === 'dine-in'
+          ? t('orders.type.dine_in', 'Dine In')
+          : t('modals.menu.pickup');
     if (editMode && editOrderNumber) {
       return `${t('modals.menu.editOrder') || 'Edit Order'} #${editOrderNumber} - ${typeLabel}`;
     }

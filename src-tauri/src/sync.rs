@@ -1034,7 +1034,6 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     }
 
     // Enqueue for sync
-    let idempotency_key = format!("{terminal_id}:{order_id}:{}", Uuid::new_v4());
     let mut sync_data = payload.clone();
     if let Value::Object(obj) = &mut sync_data {
         obj.remove("initialPayment");
@@ -1112,16 +1111,26 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             }
         }
     }
-    let sync_payload = serde_json::to_string(&sync_data).unwrap_or_else(|_| "{}".to_string());
-
-    conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('order', ?1, 'insert', ?2, ?3)",
-        params![&order_id, sync_payload, idempotency_key],
+    crate::sync_queue::enqueue_payload_item(
+        &conn,
+        "orders",
+        &order_id,
+        "INSERT",
+        &sync_data,
+        Some(if payment_method.as_deref() == Some("paid")
+            || payment_method.as_deref() == Some("partially_paid")
+        {
+            1
+        } else {
+            0
+        }),
+        Some("orders"),
+        Some("server-wins"),
+        Some(1),
     )
     .map_err(|e| {
         let _ = conn.execute_batch("ROLLBACK");
-        format!("enqueue sync: {e}")
+        format!("enqueue parity sync: {e}")
     })?;
 
     conn.execute_batch("COMMIT")
@@ -4617,10 +4626,13 @@ fn mark_payment_queue_row_synced(
     )
     .map_err(|e| format!("mark payment queue row synced: {e}"))?;
 
+    crate::sync_queue::clear_unsynced_items(conn, "payments", payment_id)?;
+    crate::sync_queue::clear_unsynced_items(conn, "order_payments", payment_id)?;
+
     Ok(())
 }
 
-fn mark_local_payment_applied(
+pub(crate) fn mark_local_payment_applied(
     conn: &Connection,
     payment_id: &str,
     synced_at: &str,
@@ -8107,7 +8119,7 @@ async fn resolve_adjustment_order_reference(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_adjustment_sync_body(
+pub(crate) fn build_adjustment_sync_body(
     adjustment_id: &str,
     payment_id: &str,
     order_id: Option<&str>,
@@ -12682,7 +12694,7 @@ pub(crate) async fn repair_orphaned_financial_queue_items(
 /// a supabase_id, immediately promote any waiting_parent payments for that
 /// order. This provides low-latency sync for the common case (order + payment
 /// in the same sync cycle).
-fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: &str) {
+pub(crate) fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: &str) {
     let now = Utc::now().to_rfc3339();
 
     // Promote order_payments rows

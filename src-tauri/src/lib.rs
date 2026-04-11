@@ -51,6 +51,7 @@ mod serial;
 mod shifts;
 mod storage;
 mod sync;
+mod sync_queue;
 mod terminal_helpers;
 mod zreport;
 
@@ -862,6 +863,32 @@ pub fn run() {
             commands::sync::sync_update_drive_thru_order_status,
             commands::sync::rooms_get_availability,
             commands::sync::appointments_get_today_metrics,
+            // Parity sync queue (offline queue for parity unification)
+            commands::sync_queue::sync_queue_enqueue,
+            commands::sync_queue::sync_queue_dequeue,
+            commands::sync_queue::sync_queue_peek,
+            commands::sync_queue::sync_queue_clear,
+            commands::sync_queue::sync_queue_length,
+            commands::sync_queue::sync_queue_status,
+            commands::sync_queue::sync_queue_list_items,
+            commands::sync_queue::sync_queue_retry_item,
+            commands::sync_queue::sync_queue_retry_module,
+            commands::sync_queue::sync_queue_list_conflicts,
+            commands::sync_queue::sync_queue_process,
+            // Offline mutation queue producers
+            commands::offline_mutations::offline_inventory_adjust,
+            commands::offline_mutations::offline_coupon_upsert,
+            commands::offline_mutations::offline_coupon_set_active,
+            commands::offline_mutations::offline_reservation_create,
+            commands::offline_mutations::offline_reservation_update,
+            commands::offline_mutations::offline_appointment_create,
+            commands::offline_mutations::offline_appointment_update_status,
+            commands::offline_mutations::offline_staff_shift_create,
+            commands::offline_mutations::offline_drive_thru_update_status,
+            commands::offline_mutations::offline_room_update_status,
+            commands::offline_mutations::offline_housekeeping_update_status,
+            commands::offline_mutations::offline_housekeeping_assign_staff,
+            commands::offline_mutations::offline_product_update_quantity,
             // Menu
             commands::menu::menu_get_categories,
             commands::menu::menu_get_subcategories,
@@ -1095,6 +1122,7 @@ pub fn run() {
             commands::branch_data::branch_data_get_delivery_zones,
             commands::branch_data::branch_data_get_staff_schedule,
             commands::branch_data::branch_data_get_tables,
+            commands::branch_data::branch_data_update_table_status,
             commands::branch_data::branch_data_validate_coupon,
             // Utility compatibility
             commands::system_ui::clipboard_read_text,
@@ -1142,6 +1170,7 @@ pub fn run() {
             commands::updates::update_set_channel,
             // API proxy
             commands::api_bridge::api_fetch_from_admin,
+            commands::api_bridge::api_list_cached_paths,
             commands::api_bridge::sync_test_parent_connection,
             commands::api_bridge::admin_sync_terminal_config,
         ])

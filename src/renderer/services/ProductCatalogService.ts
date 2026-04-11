@@ -9,7 +9,8 @@
 
 import { supabase, isSupabaseConfigured } from '../../shared/supabase';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
-import { isBrowser } from '../../lib';
+import { getBridge, isBrowser } from '../../lib';
+import { offlineUpdateProductQuantity } from './offline-mutations';
 
 // Types
 export interface Product {
@@ -420,7 +421,9 @@ class ProductCatalogService {
       }
 
       const endpoint = `/api/pos/products${params.toString() ? `?${params.toString()}` : ''}`;
-      const result = await posApiGet<{ success: boolean; products: any[] }>(endpoint);
+      const result = isBrowser()
+        ? await posApiGet<{ success: boolean; products: any[] }>(endpoint)
+        : await getBridge().adminApi.fetchFromAdmin(endpoint, { method: 'GET' });
 
       if (!result.success || !result.data?.success) {
         return null;
@@ -437,7 +440,9 @@ class ProductCatalogService {
     try {
       const cleanedBarcode = barcode.replace(/[\s\-]/g, '').trim();
       const endpoint = `/api/pos/products/lookup?barcode=${encodeURIComponent(cleanedBarcode)}`;
-      const result = await posApiGet<{ success: boolean; found: boolean; product?: any }>(endpoint);
+      const result = isBrowser()
+        ? await posApiGet<{ success: boolean; found: boolean; product?: any }>(endpoint)
+        : await getBridge().adminApi.fetchFromAdmin(endpoint, { method: 'GET' });
 
       if (!result.success || !result.data?.success) {
         return null;
@@ -456,7 +461,9 @@ class ProductCatalogService {
 
   private async fetchCategoriesFromApi(): Promise<ProductCategory[] | null> {
     try {
-      const result = await posApiGet<{ success: boolean; categories: any[] }>('/api/pos/product-categories');
+      const result = isBrowser()
+        ? await posApiGet<{ success: boolean; categories: any[] }>('/api/pos/product-categories')
+        : await getBridge().adminApi.fetchFromAdmin('/api/pos/product-categories', { method: 'GET' });
       if (!result.success || !result.data?.success) {
         return null;
       }
@@ -474,16 +481,33 @@ class ProductCatalogService {
 
   private async updateQuantityViaApi(productId: string, newQuantity: number): Promise<Product | null> {
     try {
-      const result = await posApiPatch<{ success: boolean; product: any }>(
-        `/api/pos/products/${productId}`,
-        { quantity: newQuantity }
-      );
+      const result = isBrowser()
+        ? await posApiPatch<{ success: boolean; product: any }>(
+            `/api/pos/products/${productId}`,
+            { quantity: newQuantity }
+          )
+        : {
+            success: true,
+            data: await offlineUpdateProductQuantity({
+              productId,
+              quantity: newQuantity,
+            }),
+          };
 
-      if (!result.success || !result.data?.success) {
+      if (
+        !result.success ||
+        (typeof (result.data as { success?: boolean } | undefined)?.success === 'boolean' &&
+          (result.data as { success?: boolean }).success === false)
+      ) {
         return null;
       }
 
-      return transformProductFromAPI(result.data.product);
+      const payload = result.data as { success?: boolean; product?: any } | undefined;
+      if (!payload?.product) {
+        return null;
+      }
+
+      return transformProductFromAPI(payload.product);
     } catch (error) {
       console.error('ProductCatalogService: API updateQuantity error:', error);
       return null;
@@ -492,9 +516,13 @@ class ProductCatalogService {
 
   private async fetchProductSuppliersFromApi(productId: string): Promise<ProductSupplier[] | null> {
     try {
-      const result = await posApiGet<{ success: boolean; suppliers: any[] }>(
-        `/api/pos/products/${productId}/suppliers`
-      );
+      const result = isBrowser()
+        ? await posApiGet<{ success: boolean; suppliers: any[] }>(
+            `/api/pos/products/${productId}/suppliers`
+          )
+        : await getBridge().adminApi.fetchFromAdmin(`/api/pos/products/${productId}/suppliers`, {
+            method: 'GET',
+          });
 
       if (!result.success || !result.data?.success) {
         return null;
@@ -509,9 +537,13 @@ class ProductCatalogService {
 
   private async fetchLowStockProductsFromApi(): Promise<LowStockProduct[] | null> {
     try {
-      const result = await posApiGet<{ success: boolean; products: any[] }>(
-        '/api/pos/products/low-stock'
-      );
+      const result = isBrowser()
+        ? await posApiGet<{ success: boolean; products: any[] }>(
+            '/api/pos/products/low-stock'
+          )
+        : await getBridge().adminApi.fetchFromAdmin('/api/pos/products/low-stock', {
+            method: 'GET',
+          });
 
       if (!result.success || !result.data?.success) {
         return null;

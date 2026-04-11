@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tauri::Emitter;
 
 use crate::{db, read_local_json, read_local_setting, read_module_cache, storage};
 
@@ -11,6 +12,8 @@ const CACHE_KEY_DELIVERY_ZONES: &str = "delivery_zones";
 const CACHE_KEY_COUPONS: &str = "coupons";
 const CACHE_KEY_CATALOG_OFFERS: &str = "catalog_offers";
 const DELIVERY_ZONES_LOCAL_KEY: &str = "delivery_zones_cache_v1";
+const STAFF_AUTH_CACHE_CATEGORY: &str = "staff_auth_cache";
+const ADMIN_API_CACHE_PREFIX: &str = "admin_api_get::";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +53,17 @@ struct CatalogOffersPayload {
     catalog_type: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TableStatusUpdatePayload {
+    #[serde(default, alias = "table_id")]
+    table_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default, alias = "branch_id")]
+    branch_id: Option<String>,
+}
+
 #[derive(Debug)]
 struct CacheEntry {
     synced_at: String,
@@ -65,6 +79,10 @@ struct DatasetStatus {
     available: bool,
     source: &'static str,
     item_count: Option<usize>,
+}
+
+fn admin_api_cache_key(path: &str) -> String {
+    format!("{ADMIN_API_CACHE_PREFIX}{path}")
 }
 
 fn trimmed(value: Option<String>) -> Option<String> {
@@ -83,6 +101,19 @@ fn resolve_branch_id(db: &db::DbState, explicit: Option<String>) -> Result<Strin
         })
 }
 
+fn resolve_terminal_id(db: &db::DbState) -> Option<String> {
+    trimmed(
+        storage::get_credential("terminal_id")
+            .or_else(|| read_local_setting(db, "terminal", "terminal_id")),
+    )
+}
+
+fn resolve_organization_id(db: &db::DbState) -> String {
+    storage::get_credential("organization_id")
+        .or_else(|| read_local_setting(db, "terminal", "organization_id"))
+        .unwrap_or_else(|| "pending-org".to_string())
+}
+
 fn normalize_scope_key(values: &[Option<&str>]) -> String {
     let parts: Vec<&str> = values
         .iter()
@@ -98,6 +129,31 @@ fn normalize_scope_key(values: &[Option<&str>]) -> String {
     }
 }
 
+fn estimate_payload_item_count(payload: &Value) -> Option<usize> {
+    if let Some(array) = payload.as_array() {
+        return Some(array.len());
+    }
+
+    for key in [
+        "rows",
+        "zones",
+        "orders",
+        "customers",
+        "integrations",
+        "terminals",
+        "devices",
+        "items",
+        "heatmapPoints",
+        "zonePerformance",
+    ] {
+        if let Some(array) = payload.get(key).and_then(Value::as_array) {
+            return Some(array.len());
+        }
+    }
+
+    payload.as_object().map(|object| object.len().max(1))
+}
+
 fn extract_payload(response: Value) -> Value {
     response.get("data").cloned().unwrap_or(response)
 }
@@ -111,6 +167,41 @@ fn payload_version(payload: &Value) -> Option<String> {
         .or_else(|| payload.get("sync_timestamp"))
         .and_then(Value::as_str)
         .map(|value| value.to_string())
+}
+
+fn update_tables_cached_payload(
+    payload: &mut Value,
+    table_id: &str,
+    status: &str,
+    updated_at: &str,
+) -> Result<Value, String> {
+    let tables = if let Some(arr) = payload.as_array_mut() {
+        arr
+    } else if let Some(arr) = payload.get_mut("tables").and_then(Value::as_array_mut) {
+        arr
+    } else {
+        return Err("Cached tables payload is not in a supported format".into());
+    };
+
+    for table in tables.iter_mut() {
+        let id = table
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        if id != table_id {
+            continue;
+        }
+
+        if let Some(obj) = table.as_object_mut() {
+            obj.insert("status".to_string(), json!(status));
+            obj.insert("updated_at".to_string(), json!(updated_at));
+            obj.insert("updatedAt".to_string(), json!(updated_at));
+            return Ok(Value::Object(obj.clone()));
+        }
+    }
+
+    Err("Table not found in local cache".into())
 }
 
 fn cache_payload(
@@ -295,6 +386,66 @@ fn cached_dataset_status_latest(
     }
 }
 
+fn cached_admin_get_dataset_status(
+    db: &db::DbState,
+    path: &str,
+    cache_key: &str,
+    scope_key: &str,
+) -> DatasetStatus {
+    read_local_json(db, &admin_api_cache_key(path))
+        .ok()
+        .map(|envelope| {
+            let payload = envelope.get("data").cloned().unwrap_or(Value::Null);
+            DatasetStatus {
+                cache_key: cache_key.to_string(),
+                scope_key: scope_key.to_string(),
+                synced_at: envelope
+                    .get("cachedAt")
+                    .or_else(|| envelope.get("updatedAt"))
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_string()),
+                available: !payload.is_null(),
+                source: "local_settings",
+                item_count: estimate_payload_item_count(&payload),
+            }
+        })
+        .unwrap_or(DatasetStatus {
+            cache_key: cache_key.to_string(),
+            scope_key: scope_key.to_string(),
+            synced_at: None,
+            available: false,
+            source: "local_settings",
+            item_count: None,
+        })
+}
+
+fn sqlite_table_dataset_status(
+    conn: &rusqlite::Connection,
+    query: &str,
+    cache_key: &str,
+    scope_key: &str,
+) -> DatasetStatus {
+    conn.query_row(query, [], |row| {
+        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+    })
+    .map(|(synced_at, count)| DatasetStatus {
+        cache_key: cache_key.to_string(),
+        scope_key: scope_key.to_string(),
+        synced_at,
+        available: count > 0,
+        source: "sqlite",
+        item_count: Some(count.max(0) as usize),
+    })
+    .unwrap_or(DatasetStatus {
+        cache_key: cache_key.to_string(),
+        scope_key: scope_key.to_string(),
+        synced_at: None,
+        available: false,
+        source: "sqlite",
+        item_count: None,
+    })
+}
+
 async fn fetch_branch_scoped_payload(
     db: &db::DbState,
     branch_id: &str,
@@ -421,6 +572,99 @@ pub async fn branch_data_get_tables(
     let branch_id = resolve_branch_id(&db, payload.branch_id)?;
     let path = format!("/api/pos/tables?branch_id={branch_id}");
     fetch_branch_scoped_payload(&db, &branch_id, CACHE_KEY_TABLES, "all", path).await
+}
+
+#[tauri::command]
+pub async fn branch_data_update_table_status(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let payload: TableStatusUpdatePayload = arg0
+        .map(serde_json::from_value)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
+    let table_id = trimmed(payload.table_id).ok_or_else(|| "Missing tableId".to_string())?;
+    let status = trimmed(payload.status).ok_or_else(|| "Missing status".to_string())?;
+    let branch_id = resolve_branch_id(&db, payload.branch_id)?;
+    let organization_id = resolve_organization_id(&db);
+    let now = Utc::now().to_rfc3339();
+
+    let updated_table = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| format!("begin table status update: {error}"))?;
+
+        let result = (|| -> Result<Value, String> {
+            let mut cached_tables = read_cache_entry(&conn, &branch_id, CACHE_KEY_TABLES, "all")?
+                .ok_or_else(|| {
+                    "Local tables cache is missing. Connect once while online before updating tables offline."
+                        .to_string()
+                })?;
+            let updated_table = update_tables_cached_payload(
+                &mut cached_tables.payload,
+                &table_id,
+                &status,
+                &now,
+            )?;
+            cache_payload(
+                &conn,
+                &branch_id,
+                CACHE_KEY_TABLES,
+                "all",
+                &cached_tables.payload,
+            )?;
+
+            crate::sync_queue::enqueue(
+                &conn,
+                &crate::sync_queue::EnqueueInput {
+                    table_name: "restaurant_tables".to_string(),
+                    record_id: table_id.clone(),
+                    operation: "UPDATE".to_string(),
+                    data: json!({
+                        "status": status,
+                        "updated_at": now,
+                    })
+                    .to_string(),
+                    organization_id: organization_id.clone(),
+                    priority: Some(0),
+                    module_type: Some("operations".to_string()),
+                    conflict_strategy: Some("server-wins".to_string()),
+                    version: Some(1),
+                },
+            )?;
+
+            Ok(updated_table)
+        })();
+
+        match result {
+            Ok(updated_table) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|error| format!("commit table status update: {error}"))?;
+                updated_table
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
+    };
+
+    let event_payload = json!({
+        "tableId": table_id,
+        "status": status,
+        "updatedAt": now,
+        "queued": true,
+        "table": updated_table,
+    });
+    let _ = app.emit("table_status_updated", event_payload.clone());
+    let _ = app.emit("sync:status", json!({ "queuedRemote": 1 }));
+
+    Ok(json!({
+        "success": true,
+        "data": event_payload
+    }))
 }
 
 #[tauri::command]
@@ -601,6 +845,7 @@ pub async fn branch_data_get_bundle_status(
         .unwrap_or_default();
     let branch_id = resolve_branch_id(&db, payload.branch_id)?;
 
+    let terminal_id = resolve_terminal_id(&db);
     let conn = db.conn.lock().map_err(|error| error.to_string())?;
     let mut datasets = vec![
         cached_dataset_status(&conn, &branch_id, CACHE_KEY_TABLES, "all"),
@@ -608,6 +853,26 @@ pub async fn branch_data_get_bundle_status(
         cached_dataset_status(&conn, &branch_id, CACHE_KEY_DELIVERY_ZONES, "all"),
         cached_dataset_status(&conn, &branch_id, CACHE_KEY_COUPONS, "all"),
         cached_dataset_status(&conn, &branch_id, CACHE_KEY_CATALOG_OFFERS, "menu"),
+    ];
+    let mut advisory_datasets = vec![
+        sqlite_table_dataset_status(
+            &conn,
+            "SELECT MAX(last_synced_at), COUNT(*) FROM loyalty_settings",
+            "loyalty_settings",
+            "default",
+        ),
+        sqlite_table_dataset_status(
+            &conn,
+            "SELECT MAX(last_synced_at), COUNT(*) FROM loyalty_customers",
+            "loyalty_customers",
+            "default",
+        ),
+        sqlite_table_dataset_status(
+            &conn,
+            "SELECT MAX(updated_at), COUNT(*) FROM ecr_devices WHERE device_type = 'payment_terminal'",
+            "payment_terminal_config",
+            "default",
+        ),
     ];
 
     let menu_status = conn
@@ -657,6 +922,54 @@ pub async fn branch_data_get_bundle_status(
             item_count: None,
         });
     datasets.push(printer_profile_status);
+
+    let staff_auth_status = conn
+        .query_row(
+            "SELECT setting_value, updated_at
+             FROM local_settings
+             WHERE setting_category = ?1 AND setting_key = ?2
+             LIMIT 1",
+            params![
+                STAFF_AUTH_CACHE_CATEGORY,
+                format!("branch_{}", branch_id.trim())
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map(|row| match row {
+            Some((raw, synced_at)) => {
+                let payload = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+                let item_count = payload
+                    .get("staff")
+                    .and_then(Value::as_array)
+                    .map(|staff| staff.len());
+                DatasetStatus {
+                    cache_key: "staff_auth_cache".to_string(),
+                    scope_key: format!("branch_{}", branch_id.trim()),
+                    synced_at,
+                    available: item_count.map(|count| count > 0).unwrap_or(false),
+                    source: "local_settings",
+                    item_count,
+                }
+            }
+            None => DatasetStatus {
+                cache_key: "staff_auth_cache".to_string(),
+                scope_key: format!("branch_{}", branch_id.trim()),
+                synced_at: None,
+                available: false,
+                source: "local_settings",
+                item_count: None,
+            },
+        })
+        .unwrap_or(DatasetStatus {
+            cache_key: "staff_auth_cache".to_string(),
+            scope_key: format!("branch_{}", branch_id.trim()),
+            synced_at: None,
+            available: false,
+            source: "local_settings",
+            item_count: None,
+        });
+    datasets.push(staff_auth_status);
     drop(conn);
 
     let module_status = read_module_cache(&db)
@@ -717,17 +1030,194 @@ pub async fn branch_data_get_bundle_status(
             available: false,
             source: "local_settings",
             item_count: None,
-        });
+    });
     datasets.push(delivery_local_status);
+
+    if let Some(terminal_id) = terminal_id.as_deref() {
+        advisory_datasets.push(cached_admin_get_dataset_status(
+            &db,
+            &format!("/api/pos/settings/{terminal_id}"),
+            "pos_settings",
+            "default",
+        ));
+        advisory_datasets.push(cached_admin_get_dataset_status(
+            &db,
+            &format!("/api/pos/settings/{terminal_id}?category=menu"),
+            "menu_settings",
+            "default",
+        ));
+    } else {
+        advisory_datasets.push(DatasetStatus {
+            cache_key: "pos_settings".to_string(),
+            scope_key: "default".to_string(),
+            synced_at: None,
+            available: false,
+            source: "local_settings",
+            item_count: None,
+        });
+        advisory_datasets.push(DatasetStatus {
+            cache_key: "menu_settings".to_string(),
+            scope_key: "default".to_string(),
+            synced_at: None,
+            available: false,
+            source: "local_settings",
+            item_count: None,
+        });
+    }
+
+    advisory_datasets.extend([
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/integrations",
+            "integrations_config",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/mydata/config",
+            "mydata_config",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/kiosk/status",
+            "kiosk_status",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/kiosk/orders?limit=10",
+            "kiosk_orders",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/customer-display?limit=200",
+            "customer_display_feed",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/analytics?time_range=today",
+            "analytics_today",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/analytics?time_range=week",
+            "analytics_week",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/analytics?time_range=month",
+            "analytics_month",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/delivery-zones",
+            "delivery_zones_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/map-analytics?time_range=30d",
+            "delivery_zone_analytics",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/sync/inventory_items?limit=2000",
+            "inventory_items",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/suppliers",
+            "suppliers",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/coupons",
+            "coupons_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/reservations",
+            "reservations_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/appointments",
+            "appointments_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/drive-through",
+            "drive_through_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/rooms",
+            "rooms_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/housekeeping?status=all",
+            "housekeeping_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/guest-billing",
+            "guest_billing_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/products",
+            "products_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/product-categories",
+            "product_categories_page",
+            "default",
+        ),
+        cached_admin_get_dataset_status(
+            &db,
+            "/api/pos/products/low-stock",
+            "products_low_stock_page",
+            "default",
+        ),
+    ]);
 
     let required_missing: Vec<String> = datasets
         .iter()
         .filter(|dataset| {
             matches!(
                 dataset.cache_key.as_str(),
-                "menu_cache" | "tables" | "staff_schedule" | "delivery_zones" | "modules"
+                "menu_cache"
+                    | "tables"
+                    | "staff_schedule"
+                    | "staff_auth_cache"
+                    | "delivery_zones"
+                    | "modules"
             ) && !dataset.available
         })
+        .map(|dataset| dataset.cache_key.clone())
+        .collect();
+    let advisory_missing: Vec<String> = advisory_datasets
+        .iter()
+        .filter(|dataset| !dataset.available)
         .map(|dataset| dataset.cache_key.clone())
         .collect();
 
@@ -744,8 +1234,17 @@ pub async fn branch_data_get_bundle_status(
                 "source": dataset.source,
                 "itemCount": dataset.item_count,
             })).collect::<Vec<Value>>(),
+            "advisoryDatasets": advisory_datasets.into_iter().map(|dataset| json!({
+                "cacheKey": dataset.cache_key,
+                "scopeKey": dataset.scope_key,
+                "syncedAt": dataset.synced_at,
+                "available": dataset.available,
+                "source": dataset.source,
+                "itemCount": dataset.item_count,
+            })).collect::<Vec<Value>>(),
             "hasRequiredCoreData": required_missing.is_empty(),
             "missingRequiredDatasets": required_missing,
+            "missingAdvisoryDatasets": advisory_missing,
         }
     }))
 }

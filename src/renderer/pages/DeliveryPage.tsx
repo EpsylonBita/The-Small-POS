@@ -16,7 +16,6 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
-import { posApiGet, posApiPost, posApiPatch } from '../utils/api-helpers';
 import {
   buildGoogleMapsDirectionsUrl,
   buildSingleDeliveryRouteStop,
@@ -24,7 +23,7 @@ import {
   type StoreMapOrigin,
 } from '../utils/delivery-routing';
 import { openExternalUrl } from '../utils/electron-api';
-import { offEvent, onEvent } from '../../lib';
+import { getBridge, offEvent, onEvent } from '../../lib';
 import {
   Truck,
   MapPin,
@@ -142,6 +141,101 @@ const getNextStatus = (currentStatus: DeliveryStatus): { label: string; status: 
     default:
       return null;
   }
+};
+
+const normalizeDeliveryStatus = (value: unknown): DeliveryStatus => {
+  const normalized = String(value || 'pending').trim().toLowerCase();
+  switch (normalized) {
+    case 'assigned':
+      return 'assigned';
+    case 'picked_up':
+    case 'picked-up':
+      return 'picked_up';
+    case 'in_transit':
+    case 'out_for_delivery':
+    case 'out-for-delivery':
+      return 'in_transit';
+    case 'delivered':
+    case 'completed':
+      return 'delivered';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+    case 'canceled':
+      return 'cancelled';
+    default:
+      return 'pending';
+  }
+};
+
+const extractDeliveryAddress = (order: Record<string, any>): DeliveryAddress => ({
+  street: order.delivery_address || order.deliveryAddress || order.address || '',
+  city: order.delivery_city || order.deliveryCity,
+  postalCode: order.delivery_postal_code || order.deliveryPostalCode,
+  floor: order.delivery_floor || order.deliveryFloor,
+  notes: order.delivery_notes || order.deliveryNotes,
+});
+
+const mapOrderToDelivery = (order: Record<string, any>): Delivery | null => {
+  const orderType = String(order.order_type || order.orderType || '').toLowerCase();
+  if (orderType !== 'delivery') {
+    return null;
+  }
+
+  const id = String(order.id || order.orderId || '').trim();
+  if (!id) {
+    return null;
+  }
+
+  const address = extractDeliveryAddress(order);
+  const createdAt = order.created_at || order.createdAt || new Date().toISOString();
+  const updatedAt = order.updated_at || order.updatedAt || createdAt;
+
+  return {
+    id,
+    orderId: id,
+    orderNumber: String(order.order_number || order.orderNumber || order.order_id || id),
+    status: normalizeDeliveryStatus(order.status),
+    customerName: order.customer_name || order.customerName || 'Customer',
+    customerPhone: order.customer_phone || order.customerPhone,
+    address,
+    driverId: order.driver_id || order.driverId,
+    driverName: order.driver_name || order.driverName,
+    orderTotal: Number(order.total_amount ?? order.totalAmount ?? 0) || 0,
+    orderItems: Array.isArray(order.items)
+      ? order.items.map((item: any) => ({
+          name: item.name || item.item_name || 'Item',
+          quantity: Number(item.quantity ?? 1) || 1,
+        }))
+      : Array.isArray(order.orderItems)
+        ? order.orderItems
+        : [],
+    paymentStatus: order.payment_status || order.paymentStatus,
+    estimatedDeliveryTime:
+      order.estimated_delivery_time || order.estimatedDeliveryTime || order.estimated_time,
+    actualDeliveryTime: order.actual_delivery_time || order.actualDeliveryTime,
+    createdAt,
+    updatedAt,
+  };
+};
+
+const mapDriverToCardShape = (driver: Record<string, any>): Driver => {
+  const name = String(driver.name || driver.staffName || '').trim();
+  const activeAssignments = Number(driver.current_orders ?? driver.currentOrders ?? 0) || 0;
+  const statusValue = String(driver.status || '').trim().toLowerCase();
+  return {
+    id: String(driver.id || driver.staffId || '').trim(),
+    name,
+    firstName: name.split(' ')[0] || name,
+    lastName: name.split(' ').slice(1).join(' '),
+    phone: driver.phone || undefined,
+    avatarUrl: driver.avatar_url || driver.avatarUrl,
+    status: {
+      isClockedIn: true,
+      isAvailable: statusValue !== 'busy',
+      activeAssignments,
+    },
+  };
 };
 
 // ============================================================
@@ -429,6 +523,7 @@ const DeliveryPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { getSetting } = useTerminalSettings();
+  const bridge = useMemo(() => getBridge(), []);
   const isDark = resolvedTheme === 'dark';
   const storeMapOrigin = useMemo<StoreMapOrigin | null>(
     () => resolveStoreMapOrigin(getSetting),
@@ -449,62 +544,52 @@ const DeliveryPage: React.FC = () => {
   // Fetch deliveries
   const fetchDeliveries = useCallback(async () => {
     try {
-      const response = await posApiGet<{
-        success: boolean;
-        deliveries: any[];
-        error?: string;
-      }>('/api/pos/delivery/orders');
+      const response: any = await bridge.orders.getAll();
+      const rows = Array.isArray(response)
+        ? response
+        : Array.isArray(response?.data)
+          ? response.data
+          : Array.isArray(response?.orders)
+            ? response.orders
+            : [];
 
-      if (response.success && response.data?.deliveries) {
-        // Transform API response to our Delivery type
-        const transformed: Delivery[] = response.data.deliveries.map((d: any) => ({
-          id: d.id,
-          orderId: d.order_id,
-          orderNumber: d.order_number || d.orderNumber,
-          status: d.status,
-          customerName: d.customer_name || d.customerName,
-          customerPhone: d.customer_phone || d.customerPhone,
-          address: {
-            street: d.delivery_address?.street || d.address?.street || '',
-            city: d.delivery_address?.city || d.address?.city,
-            postalCode: d.delivery_address?.postal_code || d.address?.postalCode,
-            floor: d.delivery_address?.floor || d.address?.floor,
-            notes: d.delivery_address?.notes || d.address?.notes,
-          },
-          driverId: d.driver_id || d.driverId,
-          driverName: d.driver_name || d.driverName,
-          orderTotal: d.order_total || d.orderTotal,
-          orderItems: d.order_items || d.orderItems,
-          paymentStatus: d.payment_status || d.paymentStatus,
-          estimatedDeliveryTime: d.estimated_delivery_time || d.estimatedDeliveryTime,
-          actualDeliveryTime: d.actual_delivery_time || d.actualDeliveryTime,
-          createdAt: d.created_at || d.createdAt,
-          updatedAt: d.updated_at || d.updatedAt,
-        }));
-        setDeliveries(transformed);
-      }
+      const transformed = rows
+        .map((row: Record<string, any>) => mapOrderToDelivery(row))
+        .filter((delivery: Delivery | null): delivery is Delivery => Boolean(delivery))
+        .sort((left: Delivery, right: Delivery) => {
+          const leftTs = new Date(left.updatedAt || left.createdAt).getTime();
+          const rightTs = new Date(right.updatedAt || right.createdAt).getTime();
+          return rightTs - leftTs;
+        });
+
+      setDeliveries(transformed);
+      setError(null);
     } catch (err) {
       console.error('[DeliveryPage] Error fetching deliveries:', err);
       setError('Failed to load deliveries');
     }
-  }, []);
+  }, [bridge.orders]);
 
   // Fetch drivers
   const fetchDrivers = useCallback(async () => {
     try {
-      const response = await posApiGet<{
-        success: boolean;
-        drivers: any[];
-        error?: string;
-      }>('/api/pos/delivery/drivers');
+      const branchId = await bridge.terminalConfig.getBranchId().catch(() => null);
+      const response: any = await bridge.drivers.getActive(branchId || '');
+      const rows = Array.isArray(response)
+        ? response
+        : Array.isArray(response?.data)
+          ? response.data
+          : [];
 
-      if (response.success && response.data?.drivers) {
-        setDrivers(response.data.drivers);
-      }
+      setDrivers(
+        rows
+          .map((driver: Record<string, any>) => mapDriverToCardShape(driver))
+          .filter((driver: Driver) => Boolean(driver.id)),
+      );
     } catch (err) {
       console.error('[DeliveryPage] Error fetching drivers:', err);
     }
-  }, []);
+  }, [bridge.drivers, bridge.terminalConfig]);
 
   // Initial load
   useEffect(() => {
@@ -571,33 +656,32 @@ const DeliveryPage: React.FC = () => {
   // Update delivery status
   const handleStatusUpdate = useCallback(async (deliveryId: string, newStatus: DeliveryStatus) => {
     try {
-      const response = await posApiPatch(`/api/pos/delivery/${deliveryId}/status`, {
-        status: newStatus,
-      });
+      const response: any = await bridge.orders.updateStatus(deliveryId, newStatus);
 
-      if (response.success) {
+      if (response?.success !== false) {
         setDeliveries(prev =>
           prev.map(d => (d.id === deliveryId ? { ...d, status: newStatus, updatedAt: new Date().toISOString() } : d))
         );
-        toast.success(t('delivery.statusUpdated', 'Status updated'));
+        toast.success(
+          typeof navigator !== 'undefined' && !navigator.onLine
+            ? t('delivery.savedLocallyQueued', 'Saved locally and queued for sync')
+            : t('delivery.statusUpdated', 'Status updated'),
+        );
       } else {
-        toast.error(t('delivery.statusUpdateFailed', 'Failed to update status'));
+        toast.error(response?.error || t('delivery.statusUpdateFailed', 'Failed to update status'));
       }
     } catch (err) {
       console.error('[DeliveryPage] Error updating status:', err);
       toast.error(t('delivery.statusUpdateFailed', 'Failed to update status'));
     }
-  }, [t]);
+  }, [bridge.orders, t]);
 
   // Assign driver
   const handleAssignDriver = useCallback(async (deliveryId: string, driverId: string) => {
     try {
-      const response = await posApiPost('/api/pos/delivery/assign', {
-        delivery_id: deliveryId,
-        driver_id: driverId,
-      });
+      const response: any = await bridge.orders.assignDriver(deliveryId, driverId);
 
-      if (response.success) {
+      if (response?.success !== false) {
         const driver = drivers.find(d => d.id === driverId);
         setDeliveries(prev =>
           prev.map(d =>
@@ -606,15 +690,19 @@ const DeliveryPage: React.FC = () => {
               : d
           )
         );
-        toast.success(t('delivery.driverAssigned', 'Driver assigned'));
+        toast.success(
+          typeof navigator !== 'undefined' && !navigator.onLine
+            ? t('delivery.savedLocallyQueued', 'Saved locally and queued for sync')
+            : t('delivery.driverAssigned', 'Driver assigned'),
+        );
       } else {
-        toast.error(t('delivery.assignFailed', 'Failed to assign driver'));
+        toast.error(response?.error || t('delivery.assignFailed', 'Failed to assign driver'));
       }
     } catch (err) {
       console.error('[DeliveryPage] Error assigning driver:', err);
       toast.error(t('delivery.assignFailed', 'Failed to assign driver'));
     }
-  }, [drivers, t]);
+  }, [bridge.orders, drivers, t]);
 
   // Open assignment modal
   const openAssignModal = useCallback((delivery: Delivery) => {

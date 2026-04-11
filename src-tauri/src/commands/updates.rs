@@ -9,6 +9,7 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::{db, UpdaterRuntimeState};
 
 const UPDATER_ARTIFACT_DIR: &str = "updater";
+const UPDATER_PUBKEY_PLACEHOLDER: &str = "__TAURI_UPDATER_PUBKEY__";
 
 fn parse_update_channel_payload(arg0: Option<serde_json::Value>) -> String {
     let raw = match arg0 {
@@ -31,6 +32,48 @@ fn parse_update_channel_payload(arg0: Option<serde_json::Value>) -> String {
     };
 
     raw.unwrap_or_else(|| "stable".to_string()).to_lowercase()
+}
+
+fn configured_updater_pubkey() -> Option<String> {
+    let config: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).ok()?;
+    config
+        .get("plugins")
+        .and_then(|value| value.get("updater"))
+        .and_then(|value| value.get("pubkey"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn validate_updater_configuration(
+    is_debug_build: bool,
+    configured_pubkey: Option<&str>,
+) -> Result<(), String> {
+    if is_debug_build {
+        return Err(
+            "Updater is disabled in local development builds. Use a packaged release build to test updates."
+                .to_string(),
+        );
+    }
+
+    let pubkey = configured_pubkey
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Updater public key is missing from this build.".to_string())?;
+
+    if pubkey == UPDATER_PUBKEY_PLACEHOLDER {
+        return Err(
+            "Updater public key is not configured for this build. Inject TAURI_UPDATER_PUBKEY or use a packaged release build."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_updater_is_available() -> Result<(), String> {
+    validate_updater_configuration(cfg!(debug_assertions), configured_updater_pubkey().as_deref())
 }
 
 fn update_state_string(state: &serde_json::Value, key: &str) -> Option<String> {
@@ -379,6 +422,15 @@ pub async fn update_check(
     app: tauri::AppHandle,
     updater_runtime: tauri::State<'_, UpdaterRuntimeState>,
 ) -> Result<(), String> {
+    if let Err(message) = ensure_updater_is_available() {
+        let mut state = crate::read_update_state(&db)?;
+        reset_update_state(&mut state);
+        set_state_value(&mut state, "error", serde_json::json!(message.clone()));
+        crate::write_update_state(&db, &state)?;
+        let _ = app.emit("update_error", serde_json::json!({ "message": message }));
+        return Ok(());
+    }
+
     let mut state = crate::read_update_state(&db)?;
     let prior_artifact = update_state_path(&state, "downloadedArtifactPath");
     remove_artifact(prior_artifact.as_deref());
@@ -476,6 +528,14 @@ pub async fn update_download(
     app: tauri::AppHandle,
     updater_runtime: tauri::State<'_, UpdaterRuntimeState>,
 ) -> Result<serde_json::Value, String> {
+    if let Err(message) = ensure_updater_is_available() {
+        let _ = app.emit(
+            "update_error",
+            serde_json::json!({ "message": message.clone() }),
+        );
+        return Ok(serde_json::json!({ "success": false, "error": message }));
+    }
+
     let pending_update = {
         let guard = updater_runtime
             .pending_update
@@ -665,6 +725,14 @@ pub async fn update_install(
     app: tauri::AppHandle,
     updater_runtime: tauri::State<'_, UpdaterRuntimeState>,
 ) -> Result<serde_json::Value, String> {
+    if let Err(message) = ensure_updater_is_available() {
+        let _ = app.emit(
+            "update_error",
+            serde_json::json!({ "message": message.clone() }),
+        );
+        return Ok(serde_json::json!({ "success": false, "error": message }));
+    }
+
     let mut state = crate::read_update_state(&db)?;
     let downloaded_version = update_state_string(&state, "downloadedVersion");
     let artifact_path = update_state_path(&state, "downloadedArtifactPath");
@@ -758,5 +826,29 @@ mod dto_tests {
         let from_empty = parse_update_channel_payload(Some(serde_json::json!("   ")));
         assert_eq!(from_none, "stable");
         assert_eq!(from_empty, "stable");
+    }
+
+    #[test]
+    fn validate_updater_configuration_rejects_debug_builds() {
+        let result = validate_updater_configuration(true, Some("real-pubkey"));
+        assert_eq!(
+            result.unwrap_err(),
+            "Updater is disabled in local development builds. Use a packaged release build to test updates."
+        );
+    }
+
+    #[test]
+    fn validate_updater_configuration_rejects_placeholder_pubkey() {
+        let result = validate_updater_configuration(false, Some(UPDATER_PUBKEY_PLACEHOLDER));
+        assert_eq!(
+            result.unwrap_err(),
+            "Updater public key is not configured for this build. Inject TAURI_UPDATER_PUBKEY or use a packaged release build."
+        );
+    }
+
+    #[test]
+    fn validate_updater_configuration_accepts_release_with_pubkey() {
+        let result = validate_updater_configuration(false, Some("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu"));
+        assert!(result.is_ok());
     }
 }

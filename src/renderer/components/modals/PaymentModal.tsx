@@ -14,7 +14,7 @@ interface PaymentModalProps {
   discountAmount?: number;
   deliveryFee?: number;
   isProcessing?: boolean;
-  orderType?: 'pickup' | 'delivery';
+  orderType?: 'pickup' | 'delivery' | 'dine-in';
   minimumOrderAmount?: number; // From delivery zone settings in admin dashboard
   onPaymentComplete: (paymentData: {
     method: 'cash' | 'card';

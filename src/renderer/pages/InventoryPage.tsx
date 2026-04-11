@@ -21,6 +21,8 @@ import { toast } from 'react-hot-toast';
 import { formatCurrency } from '../utils/format';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
 import { getBridge, isBrowser } from '../../lib';
+import { offlineAdjustInventory } from '../services/offline-mutations';
+import { getOfflineActionState } from '../services/offline-page-capabilities';
 
 interface InventoryItem {
   id: string;
@@ -89,10 +91,25 @@ const InventoryPage: React.FC = () => {
   const [adjustmentQty, setAdjustmentQty] = useState(0);
   const [adjustmentReason, setAdjustmentReason] = useState<'count' | 'received' | 'damaged' | 'expired' | 'theft' | 'other'>('count');
   const [adjustmentNotes, setAdjustmentNotes] = useState('');
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   const isDark = resolvedTheme === 'dark';
   const isGreek = i18n.language === 'el';
   const formatMoney = (amount: number) => formatCurrency(amount);
+  const adjustAction = getOfflineActionState('inventory', 'adjust', isOnline);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const fetchInventory = useCallback(async () => {
     setLoading(true);
@@ -161,7 +178,12 @@ const InventoryPage: React.FC = () => {
     return <CheckCircle className={`w-5 h-5 ${isDark ? 'text-zinc-300' : 'text-green-500'}`} />;
   };
 
-  const handleAdjustStock = async () => {
+  const handleAdjustStock = useCallback(async () => {
+    if (adjustAction.disabled) {
+      toast.error(adjustAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
+
     if (!selectedItem || adjustmentQty === 0) return;
 
     const nextQuantity = selectedItem.stock_quantity + adjustmentQty;
@@ -173,20 +195,12 @@ const InventoryPage: React.FC = () => {
     try {
       const invoke = getIpcInvoke();
       if (invoke) {
-        const result = await invoke(
-          'api:fetch-from-admin',
-          `/api/pos/sync/inventory_items/${selectedItem.id}`,
-          {
-            method: 'PATCH',
-            body: {
-              stock_quantity: nextQuantity,
-            },
-          }
-        );
-
-        if (!result?.success || result?.data?.success === false) {
-          throw new Error(result?.error || result?.data?.error || 'Failed to adjust stock');
-        }
+        await offlineAdjustInventory({
+          product_id: selectedItem.id,
+          adjustment: nextQuantity,
+          reason: adjustmentReason,
+          notes: adjustmentNotes.trim() || null,
+        });
       } else {
         const result = await posApiPatch<any>(`pos/sync/inventory_items/${selectedItem.id}`, {
           stock_quantity: nextQuantity,
@@ -197,7 +211,11 @@ const InventoryPage: React.FC = () => {
         }
       }
 
-      toast.success(t('inventory.adjustmentSaved', 'Stock adjusted successfully'));
+      toast.success(
+        isOnline
+          ? t('inventory.adjustmentSaved', 'Stock adjusted successfully')
+          : t('common.savedLocallyQueued', 'Saved locally and queued'),
+      );
       await fetchInventory();
     } catch (error) {
       console.error('Failed to adjust stock:', error);
@@ -209,7 +227,17 @@ const InventoryPage: React.FC = () => {
     setAdjustmentQty(0);
     setAdjustmentReason('count');
     setAdjustmentNotes('');
-  };
+  }, [adjustAction.disabled, adjustAction.message, adjustmentQty, fetchInventory, selectedItem, t]);
+
+  const openAdjustModal = useCallback((item: InventoryItem) => {
+    if (adjustAction.disabled) {
+      toast.error(adjustAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
+
+    setSelectedItem(item);
+    setShowAdjustModal(true);
+  }, [adjustAction.disabled, adjustAction.message, t]);
 
   return (
     <div className={`min-h-screen p-6 ${isDark ? 'bg-black text-white' : 'bg-gray-50 text-gray-900'}`}>
@@ -403,9 +431,10 @@ const InventoryPage: React.FC = () => {
                     <td className="px-4 py-3 text-right font-medium">{formatMoney(item.stock_quantity * item.cost_per_unit)}</td>
                     <td className="px-4 py-3 text-center">
                       <button
-                        onClick={() => { setSelectedItem(item); setShowAdjustModal(true); }}
-                        className={`p-2 rounded-lg transition-all ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-200'}`}
-                        title={t('inventory.adjustStock', 'Adjust Stock')}
+                        onClick={() => openAdjustModal(item)}
+                        disabled={adjustAction.disabled}
+                        className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-200'}`}
+                        title={adjustAction.message || t('inventory.adjustStock', 'Adjust Stock')}
                       >
                         <Edit3 className="w-4 h-4" />
                       </button>
@@ -447,6 +476,7 @@ const InventoryPage: React.FC = () => {
               <select
                 value={adjustmentReason}
                 onChange={(e) => setAdjustmentReason(e.target.value as typeof adjustmentReason)}
+                disabled={adjustAction.disabled}
                 className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100' : 'bg-gray-100 border-gray-300 text-gray-900'}`}
               >
                 <option value="count">{t('inventory.reasons.count', 'Stock Count')}</option>
@@ -458,16 +488,17 @@ const InventoryPage: React.FC = () => {
               </select>
             </div>
             <div className="flex items-center gap-4 mb-4">
-              <button onClick={() => setAdjustmentQty(q => q - 1)} className={`p-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 hover:bg-gray-300'}`}>
+              <button disabled={adjustAction.disabled} onClick={() => setAdjustmentQty(q => q - 1)} className={`p-3 rounded-xl border disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 hover:bg-gray-300'}`}>
                 <Minus className="w-5 h-5" />
               </button>
               <input
                 type="number"
                 value={adjustmentQty}
                 onChange={(e) => setAdjustmentQty(Number(e.target.value))}
+                disabled={adjustAction.disabled}
                 className={`flex-1 text-center text-2xl font-bold py-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-gray-100 border-gray-300'}`}
               />
-              <button onClick={() => setAdjustmentQty(q => q + 1)} className={`p-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 hover:bg-gray-300'}`}>
+              <button disabled={adjustAction.disabled} onClick={() => setAdjustmentQty(q => q + 1)} className={`p-3 rounded-xl border disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 hover:bg-gray-300'}`}>
                 <Plus className="w-5 h-5" />
               </button>
             </div>
@@ -480,6 +511,7 @@ const InventoryPage: React.FC = () => {
                 onChange={(e) => setAdjustmentNotes(e.target.value)}
                 placeholder={t('inventory.notesPlaceholder', 'Add notes about this adjustment...')}
                 rows={2}
+                disabled={adjustAction.disabled}
                 className={`w-full px-3 py-2 rounded-lg resize-none border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100 placeholder-zinc-500' : 'bg-gray-100 border-gray-300 text-gray-900 placeholder-gray-400'}`}
               />
             </div>
@@ -487,7 +519,7 @@ const InventoryPage: React.FC = () => {
               <button onClick={() => { setShowAdjustModal(false); setAdjustmentReason('count'); setAdjustmentNotes(''); }} className={`flex-1 py-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-gray-200 border-gray-300'}`}>
                 {t('common.cancel', 'Cancel')}
               </button>
-              <button onClick={handleAdjustStock} disabled={adjustmentQty === 0} className={`flex-1 py-3 rounded-xl font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
+              <button onClick={() => void handleAdjustStock()} disabled={adjustmentQty === 0 || adjustAction.disabled} title={adjustAction.message || undefined} className={`flex-1 py-3 rounded-xl font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
                 isDark ? 'bg-zinc-100 text-black hover:bg-white' : 'bg-black text-white hover:bg-zinc-800'
               }`}>
                 {t('common.save', 'Save')}

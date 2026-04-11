@@ -778,20 +778,38 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   }
 
   const enabledFeatureLabels = Object.entries({
-    'Order creation': features.orderCreation,
-    'Order editing': features.orderModification,
-    'Cash payments': features.cashPayments,
-    'Card payments': features.cardPayments,
-    Discounts: features.discounts,
-    Refunds: features.refunds,
-    Reports: features.reports,
-    Settings: features.settings,
-    'Ghost mode': ghostModeFeatureEnabled,
+    [t('settings.features.orderCreation', 'Order creation')]: features.orderCreation,
+    [t('settings.features.orderModification', 'Order editing')]: features.orderModification,
+    [t('settings.features.cashPayments', 'Cash payments')]: features.cashPayments,
+    [t('settings.features.cardPayments', 'Card payments')]: features.cardPayments,
+    [t('settings.features.discounts', 'Discounts')]: features.discounts,
+    [t('settings.features.refunds', 'Refunds')]: features.refunds,
+    [t('settings.features.reports', 'Reports')]: features.reports,
+    [t('settings.features.settings', 'Settings')]: features.settings,
+    [t('settings.features.ghostMode', 'Ghost mode')]: ghostModeFeatureEnabled,
   })
     .filter(([, enabled]) => enabled)
     .map(([label]) => label)
 
   const enabledModuleNames = enabledModules.map((module) => module.module.name)
+  const resolvedTerminalTypeLabel =
+    terminalType === 'mobile_waiter'
+      ? t('settings.terminal.type.mobile_waiter', 'Mobile POS')
+      : t('settings.terminal.type.main', 'Main Terminal')
+  const managedTerminalSummary = [
+    resolvedTerminalTypeLabel,
+    ownerTerminalId
+      ? t('settings.managedByAdmin.ownerLabel', {
+          owner: ownerTerminalId,
+          defaultValue: 'Owner {{owner}}',
+        })
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' - ')
+  const syncHealthLabel = t(`settings.managedByAdmin.syncHealth.${runtimeSyncHealth}`, {
+    defaultValue: runtimeSyncHealth,
+  })
 
   return (
     <>
@@ -834,40 +852,64 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
                 <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2">
-                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">Terminal unit</div>
-                  <div className="mt-1 liquid-glass-modal-text">
-                    {terminalType === 'mobile_waiter' ? 'Mobile Terminal' : 'Main Terminal'}
-                    {ownerTerminalId ? ` • Owner ${ownerTerminalId}` : ''}
+                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
+                    {t('settings.managedByAdmin.terminalUnitLabel', 'Terminal unit')}
                   </div>
+                  <div className="mt-1 liquid-glass-modal-text">{managedTerminalSummary}</div>
                   <div className="text-xs liquid-glass-modal-text-muted mt-1">
                     {posOperatingMode || 'legacy_branch_shared'}
                   </div>
                 </div>
                 <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2">
-                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">Connection</div>
-                  <div className="mt-1 liquid-glass-modal-text break-all">{runtimeTerminalId || terminalId || 'Unassigned terminal'}</div>
+                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
+                    {t('settings.managedByAdmin.connectionLabel', 'Connection')}
+                  </div>
+                  <div className="mt-1 liquid-glass-modal-text break-all">
+                    {runtimeTerminalId ||
+                      terminalId ||
+                      t('settings.managedByAdmin.unassignedTerminal', 'Unassigned terminal')}
+                  </div>
                   <div className="text-xs liquid-glass-modal-text-muted mt-1 break-all">
-                    {runtimeAdminUrl || adminDashboardUrl || 'No admin URL'}
+                    {runtimeAdminUrl ||
+                      adminDashboardUrl ||
+                      t('settings.managedByAdmin.noAdminUrl', 'No admin URL')}
                   </div>
                   <div className="text-xs liquid-glass-modal-text-muted mt-1">
-                    Sync: {runtimeSyncHealth}
+                    {t('settings.managedByAdmin.syncStatusLabel', 'Sync')}: {syncHealthLabel}
                   </div>
                 </div>
                 <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2 md:col-span-2">
-                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">Enabled features</div>
+                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
+                    {t('settings.managedByAdmin.enabledFeaturesLabel', 'Enabled features')}
+                  </div>
                   <div className="mt-1 liquid-glass-modal-text">
-                    {enabledFeatureLabels.length ? enabledFeatureLabels.join(', ') : 'No remote features enabled'}
+                    {enabledFeatureLabels.length
+                      ? enabledFeatureLabels.join(', ')
+                      : t(
+                          'settings.managedByAdmin.noRemoteFeaturesEnabled',
+                          'No remote features enabled',
+                        )}
                   </div>
                 </div>
                 <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2 md:col-span-2">
-                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">Enabled modules</div>
+                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
+                    {t('settings.managedByAdmin.enabledModulesLabel', 'Enabled modules')}
+                  </div>
                   <div className="mt-1 liquid-glass-modal-text">
-                    {enabledModuleNames.length ? enabledModuleNames.join(', ') : 'Core modules only'}
+                    {enabledModuleNames.length
+                      ? enabledModuleNames.join(', ')
+                      : t('settings.managedByAdmin.coreModulesOnly', 'Core modules only')}
                   </div>
                   <div className="text-xs liquid-glass-modal-text-muted mt-1">
                     {pinResetRequired
-                      ? 'Admin requires a new local PIN on next login.'
-                      : 'No remote PIN reset request pending.'}
+                      ? t(
+                          'settings.managedByAdmin.pinResetRequired',
+                          'Admin requires a new local PIN on next login.',
+                        )
+                      : t(
+                          'settings.managedByAdmin.pinResetClear',
+                          'No remote PIN reset request pending.',
+                        )}
                   </div>
                 </div>
               </div>

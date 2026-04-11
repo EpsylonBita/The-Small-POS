@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, CheckCircle, Clock, Home, Mail, MapPin, User } from 'lucide-react';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { posApiPost } from '../../utils/api-helpers';
 import {
   buildAddressFingerprint,
   createAddressSessionToken,
@@ -19,6 +18,7 @@ import {
 } from '../../services/address-workflow';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
+import { getBridge } from '../../../lib';
 
 interface Customer {
   id: string;
@@ -63,6 +63,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   onAddressAdded,
 }) => {
   const { t } = useTranslation();
+  const bridge = useRef(getBridge()).current;
   const { hasModule } = useAcquiredModules();
   const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
   const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
@@ -456,7 +457,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
           }
         : {};
 
-      const addressResult = await posApiPost<any>(`pos/customers/${customer.id}/addresses`, {
+      const addressResult: any = await bridge.customers.addAddress(customer.id, {
         street: formData.address.trim(),
         street_address: formData.address.trim(),
         address: formData.address.trim(),
@@ -465,13 +466,13 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
         notes: formData.notes.trim() || undefined,
         address_type: 'delivery',
         is_default: false,
-        coordinates: coords,
+        coordinates: coords || undefined,
         latitude: coords?.lat ?? null,
         longitude: coords?.lng ?? null,
         ...metadata,
       });
 
-      if (!addressResult.success) {
+      if (addressResult?.success === false) {
         throw new Error(addressResult.error || t('modals.addNewAddress.saveFailed'));
       }
 

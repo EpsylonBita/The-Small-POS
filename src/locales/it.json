@@ -1605,6 +1605,80 @@
       "exportSettings": "Esporta impostazioni",
       "importSettings": "Importa impostazioni"
     },
+    "connection": {
+      "syncPolicy": "Sincronizza criteri"
+    },
+    "managedByAdmin": {
+      "title": "Gestito dall'admin",
+      "helpText": "L'admin controlla la politica di accesso. Questo terminale controlla l'hardware e il comportamento locale.",
+      "terminalUnitLabel": "Unità terminale",
+      "ownerLabel": "Proprietario {{owner}}",
+      "connectionLabel": "Connessione",
+      "unassignedTerminal": "Terminale non assegnato",
+      "noAdminUrl": "Nessun URL admin",
+      "syncStatusLabel": "Sync",
+      "enabledFeaturesLabel": "Funzionalità abilitate",
+      "noRemoteFeaturesEnabled": "Nessuna funzionalità remota abilitata",
+      "enabledModulesLabel": "Moduli abilitati",
+      "coreModulesOnly": "Solo moduli core",
+      "pinResetRequired": "L'admin richiede un nuovo PIN locale al prossimo accesso.",
+      "pinResetClear": "Nessuna richiesta remota di reset PIN in sospeso.",
+      "syncNow": "Sincronizza criteri",
+      "syncHealth": {
+        "offline": "Offline",
+        "polling": "Controllo periodico",
+        "websocket": "Tempo reale",
+        "online": "Online",
+        "healthy": "Sano",
+        "error": "Errore",
+        "blocked": "Bloccato",
+        "unknown": "Sconosciuto"
+      }
+    },
+    "paymentTerminals": {
+      "title": "Terminali di pagamento",
+      "label": "Terminali di pagamento",
+      "helpText": "Configura dispositivi di pagamento ECR",
+      "configureButton": "Configura"
+    },
+    "printQueue": {
+      "title": "Coda di stampa",
+      "helpText": "I lavori già inviati alla stampante LAN non possono essere richiamati dal dispositivo. Questi controlli fermano o ritentano solo i lavori ancora in coda localmente su questo POS.",
+      "pausedProfiles": "Profili in pausa per: {{profiles}}",
+      "refresh": "Aggiorna",
+      "resume": "Riprendi coda",
+      "pause": "Metti in pausa la coda",
+      "cancelPending": "Annulla in sospeso",
+      "empty": "Al momento non ci sono lavori di stampa locali in coda.",
+      "defaultPrinter": "Predefinita",
+      "unknown": "Sconosciuto",
+      "cancel": "Annulla",
+      "retry": "Riprova",
+      "loadFailed": "Impossibile caricare la coda di stampa",
+      "resumed": "Coda di stampa ripresa",
+      "paused": "Coda di stampa messa in pausa",
+      "updateFailed": "Impossibile aggiornare la coda di stampa",
+      "cancelledAll": "Lavori di stampa in coda annullati",
+      "cancelAllFailed": "Impossibile annullare i lavori di stampa in coda",
+      "cancelled": "Lavoro di stampa annullato",
+      "cancelFailed": "Impossibile annullare il lavoro di stampa",
+      "retried": "Lavoro di stampa reinserito in coda",
+      "retryFailed": "Impossibile riprovare il lavoro di stampa",
+      "columns": {
+        "job": "Lavoro",
+        "status": "Stato",
+        "printer": "Stampante",
+        "action": "Azione"
+      },
+      "status": {
+        "pending": "In attesa",
+        "printing": "Stampa",
+        "failed": "Fallito",
+        "completed": "Completato",
+        "cancelled": "Annullato",
+        "paused": "In pausa"
+      }
+    },
     "sections": {
       "general": "Generali",
       "terminal": "Terminale",
@@ -1658,13 +1732,28 @@
       "expenses": "Spese",
       "staffPayments": "Pagamenti personale",
       "reports": "Report",
-      "settings": "Impostazioni"
+      "settings": "Impostazioni",
+      "ghostMode": "Modalità fantasma"
     },
     "printer": {
       "title": "Impostazioni stampante",
       "label": "Impostazioni stampante",
       "helpText": "Configura la stampante termica per gli scontrini",
       "configureButton": "Configura stampante",
+      "quickSetup": "Configurazione rapida",
+      "expertSettings": "Impostazioni avanzate",
+      "verificationFirstHint": "Usa prima la configurazione rapida. Verifica un percorso di trasporto e codifica funzionante prima di affidarti alla stampante nel servizio live.",
+      "startQuickSetup": "Avvia procedura guidata di verifica",
+      "quickWizardAdvanced": "Impostazioni avanzate",
+      "quickWizardDetectTitle": "Passaggio 1: rileva stampanti",
+      "quickWizardDetectHint": "Prima rileviamo le stampanti vicine e installate, ma nessuna viene considerata pronta per la stampa finché la verifica non riesce.",
+      "quickWizardDraftOnlyHint": "Configurazione orientata alla compatibilità: la procedura guidata testa trasporto e codifica usando un profilo bozza non salvato. Non vengono creati profili stampante temporanei.",
+      "quickWizardStep": {
+        "detect": "Rileva",
+        "verify": "Verifica",
+        "style": "Stile",
+        "save": "Salva"
+      },
       "receiptPrinter": "Stampante scontrini",
       "kitchenPrinter": "Stampante cucina",
       "labelPrinter": "Stampante etichette",

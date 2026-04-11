@@ -33,6 +33,7 @@ import {
   buildShiftCheckoutPrintSnapshot,
   canPrintShiftCheckoutSnapshot,
   queueShiftCheckoutPrint,
+  type ShiftCheckoutPrintParams,
 } from '../../src/renderer/utils/staffShiftCheckoutPrint';
 import {
   normalizeZReportData,
@@ -510,15 +511,18 @@ test('buildResolvedAddressDetails preserves the clicked street label while using
 });
 
 test('resolvePickupToDeliveryAddress prefers the selected customer address', () => {
+  const customerId = '00000000-0000-4000-8000-000000000001';
+  const addr1 = '00000000-0000-4000-8000-000000000002';
+  const addr2 = '00000000-0000-4000-8000-000000000003';
   const resolved = resolvePickupToDeliveryAddress({
-    id: 'customer-1',
+    id: customerId,
     name: 'Alice',
     phone: '12345',
-    selected_address_id: 'addr-2',
+    selected_address_id: addr2,
     addresses: [
       {
-        id: 'addr-1',
-        customer_id: 'customer-1',
+        id: addr1,
+        customer_id: customerId,
         street_address: '1 First Street',
         city: 'Athens',
         postal_code: '11111',
@@ -526,8 +530,8 @@ test('resolvePickupToDeliveryAddress prefers the selected customer address', () 
         name_on_ringer: 'Default Bell',
       },
       {
-        id: 'addr-2',
-        customer_id: 'customer-1',
+        id: addr2,
+        customer_id: customerId,
         street_address: '2 Second Street',
         city: 'Piraeus',
         postal_code: '22222',
@@ -540,8 +544,8 @@ test('resolvePickupToDeliveryAddress prefers the selected customer address', () 
     ],
   });
 
-  assert.equal(resolved?.addressId, 'addr-2');
-  assert.equal(resolved?.customerId, 'customer-1');
+  assert.equal(resolved?.addressId, addr2);
+  assert.equal(resolved?.customerId, customerId);
   assert.equal(resolved?.streetAddress, '2 Second Street');
   assert.equal(resolved?.city, 'Piraeus');
   assert.equal(resolved?.postalCode, '22222');
@@ -578,20 +582,29 @@ test('sortOrdersOldestFirst keeps new realtime orders at the bottom', () => {
   const sorted = sortOrdersOldestFirst([
     {
       id: 'order-new',
+      order_number: '00003',
       orderNumber: '00003',
+      created_at: '2026-03-22T10:10:00.000Z',
       createdAt: '2026-03-22T10:10:00.000Z',
+      updated_at: '2026-03-22T10:10:00.000Z',
       updatedAt: '2026-03-22T10:10:00.000Z',
     },
     {
       id: 'order-oldest',
+      order_number: '00001',
       orderNumber: '00001',
+      created_at: '2026-03-22T10:00:00.000Z',
       createdAt: '2026-03-22T10:00:00.000Z',
+      updated_at: '2026-03-22T10:00:00.000Z',
       updatedAt: '2026-03-22T10:00:00.000Z',
     },
     {
       id: 'order-middle',
+      order_number: '00002',
       orderNumber: '00002',
+      created_at: '2026-03-22T10:05:00.000Z',
       createdAt: '2026-03-22T10:05:00.000Z',
+      updated_at: '2026-03-22T10:05:00.000Z',
       updatedAt: '2026-03-22T10:05:00.000Z',
     },
   ]);
@@ -761,13 +774,13 @@ test('non-financial checkout print snapshot only uses the snapshot timestamp', (
 });
 
 test('queueShiftCheckoutPrint sends snapshot overrides through the bridge', async () => {
-  let capturedPayload: Record<string, unknown> | null = null;
+  let capturedPayload: ShiftCheckoutPrintParams | null = null;
   const bridge = {
     terminalConfig: {
-      getSetting: async () => 'Front Counter',
+      getSetting: async (_category: string, _key: string): Promise<unknown> => 'Front Counter',
     },
     shifts: {
-      printCheckout: async (params: Record<string, unknown>) => {
+      printCheckout: async (params: ShiftCheckoutPrintParams): Promise<unknown> => {
         capturedPayload = params;
         return { success: true };
       },

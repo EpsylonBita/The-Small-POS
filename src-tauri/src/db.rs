@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 43;
+const CURRENT_SCHEMA_VERSION: i32 = 44;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -273,6 +273,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 43 {
         migrate_v43(conn)?;
+    }
+    if current < 44 {
+        migrate_v44(conn)?;
     }
 
     Ok(())
@@ -2713,6 +2716,17 @@ fn migrate_v43(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v43 loyalty_customers.customer_id: {e}"))?;
 
     info!("Applied migration v43 (loyalty_customers.customer_id)");
+    Ok(())
+}
+
+/// Migration v44: Parity sync queue and conflict audit log tables.
+fn migrate_v44(conn: &Connection) -> Result<(), String> {
+    crate::sync_queue::create_tables(conn)?;
+
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (44);")
+        .map_err(|e| format!("migration v44 schema_version: {e}"))?;
+
+    info!("Applied migration v44 (parity_sync_queue, conflict_audit_log)");
     Ok(())
 }
 

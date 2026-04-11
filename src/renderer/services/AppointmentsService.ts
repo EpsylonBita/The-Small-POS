@@ -7,6 +7,10 @@
 
 import { getBridge, isBrowser } from '../../lib';
 import { posApiGet, posApiPatch, posApiPost } from '../utils/api-helpers';
+import {
+  offlineCreateAppointment,
+  offlineUpdateAppointmentStatus,
+} from './offline-mutations';
 
 export type AppointmentStatus =
   | 'scheduled'
@@ -334,10 +338,17 @@ class AppointmentsService {
             `/api/pos/appointments/${appointmentId}/status`,
             body,
           )
-        : await this.bridge.appointments.updateStatus(appointmentId, body);
+        : {
+            success: true,
+            data: await offlineUpdateAppointmentStatus({
+              appointmentId,
+              ...body,
+            }),
+          };
 
       if (!result.success) {
-        console.error('[AppointmentsService] API status update error:', result.error);
+        const bridgeError = 'error' in result ? result.error : undefined;
+        console.error('[AppointmentsService] API status update error:', bridgeError);
         return null;
       }
 
@@ -404,10 +415,14 @@ class AppointmentsService {
 
       const result = isBrowser()
         ? await posApiPost<AppointmentSingleResponse>('/api/pos/appointments', body)
-        : await this.bridge.appointments.create(body);
+        : {
+            success: true,
+            data: await offlineCreateAppointment(body),
+          };
 
       if (!result.success || !result.data) {
-        console.error('[AppointmentsService] API create error:', result.error);
+        const bridgeError = 'error' in result ? result.error : undefined;
+        console.error('[AppointmentsService] API create error:', bridgeError);
         return null;
       }
 

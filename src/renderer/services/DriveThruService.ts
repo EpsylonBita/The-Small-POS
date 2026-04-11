@@ -9,6 +9,7 @@
  */
 
 import { getBridge } from '../../lib';
+import { offlineUpdateDriveThruStatus } from './offline-mutations';
 
 // Types
 export type DriveThruOrderStatus = 'waiting' | 'preparing' | 'ready' | 'served';
@@ -112,14 +113,21 @@ class DriveThruService {
 
       console.log('[DriveThruService] Fetching lanes via API');
 
-      const result = await this.bridge.sync.fetchDriveThru({});
+      const result = await this.bridge.adminApi.fetchFromAdmin('/api/pos/drive-through', {
+        method: 'GET',
+      });
 
       if (!result.success) {
         console.error('[DriveThruService] API error:', result.error);
         throw new Error(result.error || 'Failed to fetch drive-thru data');
       }
 
-      return (result.lanes || []).map(transformLaneFromAPI);
+      const payload = (result.data ?? {}) as { success?: boolean; lanes?: any[] };
+      if (payload.success === false) {
+        throw new Error('Failed to fetch drive-thru data');
+      }
+
+      return (payload.lanes || []).map(transformLaneFromAPI);
     } catch (error) {
       console.error('[DriveThruService] Failed to fetch lanes:', error);
       return [];
@@ -143,14 +151,27 @@ class DriveThruService {
         options.lane_id = laneId;
       }
 
-      const result = await this.bridge.sync.fetchDriveThru(options);
+      const search = new URLSearchParams()
+      if (options.lane_id) {
+        search.set('lane_id', String(options.lane_id))
+      }
+
+      const result = await this.bridge.adminApi.fetchFromAdmin(
+        `/api/pos/drive-through${search.toString() ? `?${search.toString()}` : ''}`,
+        { method: 'GET' },
+      );
 
       if (!result.success) {
         console.error('[DriveThruService] API error:', result.error);
         throw new Error(result.error || 'Failed to fetch drive-thru orders');
       }
 
-      return (result.orders || []).map(transformOrderFromAPI);
+      const payload = (result.data ?? {}) as { success?: boolean; orders?: any[] };
+      if (payload.success === false) {
+        throw new Error('Failed to fetch drive-thru orders');
+      }
+
+      return (payload.orders || []).map(transformOrderFromAPI);
     } catch (error) {
       console.error('[DriveThruService] Failed to fetch orders:', error);
       return [];
@@ -164,11 +185,13 @@ class DriveThruService {
     try {
       console.log('[DriveThruService] Updating order status via API:', { orderId, status });
 
-      const result = await this.bridge.sync.updateDriveThruOrderStatus(orderId, status);
+      const result = await offlineUpdateDriveThruStatus({
+        drive_through_order_id: orderId,
+        status,
+      });
 
-      if (!result.success) {
-        console.error('[DriveThruService] API error:', result.error);
-        throw new Error(result.error || 'Failed to update order status');
+      if (!result.order) {
+        throw new Error('Failed to update order status');
       }
 
       return transformOrderFromAPI(result.order);

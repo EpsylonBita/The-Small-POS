@@ -26,6 +26,8 @@ import {
 } from '../utils/api-helpers';
 import { formatCurrency, formatDate } from '../utils/format';
 import { getBridge, isBrowser } from '../../lib';
+import { offlineSetCouponActive, offlineUpsertCoupon } from '../services/offline-mutations';
+import { getOfflineActionState } from '../services/offline-page-capabilities';
 
 interface Coupon {
   id: string;
@@ -137,9 +139,26 @@ const CouponsPage: React.FC = () => {
   const [showModal, setShowModal] = useState(false);
   const [editingCoupon, setEditingCoupon] = useState<Coupon | null>(null);
   const [form, setForm] = useState<CouponFormState>(EMPTY_FORM);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   const isDark = resolvedTheme === 'dark';
   const formatMoney = (amount: number) => formatCurrency(amount);
+  const saveAction = getOfflineActionState('coupons', 'save', isOnline);
+  const toggleAction = getOfflineActionState('coupons', 'toggle', isOnline);
+  const deleteAction = getOfflineActionState('coupons', 'delete', isOnline);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const fetchCoupons = useCallback(async () => {
     setLoading(true);
@@ -196,12 +215,20 @@ const CouponsPage: React.FC = () => {
   };
 
   const openCreateModal = () => {
+    if (saveAction.disabled) {
+      toast.error(saveAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
     setEditingCoupon(null);
     setForm(EMPTY_FORM);
     setShowModal(true);
   };
 
   const openEditModal = (coupon: Coupon) => {
+    if (saveAction.disabled) {
+      toast.error(saveAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
     setEditingCoupon(coupon);
     setForm({
       code: coupon.code,
@@ -225,6 +252,11 @@ const CouponsPage: React.FC = () => {
   };
 
   const handleSaveCoupon = async () => {
+    if (saveAction.disabled) {
+      toast.error(saveAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
+
     const code = form.code.trim().toUpperCase();
     if (!code) {
       toast.error(t('coupons.errors.codeRequired', 'Coupon code is required'));
@@ -280,14 +312,10 @@ const CouponsPage: React.FC = () => {
         };
 
         if (invoke) {
-          const result = await invoke(
-            'api:fetch-from-admin',
-            `/api/pos/coupons/${editingCoupon.id}`,
-            { method: 'PATCH', body: payload }
-          );
-          if (!result?.success || result?.data?.error) {
-            throw new Error(readApiError(result, 'Failed to update coupon'));
-          }
+          await offlineUpsertCoupon({
+            id: editingCoupon.id,
+            ...payload,
+          });
         } else {
           const result = await posApiPatch<{ error?: string }>(`pos/coupons/${editingCoupon.id}`, payload);
           if (!result.success || result.data?.error) {
@@ -307,13 +335,7 @@ const CouponsPage: React.FC = () => {
         };
 
         if (invoke) {
-          const result = await invoke('api:fetch-from-admin', '/api/pos/coupons', {
-            method: 'POST',
-            body: payload,
-          });
-          if (!result?.success || result?.data?.error) {
-            throw new Error(readApiError(result, 'Failed to create coupon'));
-          }
+          await offlineUpsertCoupon(payload);
         } else {
           const result = await posApiPost<{ error?: string }>('pos/coupons', payload);
           if (!result.success || result.data?.error) {
@@ -324,8 +346,12 @@ const CouponsPage: React.FC = () => {
 
       toast.success(
         editingCoupon
-          ? t('coupons.updated', 'Coupon updated')
-          : t('coupons.created', 'Coupon created')
+          ? isOnline
+            ? t('coupons.updated', 'Coupon updated')
+            : t('common.savedLocallyQueued', 'Saved locally and queued')
+          : isOnline
+            ? t('coupons.created', 'Coupon created')
+            : t('common.savedLocallyQueued', 'Saved locally and queued')
       );
       closeModal();
       await fetchCoupons();
@@ -338,18 +364,19 @@ const CouponsPage: React.FC = () => {
   };
 
   const handleToggleActive = async (coupon: Coupon) => {
+    if (toggleAction.disabled) {
+      toast.error(toggleAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
+
     setProcessingId(coupon.id);
     try {
       const invoke = getIpcInvoke();
       if (invoke) {
-        const result = await invoke(
-          'api:fetch-from-admin',
-          `/api/pos/coupons/${coupon.id}`,
-          { method: 'PATCH', body: { is_active: !coupon.is_active } }
-        );
-        if (!result?.success || result?.data?.error) {
-          throw new Error(readApiError(result, 'Failed to update coupon status'));
-        }
+        await offlineSetCouponActive({
+          couponId: coupon.id,
+          isActive: !coupon.is_active,
+        });
       } else {
         const result = await posApiPatch<{ error?: string }>(`pos/coupons/${coupon.id}`, {
           is_active: !coupon.is_active,
@@ -368,8 +395,12 @@ const CouponsPage: React.FC = () => {
       );
       toast.success(
         !coupon.is_active
-          ? t('coupons.activated', 'Coupon activated')
-          : t('coupons.deactivated', 'Coupon deactivated')
+          ? isOnline
+            ? t('coupons.activated', 'Coupon activated')
+            : t('common.savedLocallyQueued', 'Saved locally and queued')
+          : isOnline
+            ? t('coupons.deactivated', 'Coupon deactivated')
+            : t('common.savedLocallyQueued', 'Saved locally and queued')
       );
     } catch (error) {
       console.error('Failed to update coupon status:', error);
@@ -380,6 +411,11 @@ const CouponsPage: React.FC = () => {
   };
 
   const handleDelete = async (coupon: Coupon) => {
+    if (deleteAction.disabled) {
+      toast.error(deleteAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
+      return;
+    }
+
     if (!window.confirm(t('coupons.confirmDelete', 'Delete this coupon? This cannot be undone.'))) {
       return;
     }
@@ -451,11 +487,13 @@ const CouponsPage: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             onClick={openCreateModal}
+            disabled={saveAction.disabled}
+            title={saveAction.message || undefined}
             className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
               isDark
                 ? 'bg-zinc-100 text-black border border-zinc-200 hover:bg-white'
                 : 'bg-white text-black border border-gray-300 hover:bg-gray-100'
-            }`}
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
           >
             <Plus className="w-4 h-4" />
             {t('coupons.create', 'New Coupon')}
@@ -633,18 +671,19 @@ const CouponsPage: React.FC = () => {
                   <div className="flex items-center justify-end gap-2">
                     <button
                       onClick={() => openEditModal(coupon)}
-                      disabled={busy}
+                      disabled={busy || saveAction.disabled}
+                      title={saveAction.message || t('common.edit', 'Edit')}
                       className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
                         isDark ? 'bg-zinc-900 border border-zinc-700 hover:bg-zinc-800' : 'bg-white border border-gray-300 hover:bg-gray-100'
                       }`}
-                      title={t('common.edit', 'Edit')}
                     >
                       <Edit3 className="w-4 h-4" />
                       {t('common.edit', 'Edit')}
                     </button>
                     <button
                       onClick={() => handleToggleActive(coupon)}
-                      disabled={busy}
+                      disabled={busy || toggleAction.disabled}
+                      title={toggleAction.message || (coupon.is_active ? t('common.deactivate', 'Deactivate') : t('common.activate', 'Activate'))}
                       className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
                         coupon.is_active
                           ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
@@ -652,18 +691,17 @@ const CouponsPage: React.FC = () => {
                             ? 'bg-zinc-900 text-zinc-100 border border-zinc-700 hover:bg-zinc-800'
                             : 'bg-white text-black border border-gray-300 hover:bg-gray-100'
                       }`}
-                      title={coupon.is_active ? t('common.deactivate', 'Deactivate') : t('common.activate', 'Activate')}
                     >
                       {coupon.is_active ? <XCircle className="w-4 h-4" /> : <CheckCircle className="w-4 h-4" />}
                       {coupon.is_active ? t('common.deactivate', 'Deactivate') : t('common.activate', 'Activate')}
                     </button>
                     <button
                       onClick={() => handleDelete(coupon)}
-                      disabled={busy}
+                      disabled={busy || deleteAction.disabled}
+                      title={deleteAction.message || t('common.delete', 'Delete')}
                       className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
                         isDark ? 'bg-zinc-900 border border-zinc-700 hover:bg-zinc-800 text-red-400' : 'bg-white border border-gray-300 hover:bg-gray-100 text-red-600'
                       }`}
-                      title={t('common.delete', 'Delete')}
                     >
                       <Trash2 className="w-4 h-4" />
                       {t('common.delete', 'Delete')}
@@ -691,12 +729,22 @@ const CouponsPage: React.FC = () => {
             </div>
 
             <div className="p-5 space-y-4">
+              {saveAction.disabled && (
+                <div className={`rounded-xl border px-3 py-2 text-sm ${
+                  isDark
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-100'
+                    : 'bg-amber-50 border-amber-300 text-amber-900'
+                }`}>
+                  {saveAction.message}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <label className="text-sm">
                   <span className="block mb-1">{t('coupons.code', 'Code')} *</span>
                   <input
                     value={form.code}
                     onChange={(e) => setForm((prev) => ({ ...prev, code: e.target.value.toUpperCase() }))}
+                    disabled={saveAction.disabled}
                     className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder="SAVE10"
                   />
@@ -706,6 +754,7 @@ const CouponsPage: React.FC = () => {
                   <select
                     value={form.discount_type}
                     onChange={(e) => setForm((prev) => ({ ...prev, discount_type: e.target.value as 'percentage' | 'fixed' }))}
+                    disabled={saveAction.disabled}
                     className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   >
                     <option value="percentage">{t('coupons.percentage', 'Percentage')}</option>
@@ -723,6 +772,7 @@ const CouponsPage: React.FC = () => {
                     min="0"
                     value={form.discount_value}
                     onChange={(e) => setForm((prev) => ({ ...prev, discount_value: e.target.value }))}
+                    disabled={saveAction.disabled}
                     className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   />
                 </label>
@@ -734,6 +784,7 @@ const CouponsPage: React.FC = () => {
                     min="0"
                     value={form.min_order_amount}
                     onChange={(e) => setForm((prev) => ({ ...prev, min_order_amount: e.target.value }))}
+                    disabled={saveAction.disabled}
                     className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder="0"
                   />
@@ -749,6 +800,7 @@ const CouponsPage: React.FC = () => {
                     step="1"
                     value={form.usage_limit}
                     onChange={(e) => setForm((prev) => ({ ...prev, usage_limit: e.target.value }))}
+                    disabled={saveAction.disabled}
                     className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder={t('common.optional', 'Optional')}
                   />
@@ -759,6 +811,7 @@ const CouponsPage: React.FC = () => {
                     type="datetime-local"
                     value={form.expires_at}
                     onChange={(e) => setForm((prev) => ({ ...prev, expires_at: e.target.value }))}
+                    disabled={saveAction.disabled}
                     className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   />
                 </label>
@@ -769,6 +822,7 @@ const CouponsPage: React.FC = () => {
                 <input
                   value={form.name}
                   onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+                  disabled={saveAction.disabled}
                   className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                 />
               </label>
@@ -779,6 +833,7 @@ const CouponsPage: React.FC = () => {
                   rows={3}
                   value={form.description}
                   onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
+                  disabled={saveAction.disabled}
                   className={`w-full px-3 py-2 rounded-lg border resize-none ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                 />
               </label>
@@ -789,6 +844,7 @@ const CouponsPage: React.FC = () => {
                     type="checkbox"
                     checked={form.is_active}
                     onChange={(e) => setForm((prev) => ({ ...prev, is_active: e.target.checked }))}
+                    disabled={saveAction.disabled}
                   />
                   {t('common.active', 'Active')}
                 </label>
@@ -805,7 +861,8 @@ const CouponsPage: React.FC = () => {
               </button>
               <button
                 onClick={handleSaveCoupon}
-                disabled={saving}
+                disabled={saving || saveAction.disabled}
+                title={saveAction.message || undefined}
                 className={`px-4 py-2 rounded-lg disabled:opacity-50 inline-flex items-center gap-2 font-semibold ${
                   isDark
                     ? 'bg-zinc-100 text-black border border-zinc-200 hover:bg-white'

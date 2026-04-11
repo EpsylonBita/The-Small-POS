@@ -1605,6 +1605,80 @@
       "exportSettings": "Export Settings",
       "importSettings": "Import Settings"
     },
+    "connection": {
+      "syncPolicy": "Sync Policy"
+    },
+    "managedByAdmin": {
+      "title": "Managed by Admin",
+      "helpText": "Admin controls access policy. This terminal controls hardware and local behavior.",
+      "terminalUnitLabel": "Terminal unit",
+      "ownerLabel": "Owner {{owner}}",
+      "connectionLabel": "Connection",
+      "unassignedTerminal": "Unassigned terminal",
+      "noAdminUrl": "No admin URL",
+      "syncStatusLabel": "Sync",
+      "enabledFeaturesLabel": "Enabled features",
+      "noRemoteFeaturesEnabled": "No remote features enabled",
+      "enabledModulesLabel": "Enabled modules",
+      "coreModulesOnly": "Core modules only",
+      "pinResetRequired": "Admin requires a new local PIN on next login.",
+      "pinResetClear": "No remote PIN reset request pending.",
+      "syncNow": "Sync Policy",
+      "syncHealth": {
+        "offline": "Offline",
+        "polling": "Polling",
+        "websocket": "Realtime",
+        "online": "Online",
+        "healthy": "Healthy",
+        "error": "Error",
+        "blocked": "Blocked",
+        "unknown": "Unknown"
+      }
+    },
+    "paymentTerminals": {
+      "title": "Payment Terminals",
+      "label": "Payment Terminals",
+      "helpText": "Configure ECR payment devices",
+      "configureButton": "Configure"
+    },
+    "printQueue": {
+      "title": "Print Queue",
+      "helpText": "Jobs already sent to the LAN printer cannot be recalled from the device. These controls only stop or retry jobs still queued locally on this POS.",
+      "pausedProfiles": "Profile pauses active for: {{profiles}}",
+      "refresh": "Refresh",
+      "resume": "Resume queue",
+      "pause": "Pause queue",
+      "cancelPending": "Cancel pending",
+      "empty": "No local print jobs are queued right now.",
+      "defaultPrinter": "Default",
+      "unknown": "Unknown",
+      "cancel": "Cancel",
+      "retry": "Retry",
+      "loadFailed": "Failed to load print queue",
+      "resumed": "Print queue resumed",
+      "paused": "Print queue paused",
+      "updateFailed": "Failed to update print queue",
+      "cancelledAll": "Cancelled queued print jobs",
+      "cancelAllFailed": "Failed to cancel queued print jobs",
+      "cancelled": "Print job cancelled",
+      "cancelFailed": "Failed to cancel print job",
+      "retried": "Print job re-queued",
+      "retryFailed": "Failed to retry print job",
+      "columns": {
+        "job": "Job",
+        "status": "Status",
+        "printer": "Printer",
+        "action": "Action"
+      },
+      "status": {
+        "pending": "Pending",
+        "printing": "Printing",
+        "failed": "Failed",
+        "completed": "Completed",
+        "cancelled": "Cancelled",
+        "paused": "Paused"
+      }
+    },
     "sections": {
       "general": "General",
       "terminal": "Terminal",
@@ -1658,13 +1732,28 @@
       "expenses": "Expenses",
       "staffPayments": "Staff Payments",
       "reports": "Reports",
-      "settings": "Settings"
+      "settings": "Settings",
+      "ghostMode": "Ghost mode"
     },
     "printer": {
       "title": "Printer Settings",
       "label": "Printer Settings",
       "helpText": "Configure thermal receipt printer",
       "configureButton": "Configure Printer",
+      "quickSetup": "Quick Setup",
+      "expertSettings": "Expert Settings",
+      "verificationFirstHint": "Use Quick Setup first. It verifies a working transport and encoding path before you rely on a printer in live service.",
+      "startQuickSetup": "Start Verification Wizard",
+      "quickWizardAdvanced": "Expert Settings",
+      "quickWizardDetectTitle": "Step 1: Detect Printers",
+      "quickWizardDetectHint": "We detect nearby and installed printers first, but nothing is treated as printable until verification succeeds.",
+      "quickWizardDraftOnlyHint": "Compatibility-first setup: the wizard tests transport and encoding using an unsaved draft profile. No temporary printer profiles are created.",
+      "quickWizardStep": {
+        "detect": "Detect",
+        "verify": "Verify",
+        "style": "Style",
+        "save": "Save"
+      },
       "receiptPrinter": "Receipt Printer",
       "kitchenPrinter": "Kitchen Printer",
       "labelPrinter": "Label Printer",

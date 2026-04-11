@@ -971,7 +971,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         get()._invalidateCache();
         get()._setLoading(operation, false);
 
-        if (newOrder.id && !isGhostOrder(orderData)) {
+        if ((newOrder as any).savedForRetry) {
+          toast('Order saved offline and queued for sync when connectivity returns');
+        }
+
+        if (newOrder.id && !isGhostOrder(orderData) && !(newOrder as any).savedForRetry) {
           pollFiscalReceiptStatus(newOrder.id, { timeoutMs: 30000, intervalMs: 2500 })
             .then((fiscalStatus) => {
               if (!fiscalStatus) {
@@ -995,26 +999,20 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             });
         }
 
-        return { success: true, orderId: newOrder.id, orderNumber: newOrder.orderNumber || newOrder.order_number };
+        return {
+          success: true,
+          orderId: newOrder.id,
+          orderNumber: newOrder.orderNumber || newOrder.order_number,
+          savedForRetry: Boolean((newOrder as any).savedForRetry),
+        };
       } catch (error) {
         // Handle error
         const posError = errorHandler.handle(error);
         get()._setError(posError);
         get()._setLoading(operation, false);
 
-        // Save order for retry if it's a network/timeout error
-        let savedForRetry = false;
-        try {
-          const resp = await bridge.orders.saveForRetry(orderData as Partial<Order>) as unknown as IpcResult;
-          savedForRetry = !!resp?.success;
-        } catch {}
-
         const userMessage = errorHandler.getUserMessage(posError);
-        if (savedForRetry) {
-          toast((t) => 'Order saved and will retry automatically when online');
-        }
-
-        return { success: false, error: userMessage, savedForRetry };
+        return { success: false, error: userMessage, savedForRetry: false };
       }
     },
 

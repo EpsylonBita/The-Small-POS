@@ -468,7 +468,6 @@ pub(crate) fn refund_payment_in_connection(
         }
     }
 
-    let idempotency_key = format!("adjustment:{adjustment_id}");
     let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
     let branch_id = storage::get_credential("branch_id").unwrap_or_default();
     let sync_payload = build_adjustment_queue_payload(
@@ -488,17 +487,20 @@ pub(crate) fn refund_payment_in_connection(
         Some(adjustment_context.as_str()),
     );
 
-    let queue_status = if initial_sync_state == "waiting_parent" {
-        "deferred"
-    } else {
-        "pending"
-    };
-    conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
-         VALUES ('payment_adjustment', ?1, 'insert', ?2, ?3, ?4)",
-        params![adjustment_id, sync_payload, idempotency_key, queue_status],
+    let sync_payload_value =
+        serde_json::from_str::<Value>(&sync_payload).map_err(|e| format!("parse adjustment payload: {e}"))?;
+    crate::sync_queue::enqueue_payload_item(
+        &conn,
+        "payment_adjustments",
+        &adjustment_id,
+        "INSERT",
+        &sync_payload_value,
+        Some(1),
+        Some("financial"),
+        Some("manual"),
+        Some(1),
     )
-    .map_err(|e| format!("enqueue adjustment sync: {e}"))?;
+    .map_err(|e| format!("enqueue adjustment parity sync: {e}"))?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -684,31 +686,7 @@ pub fn void_payment_with_adjustment(
             }
         }
 
-        // Enqueue void sync for the payment (existing flow)
-        let void_idem_key = format!("payment:void:{payment_id}");
-        let mut void_payload = Map::new();
-        void_payload.insert(
-            "paymentId".to_string(),
-            Value::String(payment_id.to_string()),
-        );
-        void_payload.insert("orderId".to_string(), Value::String(order_id.to_string()));
-        void_payload.insert("voidReason".to_string(), Value::String(reason.to_string()));
-        if let Some(voided_by) = resolved_staff_id.as_deref() {
-            void_payload.insert("voidedBy".to_string(), Value::String(voided_by.to_string()));
-        }
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('payment', ?1, 'void', ?2, ?3)",
-            params![
-                payment_id,
-                Value::Object(void_payload).to_string(),
-                void_idem_key
-            ],
-        )
-        .map_err(|e| format!("enqueue void sync: {e}"))?;
-
         // Enqueue adjustment sync
-        let adj_idem_key = format!("adjustment:{adjustment_id}");
         let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
         let branch_id = storage::get_credential("branch_id").unwrap_or_default();
         let adj_payload = build_adjustment_queue_payload(
@@ -728,17 +706,20 @@ pub fn void_payment_with_adjustment(
             None,
         );
 
-        let queue_status = if initial_sync_state == "waiting_parent" {
-            "deferred"
-        } else {
-            "pending"
-        };
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
-             VALUES ('payment_adjustment', ?1, 'insert', ?2, ?3, ?4)",
-            params![adjustment_id, adj_payload, adj_idem_key, queue_status],
+        let adj_payload_value = serde_json::from_str::<Value>(&adj_payload)
+            .map_err(|e| format!("parse void adjustment payload: {e}"))?;
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "payment_adjustments",
+            &adjustment_id,
+            "INSERT",
+            &adj_payload_value,
+            Some(1),
+            Some("financial"),
+            Some("manual"),
+            Some(1),
         )
-        .map_err(|e| format!("enqueue adjustment sync: {e}"))?;
+        .map_err(|e| format!("enqueue void adjustment parity sync: {e}"))?;
 
         Ok(())
     })();

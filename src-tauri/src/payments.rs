@@ -834,7 +834,6 @@ pub(crate) fn record_payment_in_connection(
     }
 
     if options.enqueue_sync {
-        let idempotency_key = format!("payment:{payment_id}");
         let sync_payload = serde_json::json!({
             "paymentId": payment_id,
             "orderId": input.order_id,
@@ -851,19 +850,19 @@ pub(crate) fn record_payment_in_connection(
             "staffId": resolved_staff_id,
             "staffShiftId": resolved_shift_id,
             "items": build_payment_items_json(&input.items),
-        })
-        .to_string();
-        let queue_status = if sync_state == "waiting_parent" {
-            "deferred"
-        } else {
-            "pending"
-        };
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
-             VALUES ('payment', ?1, 'insert', ?2, ?3, ?4)",
-            params![payment_id, sync_payload, idempotency_key, queue_status],
+        });
+        crate::sync_queue::enqueue_payload_item(
+            conn,
+            "payments",
+            &payment_id,
+            "INSERT",
+            &sync_payload,
+            Some(1),
+            Some("financial"),
+            Some("manual"),
+            Some(1),
         )
-        .map_err(|e| format!("enqueue payment sync: {e}"))?;
+        .map_err(|e| format!("enqueue payment parity sync: {e}"))?;
     }
 
     Ok(RecordedPayment {
@@ -1125,46 +1124,30 @@ fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Resu
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| format!("load payment queue context: {e}"))?;
-    let sync_payload = build_payment_sync_payload_for_payment(conn, payment_id)?;
-    let idempotency_key = format!("payment:{payment_id}");
     let now = Utc::now().to_rfc3339();
-    let queue_status = if has_supabase_id == 1 {
-        "pending"
-    } else {
-        "deferred"
-    };
     let sync_state = if has_supabase_id == 1 {
         "pending"
     } else {
         "waiting_parent"
     };
+    let sync_payload = serde_json::from_str::<Value>(&build_payment_sync_payload_for_payment(
+        conn, payment_id,
+    )?)
+    .map_err(|e| format!("parse refreshed payment sync payload: {e}"))?;
 
-    let updated = conn
-        .execute(
-            "UPDATE sync_queue
-             SET operation = 'insert',
-                 payload = ?1,
-                 idempotency_key = COALESCE(idempotency_key, ?2),
-                 status = ?3,
-                 retry_count = 0,
-                 next_retry_at = NULL,
-                 last_error = NULL,
-                 synced_at = NULL,
-                 updated_at = ?4
-             WHERE entity_type = 'payment'
-               AND entity_id = ?5",
-            params![sync_payload, idempotency_key, queue_status, now, payment_id],
-        )
-        .map_err(|e| format!("refresh payment queue row: {e}"))?;
-
-    if updated == 0 {
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
-             VALUES ('payment', ?1, 'insert', ?2, ?3, ?4)",
-            params![payment_id, sync_payload, idempotency_key, queue_status],
-        )
-        .map_err(|e| format!("insert refreshed payment queue row: {e}"))?;
-    }
+    crate::sync_queue::clear_unsynced_items(conn, "payments", payment_id)?;
+    crate::sync_queue::enqueue_payload_item(
+        conn,
+        "payments",
+        payment_id,
+        "INSERT",
+        &sync_payload,
+        Some(1),
+        Some("financial"),
+        Some("manual"),
+        Some(1),
+    )
+    .map_err(|e| format!("refresh payment parity queue row: {e}"))?;
 
     conn.execute(
         "UPDATE order_payments
@@ -1194,13 +1177,13 @@ fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Resu
 fn payment_sync_queue_needs_retry(conn: &Connection, payment_id: &str) -> Result<bool, String> {
     let queue_row: Option<(String, i64, Option<String>, Option<String>)> = match conn.query_row(
         "SELECT status,
-                COALESCE(retry_count, 0),
+                COALESCE(attempts, 0),
                 next_retry_at,
-                last_error
-         FROM sync_queue
-         WHERE entity_type = 'payment'
-           AND entity_id = ?1
-         ORDER BY id DESC
+                error_message
+         FROM parity_sync_queue
+         WHERE table_name = 'payments'
+           AND record_id = ?1
+         ORDER BY created_at DESC
          LIMIT 1",
         params![payment_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -1241,13 +1224,18 @@ fn enqueue_order_payment_snapshot_sync(
         "paymentStatus": payment_status,
         "paymentMethod": payment_method,
     });
-    let idempotency_key = format!("order:payment-method:{order_id}:{}", Uuid::new_v4());
-    conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('order', ?1, 'update', ?2, ?3)",
-        params![order_id, payload.to_string(), idempotency_key],
+    crate::sync_queue::enqueue_payload_item(
+        conn,
+        "orders",
+        order_id,
+        "UPDATE",
+        &payload,
+        Some(0),
+        Some("orders"),
+        Some("server-wins"),
+        Some(1),
     )
-    .map_err(|e| format!("enqueue order payment snapshot sync: {e}"))?;
+    .map_err(|e| format!("enqueue order payment snapshot parity sync: {e}"))?;
 
     Ok(())
 }

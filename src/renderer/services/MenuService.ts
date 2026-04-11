@@ -1,9 +1,106 @@
 import { supabase, isSupabaseConfigured } from '../../shared/supabase';
-import { getApiUrl } from '../../config/environment';
 import { ErrorFactory, ErrorHandler, withTimeout, withRetry, POSError } from '../../shared/utils/error-handler';
 import { TIMING, RETRY } from '../../shared/constants';
 import { isOwnEvent, addSessionId } from '../utils/session-utils';
 import { getBridge, isBrowser } from '../../lib';
+import { posApiGet } from '../utils/api-helpers';
+
+const DEFAULT_ADMIN_DASHBOARD_SETTINGS = {
+  tax_rate: 0.24,
+  service_fee: 0,
+  delivery_fee: 0,
+  currency: 'EUR',
+  timezone: 'Europe/Athens'
+};
+
+const DEFAULT_MENU_CONFIGURATION = {
+  enable_customization: true,
+  max_customizations: 10,
+  preparation_time_buffer: 5,
+  auto_categorize: true
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readNumber(value: unknown, fallback: number): number {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : fallback;
+}
+
+function readString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeAdminDashboardSettings(payload: unknown) {
+  const root = asRecord(payload);
+  const groupedSettings = asRecord(root?.settings);
+  const terminalSettings = asRecord(root);
+  const generalSettings = asRecord(groupedSettings?.general);
+  const taxSettings = asRecord(groupedSettings?.tax);
+  const deliverySettings = asRecord(groupedSettings?.delivery);
+  const receiptSettings = asRecord(groupedSettings?.receipt);
+  const terminalCategory = asRecord(groupedSettings?.terminal);
+
+  return {
+    tax_rate: readNumber(
+      taxSettings?.tax_rate_percentage ??
+        generalSettings?.tax_rate ??
+        terminalSettings?.tax_rate,
+      DEFAULT_ADMIN_DASHBOARD_SETTINGS.tax_rate
+    ),
+    service_fee: readNumber(
+      generalSettings?.service_fee ?? terminalSettings?.service_fee,
+      DEFAULT_ADMIN_DASHBOARD_SETTINGS.service_fee
+    ),
+    delivery_fee: readNumber(
+      deliverySettings?.delivery_fee ??
+        generalSettings?.delivery_fee ??
+        terminalSettings?.delivery_fee,
+      DEFAULT_ADMIN_DASHBOARD_SETTINGS.delivery_fee
+    ),
+    currency: readString(
+      receiptSettings?.currency ??
+        terminalCategory?.currency ??
+        terminalSettings?.currency,
+      DEFAULT_ADMIN_DASHBOARD_SETTINGS.currency
+    ),
+    timezone: readString(
+      generalSettings?.timezone ??
+        terminalCategory?.timezone ??
+        terminalSettings?.timezone,
+      DEFAULT_ADMIN_DASHBOARD_SETTINGS.timezone
+    ),
+  };
+}
+
+function normalizeMenuConfiguration(payload: unknown) {
+  const root = asRecord(payload);
+  const groupedSettings = asRecord(root?.settings);
+  const menuSettings = asRecord(groupedSettings?.menu) ?? groupedSettings ?? root;
+
+  return {
+    enable_customization:
+      typeof menuSettings?.enable_customization === 'boolean'
+        ? menuSettings.enable_customization
+        : DEFAULT_MENU_CONFIGURATION.enable_customization,
+    max_customizations: readNumber(
+      menuSettings?.max_customizations,
+      DEFAULT_MENU_CONFIGURATION.max_customizations
+    ),
+    preparation_time_buffer: readNumber(
+      menuSettings?.preparation_time_buffer,
+      DEFAULT_MENU_CONFIGURATION.preparation_time_buffer
+    ),
+    auto_categorize:
+      typeof menuSettings?.auto_categorize === 'boolean'
+        ? menuSettings.auto_categorize
+        : DEFAULT_MENU_CONFIGURATION.auto_categorize,
+  };
+}
 
 // Enhanced interfaces matching database schema
 /**
@@ -1098,29 +1195,49 @@ class MenuService {
     }
 
     try {
-      const response = await fetch(getApiUrl('/settings/pos'), {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      const bridge = getBridge();
+      const terminalId =
+        (await bridge.terminalConfig.getTerminalId().catch(() => '')) ||
+        (await bridge.terminalConfig
+          .getSetting('terminal', 'terminal_id')
+          .catch(() => '')) ||
+        '';
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch admin settings');
+      if (!terminalId) {
+        throw new Error('Terminal ID is not configured');
       }
 
-      const settings = await response.json();
+      const result = isBrowser()
+        ? await posApiGet<Record<string, unknown>>(
+            `/pos/settings/${encodeURIComponent(String(terminalId))}`
+          )
+        : await bridge.adminApi.fetchFromAdmin(
+            `/api/pos/settings/${encodeURIComponent(String(terminalId))}`,
+            { method: 'GET' },
+          );
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to fetch admin settings');
+      }
+
+      const settings = normalizeAdminDashboardSettings(result.data);
       this.setCache(cacheKey, settings);
+      if (!isBrowser()) {
+        await bridge.settings.updateLocal(cacheKey, settings).catch(() => null);
+      }
       return settings;
     } catch (error) {
       console.error('Error fetching admin dashboard settings:', error);
-      return {
-        tax_rate: 0.24, // Default Greek VAT
-        service_fee: 0,
-        delivery_fee: 0,
-        currency: 'EUR',
-        timezone: 'Europe/Athens'
-      };
+      if (!isBrowser()) {
+        const localSnapshot = await getBridge().settings.getLocal(cacheKey).catch(() => null);
+        if (localSnapshot && typeof localSnapshot === 'object') {
+          const normalized = normalizeAdminDashboardSettings(localSnapshot);
+          this.setCache(cacheKey, normalized);
+          return normalized;
+        }
+      }
+
+      return DEFAULT_ADMIN_DASHBOARD_SETTINGS;
     }
   }
 
@@ -1132,28 +1249,49 @@ class MenuService {
     }
 
     try {
-      const response = await fetch(getApiUrl('/settings/menu'), {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      const bridge = getBridge();
+      const terminalId =
+        (await bridge.terminalConfig.getTerminalId().catch(() => '')) ||
+        (await bridge.terminalConfig
+          .getSetting('terminal', 'terminal_id')
+          .catch(() => '')) ||
+        '';
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch menu configuration');
+      if (!terminalId) {
+        throw new Error('Terminal ID is not configured');
       }
 
-      const config = await response.json();
+      const result = isBrowser()
+        ? await posApiGet<Record<string, unknown>>(
+            `/pos/settings/${encodeURIComponent(String(terminalId))}?category=menu`
+          )
+        : await bridge.adminApi.fetchFromAdmin(
+            `/api/pos/settings/${encodeURIComponent(String(terminalId))}?category=menu`,
+            { method: 'GET' },
+          );
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to fetch menu configuration');
+      }
+
+      const config = normalizeMenuConfiguration(result.data);
       this.setCache(cacheKey, config);
+      if (!isBrowser()) {
+        await bridge.settings.updateLocal(cacheKey, config).catch(() => null);
+      }
       return config;
     } catch (error) {
       console.error('Error fetching menu configuration:', error);
-      return {
-        enable_customization: true,
-        max_customizations: 10,
-        preparation_time_buffer: 5,
-        auto_categorize: true
-      };
+      if (!isBrowser()) {
+        const localSnapshot = await getBridge().settings.getLocal(cacheKey).catch(() => null);
+        if (localSnapshot && typeof localSnapshot === 'object') {
+          const normalized = normalizeMenuConfiguration(localSnapshot);
+          this.setCache(cacheKey, normalized);
+          return normalized;
+        }
+      }
+
+      return DEFAULT_MENU_CONFIGURATION;
     }
   }
 

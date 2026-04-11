@@ -59,6 +59,31 @@ function toAdminApiPath(endpoint: string): string {
   return `/api/${clean}`;
 }
 
+function normalizeTransportError(method: string, error?: string | null): string {
+  const fallback =
+    method === 'GET'
+      ? 'No cached local data is available yet. Connect once while online to download it.'
+      : 'This action requires an online connection.';
+
+  if (!error) {
+    return fallback;
+  }
+
+  const normalized = error.toLowerCase();
+  if (
+    normalized.includes('failed to fetch') ||
+    normalized.includes('network error') ||
+    normalized.includes('timed out') ||
+    normalized.includes('timeout') ||
+    normalized.includes('connection') ||
+    normalized.includes('offline')
+  ) {
+    return fallback;
+  }
+
+  return error;
+}
+
 /**
  * Get POS authentication headers for API calls
  * Fetches terminal identity from the main process via IPC.
@@ -97,9 +122,9 @@ export async function posApiFetch<T = any>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
+  const method = (options.method || 'GET').toUpperCase();
   try {
     const callerHeaders = normalizeHeaders(options.headers);
-    const method = (options.method || 'GET').toUpperCase();
     const useTauriIpc = isTauriRuntime();
     const authHeaders = useTauriIpc ? {} : await getPosAuthHeaders();
     const mergedHeaders = {
@@ -125,7 +150,10 @@ export async function posApiFetch<T = any>(
       if (!ipcResult?.success) {
         return {
           success: false,
-          error: ipcResult?.error || 'Failed to fetch from admin API',
+          error: normalizeTransportError(
+            method,
+            ipcResult?.error || 'Failed to fetch from admin API',
+          ),
           status: ipcResult?.status,
         };
       }
@@ -158,7 +186,10 @@ export async function posApiFetch<T = any>(
     return { success: true, data, status: response.status };
   } catch (error: any) {
     console.error(`[posApiFetch] ${endpoint} error:`, error);
-    return { success: false, error: error.message || 'Network error' };
+    return {
+      success: false,
+      error: normalizeTransportError(method, error.message || 'Network error'),
+    };
   }
 }
 

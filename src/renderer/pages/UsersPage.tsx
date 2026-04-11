@@ -43,6 +43,7 @@ interface UserProfile {
 interface CustomerAddress {
   id: string;
   customer_id: string;
+  version?: number;
   street_address: string;
   city: string;
   postal_code: string;
@@ -175,45 +176,39 @@ const UsersPage: React.FC = () => {
     setSelectedUser(user);
     setShowDetailsModal(true);
 
-    // Fetch full customer data with addresses from POS API
-    if (!user.phone) {
-      setUserAddresses([]);
-      return;
-    }
-
     try {
-      const result = await posApiGet<any>(`pos/customers?phone=${encodeURIComponent(user.phone)}`);
-      const payload = result.success ? result.data : null;
-      console.log('Customer details from API:', payload);
+      let matchedCustomer: any = await bridge.customers.lookupById(user.id);
 
-      if (result.success && payload?.success) {
-        // Handle single result (customer) or multiple results (customers array)
-        let matchedCustomer = payload.customer;
-        if (!matchedCustomer && Array.isArray(payload.customers)) {
-          matchedCustomer = payload.customers.find((c: any) => c.id === user.id) || payload.customers[0];
+      if (!matchedCustomer && user.phone) {
+        const result = await posApiGet<any>(`pos/customers?phone=${encodeURIComponent(user.phone)}`);
+        const payload = result.success ? result.data : null;
+        if (result.success && payload?.success) {
+          matchedCustomer = payload.customer;
+          if (!matchedCustomer && Array.isArray(payload.customers)) {
+            matchedCustomer = payload.customers.find((c: any) => c.id === user.id) || payload.customers[0];
+          }
         }
+      }
 
-        if (matchedCustomer?.addresses && matchedCustomer.addresses.length > 0) {
-          setUserAddresses(matchedCustomer.addresses.map((addr: any) => ({
-            id: addr.id,
-            customer_id: user.id,
-            street_address: addr.street || addr.street_address,
-            city: addr.city || '',
-            postal_code: addr.postal_code || '',
-            floor_number: addr.floor_number,
-            address_type: addr.address_type || 'delivery',
-            is_default: addr.is_default,
-            delivery_notes: addr.delivery_notes || addr.notes,
-            latitude: addr.latitude,
-            longitude: addr.longitude,
-            place_id: addr.place_id || addr.google_place_id,
-            formatted_address: addr.formatted_address,
-            resolved_street_number: addr.resolved_street_number,
-            address_fingerprint: addr.address_fingerprint,
-          })));
-        } else {
-          setUserAddresses([]);
-        }
+      if (matchedCustomer?.addresses && matchedCustomer.addresses.length > 0) {
+        setUserAddresses(matchedCustomer.addresses.map((addr: any) => ({
+          id: addr.id,
+          customer_id: user.id,
+          version: addr.version,
+          street_address: addr.street || addr.street_address,
+          city: addr.city || '',
+          postal_code: addr.postal_code || '',
+          floor_number: addr.floor_number,
+          address_type: addr.address_type || 'delivery',
+          is_default: addr.is_default,
+          delivery_notes: addr.delivery_notes || addr.notes,
+          latitude: addr.latitude,
+          longitude: addr.longitude,
+          place_id: addr.place_id || addr.google_place_id,
+          formatted_address: addr.formatted_address,
+          resolved_street_number: addr.resolved_street_number,
+          address_fingerprint: addr.address_fingerprint,
+        })));
       } else {
         setUserAddresses([]);
       }
@@ -395,11 +390,14 @@ const UsersPage: React.FC = () => {
         editedAddress.latitude,
         editedAddress.longitude
       );
-      const result = await posApiFetch<any>(`pos/customers/${selectedUser.id}/addresses/${addressId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const currentAddress = userAddresses.find((addr) => addr.id === addressId);
+      const result: any = await bridge.customers.updateAddress(
+        addressId,
+        {
+          customer_id: selectedUser.id,
           address: combinedAddress,
+          street_address: editedAddress.street_address || combinedAddress,
+          city: editedAddress.city,
           postal_code: editedAddress.postal_code,
           floor_number: editedAddress.floor_number,
           address_type: editedAddress.address_type || 'delivery',
@@ -411,21 +409,23 @@ const UsersPage: React.FC = () => {
           formatted_address: editedAddress.formatted_address || combinedAddress,
           resolved_street_number: editedAddress.resolved_street_number,
           address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint,
-        }),
-      });
+        },
+        currentAddress?.version || 0,
+      );
 
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to update address');
-      }
-
-      if (result.data?.success !== false) {
-        toast.success(t('users.updateAddressSuccess', 'Address updated successfully'));
+      if (result?.success !== false) {
+        toast.success(
+          result?.queued
+            ? t('users.savedLocallyQueued', 'Saved locally and queued for sync')
+            : t('users.updateAddressSuccess', 'Address updated successfully'),
+        );
 
         // Update local state with the returned address data
         setUserAddresses(prev => prev.map(addr =>
           addr.id === addressId
             ? {
                 ...addr,
+                version: result?.data?.version ?? addr.version,
                 street_address: editedAddress.street_address || addr.street_address,
                 city: editedAddress.city || addr.city,
                 postal_code: editedAddress.postal_code || addr.postal_code,
@@ -447,7 +447,7 @@ const UsersPage: React.FC = () => {
         setEditedAddress({});
         addressSessionTokenRef.current = null;
       } else {
-        throw new Error(result.error || 'Failed to update address');
+        throw new Error(result?.error || 'Failed to update address');
       }
     } catch (error) {
       console.error('Error updating address:', error);
@@ -459,6 +459,16 @@ const UsersPage: React.FC = () => {
     if (!selectedUser) return;
 
     if (!confirm(t('users.confirmDeleteAddress', 'Are you sure you want to delete this address?'))) {
+      return;
+    }
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      toast.error(
+        t(
+          'users.deleteAddressRequiresOnline',
+          'Deleting an address requires an online connection.',
+        ),
+      );
       return;
     }
 

@@ -592,6 +592,25 @@ export interface OrderFinancialsUpdateParams {
   tipAmount?: number;
 }
 
+export interface EditSettlementOrderUpdates {
+  orderType?: "pickup" | "delivery" | "dine-in";
+  customerId?: string | null;
+  customerName?: string;
+  customerPhone?: string;
+  customerEmail?: string | null;
+  deliveryAddress?: string | null;
+  deliveryCity?: string | null;
+  deliveryPostalCode?: string | null;
+  deliveryFloor?: string | null;
+  deliveryNotes?: string | null;
+  nameOnRinger?: string | null;
+  tableNumber?: string | null;
+  driverId?: string | null;
+  driverName?: string | null;
+  waiterId?: string | null;
+  paymentMethod?: string | null;
+}
+
 export interface OrderCustomerInfoUpdateParams {
   orderId: string;
   customerName: string;
@@ -674,10 +693,20 @@ export interface CustomerAddress {
   street_address?: string;
   city?: string;
   postal_code?: string;
+  floor_number?: string;
+  notes?: string;
+  delivery_notes?: string;
+  address_type?: string;
+  name_on_ringer?: string | null;
   lat?: number;
   lng?: number;
   latitude?: number | null;
   longitude?: number | null;
+  place_id?: string | null;
+  google_place_id?: string | null;
+  formatted_address?: string | null;
+  resolved_street_number?: string | null;
+  address_fingerprint?: string | null;
   coordinates?:
     | { lat: number; lng: number }
     | { type: "Point"; coordinates: [number, number] };
@@ -1040,11 +1069,15 @@ export interface PlatformBridge {
       orderId: string;
       items: OrderItem[];
       orderNotes?: string;
+      financials?: Partial<OrderFinancialsUpdateParams>;
+      orderUpdates?: Partial<EditSettlementOrderUpdates>;
     }): Promise<OrderEditSettlementPreview>;
     applyEditSettlement(payload: {
       orderId: string;
       items: OrderItem[];
       orderNotes?: string;
+      financials?: Partial<OrderFinancialsUpdateParams>;
+      orderUpdates?: Partial<EditSettlementOrderUpdates>;
       action: OrderEditSettlementAction;
     }): Promise<IpcResult>;
     updateCustomerInfo(
@@ -2109,6 +2142,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "branch-data:get-delivery-zones": "branchData.getDeliveryZones",
   "branch-data:get-staff-schedule": "branchData.getStaffSchedule",
   "branch-data:get-tables": "branchData.getTables",
+  "branch-data:update-table-status": "branchData.updateTableStatus",
   "branch-data:validate-coupon": "branchData.validateCoupon",
 
   // Updates
@@ -2330,11 +2364,15 @@ export class TauriBridge implements PlatformBridge {
       orderId: string;
       items: OrderItem[];
       orderNotes?: string;
+      financials?: Partial<OrderFinancialsUpdateParams>;
+      orderUpdates?: Partial<EditSettlementOrderUpdates>;
     }) => this.inv("orders:preview-edit-settlement", payload),
     applyEditSettlement: (payload: {
       orderId: string;
       items: OrderItem[];
       orderNotes?: string;
+      financials?: Partial<OrderFinancialsUpdateParams>;
+      orderUpdates?: Partial<EditSettlementOrderUpdates>;
       action: OrderEditSettlementAction;
     }) => this.inv("orders:apply-edit-settlement", payload),
     updateCustomerInfo: (payload: OrderCustomerInfoUpdateParams) =>
@@ -2570,10 +2608,7 @@ export class TauriBridge implements PlatformBridge {
       this.inv("branch-data:get-tables", params || {}),
     get: (tableId: string) => this.adminFetch(`/api/pos/tables/${tableId}`),
     updateStatus: (tableId: string, status: string) =>
-      this.adminFetch(`/api/pos/tables/${tableId}`, {
-        method: "PATCH",
-        body: { status },
-      }),
+      this.inv("branch-data:update-table-status", { tableId, status }),
   };
 
   staffSchedule = {

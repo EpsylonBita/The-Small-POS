@@ -84,6 +84,8 @@ import {
 import { couponRedemptionService } from "../services/CouponRedemptionService";
 import { getBridge, offEvent, onEvent } from "../../lib";
 import type {
+  EditSettlementOrderUpdates,
+  OrderFinancialsUpdateParams,
   OrderEditSettlementPreview,
   OrderEditSettlementRefund,
   PickupToDeliveryConversionParams,
@@ -100,6 +102,8 @@ interface OrderDashboardProps {
   className?: string;
   orderFilter?: (order: Order) => boolean;
 }
+
+type EditableOrderType = "pickup" | "delivery" | "dine-in";
 
 const extractOrderDashboardErrorMessage = (error: unknown): string | null => {
   if (error instanceof Error && error.message.trim()) {
@@ -125,6 +129,8 @@ interface EditSettlementRequest {
   orderNumber?: string;
   items: OrderItem[];
   orderNotes?: string;
+  financials?: Partial<OrderFinancialsUpdateParams>;
+  orderUpdates?: Partial<EditSettlementOrderUpdates>;
 }
 
 interface PendingEditRefundSettlement {
@@ -227,6 +233,17 @@ const buildCustomerInfoFromOrderFlowCustomer = (
     },
     notes: resolvedAddress?.notes || customer.notes || "",
   };
+};
+
+const resolveEditableOrderType = (order: Pick<Order, "orderType" | "order_type">): EditableOrderType => {
+  const rawValue = String(order.orderType || order.order_type || "pickup").trim().toLowerCase();
+  if (rawValue === "delivery") {
+    return "delivery";
+  }
+  if (rawValue === "dine-in" || rawValue === "dine_in") {
+    return "dine-in";
+  }
+  return "pickup";
 };
 
 export const OrderDashboard = memo<OrderDashboardProps>(
@@ -403,9 +420,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [editingSingleOrder, setEditingSingleOrder] = useState<string | null>(
       null,
     );
-    const [editingOrderType, setEditingOrderType] = useState<
-      "pickup" | "delivery"
-    >("pickup"); // Track order type for editing
+    const [editingOrderType, setEditingOrderType] =
+      useState<EditableOrderType>("pickup"); // Track order type for editing
     // Snapshot of customer info captured when "Edit Customer Info" is clicked
     // (avoids depending on pendingEditOrders surviving the modal transition)
     const [editCustomerSnapshot, setEditCustomerSnapshot] =
@@ -2743,6 +2759,91 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       [],
     );
 
+    const deriveEditSettlementPayload = useCallback(
+      (
+        order: Order | undefined,
+        nextItems: OrderItem[],
+        targetOrderType: EditableOrderType,
+      ): {
+        financials?: Partial<OrderFinancialsUpdateParams>;
+        orderUpdates?: Partial<EditSettlementOrderUpdates>;
+      } => {
+        if (!order) {
+          return {};
+        }
+
+        const itemsSubtotal = Number(
+          nextItems
+            .reduce((sum, item) => {
+              const quantity = Number(item.quantity || 0);
+              const explicitTotal =
+                (item as any).total_price ??
+                (item as any).totalPrice ??
+                null;
+              if (typeof explicitTotal === "number") {
+                return sum + explicitTotal;
+              }
+              return sum + Number(item.unit_price ?? item.price ?? 0) * quantity;
+            }, 0)
+            .toFixed(2),
+        );
+        const discountAmount = Number(
+          Number((order as any).discount_amount ?? (order as any).discountAmount ?? 0).toFixed(2),
+        );
+        const discountPercentage = Number(
+          (order as any).discount_percentage ?? (order as any).discountPercentage ?? 0,
+        );
+        const tipAmount = Number((order as any).tip_amount ?? (order as any).tipAmount ?? 0);
+        const taxRate = Number((order as any).tax_rate ?? 24);
+        const deliveryFee =
+          targetOrderType === "delivery"
+            ? Number((order as any).delivery_fee ?? order.deliveryFee ?? 0)
+            : 0;
+        const taxableSubtotal = Math.max(0, itemsSubtotal - discountAmount);
+        const taxAmount = Number((taxableSubtotal * (taxRate / 100)).toFixed(2));
+        const totalAmount = Number(
+          (taxableSubtotal + taxAmount + deliveryFee + tipAmount).toFixed(2),
+        );
+
+        const orderUpdates: Partial<EditSettlementOrderUpdates> = {
+          orderType: targetOrderType,
+        };
+
+        if (targetOrderType === "delivery") {
+          orderUpdates.tableNumber = null;
+          orderUpdates.waiterId = null;
+        } else {
+          orderUpdates.deliveryAddress = null;
+          orderUpdates.deliveryCity = null;
+          orderUpdates.deliveryPostalCode = null;
+          orderUpdates.deliveryFloor = null;
+          orderUpdates.deliveryNotes = null;
+          orderUpdates.nameOnRinger = null;
+          orderUpdates.driverId = null;
+          orderUpdates.driverName = null;
+        }
+
+        if (targetOrderType === "pickup") {
+          orderUpdates.tableNumber = null;
+          orderUpdates.waiterId = null;
+        }
+
+        return {
+          financials: {
+            totalAmount,
+            subtotal: taxableSubtotal,
+            taxAmount,
+            deliveryFee,
+            discountAmount,
+            discountPercentage,
+            tipAmount,
+          },
+          orderUpdates,
+        };
+      },
+      [],
+    );
+
     const openEditSettlementCollectionPrompt = useCallback(
       (preview: OrderEditSettlementPreview, request: EditSettlementRequest) => {
         const collectionMode: SplitPaymentCollectionMode | undefined = preview
@@ -2807,6 +2908,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               orderId: request.orderId,
               items: request.items,
               orderNotes: request.orderNotes,
+              financials: request.financials,
+              orderUpdates: request.orderUpdates,
             }),
           ),
         );
@@ -2832,12 +2935,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             orderId: request.orderId,
             items: request.items,
             orderNotes: request.orderNotes,
+            financials: request.financials,
+            orderUpdates: request.orderUpdates,
             action: { type: "mark_partial" },
           });
           const refreshedPreview = await bridge.orders.previewEditSettlement({
             orderId: request.orderId,
             items: request.items,
             orderNotes: request.orderNotes,
+            financials: request.financials,
+            orderUpdates: request.orderUpdates,
           });
           resetEditOrderState();
           clearBulkSelection();
@@ -2889,6 +2996,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             orderId: request.orderId,
             items: request.items,
             orderNotes: request.orderNotes,
+            financials: request.financials,
+            orderUpdates: request.orderUpdates,
             action: { type: "none" },
           });
         }
@@ -2926,6 +3035,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderId: request.orderId,
           items: request.items,
           orderNotes: request.orderNotes,
+          financials: request.financials,
+          orderUpdates: request.orderUpdates,
           action: {
             type: "refund",
             refunds: refunds.map((refund) => {
@@ -3727,7 +3838,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowEditPaymentModal(true);
     };
 
-    const handleEditOrder = () => {
+    const openMenuEditSession = (targetOrderType?: EditableOrderType) => {
       setShowEditOptionsModal(false);
 
       // Get the order being edited to determine its type
@@ -3753,23 +3864,31 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             orderToEdit.order_number || orderToEdit.orderNumber,
           );
 
-          // Determine order type - handle both camelCase and snake_case
-          const orderTypeValue = (orderToEdit.orderType ||
-            orderToEdit.order_type ||
-            "pickup") as string;
-          // Map dine-in to pickup for menu display purposes
-          const menuOrderType =
-            orderTypeValue === "dine-in" || orderTypeValue === "dine_in"
-              ? "pickup"
-              : orderTypeValue === "delivery"
-                ? "delivery"
-                : "pickup";
-          setEditingOrderType(menuOrderType);
+          setEditingOrderType(
+            targetOrderType || resolveEditableOrderType(orderToEdit),
+          );
         }
       }
 
       // Open the menu-based edit modal instead of the simple edit modal
       setShowEditMenuModal(true);
+    };
+
+    const handleEditOrder = () => {
+      openMenuEditSession();
+    };
+
+    const handleChangeOrderType = (targetOrderType: EditableOrderType) => {
+      if (pendingEditOrders.length !== 1) {
+        toast.error(
+          t("orderDashboard.changeOrderTypeSingleOnly", {
+            defaultValue: "Change order type is only available for one order at a time.",
+          }),
+        );
+        return;
+      }
+
+      openMenuEditSession(targetOrderType);
     };
 
     const handleEditOptionsClose = () => {
@@ -3951,15 +4070,29 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       orderId: string;
       items: any[];
       total: number;
+      orderType?: string;
       notes?: string;
     }) => {
       try {
+        const targetOrder = orders.find((order) => order.id === orderData.orderId);
+        const targetOrderType = resolveEditableOrderType({
+          orderType: orderData.orderType as Order["orderType"],
+          order_type: orderData.orderType as Order["order_type"],
+        });
+        const settlementPayload = deriveEditSettlementPayload(
+          targetOrder,
+          normalizeEditOrderItems(orderData.items),
+          targetOrderType,
+        );
+
         await applySettlementAwareOrderEdit([
           {
             orderId: orderData.orderId,
             orderNumber: currentEditOrderNumber,
             items: orderData.items,
             orderNotes: orderData.notes,
+            financials: settlementPayload.financials,
+            orderUpdates: settlementPayload.orderUpdates,
           },
         ]);
       } catch (error) {
@@ -4702,6 +4835,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderCount={pendingEditOrders.length}
           onEditInfo={handleEditInfo}
           onEditOrder={handleEditOrder}
+          onChangeOrderType={handleChangeOrderType}
+          currentOrderType={
+            pendingEditOrders.length === 1
+              ? resolveEditableOrderType(
+                  (orders.find((order) => order.id === pendingEditOrders[0]) as Order) || {
+                    orderType: "pickup",
+                    order_type: "pickup",
+                  },
+                )
+              : "pickup"
+          }
           onEditPayment={handleEditPayment}
           canEditPayment={canEditPaymentMethod}
           paymentEditHint={paymentEditIneligibilityReason}

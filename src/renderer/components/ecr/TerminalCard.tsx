@@ -44,6 +44,8 @@ interface Props {
   onEdit: () => void
   onDelete: () => void
   onSetDefault: () => void
+  connectionActionsDisabled?: boolean
+  connectionActionsDisabledReason?: string | null
 }
 
 const ConnectionIcon: React.FC<{ type: ConnectionType; className?: string }> = ({
@@ -70,6 +72,8 @@ export const TerminalCard: React.FC<Props> = ({
   onEdit,
   onDelete,
   onSetDefault,
+  connectionActionsDisabled = false,
+  connectionActionsDisabledReason = null,
 }) => {
   const { t } = useTranslation()
   const isConnected = status?.state === 'connected'
@@ -131,7 +135,9 @@ export const TerminalCard: React.FC<Props> = ({
         {isConnected ? (
           <button
             onClick={onDisconnect}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+            disabled={connectionActionsDisabled}
+            title={connectionActionsDisabledReason || undefined}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <PowerOff className="w-4 h-4" />
             {t('ecr.disconnect', 'Disconnect')}
@@ -139,7 +145,8 @@ export const TerminalCard: React.FC<Props> = ({
         ) : (
           <button
             onClick={onConnect}
-            disabled={isConnecting || !device.enabled}
+            disabled={isConnecting || !device.enabled || connectionActionsDisabled}
+            title={connectionActionsDisabledReason || undefined}
             className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Power className="w-4 h-4" />

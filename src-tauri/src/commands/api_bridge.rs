@@ -1,7 +1,10 @@
+use chrono::Utc;
 use tauri::Emitter;
 use zeroize::Zeroizing;
 
-use crate::{api, db, storage, value_str};
+use crate::{api, db, read_local_json, storage, value_str, write_local_json};
+
+const ADMIN_API_CACHE_PREFIX: &str = "admin_api_get::";
 
 #[derive(Debug)]
 struct AdminFetchCompatPayload {
@@ -82,6 +85,95 @@ fn parse_admin_fetch_payload(
     };
 
     Ok(AdminFetchCompatPayload { path, options })
+}
+
+fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
+    method.eq_ignore_ascii_case("GET")
+        && path.starts_with("/api/pos/")
+        && !path.contains("/api/pos/auth")
+        && !path.contains("/api/pos/updates")
+}
+
+fn admin_api_cache_key(path: &str) -> String {
+    format!("{ADMIN_API_CACHE_PREFIX}{path}")
+}
+
+pub(crate) fn cache_admin_get_response(
+    db: &db::DbState,
+    path: &str,
+    response: &serde_json::Value,
+) -> Result<(), String> {
+    let envelope = serde_json::json!({
+        "path": path,
+        "cachedAt": Utc::now().to_rfc3339(),
+        "data": response,
+    });
+    write_local_json(db, &admin_api_cache_key(path), &envelope)
+}
+
+pub(crate) fn read_cached_admin_get_response(
+    db: &db::DbState,
+    path: &str,
+) -> Option<(serde_json::Value, Option<String>)> {
+    let envelope = read_local_json(db, &admin_api_cache_key(path)).ok()?;
+    let data = envelope.get("data").cloned().unwrap_or(serde_json::Value::Null);
+    if data.is_null() {
+        return None;
+    }
+    let cached_at = envelope
+        .get("cachedAt")
+        .or_else(|| envelope.get("updatedAt"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    Some((data, cached_at))
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedAdminPathQuery {
+    #[serde(default)]
+    prefixes: Vec<String>,
+}
+
+pub(crate) fn list_cached_admin_get_paths(
+    db: &db::DbState,
+    prefixes: &[String],
+) -> Result<Vec<String>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT setting_key
+             FROM local_settings
+             WHERE setting_category = 'local'
+               AND setting_key LIKE ?1
+             ORDER BY setting_key ASC",
+        )
+        .map_err(|e| format!("prepare cached admin path query: {e}"))?;
+    let rows = stmt
+        .query_map([format!("{ADMIN_API_CACHE_PREFIX}%")], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| format!("query cached admin paths: {e}"))?;
+
+    let trimmed_prefixes = prefixes
+        .iter()
+        .map(|prefix| prefix.trim().to_string())
+        .filter(|prefix| !prefix.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut paths = rows
+        .filter_map(Result::ok)
+        .filter_map(|setting_key| setting_key.strip_prefix(ADMIN_API_CACHE_PREFIX).map(str::to_string))
+        .filter(|path| {
+            trimmed_prefixes.is_empty()
+                || trimmed_prefixes
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix.as_str()))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 #[tauri::command]
@@ -196,17 +288,69 @@ pub async fn api_fetch_from_admin(
         }));
     }
 
+    let cacheable_get = is_cacheable_admin_get(&method, &final_path);
+
     match crate::admin_fetch(Some(&db), &final_path, &method, body).await {
-        Ok(v) => Ok(serde_json::json!({
-            "success": true,
-            "data": v,
-            "status": 200
-        })),
-        Err(e) => Ok(serde_json::json!({
-            "success": false,
-            "error": e
-        })),
+        Ok(v) => {
+            if cacheable_get {
+                let _ = cache_admin_get_response(&db, &final_path, &v);
+            }
+
+            Ok(serde_json::json!({
+                "success": true,
+                "data": v,
+                "status": 200,
+                "meta": {
+                    "source": "remote"
+                }
+            }))
+        }
+        Err(e) => {
+            if cacheable_get {
+                if let Some((cached_data, cached_at)) =
+                    read_cached_admin_get_response(&db, &final_path)
+                {
+                    return Ok(serde_json::json!({
+                        "success": true,
+                        "data": cached_data,
+                        "status": 200,
+                        "meta": {
+                            "source": "cache",
+                            "cachedAt": cached_at,
+                            "offlineFallback": true,
+                            "path": final_path,
+                        }
+                    }));
+                }
+            }
+
+            Ok(serde_json::json!({
+                "success": false,
+                "error": if cacheable_get {
+                    format!("{e}. No cached local copy is available yet for offline use.")
+                } else {
+                    e
+                }
+            }))
+        }
     }
+}
+
+#[tauri::command]
+pub fn api_list_cached_paths(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let query: CachedAdminPathQuery = arg0
+        .map(serde_json::from_value)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
+    let paths = list_cached_admin_get_paths(&db, &query.prefixes)?;
+    Ok(serde_json::json!({
+        "success": true,
+        "paths": paths,
+    }))
 }
 
 #[tauri::command]
@@ -231,6 +375,29 @@ pub async fn sync_test_parent_connection(
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    fn test_db_state() -> db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS local_settings (
+                id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                setting_category TEXT NOT NULL,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT NOT NULL,
+                last_sync TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(setting_category, setting_key)
+            );",
+        )
+        .expect("create local_settings");
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
 
     #[test]
     fn parse_admin_fetch_payload_supports_legacy_tuple() {
@@ -327,5 +494,30 @@ mod dto_tests {
         let err = parse_admin_fetch_payload(Some(serde_json::json!({})), None)
             .expect_err("missing path should fail");
         assert!(err.contains("Missing API path"));
+    }
+
+    #[test]
+    fn cacheable_admin_get_only_applies_to_pos_get_routes() {
+        assert!(is_cacheable_admin_get("GET", "/api/pos/suppliers"));
+        assert!(is_cacheable_admin_get("get", "/api/pos/tables?branch_id=branch-1"));
+        assert!(!is_cacheable_admin_get("POST", "/api/pos/suppliers"));
+        assert!(!is_cacheable_admin_get("GET", "/api/admin/users"));
+    }
+
+    #[test]
+    fn admin_api_cache_round_trips_from_local_settings() {
+        let db = test_db_state();
+        let path = "/api/pos/inventory?branch_id=branch-1";
+        let response = serde_json::json!({
+            "success": true,
+            "items": [{ "id": "inv-1" }]
+        });
+
+        cache_admin_get_response(&db, path, &response).expect("cache response");
+        let (cached_data, cached_at) =
+            read_cached_admin_get_response(&db, path).expect("cached response");
+
+        assert_eq!(cached_data, response);
+        assert!(cached_at.is_some());
     }
 }

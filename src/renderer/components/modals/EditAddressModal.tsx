@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { getApiUrl } from '../../../config/environment';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { getPosAuthHeaders } from '../../services/terminal-credentials';
+import { getBridge } from '../../../lib';
 
 interface CustomerAddress {
   id: string;
@@ -32,6 +31,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
   onAddressUpdated
 }) => {
   const { t } = useTranslation();
+  const bridge = getBridge();
   const [isLoading, setIsLoading] = useState(false);
   const [formData, setFormData] = useState({
     address: '',
@@ -60,17 +60,23 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
     setIsLoading(true);
 
     try {
-      const headers = await getPosAuthHeaders();
-      const response = await fetch(getApiUrl(`pos/customers/${customerId}/addresses/${address.id}`), {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify(formData),
-      });
+      const result: any = await bridge.customers.updateAddress(
+        address.id,
+        {
+          customer_id: customerId,
+          address: formData.address,
+          street_address: formData.address,
+          postal_code: formData.postal_code,
+          floor_number: formData.floor_number,
+          notes: formData.notes,
+          address_type: formData.address_type,
+          is_default: formData.is_default,
+        },
+        0,
+      );
 
-      const result = await response.json();
-
-      if (result.success && result.address) {
-        onAddressUpdated(result.address);
+      if (result?.success && result.data) {
+        onAddressUpdated(result.data);
         onClose();
       } else {
         console.error('Failed to update address:', result.error);

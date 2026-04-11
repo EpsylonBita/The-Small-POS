@@ -2,6 +2,7 @@ import React, { memo, useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../../contexts/theme-context';
 import { CreditCard, User, Calendar, Plus, Search, FileText, RefreshCw, AlertCircle, X } from 'lucide-react';
+import { getBridge, isBrowser } from '../../../../lib';
 import { posApiGet } from '../../../utils/api-helpers';
 import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
 import { formatCurrency } from '../../../utils/format';
@@ -34,6 +35,7 @@ export const GuestBillingView: React.FC = memo(() => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { getSetting } = useTerminalSettings();
+  const bridge = getBridge();
   const [folios, setFolios] = useState<GuestFolio[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -51,9 +53,14 @@ export const GuestBillingView: React.FC = memo(() => {
       const params = new URLSearchParams();
       if (branchId) params.append('branch_id', branchId);
 
-      const response = await posApiGet<ApiFoliosResponse>(
-        `/pos/guest-billing?${params.toString()}`
-      );
+      const response = isBrowser()
+        ? await posApiGet<ApiFoliosResponse>(
+            `/pos/guest-billing?${params.toString()}`
+          )
+        : await bridge.adminApi.fetchFromAdmin(
+            `/api/pos/guest-billing${params.toString() ? `?${params.toString()}` : ''}`,
+            { method: 'GET' },
+          ) as { success: boolean; data?: ApiFoliosResponse; error?: string };
 
       if (response.success && response.data?.folios) {
         setFolios(response.data.folios);

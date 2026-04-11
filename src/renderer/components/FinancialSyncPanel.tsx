@@ -3,17 +3,15 @@ import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
-import type {
-  SyncFinancialQueueItem,
-  SyncFinancialQueueStatus,
-} from '../../lib/ipc-contracts';
+import { getSyncQueueBridge } from '../services/SyncQueueBridge';
+import type { SyncQueueItem } from '../../../../shared/pos/sync-queue-types';
 
 type ActionableFinancialStatus =
+  | 'conflict'
   | 'failed'
   | 'pending'
   | 'in_progress'
-  | 'deferred'
-  | 'queued_remote';
+  | 'deferred';
 
 interface FinancialQueueSummary {
   pending: number;
@@ -35,10 +33,10 @@ interface FinancialStatusPresentation {
 }
 
 const ACTIONABLE_STATUS_ORDER: ActionableFinancialStatus[] = [
+  'conflict',
   'failed',
   'pending',
   'deferred',
-  'queued_remote',
   'in_progress',
 ];
 
@@ -47,13 +45,34 @@ const ACTIONABLE_STATUSES = new Set<ActionableFinancialStatus>(
 );
 
 const RETRYABLE_STATUSES = new Set<ActionableFinancialStatus>([
+  'conflict',
   'failed',
   'pending',
   'deferred',
 ]);
 
-const normalizeStatus = (status: SyncFinancialQueueStatus): ActionableFinancialStatus | null => {
-  const normalized = typeof status === 'string' ? status.toLowerCase() : '';
+type ActionableFinancialItem = SyncQueueItem & {
+  normalizedStatus: ActionableFinancialStatus;
+};
+
+const normalizeStatus = (item: SyncQueueItem): ActionableFinancialStatus | null => {
+  const normalized = typeof item.status === 'string' ? item.status.toLowerCase() : '';
+  if (normalized === 'processing') {
+    return 'in_progress';
+  }
+  if (normalized === 'conflict') {
+    return 'conflict';
+  }
+  if (normalized === 'failed') {
+    return 'failed';
+  }
+  if (normalized === 'pending') {
+    const error = item.errorMessage?.toLowerCase() || '';
+    if (error.includes('waiting for parent') || !!item.nextRetryAt) {
+      return 'deferred';
+    }
+    return 'pending';
+  }
   return ACTIONABLE_STATUSES.has(normalized as ActionableFinancialStatus)
     ? (normalized as ActionableFinancialStatus)
     : null;
@@ -67,21 +86,21 @@ const formatPayload = (payload: string): string => {
   }
 };
 
-const formatDependencyStatus = (value: string | null | undefined): string => {
-  if (!value) {
-    return '';
-  }
-
-  return value
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (segment) => segment.toUpperCase());
-};
-
 const getStatusPresentation = (
   t: ReturnType<typeof useTranslation>['t'],
   status: ActionableFinancialStatus,
 ): FinancialStatusPresentation => {
   switch (status) {
+    case 'conflict':
+      return {
+        label: t('sync.financial.conflict', { defaultValue: 'Conflict' }),
+        badgeClassName:
+          'bg-orange-500/15 text-orange-700 dark:text-orange-300 border border-orange-500/30',
+        accentClassName: 'text-orange-600 dark:text-orange-300',
+        description: t('sync.financial.conflictGroupDesc', {
+          defaultValue: 'These items require operator review before they can sync.',
+        }),
+      };
     case 'failed':
       return {
         label: t('sync.financial.failed', { defaultValue: 'Failed' }),
@@ -112,18 +131,6 @@ const getStatusPresentation = (
           defaultValue: 'These items were delayed by retry or backpressure handling.',
         }),
       };
-    case 'queued_remote':
-      return {
-        label: t('sync.financial.queuedRemote', {
-          defaultValue: 'Queued Remotely',
-        }),
-        badgeClassName:
-          'bg-violet-500/15 text-violet-700 dark:text-violet-300 border border-violet-500/30',
-        accentClassName: 'text-violet-600 dark:text-violet-300',
-        description: t('sync.financial.queuedRemoteGroupDesc', {
-          defaultValue: 'These items were accepted and are still waiting upstream.',
-        }),
-      };
     case 'in_progress':
       return {
         label: t('sync.financial.inProgress', { defaultValue: 'In Progress' }),
@@ -137,19 +144,21 @@ const getStatusPresentation = (
   }
 };
 
-const canRetry = (item: SyncFinancialQueueItem): boolean => {
-  const status = normalizeStatus(item.status);
+const canRetry = (item: SyncQueueItem): boolean => {
+  const status = normalizeStatus(item);
   return status ? RETRYABLE_STATUSES.has(status) : false;
 };
 
-const canRepairOrphanedAdjustment = (item: SyncFinancialQueueItem): boolean => {
-  const status = normalizeStatus(item.status);
-  if (item.entityType !== 'payment_adjustment' || status !== 'failed') {
+const canRepairOrphanedAdjustment = (item: ActionableFinancialItem): boolean => {
+  if (
+    item.tableName !== 'payment_adjustments' ||
+    item.normalizedStatus !== 'failed'
+  ) {
     return false;
   }
 
   const normalizedError =
-    typeof item.lastError === 'string' ? item.lastError.toLowerCase() : '';
+    typeof item.errorMessage === 'string' ? item.errorMessage.toLowerCase() : '';
   return (
     normalizedError.includes('order not found') ||
     normalizedError.includes('payment does not belong to the provided order')
@@ -163,15 +172,19 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
   queueSummary,
 }) => {
   const bridge = getBridge();
+  const syncQueue = getSyncQueueBridge();
   const { t } = useTranslation();
-  const [items, setItems] = useState<SyncFinancialQueueItem[]>([]);
+  const [items, setItems] = useState<SyncQueueItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState<string | null>(null);
 
   const loadItems = async () => {
     setLoading(true);
     try {
-      const queueItems = await bridge.sync.getFailedFinancialItems(100);
+      const queueItems = await syncQueue.listItems({
+        limit: 200,
+        moduleType: 'financial',
+      });
       setItems(Array.isArray(queueItems) ? queueItems : []);
     } catch (err) {
       console.error('Failed to load financial sync items', err);
@@ -210,15 +223,13 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
   const actionableItems = useMemo(() => {
     return items
       .map((item) => {
-        const normalizedStatus = normalizeStatus(item.status);
+        const normalizedStatus = normalizeStatus(item);
         return normalizedStatus ? { ...item, normalizedStatus } : null;
       })
       .filter(
         (
           item,
-        ): item is SyncFinancialQueueItem & {
-          normalizedStatus: ActionableFinancialStatus;
-        } => item !== null,
+        ): item is ActionableFinancialItem => item !== null,
       );
   }, [items]);
 
@@ -266,10 +277,10 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     metadata: blockerMetadata,
   });
 
-  const handleRetryItem = async (queueId: number) => {
-    setProcessing(String(queueId));
+  const handleRetryItem = async (queueId: string) => {
+    setProcessing(queueId);
     try {
-      await bridge.sync.retryFinancialItem(queueId);
+      await syncQueue.retryItem(queueId);
       await loadItems();
       onRefresh();
     } catch (err) {
@@ -282,7 +293,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
   const handleRetryAll = async () => {
     setProcessing('all');
     try {
-      await bridge.sync.retryAllFailedFinancial();
+      await syncQueue.retryModule('financial');
       await loadItems();
       onRefresh();
     } catch (err) {
@@ -485,29 +496,19 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
 
                         <div className="space-y-3">
                           {group.items.map((item) => {
-                            const dependencyMessage =
-                              item.parentShiftId &&
-                              (item.dependencyBlockReason ||
-                                t('sync.financial.waitingForCashierShiftSync', {
-                                  defaultValue: 'Waiting for cashier shift sync',
-                                }));
-                            const secondaryError =
-                              dependencyMessage &&
-                              item.lastError &&
-                              item.lastError !== dependencyMessage
-                                ? item.lastError
-                                : null;
+                            const queueError = item.errorMessage;
+                            const isDeferred = item.normalizedStatus === 'deferred';
 
                             return (
                               <div
-                                key={item.queueId}
+                                key={item.id}
                                 className="rounded-2xl border border-white/10 bg-black/5 p-4 dark:bg-white/[0.03]"
                               >
                                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                                   <div className="min-w-0 flex-1">
                                     <div className="mb-2 flex flex-wrap items-center gap-2">
                                       <span className="rounded-lg border border-slate-400/30 bg-slate-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-300">
-                                        {item.entityType}
+                                        {item.tableName}
                                       </span>
                                       <span className="rounded-lg border border-slate-400/30 bg-slate-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-300">
                                         {item.operation}
@@ -518,56 +519,27 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                     </div>
 
                                     <div className="mb-2 break-all text-sm font-semibold text-black dark:text-white">
-                                      {item.entityId}
+                                      {item.recordId}
                                     </div>
 
-                                    {dependencyMessage ? (
+                                    {isDeferred && queueError ? (
                                       <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
                                         <div className="text-sm font-semibold text-amber-700 dark:text-amber-200">
-                                          {dependencyMessage}
+                                          {queueError}
                                         </div>
-                                        <div className="mt-2 flex flex-wrap gap-2 text-[11px] font-semibold text-amber-800/90 dark:text-amber-100">
-                                          <span className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-2.5 py-1">
-                                            {t('sync.financial.parentShiftLabel', {
-                                              defaultValue: 'Parent shift',
-                                            })}
-                                            : {item.parentShiftId}
-                                          </span>
-                                          {item.parentShiftSyncStatus && (
-                                            <span className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-2.5 py-1">
-                                              {t('sync.financial.parentShiftLocalStatus', {
-                                                defaultValue: 'Local',
-                                              })}
-                                              : {formatDependencyStatus(item.parentShiftSyncStatus)}
-                                            </span>
-                                          )}
-                                          {item.parentShiftQueueStatus && (
-                                            <span className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-2.5 py-1">
-                                              {t('sync.financial.parentShiftQueueStatus', {
-                                                defaultValue: 'Queue',
-                                              })}
-                                              : {formatDependencyStatus(item.parentShiftQueueStatus)}
-                                            </span>
-                                          )}
-                                          {item.parentShiftQueueId != null && (
-                                            <span className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-2.5 py-1">
-                                              {t('sync.financial.parentShiftQueueId', {
-                                                defaultValue: 'Queue ID',
-                                              })}
-                                              : {item.parentShiftQueueId}
-                                            </span>
-                                          )}
-                                        </div>
-                                        {secondaryError && (
+                                        {item.nextRetryAt && (
                                           <div className="mt-2 text-xs font-medium text-amber-800/80 dark:text-amber-100/80">
-                                            {secondaryError}
+                                            {t('sync.financial.nextRetryAt', {
+                                              defaultValue: 'Next retry',
+                                            })}
+                                            : {new Date(item.nextRetryAt).toLocaleString()}
                                           </div>
                                         )}
                                       </div>
                                     ) : (
-                                      item.lastError && (
+                                      queueError && (
                                         <div className="mb-3 text-sm font-medium text-red-700 dark:text-red-300">
-                                          {item.lastError}
+                                          {queueError}
                                         </div>
                                       )
                                     )}
@@ -577,7 +549,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                         {t('sync.financial.viewPayload')}
                                       </summary>
                                       <pre className="mt-2 overflow-x-auto rounded-xl border border-slate-300/50 bg-slate-100 p-3 font-mono text-[10px] text-slate-700 dark:border-slate-600/50 dark:bg-slate-800/50 dark:text-slate-300">
-                                        {formatPayload(item.payload)}
+                                        {formatPayload(item.data)}
                                       </pre>
                                     </details>
                                   </div>
@@ -586,18 +558,18 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                     <span className="rounded-lg border border-slate-300/50 bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-600 dark:border-slate-600/50 dark:bg-slate-800/50 dark:text-slate-400">
                                       {t('sync.financial.attempts')}:{' '}
                                       <span className="font-mono text-black dark:text-white">
-                                        {item.retryCount}
+                                        {item.attempts}
                                       </span>
                                     </span>
                                     {canRetry(item) && (
                                       <button
                                         onClick={() =>
-                                          void handleRetryItem(item.queueId)
+                                          void handleRetryItem(item.id)
                                         }
                                         disabled={!!processing}
                                         className="rounded-xl border border-slate-300/50 px-4 py-2 text-xs font-bold text-black transition-all hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:text-white dark:hover:bg-white/10"
                                       >
-                                        {processing === String(item.queueId)
+                                        {processing === item.id
                                           ? '...'
                                           : t('sync.financial.retry')}
                                       </button>

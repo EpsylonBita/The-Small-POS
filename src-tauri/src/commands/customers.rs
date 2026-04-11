@@ -3,8 +3,8 @@ use serde::Deserialize;
 use tauri::Emitter;
 
 use crate::{
-    db, normalize_phone, payload_arg0_as_string, read_local_json_array, value_i64, value_str,
-    write_local_json,
+    db, normalize_phone, payload_arg0_as_string, read_local_json_array, read_local_setting,
+    storage, sync_queue, value_i64, value_str, write_local_json,
 };
 
 #[derive(Debug, Deserialize)]
@@ -459,6 +459,29 @@ fn build_remote_customer_create_body(source: &serde_json::Value) -> serde_json::
     if let Some(longitude) = value_f64_any(source, &["longitude"]) {
         body.insert("longitude".to_string(), serde_json::json!(longitude));
     }
+    if let Some(place_id) = string_field(source, &["place_id", "google_place_id"]) {
+        body.insert("place_id".to_string(), serde_json::json!(place_id));
+    }
+    if let Some(formatted_address) = string_field(source, &["formatted_address"]) {
+        body.insert(
+            "formatted_address".to_string(),
+            serde_json::json!(formatted_address),
+        );
+    }
+    if let Some(resolved_street_number) =
+        string_field(source, &["resolved_street_number"])
+    {
+        body.insert(
+            "resolved_street_number".to_string(),
+            serde_json::json!(resolved_street_number),
+        );
+    }
+    if let Some(address_fingerprint) = string_field(source, &["address_fingerprint"]) {
+        body.insert(
+            "address_fingerprint".to_string(),
+            serde_json::json!(address_fingerprint),
+        );
+    }
 
     serde_json::Value::Object(body)
 }
@@ -541,6 +564,29 @@ fn build_remote_address_body(source: &serde_json::Value) -> serde_json::Value {
     }
     if let Some(longitude) = value_f64_any(source, &["longitude"]) {
         body.insert("longitude".to_string(), serde_json::json!(longitude));
+    }
+    if let Some(place_id) = string_field(source, &["place_id", "google_place_id"]) {
+        body.insert("place_id".to_string(), serde_json::json!(place_id));
+    }
+    if let Some(formatted_address) = string_field(source, &["formatted_address"]) {
+        body.insert(
+            "formatted_address".to_string(),
+            serde_json::json!(formatted_address),
+        );
+    }
+    if let Some(resolved_street_number) =
+        string_field(source, &["resolved_street_number"])
+    {
+        body.insert(
+            "resolved_street_number".to_string(),
+            serde_json::json!(resolved_street_number),
+        );
+    }
+    if let Some(address_fingerprint) = string_field(source, &["address_fingerprint"]) {
+        body.insert(
+            "address_fingerprint".to_string(),
+            serde_json::json!(address_fingerprint),
+        );
     }
 
     serde_json::Value::Object(body)
@@ -696,6 +742,69 @@ fn is_not_found_error(error: &str) -> bool {
         || lower.contains("status 404")
         || lower.contains("customer not found")
         || lower.contains("address not found")
+}
+
+fn resolve_customer_queue_organization_id(db: &db::DbState) -> String {
+    storage::get_credential("organization_id")
+        .or_else(|| read_local_setting(db, "terminal", "organization_id"))
+        .unwrap_or_else(|| "pending-org".to_string())
+}
+
+fn enqueue_customer_sync_item(
+    db: &db::DbState,
+    table_name: &str,
+    record_id: &str,
+    operation: &str,
+    payload: &serde_json::Value,
+    version: i64,
+) -> Result<String, String> {
+    let organization_id = resolve_customer_queue_organization_id(db);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    sync_queue::enqueue(
+        &conn,
+        &sync_queue::EnqueueInput {
+            table_name: table_name.to_string(),
+            record_id: record_id.to_string(),
+            operation: operation.to_string(),
+            data: payload.to_string(),
+            organization_id,
+            priority: Some(0),
+            module_type: Some("customers".to_string()),
+            conflict_strategy: Some("manual".to_string()),
+            version: Some(version.max(1)),
+        },
+    )
+}
+
+fn build_local_customer_from_source(source: &serde_json::Value) -> serde_json::Value {
+    let body = build_remote_customer_create_body(source);
+    let customer_id = value_str(source, &["id", "customerId"])
+        .unwrap_or_else(|| format!("cust-{}", uuid::Uuid::new_v4()));
+    let now = Utc::now().to_rfc3339();
+
+    let mut customer = normalize_customer_for_cache(serde_json::json!({
+        "id": customer_id,
+        "name": value_str(&body, &["name"]).unwrap_or_else(|| "Customer".to_string()),
+        "phone": value_str(&body, &["phone"]).unwrap_or_default(),
+        "email": body.get("email").cloned().unwrap_or(serde_json::Value::Null),
+        "branch_id": body.get("branch_id").cloned().unwrap_or(serde_json::Value::Null),
+        "createdAt": now,
+        "updatedAt": now,
+    }));
+
+    let address_body = build_remote_address_body(source);
+    if address_body
+        .as_object()
+        .map(|obj| !obj.is_empty())
+        .unwrap_or(false)
+    {
+        let address = normalize_address_for_cache(address_body);
+        if let Some(obj) = customer.as_object_mut() {
+            obj.insert("addresses".to_string(), serde_json::json!([address]));
+        }
+    }
+
+    customer
 }
 
 async fn sync_customer_create_remote(
@@ -1065,13 +1174,45 @@ pub async fn customer_create(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let remote_customer = sync_customer_create_remote(&db, &payload).await?;
-    let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-    let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
-    write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-    let _ = app.emit("customer_created", customer.clone());
-    let _ = app.emit("customer_realtime_update", customer.clone());
-    Ok(serde_json::json!({ "success": true, "data": customer }))
+    let queue_payload = build_remote_customer_create_body(&payload);
+
+    match sync_customer_create_remote(&db, &payload).await {
+        Ok(remote_customer) => {
+            let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+            let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+            write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+            let _ = app.emit("customer_created", customer.clone());
+            let _ = app.emit("customer_realtime_update", customer.clone());
+            Ok(serde_json::json!({ "success": true, "data": customer }))
+        }
+        Err(remote_error) => {
+            let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+            let customer = upsert_customer_cache_entry(&mut cache, build_local_customer_from_source(&payload));
+            write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+
+            let customer_id =
+                value_str(&customer, &["id", "customerId"]).ok_or("Missing local customer id")?;
+            let version = value_i64(&customer, &["version"]).unwrap_or(1);
+            enqueue_customer_sync_item(
+                &db,
+                "customers",
+                &customer_id,
+                "INSERT",
+                &queue_payload,
+                version,
+            )?;
+
+            let _ = app.emit("customer_created", customer.clone());
+            let _ = app.emit("customer_realtime_update", customer.clone());
+            Ok(serde_json::json!({
+                "success": true,
+                "queued": true,
+                "offline": true,
+                "warning": remote_error,
+                "data": customer
+            }))
+        }
+    }
 }
 
 #[tauri::command]
@@ -1086,21 +1227,35 @@ pub async fn customer_update(
     let customer_id = payload.customer_id;
     let updates = payload.updates;
     let expected_version = payload.expected_version;
-    let remote_updates = build_remote_customer_update_body(&updates);
+    let mut remote_updates = build_remote_customer_update_body(&updates);
+    let mut remote_failure: Option<String> = None;
 
     if remote_updates
         .as_object()
         .map(|obj| !obj.is_empty())
         .unwrap_or(false)
     {
-        let remote_customer =
-            sync_customer_update_remote(&db, &customer_id, &updates, expected_version).await?;
-        let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-        let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
-        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-        let _ = app.emit("customer_updated", customer.clone());
-        let _ = app.emit("customer_realtime_update", customer.clone());
-        return Ok(serde_json::json!({ "success": true, "data": customer }));
+        match sync_customer_update_remote(&db, &customer_id, &updates, expected_version).await {
+            Ok(remote_customer) => {
+                let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+                let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+                write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+                let _ = app.emit("customer_updated", customer.clone());
+                let _ = app.emit("customer_realtime_update", customer.clone());
+                return Ok(serde_json::json!({ "success": true, "data": customer }));
+            }
+            Err(error) => {
+                remote_failure = Some(error);
+                if expected_version > 0 {
+                    if let Some(obj) = remote_updates.as_object_mut() {
+                        obj.insert(
+                            "expected_version".to_string(),
+                            serde_json::json!(expected_version),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
@@ -1159,9 +1314,31 @@ pub async fn customer_update(
 
     if let Some(customer) = updated_customer.clone() {
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+        let version = value_i64(&customer, &["version"]).unwrap_or(expected_version.max(1));
+        if remote_failure.is_some()
+            && remote_updates
+                .as_object()
+                .map(|obj| !obj.is_empty())
+                .unwrap_or(false)
+        {
+            enqueue_customer_sync_item(
+                &db,
+                "customers",
+                &customer_id,
+                "UPDATE",
+                &remote_updates,
+                version,
+            )?;
+        }
         let _ = app.emit("customer_updated", customer.clone());
         let _ = app.emit("customer_realtime_update", customer.clone());
-        return Ok(serde_json::json!({ "success": true, "data": customer }));
+        return Ok(serde_json::json!({
+            "success": true,
+            "queued": remote_failure.is_some(),
+            "offline": remote_failure.is_some(),
+            "warning": remote_failure,
+            "data": customer
+        }));
     }
 
     Err("Customer not found".into())
@@ -1194,8 +1371,22 @@ pub async fn customer_add_address(
 ) -> Result<serde_json::Value, String> {
     let payload = parse_customer_address_payload(arg0, arg1)?;
     let customer_id = payload.customer_id;
-    let remote_address = sync_customer_address_remote(&db, &customer_id, &payload.address).await?;
-    let address = normalize_address_for_cache(remote_address);
+    let mut queue_payload = build_remote_address_body(&payload.address);
+    if queue_payload
+        .get("street_address")
+        .and_then(|value| value.as_str())
+        .is_none()
+    {
+        return Err("Missing address street".into());
+    }
+    if let Some(obj) = queue_payload.as_object_mut() {
+        obj.insert("customer_id".to_string(), serde_json::json!(customer_id.clone()));
+    }
+
+    let (address, remote_failure) = match sync_customer_address_remote(&db, &customer_id, &payload.address).await {
+        Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
+        Err(error) => (normalize_address_for_cache(queue_payload.clone()), Some(error)),
+    };
 
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
     let mut updated: Option<serde_json::Value> = None;
@@ -1225,24 +1416,60 @@ pub async fn customer_add_address(
     let customer = if let Some(customer) = updated.clone() {
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
         Some(customer)
-    } else if let Some(remote_customer) =
-        sync_customer_fetch_remote_by_id(&db, &customer_id).await?
-    {
+    } else if remote_failure.is_none() {
+        if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await?
+        {
+            let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+            let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+            write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+            Some(customer)
+        } else {
+            None
+        }
+    } else {
         let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-        let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+        let placeholder = normalize_customer_for_cache(serde_json::json!({
+            "id": customer_id,
+            "addresses": [address.clone()],
+        }));
+        let customer = upsert_customer_cache_entry(&mut cache, placeholder);
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
         Some(customer)
-    } else {
-        None
     };
+
+    if remote_failure.is_some() {
+        let address_id = value_str(&address, &["id", "addressId"]).ok_or("Missing address id")?;
+        let version = value_i64(&address, &["version"]).unwrap_or(1);
+        enqueue_customer_sync_item(
+            &db,
+            "customer_addresses",
+            &address_id,
+            "INSERT",
+            &queue_payload,
+            version,
+        )?;
+    }
 
     if let Some(customer) = customer.clone() {
         let _ = app.emit("customer_updated", customer.clone());
         let _ = app.emit("customer_realtime_update", customer.clone());
-        return Ok(serde_json::json!({ "success": true, "data": address, "customer": customer }));
+        return Ok(serde_json::json!({
+            "success": true,
+            "queued": remote_failure.is_some(),
+            "offline": remote_failure.is_some(),
+            "warning": remote_failure,
+            "data": address,
+            "customer": customer
+        }));
     }
 
-    Ok(serde_json::json!({ "success": true, "data": address }))
+    Ok(serde_json::json!({
+        "success": true,
+        "queued": remote_failure.is_some(),
+        "offline": remote_failure.is_some(),
+        "warning": remote_failure,
+        "data": address
+    }))
 }
 
 #[tauri::command]
@@ -1256,7 +1483,7 @@ pub async fn customer_update_address(
     let payload = parse_customer_update_address_payload(arg0, arg1, arg2)?;
     let target_id = payload.target_id;
     let updates = payload.updates;
-    let _expected_version = payload.expected_version;
+    let expected_version = payload.expected_version;
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
     let hinted_customer_id =
         value_str(&updates, &["customer_id", "customerId"]).map(|id| id.trim().to_string());
@@ -1285,9 +1512,41 @@ pub async fn customer_update_address(
         })
         .ok_or("Customer/address not found")?;
 
-    let remote_address =
-        sync_customer_address_update_remote(&db, &customer_id, &target_id, &updates).await?;
-    let address = normalize_address_for_cache(remote_address);
+    let mut queue_payload = build_remote_address_body(&updates);
+    if queue_payload
+        .as_object()
+        .map(|obj| obj.is_empty())
+        .unwrap_or(true)
+    {
+        return Err("Missing address updates".into());
+    }
+    if let Some(obj) = queue_payload.as_object_mut() {
+        obj.insert("customer_id".to_string(), serde_json::json!(customer_id.clone()));
+        if expected_version > 0 {
+            obj.insert(
+                "expected_version".to_string(),
+                serde_json::json!(expected_version),
+            );
+        }
+    }
+
+    let (address, remote_failure) = match sync_customer_address_update_remote(
+        &db,
+        &customer_id,
+        &target_id,
+        &updates,
+    )
+    .await
+    {
+        Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
+        Err(error) => {
+            let mut local_payload = queue_payload.clone();
+            if let Some(obj) = local_payload.as_object_mut() {
+                obj.insert("id".to_string(), serde_json::json!(target_id.clone()));
+            }
+            (normalize_address_for_cache(local_payload), Some(error))
+        }
+    };
 
     let mut updated_customer: Option<serde_json::Value> = None;
     let mut cache_touched = false;
@@ -1331,16 +1590,31 @@ pub async fn customer_update_address(
     let customer = if cache_touched {
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
         updated_customer.clone()
-    } else if let Some(remote_customer) =
-        sync_customer_fetch_remote_by_id(&db, &customer_id).await?
-    {
-        let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-        let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
-        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-        Some(customer)
+    } else if remote_failure.is_none() {
+        if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await?
+        {
+            let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+            let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+            write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+            Some(customer)
+        } else {
+            updated_customer.clone()
+        }
     } else {
         updated_customer.clone()
     };
+
+    if remote_failure.is_some() {
+        let version = value_i64(&address, &["version"]).unwrap_or(expected_version.max(1));
+        enqueue_customer_sync_item(
+            &db,
+            "customer_addresses",
+            &target_id,
+            "UPDATE",
+            &queue_payload,
+            version,
+        )?;
+    }
 
     if let Some(customer) = customer.clone() {
         let _ = app.emit("customer_updated", customer.clone());
@@ -1349,6 +1623,9 @@ pub async fn customer_update_address(
 
     Ok(serde_json::json!({
         "success": true,
+        "queued": remote_failure.is_some(),
+        "offline": remote_failure.is_some(),
+        "warning": remote_failure,
         "data": address,
         "customer": customer
     }))

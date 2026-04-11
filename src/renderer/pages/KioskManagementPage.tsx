@@ -10,6 +10,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'react-hot-toast';
 import {
   Monitor,
   QrCode,
@@ -21,12 +22,15 @@ import {
   ShoppingBag,
   Clock,
   CheckCircle,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { formatCurrency, formatTime } from '../utils/format';
 import { getBridge } from '../../lib';
 import { openExternalUrl } from '../utils/electron-api';
+import { getOfflineActionState } from '../services/offline-page-capabilities';
 
 interface KioskOrder {
   id: string;
@@ -50,6 +54,7 @@ const KioskManagementPage: React.FC = () => {
   const { resolvedTheme } = useTheme();
   const { staff } = useShift();
   const isDark = resolvedTheme === 'dark';
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   const [isKioskEnabled, setIsKioskEnabled] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -62,8 +67,23 @@ const KioskManagementPage: React.FC = () => {
     totalRevenue: 0,
   });
   const [error, setError] = useState<string | null>(null);
+  const toggleAction = getOfflineActionState('kiosk', 'toggle', isOnline);
+  const openAction = getOfflineActionState('kiosk', 'open', isOnline);
 
   const branchId = staff?.branchId;
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   // Fetch kiosk status and orders using POS endpoints
   const fetchKioskData = useCallback(async () => {
@@ -113,6 +133,11 @@ const KioskManagementPage: React.FC = () => {
 
   // Toggle kiosk enabled status using POS endpoint
   const handleToggleKiosk = async () => {
+    if (toggleAction.disabled) {
+      toast.error(toggleAction.message || 'This action requires an online connection.');
+      return;
+    }
+
     setIsToggling(true);
     try {
       const result = await bridge.adminApi.fetchFromAdmin(
@@ -138,6 +163,11 @@ const KioskManagementPage: React.FC = () => {
 
   // Open kiosk in browser
   const handleOpenKiosk = async () => {
+    if (openAction.disabled) {
+      toast.error(openAction.message || 'This action requires an online connection.');
+      return;
+    }
+
     if (!branchId) return;
     // Use admin dashboard URL for kiosk page
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://admin.thesmall.app';
@@ -172,6 +202,16 @@ const KioskManagementPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg ${
+            isOnline
+              ? isDark ? 'bg-green-500/20 text-green-400' : 'bg-green-100 text-green-600'
+              : isDark ? 'bg-red-500/20 text-red-400' : 'bg-red-100 text-red-600'
+          }`}>
+            {isOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
+            <span className="text-xs font-medium">
+              {isOnline ? t('common.online', { defaultValue: 'Online' }) : t('common.offline', { defaultValue: 'Offline' })}
+            </span>
+          </div>
           <button
             onClick={fetchKioskData}
             className={`p-2 rounded-lg transition-colors ${
@@ -229,11 +269,13 @@ const KioskManagementPage: React.FC = () => {
             {isKioskEnabled && (
               <button
                 onClick={handleOpenKiosk}
+                disabled={openAction.disabled || !branchId}
                 className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
                   isDark
                     ? 'bg-blue-900/30 text-blue-400 hover:bg-blue-900/50'
                     : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
-                }`}
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
+                title={openAction.message || undefined}
               >
                 <ExternalLink className="w-4 h-4" />
                 {t('modules.kiosk.openKiosk', { defaultValue: 'Open Kiosk' })}
@@ -242,11 +284,11 @@ const KioskManagementPage: React.FC = () => {
 
             <button
               onClick={handleToggleKiosk}
-              disabled={isToggling}
+              disabled={isToggling || toggleAction.disabled}
               className={`p-2 rounded-lg transition-colors ${
                 isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'
               } disabled:opacity-50`}
-              title={isKioskEnabled ? 'Disable kiosk' : 'Enable kiosk'}
+              title={toggleAction.message || (isKioskEnabled ? 'Disable kiosk' : 'Enable kiosk')}
             >
               {isToggling ? (
                 <RefreshCw className="w-8 h-8 animate-spin text-gray-400" />

@@ -28,7 +28,9 @@ import KitchenDisplayPage from '../pages/KitchenDisplayPage';
 import CustomerDisplayPage from '../pages/CustomerDisplayPage';
 import KioskManagementPage from '../pages/KioskManagementPage';
 import IntegrationsPage from '../pages/IntegrationsPage';
+import SettingsPage from '../pages/SettingsPage';
 import { getBridge } from '../../lib';
+import { getOfflinePageBanner } from '../services/offline-page-capabilities';
 
 import { ExpenseModal } from './modals/ExpenseModal';
 
@@ -339,7 +341,8 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
     menu: MenuView,
     users: CustomersView,
     customers: CustomersView, // alias for users/staff management
-    // settings is handled via modal, not a view
+    // Settings page (full view alongside the modal)
+    settings: () => <SettingsPage />,
 
     // Restaurant vertical (lazy-loaded)
     tables: TablesView,
@@ -418,6 +421,14 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
     );
   };
 
+  const missingAdvisoryDatasets = Array.isArray(offlineBundleStatus?.missingAdvisoryDatasets)
+    ? (offlineBundleStatus.missingAdvisoryDatasets as string[])
+    : [];
+  const pageOfflineBanner = getOfflinePageBanner(currentView, isOffline);
+  const advisorySummary = missingAdvisoryDatasets.length > 0
+    ? missingAdvisoryDatasets.map((dataset) => dataset.replace(/_/g, ' ')).join(', ')
+    : '';
+
   return (
     <NavigationProvider currentView={currentView} onViewChange={handleViewChange}>
       <div className={`flex h-screen h-[100dvh] transition-all duration-300 overflow-hidden safe-area-all ${resolvedTheme === 'light'
@@ -461,12 +472,15 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
                 {offlineBundleStatus.hasRequiredCoreData !== false ? (
                   <span>
                     Offline mode is using the last locally cached branch data. Reconnect to refresh
-                    staff, tables, delivery rules, coupons, and offers.
+                    staff PIN cache, schedules, tables, delivery rules, coupons, and offers.
+                    {pageOfflineBanner ? ` ${pageOfflineBanner}` : ''}
+                    {advisorySummary ? ` Advisory caches still missing: ${advisorySummary}.` : ''}
                   </span>
                 ) : (
                   <span>
                     Offline mode is missing required branch data for this terminal. Connect once to
-                    download the local branch bundle before continuing. Missing datasets:{' '}
+                    download the local branch bundle and staff login cache before continuing.
+                    Missing datasets:{' '}
                     {(offlineBundleStatus.missingRequiredDatasets ?? []).join(', ')}
                   </span>
                 )}

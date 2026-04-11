@@ -4,6 +4,7 @@ import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import { Package, Coffee, Eye, EyeOff, Search, RefreshCw } from 'lucide-react';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { getOfflineActionState } from '../services/offline-page-capabilities';
 
 // Types
 interface MenuItem {
@@ -52,12 +53,27 @@ export const MenuManagementPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'categories' | 'subcategories' | 'ingredients' | 'combos'>('subcategories');
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   // Data states
   const [categories, setCategories] = useState<Category[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
   const [combos, setCombos] = useState<Combo[]>([]);
+  const toggleAction = getOfflineActionState('menu', 'toggle', isOnline);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   // Load data on mount and tab change
   useEffect(() => {
@@ -147,6 +163,11 @@ export const MenuManagementPage: React.FC = () => {
   };
 
   const toggleCategoryAvailability = async (id: string, currentStatus: boolean) => {
+    if (toggleAction.disabled) {
+      toast.error(toggleAction.message || 'This action requires an online connection.');
+      return;
+    }
+
     const original = categories;
     // Optimistic update
     setCategories(prev => prev.map(c => c.id === id ? { ...c, is_active: !currentStatus } : c));
@@ -165,6 +186,11 @@ export const MenuManagementPage: React.FC = () => {
   };
 
   const toggleMenuItemAvailability = async (id: string, currentStatus: boolean) => {
+    if (toggleAction.disabled) {
+      toast.error(toggleAction.message || 'This action requires an online connection.');
+      return;
+    }
+
     const original = menuItems;
     // Optimistic update
     setMenuItems(prev => prev.map(item => item.id === id ? { ...item, is_available: !currentStatus } : item));
@@ -183,6 +209,11 @@ export const MenuManagementPage: React.FC = () => {
   };
 
   const toggleIngredientAvailability = async (id: string, currentStatus: boolean) => {
+    if (toggleAction.disabled) {
+      toast.error(toggleAction.message || 'This action requires an online connection.');
+      return;
+    }
+
     const original = ingredients;
     // Optimistic update
     setIngredients(prev => prev.map(ing => ing.id === id ? { ...ing, is_available: !currentStatus } : ing));
@@ -201,6 +232,11 @@ export const MenuManagementPage: React.FC = () => {
   };
 
   const toggleComboAvailability = async (id: string, currentStatus: boolean) => {
+    if (toggleAction.disabled) {
+      toast.error(toggleAction.message || 'This action requires an online connection.');
+      return;
+    }
+
     const original = combos;
     // Optimistic update
     setCombos(prev => prev.map(c => c.id === id ? { ...c, is_active: !currentStatus } : c));
@@ -355,12 +391,13 @@ export const MenuManagementPage: React.FC = () => {
             </div>
             <button
               onClick={() => toggleCategoryAvailability(category.id, category.is_active)}
-              className={`p-2 rounded-lg transition-all ${
+              disabled={toggleAction.disabled}
+              title={toggleAction.message || (category.is_active ? 'Disable' : 'Enable')}
+              className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                 category.is_active
                   ? 'text-green-500 hover:bg-green-500/10'
                   : 'text-red-500 hover:bg-red-500/10'
               }`}
-              title={category.is_active ? 'Disable' : 'Enable'}
             >
               {category.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
@@ -392,12 +429,13 @@ export const MenuManagementPage: React.FC = () => {
             </div>
             <button
               onClick={() => toggleMenuItemAvailability(item.id, item.is_available)}
-              className={`p-2 rounded-lg transition-all ${
+              disabled={toggleAction.disabled}
+              title={toggleAction.message || (item.is_available ? 'Disable' : 'Enable')}
+              className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                 item.is_available
                   ? 'text-green-500 hover:bg-green-500/10'
                   : 'text-red-500 hover:bg-red-500/10'
               }`}
-              title={item.is_available ? 'Disable' : 'Enable'}
             >
               {item.is_available ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
@@ -439,12 +477,13 @@ export const MenuManagementPage: React.FC = () => {
             </div>
             <button
               onClick={() => toggleIngredientAvailability(ingredient.id, ingredient.is_available)}
-              className={`p-2 rounded-lg transition-all ${
+              disabled={toggleAction.disabled}
+              title={toggleAction.message || (ingredient.is_available ? 'Disable' : 'Enable')}
+              className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                 ingredient.is_available
                   ? 'text-green-500 hover:bg-green-500/10'
                   : 'text-red-500 hover:bg-red-500/10'
               }`}
-              title={ingredient.is_available ? 'Disable' : 'Enable'}
             >
               {ingredient.is_available ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
@@ -481,12 +520,13 @@ export const MenuManagementPage: React.FC = () => {
             </div>
             <button
               onClick={() => toggleComboAvailability(combo.id, combo.is_active)}
-              className={`p-2 rounded-lg transition-all ${
+              disabled={toggleAction.disabled}
+              title={toggleAction.message || (combo.is_active ? 'Disable' : 'Enable')}
+              className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                 combo.is_active
                   ? 'text-green-500 hover:bg-green-500/10'
                   : 'text-red-500 hover:bg-red-500/10'
               }`}
-              title={combo.is_active ? 'Disable' : 'Enable'}
             >
               {combo.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
@@ -527,4 +567,3 @@ export const MenuManagementPage: React.FC = () => {
 };
 
 export default MenuManagementPage;
-

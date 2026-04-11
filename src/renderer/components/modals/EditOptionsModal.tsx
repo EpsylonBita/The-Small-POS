@@ -7,6 +7,8 @@ interface EditOptionsModalProps {
   orderCount: number;
   onEditInfo: () => void;
   onEditOrder: () => void;
+  onChangeOrderType: (type: "pickup" | "delivery" | "dine-in") => void;
+  currentOrderType?: "pickup" | "delivery" | "dine-in";
   onEditPayment: () => void;
   canEditPayment: boolean;
   paymentEditHint?: string;
@@ -18,6 +20,8 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
   orderCount,
   onEditInfo,
   onEditOrder,
+  onChangeOrderType,
+  currentOrderType = "pickup",
   onEditPayment,
   canEditPayment,
   paymentEditHint,
@@ -109,6 +113,47 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                   </div>
                 </div>
               </button>
+
+              {orderCount === 1 && (
+                <div className="w-full p-4 rounded-lg border text-left transition-all duration-200 border-violet-200/50 dark:border-violet-400/30 bg-violet-50/50 dark:bg-violet-500/10 liquid-glass-modal-text">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-10 h-10 rounded-lg bg-violet-500/20 dark:bg-violet-500/30 flex items-center justify-center backdrop-blur-sm">
+                      <svg className="w-5 h-5 text-violet-600 dark:text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h11m-8 5h8m-11 5h11m3-10 3 3m0 0-3 3m3-3h-7" />
+                      </svg>
+                    </div>
+                    <div>
+                      <div className="font-medium">{t('modals.editOptions.changeOrderType', 'Change Order Type')}</div>
+                      <div className="text-sm opacity-75 liquid-glass-modal-text-muted">
+                        {t('modals.editOptions.changeOrderTypeDesc', 'Reprice the order using pickup, delivery, or dine-in tiers')}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {([
+                      ["pickup", t('orders.type.takeaway', 'Pickup')],
+                      ["delivery", t('orders.type.delivery', 'Delivery')],
+                      ["dine-in", t('orders.type.dine_in', 'Dine In')],
+                    ] as const).map(([type, label]) => {
+                      const isActive = currentOrderType === type;
+                      return (
+                        <button
+                          key={type}
+                          onClick={() => onChangeOrderType(type)}
+                          disabled={isActive}
+                          className={`rounded-lg border px-3 py-2 text-sm font-medium transition-all ${
+                            isActive
+                              ? 'border-violet-500/50 bg-violet-500/20 text-violet-700 dark:text-violet-200 cursor-default'
+                              : 'border-white/20 bg-white/10 hover:bg-white/20'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
     </LiquidGlassModal>
   );

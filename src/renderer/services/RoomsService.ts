@@ -7,6 +7,7 @@
  * @since 2.1.0 - Migrated from direct Supabase to API via IPC
  */
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { offlineUpdateRoomStatus } from './offline-mutations';
 
 // Types
 export type RoomStatus = 'available' | 'occupied' | 'cleaning' | 'maintenance' | 'reserved';
@@ -124,15 +125,25 @@ class RoomsService {
         options.room_type = filters.roomTypeFilter;
       }
 
-      // Use IPC to fetch rooms via API (proper auth & audit logging)
-      const result = await this.bridge.sync.fetchRooms(options);
+      const search = new URLSearchParams()
+      if (options.status) search.set('status', String(options.status))
+      if (options.floor) search.set('floor', String(options.floor))
+      if (options.room_type) search.set('room_type', String(options.room_type))
+      const result = await this.bridge.rooms.list(
+        Object.fromEntries(search.entries()) as Record<string, string>,
+      );
 
       if (!result.success) {
         console.error('[RoomsService] API error:', result.error);
         throw new Error(result.error || 'Failed to fetch rooms');
       }
 
-      let rooms = (result.rooms || []).map((item: RoomFromAPI) => transformFromAPI(item));
+      const payload = (result.data ?? {}) as { success?: boolean; rooms?: RoomFromAPI[]; error?: string };
+      if (payload.success === false) {
+        throw new Error(payload.error || 'Failed to fetch rooms');
+      }
+
+      let rooms = (payload.rooms || []).map((item: RoomFromAPI) => transformFromAPI(item));
 
       // Apply local search filter (not supported by API)
       if (filters?.searchTerm) {
@@ -156,15 +167,16 @@ class RoomsService {
     try {
       console.log('[RoomsService] Updating room status via API:', roomId, newStatus);
 
-      // Use IPC to update room via API (proper auth & audit logging)
-      const result = await this.bridge.sync.updateRoomStatus(roomId, newStatus);
+      const result = await offlineUpdateRoomStatus({
+        roomId,
+        status: newStatus,
+      });
 
-      if (!result.success) {
-        console.error('[RoomsService] API error:', result.error);
-        throw new Error(result.error || 'Failed to update room status');
+      if (!result.room) {
+        throw new Error('Failed to update room status');
       }
 
-      return transformFromAPI(result.room);
+      return transformFromAPI(result.room as unknown as RoomFromAPI);
     } catch (error) {
       console.error('[RoomsService] Failed to update room status:', error);
       throw error;

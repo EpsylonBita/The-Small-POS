@@ -331,42 +331,43 @@ fn force_order_sync_retry_inner(
     sync::cleanup_order_update_queue_rows_for_order(db, Some(order_id))?;
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let blocked_by_invalid_transition: bool = conn
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1
-                FROM sync_queue
-                WHERE entity_type = 'order'
-                  AND entity_id = ?1
-                  AND operation = 'update'
-                  AND status = 'failed'
-                  AND COALESCE(synced_at, '') = ''
-                  AND lower(COALESCE(last_error, '')) LIKE '%invalid status transition%'
-            )",
-            rusqlite::params![order_id],
-            |row| row.get(0),
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, status, lower(COALESCE(error_message, ''))
+             FROM parity_sync_queue
+             WHERE table_name = 'orders'
+               AND record_id = ?1
+               AND operation = 'UPDATE'",
         )
-        .map_err(|e| format!("inspect order retry blockers: {e}"))?;
+        .map_err(|e| format!("prepare parity order retry query: {e}"))?;
+    let queue_rows = stmt
+        .query_map(rusqlite::params![order_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query parity order retry rows: {e}"))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    drop(stmt);
 
-    let updated = conn
-        .execute(
-            "UPDATE sync_queue
-             SET status = 'pending',
-                 retry_count = 0,
-                 last_error = NULL,
-                 next_retry_at = NULL,
-                 updated_at = datetime('now')
-             WHERE entity_type = 'order'
-               AND entity_id = ?1
-               AND status IN ('pending', 'in_progress', 'queued_remote', 'failed')
-               AND COALESCE(synced_at, '') = ''
-               AND NOT (
-                    status = 'failed'
-                    AND lower(COALESCE(last_error, '')) LIKE '%invalid status transition%'
-               )",
-            rusqlite::params![order_id],
-        )
-        .map_err(|e| e.to_string())?;
+    let blocked_by_invalid_transition = queue_rows.iter().any(|(_, status, error_message)| {
+        status == "failed" && error_message.contains("invalid status transition")
+    });
+
+    let mut updated = 0usize;
+    for (item_id, status, error_message) in &queue_rows {
+        if !matches!(status.as_str(), "pending" | "processing" | "failed" | "conflict") {
+            continue;
+        }
+        if status == "failed" && error_message.contains("invalid status transition") {
+            continue;
+        }
+        crate::sync_queue::retry_item(&conn, item_id)?;
+        updated += 1;
+    }
 
     let mut inserted_fallback = false;
     if updated == 0 && !blocked_by_invalid_transition {
@@ -381,13 +382,8 @@ fn force_order_sync_retry_inner(
             "orderId": order_id,
             "status": current_status
         });
-        let idem = format!("order:force-retry:{}:{}", order_id, uuid::Uuid::new_v4());
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('order', ?1, 'update', ?2, ?3)",
-            rusqlite::params![order_id, fallback_payload.to_string(), idem],
-        )
-        .map_err(|e| format!("insert fallback order retry: {e}"))?;
+        enqueue_order_sync_payload(&conn, order_id, &fallback_payload)
+            .map_err(|e| format!("insert fallback parity order retry: {e}"))?;
         inserted_fallback = true;
     }
 
@@ -404,29 +400,42 @@ fn enqueue_or_refresh_driver_earning_sync_row(
     payload: &Value,
     now: &str,
 ) -> Result<(), String> {
-    conn.execute(
-        "DELETE FROM sync_queue
-         WHERE entity_type IN ('driver_earning', 'driver_earnings')
-           AND entity_id = ?1
-           AND status IN ('pending', 'deferred', 'failed', 'queued_remote')
-           AND COALESCE(synced_at, '') = ''",
-        rusqlite::params![earning_id],
+    crate::sync_queue::clear_unsynced_items(conn, "driver_earnings", earning_id)?;
+    crate::sync_queue::enqueue_payload_item(
+        conn,
+        "driver_earnings",
+        earning_id,
+        "INSERT",
+        payload,
+        Some(1),
+        Some("financial"),
+        Some("manual"),
+        Some(1),
     )
-    .map_err(|e| format!("clear stale driver earning sync rows: {e}"))?;
+    .map_err(|e| format!("enqueue driver earning parity row: {e}"))?;
 
-    conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, last_error, updated_at)
-         VALUES ('driver_earning', ?1, 'create', ?2, ?3, 'pending', 0, NULL, ?4)",
-        rusqlite::params![
-            earning_id,
-            payload.to_string(),
-            format!("driver_earning:{}:{}", earning_id, uuid::Uuid::new_v4()),
-            now
-        ],
-    )
-    .map_err(|e| format!("enqueue driver earning sync row: {e}"))?;
+    let _ = now;
 
     Ok(())
+}
+
+fn enqueue_order_sync_payload(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    payload: &Value,
+) -> Result<(), String> {
+    crate::sync_queue::enqueue_payload_item(
+        conn,
+        "orders",
+        order_id,
+        "UPDATE",
+        payload,
+        Some(0),
+        Some("orders"),
+        Some("server-wins"),
+        Some(1),
+    )
+    .map(|_| ())
 }
 
 fn merge_order_update_items_payload(
@@ -859,17 +868,8 @@ fn enqueue_order_edit_sync(
         "paymentStatus": payment_status,
         "paymentMethod": payment_method,
     });
-    let idem = format!(
-        "order:edit-settlement:{}:{}",
-        order_id,
-        uuid::Uuid::new_v4()
-    );
-    conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('order', ?1, 'update', ?2, ?3)",
-        rusqlite::params![order_id, sync_payload.to_string(), idem],
-    )
-    .map_err(|e| format!("enqueue order edit sync: {e}"))?;
+    enqueue_order_sync_payload(conn, order_id, &sync_payload)
+        .map_err(|e| format!("enqueue order edit parity sync: {e}"))?;
     Ok(())
 }
 
@@ -1183,16 +1183,7 @@ pub async fn order_update_status(
             "status": status,
             "estimatedTime": estimated_time
         });
-        let idem = format!(
-            "order:update-status:{}:{}",
-            actual_order_id,
-            uuid::Uuid::new_v4()
-        );
-        let _ = conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('order', ?1, 'update', ?2, ?3)",
-            rusqlite::params![actual_order_id, sync_payload.to_string(), idem],
-        );
+        let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
     }
 
     let event_payload = serde_json::json!({
@@ -1294,17 +1285,8 @@ fn convert_pickup_order_to_delivery_inner(
         "driverId": serde_json::Value::Null,
         "driverName": serde_json::Value::Null
     });
-    let idem = format!(
-        "order:convert-pickup-to-delivery:{}:{}",
-        actual_order_id,
-        uuid::Uuid::new_v4()
-    );
-    tx.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('order', ?1, 'update', ?2, ?3)",
-        rusqlite::params![&actual_order_id, sync_payload.to_string(), idem],
-    )
-    .map_err(|e| format!("enqueue pickup to delivery sync row: {e}"))?;
+    enqueue_order_sync_payload(&tx, &actual_order_id, &sync_payload)
+        .map_err(|e| format!("enqueue pickup to delivery parity row: {e}"))?;
 
     tx.commit()
         .map_err(|e| format!("commit pickup to delivery transaction: {e}"))?;
@@ -1373,16 +1355,7 @@ pub async fn order_update_customer_info(
             "deliveryPostalCode": delivery_postal_code,
             "deliveryNotes": delivery_notes,
         });
-        let idem = format!(
-            "order:update-customer-info:{}:{}",
-            actual_order_id,
-            uuid::Uuid::new_v4()
-        );
-        let _ = conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('order', ?1, 'update', ?2, ?3)",
-            rusqlite::params![actual_order_id, sync_payload.to_string(), idem],
-        );
+        let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
     }
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
@@ -1473,16 +1446,7 @@ pub async fn order_update_items(
             "items": items,
             "orderNotes": notes
         });
-        let idem = format!(
-            "order:update-items:{}:{}",
-            actual_order_id,
-            uuid::Uuid::new_v4()
-        );
-        let _ = conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('order', ?1, 'update', ?2, ?3)",
-            rusqlite::params![actual_order_id, sync_payload.to_string(), idem],
-        );
+        let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
     }
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
@@ -1858,16 +1822,7 @@ pub async fn order_update_financials(
             "paymentStatus": next_payment_status,
             "paymentMethod": next_payment_method,
         });
-        let idem = format!(
-            "order:update-financials:{}:{}",
-            actual_order_id,
-            uuid::Uuid::new_v4()
-        );
-        let _ = conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('order', ?1, 'update', ?2, ?3)",
-            rusqlite::params![actual_order_id, sync_payload.to_string(), idem],
-        );
+        let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
     }
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
@@ -1910,6 +1865,14 @@ pub async fn order_delete(
         // Electron parity: order delete remains local-only.
         // Also purge stale queued order delete operations so they cannot poison
         // /api/pos/orders/sync (which only accepts insert/update).
+        let _ = conn.execute(
+            "DELETE FROM parity_sync_queue
+             WHERE table_name = 'orders'
+               AND operation = 'DELETE'
+               AND (record_id = ?1 OR status IN ('pending', 'processing', 'failed', 'conflict'))",
+            rusqlite::params![actual_id.clone()],
+        );
+        // Compatibility cleanup for historical pre-parity order delete rows.
         let _ = conn.execute(
             "DELETE FROM sync_queue
              WHERE entity_type = 'order'
@@ -2418,12 +2381,7 @@ pub async fn order_approve(
         "status": "confirmed",
         "estimatedTime": estimated_time
     });
-    let idem = format!("order:approve:{}:{}", order_id, uuid::Uuid::new_v4());
-    let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('order', ?1, 'update', ?2, ?3)",
-        rusqlite::params![order_id, payload.to_string(), idem],
-    );
+    let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
     drop(conn);
 
     let _ = app.emit("order_status_updated", payload.clone());
@@ -2465,12 +2423,7 @@ pub async fn order_decline(
         "status": "cancelled",
         "reason": reason
     });
-    let idem = format!("order:decline:{}:{}", order_id, uuid::Uuid::new_v4());
-    let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('order', ?1, 'update', ?2, ?3)",
-        rusqlite::params![order_id, payload.to_string(), idem],
-    );
+    let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
     drop(conn);
 
     let _ = app.emit("order_status_updated", payload.clone());
@@ -2589,12 +2542,7 @@ pub async fn order_assign_driver(
         "driverName": driver_name,
         "deliveryNotes": notes,
     });
-    let order_sync_idem = format!("order:assign-driver:{}:{}", order_id, uuid::Uuid::new_v4());
-    let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('order', ?1, 'update', ?2, ?3)",
-        rusqlite::params![order_id, order_sync_payload.to_string(), order_sync_idem],
-    );
+    let _ = enqueue_order_sync_payload(&conn, &order_id, &order_sync_payload);
 
     drop(conn);
 
@@ -2659,6 +2607,11 @@ pub async fn order_notify_platform_ready(
         rusqlite::params![now, order_id],
     )
     .map_err(|e| format!("set ready status: {e}"))?;
+    let sync_payload = serde_json::json!({
+        "orderId": order_id,
+        "status": "ready"
+    });
+    let _ = enqueue_order_sync_payload(&conn, &order_id, &sync_payload);
     drop(conn);
     let payload = serde_json::json!({ "orderId": order_id_raw, "status": "ready" });
     let _ = app.emit("order_status_updated", payload.clone());
@@ -2750,12 +2703,10 @@ pub async fn order_update_type(
         if let Some(removed_earning) =
             order_ownership::remove_driver_earning_for_order(&conn, &order_id)?
         {
-            let _ = conn.execute(
-                "DELETE FROM sync_queue
-                 WHERE entity_type IN ('driver_earning', 'driver_earnings')
-                   AND entity_id = ?1
-                   AND status != 'synced'",
-                rusqlite::params![removed_earning.id.as_str()],
+            let _ = crate::sync_queue::clear_unsynced_items(
+                &conn,
+                "driver_earnings",
+                removed_earning.id.as_str(),
             );
 
             if removed_earning.supabase_id.is_some() {
@@ -2765,19 +2716,16 @@ pub async fn order_update_type(
                     "order_id": order_id,
                     "deleted_at": now,
                 });
-                let driver_sync_idem = format!(
-                    "driver_earning:delete:{}:{}",
-                    order_id,
-                    uuid::Uuid::new_v4()
-                );
-                let _ = conn.execute(
-                    "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-                     VALUES ('driver_earning', ?1, 'delete', ?2, ?3)",
-                    rusqlite::params![
-                        removed_earning.id,
-                        driver_sync_payload.to_string(),
-                        driver_sync_idem
-                    ],
+                let _ = crate::sync_queue::enqueue_payload_item(
+                    &conn,
+                    "driver_earnings",
+                    &removed_earning.id,
+                    "DELETE",
+                    &driver_sync_payload,
+                    Some(1),
+                    Some("financial"),
+                    Some("manual"),
+                    Some(1),
                 );
             }
         }
@@ -2803,12 +2751,7 @@ pub async fn order_update_type(
         "driverId": serde_json::Value::Null,
         "driverName": serde_json::Value::Null
     });
-    let idem = format!("order:update-type:{}:{}", order_id, uuid::Uuid::new_v4());
-    let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('order', ?1, 'update', ?2, ?3)",
-        rusqlite::params![order_id, payload.to_string(), idem],
-    );
+    let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
     drop(conn);
     if let Some(ref status) = emitted_status {
         let _ = app.emit(
@@ -2839,31 +2782,55 @@ pub async fn order_save_for_retry(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing order payload")?;
-    let mut queue = read_local_json_array(&db, "order_retry_queue")?;
-    queue.push(serde_json::json!({
-        "id": uuid::Uuid::new_v4().to_string(),
-        "order": payload,
-        "retryCount": 0,
-        "savedAt": Utc::now().to_rfc3339()
-    }));
-    write_local_json(
-        &db,
-        "order_retry_queue",
-        &serde_json::Value::Array(queue.clone()),
-    )?;
+    let mut payload = arg0.ok_or("Missing order payload")?;
+    let order_id = payload
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("id".to_string(), Value::String(order_id.clone()));
+    }
+
+    let queue_length = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "orders",
+            &order_id,
+            "INSERT",
+            &payload,
+            Some(0),
+            Some("orders"),
+            Some("server-wins"),
+            Some(1),
+        )?;
+        crate::sync_queue::get_length(&conn)?
+    };
     let _ = app.emit(
         "order_sync_conflict",
-        serde_json::json!({ "queueLength": queue.len() }),
+        serde_json::json!({ "queueLength": queue_length }),
     );
-    Ok(serde_json::json!({ "success": true, "queueLength": queue.len() }))
+    Ok(serde_json::json!({ "success": true, "queueLength": queue_length }))
 }
 
 #[tauri::command]
 pub async fn order_get_retry_queue(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
-    let queue = read_local_json_array(&db, "order_retry_queue")?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let queue = crate::sync_queue::list_actionable_items(
+        &conn,
+        &crate::sync_queue::QueueListQuery {
+            limit: Some(200),
+            module_type: Some("orders".to_string()),
+        },
+    )?
+    .into_iter()
+    .filter(|item| item.table_name == "orders" && item.operation == "INSERT")
+    .filter_map(|item| serde_json::from_str::<Value>(&item.data).ok())
+    .collect::<Vec<_>>();
     Ok(serde_json::json!(queue))
 }
 
@@ -2872,50 +2839,37 @@ pub async fn order_process_retry_queue(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let queue = read_local_json_array(&db, "order_retry_queue")?;
-    let mut remaining: Vec<serde_json::Value> = Vec::new();
-    let mut processed = 0usize;
-    for mut item in queue {
-        let order_payload = item
-            .get("order")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-        let result = sync::create_order(&db, &order_payload);
-        if result.is_ok() {
-            processed += 1;
-            continue;
-        }
-        let retry_count = item.get("retryCount").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
-        if let Some(obj) = item.as_object_mut() {
-            obj.insert("retryCount".to_string(), serde_json::json!(retry_count));
-            obj.insert(
-                "lastAttemptAt".to_string(),
-                serde_json::json!(Utc::now().to_rfc3339()),
-            );
-            if let Err(err) = result {
-                obj.insert("lastError".to_string(), serde_json::json!(err));
-            }
-        }
-        if retry_count < 3 {
-            remaining.push(item);
-        }
-    }
-    write_local_json(
-        &db,
-        "order_retry_queue",
-        &serde_json::Value::Array(remaining.clone()),
-    )?;
+    let (admin_url, api_key) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let admin_url = db::get_setting(&conn, "terminal", "admin_dashboard_url")
+            .or_else(|| db::get_setting(&conn, "terminal", "admin_url"))
+            .or_else(|| storage::get_credential("admin_dashboard_url"))
+            .or_else(|| storage::get_credential("admin_url"))
+            .ok_or("Missing admin dashboard URL for retry processing")?;
+        let api_key = db::get_setting(&conn, "terminal", "pos_api_key")
+            .or_else(|| db::get_setting(&conn, "terminal", "api_key"))
+            .or_else(|| storage::get_credential("pos_api_key"))
+            .or_else(|| storage::get_credential("api_key"))
+            .ok_or("Missing POS API key for retry processing")?;
+        (admin_url, api_key)
+    };
+
+    let result = crate::sync_queue::process_queue(&db.conn, &admin_url, &api_key).await?;
+    let queue_status = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::sync_queue::get_status(&conn)?
+    };
     let _ = app.emit(
         "sync_retry_scheduled",
         serde_json::json!({
-            "processed": processed,
-            "remaining": remaining.len()
+            "processed": result.processed,
+            "remaining": queue_status.total
         }),
     );
     Ok(serde_json::json!({
         "success": true,
-        "processed": processed,
-        "remaining": remaining.len()
+        "processed": result.processed,
+        "remaining": queue_status.total
     }))
 }
 
@@ -2947,23 +2901,26 @@ pub async fn orders_get_retry_info(
     let order_id = resolve_order_id(&conn, &order_id_raw).unwrap_or(order_id_raw.clone());
     let mut stmt = conn
         .prepare(
-            "SELECT id, status, retry_count, max_retries, last_error, created_at, updated_at
-             FROM sync_queue
-             WHERE entity_type = 'order' AND entity_id = ?1
-             ORDER BY id DESC
+            "SELECT id, status, attempts, error_message, created_at, last_attempt, next_retry_at
+             FROM parity_sync_queue
+             WHERE table_name = 'orders'
+               AND record_id = ?1
+               AND operation = 'UPDATE'
+             ORDER BY created_at DESC
              LIMIT 5",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params![order_id], |row| {
             Ok(serde_json::json!({
-                "id": row.get::<_, i64>(0)?,
+                "id": row.get::<_, String>(0)?,
                 "status": row.get::<_, String>(1)?,
                 "retryCount": row.get::<_, i64>(2)?,
-                "maxRetries": row.get::<_, i64>(3)?,
-                "lastError": row.get::<_, Option<String>>(4)?,
-                "createdAt": row.get::<_, String>(5)?,
-                "updatedAt": row.get::<_, String>(6)?,
+                "maxRetries": crate::sync_queue::MAX_RETRY_ATTEMPTS,
+                "lastError": row.get::<_, Option<String>>(3)?,
+                "createdAt": row.get::<_, String>(4)?,
+                "updatedAt": row.get::<_, Option<String>>(5)?.unwrap_or_else(|| row.get::<_, String>(4).unwrap_or_default()),
+                "nextRetryAt": row.get::<_, Option<String>>(6)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -3269,25 +3226,9 @@ mod transition_tests {
     }
 
     #[test]
-    fn force_retry_does_not_revive_synced_history() {
+    fn force_retry_inserts_parity_fallback_when_no_actionable_rows_exist() {
         let db = test_db();
         insert_order(&db, "order-history", "completed");
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO sync_queue (
-                     entity_type, entity_id, operation, payload, idempotency_key,
-                     status, synced_at, last_error, retry_count
-                 ) VALUES (
-                     'order', 'order-history', 'update',
-                     '{\"orderId\":\"order-history\",\"status\":\"confirmed\"}',
-                     'order-history:synced-history',
-                     'failed', datetime('now'), 'Invalid status transition', 2
-                 )",
-                [],
-            )
-            .unwrap();
-        }
 
         let result = force_order_sync_retry_inner(&db, "order-history").expect("force retry");
         assert_eq!(
@@ -3300,24 +3241,22 @@ mod transition_tests {
         );
 
         let conn = db.conn.lock().unwrap();
-        let rows: Vec<(String, Option<String>, Option<String>)> = conn
+        let rows: Vec<(String, String)> = conn
             .prepare(
-                "SELECT status, synced_at, last_error
-                 FROM sync_queue
-                 WHERE entity_type = 'order' AND entity_id = 'order-history'
-                 ORDER BY id ASC",
+                "SELECT status, data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'orders' AND record_id = 'order-history'
+                 ORDER BY created_at DESC",
             )
             .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
             .filter_map(|row| row.ok())
             .collect();
 
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].0, "synced");
-        assert!(rows[0].1.is_some());
-        assert_eq!(rows[0].2, None);
-        assert_eq!(rows[1].0, "pending");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "pending");
+        assert!(rows[0].1.contains("\"orderId\":\"order-history\""));
     }
 
     #[test]
@@ -3326,28 +3265,28 @@ mod transition_tests {
         insert_order(&db, "order-blocked", "cancelled");
         {
             let conn = db.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO sync_queue (
-                     entity_type, entity_id, operation, payload, idempotency_key,
-                     status, last_error, retry_count
-                 ) VALUES (
-                     'order', 'order-blocked', 'update',
-                     '{\"orderId\":\"order-blocked\",\"status\":\"cancelled\"}',
-                     'order-blocked:invalid-transition',
-                     'failed', 'Permanent status update failure: Invalid status transition', 3
-                 )",
-                [],
+            crate::sync_queue::enqueue_payload_item(
+                &conn,
+                "orders",
+                "order-blocked",
+                "UPDATE",
+                &serde_json::json!({
+                    "orderId": "order-blocked",
+                    "status": "cancelled",
+                }),
+                Some(0),
+                Some("orders"),
+                Some("server-wins"),
+                Some(1),
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO sync_queue (
-                     entity_type, entity_id, operation, payload, idempotency_key, status, synced_at
-                 ) VALUES (
-                     'order', 'order-blocked', 'update',
-                     '{\"orderId\":\"order-blocked\",\"status\":\"completed\"}',
-                     'order-blocked:historical',
-                     'failed', datetime('now')
-                 )",
+                "UPDATE parity_sync_queue
+                 SET status = 'failed',
+                     attempts = 3,
+                     error_message = 'Permanent status update failure: Invalid status transition'
+                 WHERE table_name = 'orders'
+                   AND record_id = 'order-blocked'",
                 [],
             )
             .unwrap();
@@ -3366,24 +3305,24 @@ mod transition_tests {
         let conn = db.conn.lock().unwrap();
         let queue_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue
-                 WHERE entity_type = 'order' AND entity_id = 'order-blocked'",
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'orders' AND record_id = 'order-blocked'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         let failed_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue
-                 WHERE entity_type = 'order'
-                   AND entity_id = 'order-blocked'
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'order-blocked'
                    AND status = 'failed'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
 
-        assert_eq!(queue_count, 2);
+        assert_eq!(queue_count, 1);
         assert_eq!(failed_count, 1);
     }
 
@@ -3392,15 +3331,25 @@ mod transition_tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "driver_earnings",
+            "earning-1",
+            "INSERT",
+            &serde_json::json!({ "order_id": "order-old" }),
+            Some(1),
+            Some("financial"),
+            Some("manual"),
+            Some(1),
+        )
+        .unwrap();
         conn.execute(
-            "INSERT INTO sync_queue (
-                 entity_type, entity_id, operation, payload, idempotency_key,
-                 status, retry_count, last_error
-             ) VALUES (
-                 'driver_earning', 'earning-1', 'create',
-                 '{\"order_id\":\"order-old\"}', 'driver_earning:earning-1:stale',
-                 'failed', 3, 'Parent shift not yet synced'
-             )",
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 3,
+                 error_message = 'Parent shift not yet synced'
+             WHERE table_name = 'driver_earnings'
+               AND record_id = 'earning-1'",
             [],
         )
         .unwrap();
@@ -3422,10 +3371,9 @@ mod transition_tests {
 
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue
-                 WHERE entity_type = 'driver_earning'
-                   AND entity_id = 'earning-1'
-                   AND COALESCE(synced_at, '') = ''",
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'driver_earnings'
+                   AND record_id = 'earning-1'",
                 [],
                 |row| row.get(0),
             )
@@ -3434,10 +3382,10 @@ mod transition_tests {
 
         let (status, retry_count, last_error, payload_text): (String, i64, Option<String>, String) =
             conn.query_row(
-                "SELECT status, retry_count, last_error, payload
-                 FROM sync_queue
-                 WHERE entity_type = 'driver_earning'
-                   AND entity_id = 'earning-1'
+                "SELECT status, attempts, error_message, data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'driver_earnings'
+                   AND record_id = 'earning-1'
                  LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -3562,23 +3510,27 @@ mod transition_tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sync_queue (
-                 entity_type, entity_id, operation, payload, idempotency_key,
-                 status, retry_count, max_retries, last_error
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
              ) VALUES (
-                 'payment', 'payment-edit-stale', 'insert', '{}', 'payment:payment-edit-stale',
-                 'failed', 5, 5, 'Payment exceeds order total'
+                 'queue-payment-edit-stale', 'payments', 'payment-edit-stale', 'INSERT', '{}', 'org-test',
+                 datetime('now'), 5, 1000, 1, 'financial',
+                 'manual', 1, 'failed', 'Payment exceeds order total'
              )",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sync_queue (
-                 entity_type, entity_id, operation, payload, idempotency_key,
-                 status, retry_count, max_retries, last_error
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
              ) VALUES (
-                 'order_payments', 'payment-edit-stale', 'insert', '{}', 'order_payments:payment-edit-stale',
-                 'failed', 5, 5, 'Payment exceeds order total'
+                 'queue-payment-edit-stale-compat', 'order_payments', 'payment-edit-stale', 'INSERT', '{}', 'org-test',
+                 datetime('now'), 5, 1000, 1, 'financial',
+                 'manual', 1, 'failed', 'Payment exceeds order total'
              )",
             [],
         )
@@ -3621,18 +3573,17 @@ mod transition_tests {
         assert_eq!(sync_status, "synced");
         assert_eq!(sync_state, "applied");
 
-        let synced_queue_rows: i64 = conn
+        let remaining_queue_rows: i64 = conn
             .query_row(
                 "SELECT COUNT(*)
-                 FROM sync_queue
-                 WHERE entity_id = 'payment-edit-stale'
-                   AND entity_type IN ('payment', 'order_payments')
-                   AND status = 'synced'",
+                 FROM parity_sync_queue
+                 WHERE record_id = 'payment-edit-stale'
+                   AND table_name IN ('payments', 'order_payments')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(synced_queue_rows, 2);
+        assert_eq!(remaining_queue_rows, 0);
 
         let (payment_status, payment_method, total_paid) =
             refresh_order_payment_snapshot(&conn, "order-edit-stale", "2026-03-28T10:00:00Z")

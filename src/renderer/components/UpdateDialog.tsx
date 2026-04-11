@@ -394,6 +394,12 @@ const ErrorState: React.FC<ErrorStateProps> = ({
   onClose
 }) => {
   const { t } = useI18n();
+  const isLocalBuildUpdaterError =
+    typeof error === 'string' &&
+    (
+      error.includes('local development builds') ||
+      error.includes('public key is not configured for this build')
+    );
   return (
     <div className="space-y-6 text-center">
       {/* Error icon */}
@@ -417,7 +423,12 @@ const ErrorState: React.FC<ErrorStateProps> = ({
       </p>
 
       <p className="text-sm text-gray-400">
-        {t('updates.error.network')}
+        {isLocalBuildUpdaterError
+          ? t(
+              'updates.error.localBuild',
+              'This local build cannot verify release updates. Use a packaged release build or inject the updater public key for release testing.',
+            )
+          : t('updates.error.network')}
       </p>
 
       {/* Action buttons */}
