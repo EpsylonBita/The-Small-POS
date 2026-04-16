@@ -568,8 +568,7 @@ pub async fn loyalty_earn_points(
         get_organization_id(&db).ok_or_else(|| "Organization not configured".to_string())?;
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let canonical_customer_id =
-        resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
+    let canonical_customer_id = resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
 
     // Read loyalty settings to determine points_per_euro
     let points_per_euro: f64 = conn
@@ -721,8 +720,7 @@ pub async fn loyalty_redeem_points(
         get_organization_id(&db).ok_or_else(|| "Organization not configured".to_string())?;
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let canonical_customer_id =
-        resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
+    let canonical_customer_id = resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
 
     // Read loyalty settings to validate
     let (is_active, min_redemption, redemption_rate): (bool, i64, f64) = conn
@@ -853,8 +851,7 @@ pub async fn loyalty_get_transactions(
     };
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let canonical_customer_id =
-        resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
+    let canonical_customer_id = resolve_loyalty_customer_lookup_key(&conn, &org_id, &customer_key)?;
 
     let mut stmt = conn
         .prepare(
@@ -983,13 +980,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         setup_loyalty_customers_table(&conn);
 
-        ensure_local_loyalty_customer_row(
-            &conn,
-            "org-1",
-            "customer-123",
-            "2026-04-05T00:00:00Z",
-        )
-        .expect("placeholder row should insert");
+        ensure_local_loyalty_customer_row(&conn, "org-1", "customer-123", "2026-04-05T00:00:00Z")
+            .expect("placeholder row should insert");
 
         let inserted: (Option<String>, String, i64) = conn
             .query_row(

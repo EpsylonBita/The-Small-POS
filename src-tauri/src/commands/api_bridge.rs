@@ -116,7 +116,10 @@ pub(crate) fn read_cached_admin_get_response(
     path: &str,
 ) -> Option<(serde_json::Value, Option<String>)> {
     let envelope = read_local_json(db, &admin_api_cache_key(path)).ok()?;
-    let data = envelope.get("data").cloned().unwrap_or(serde_json::Value::Null);
+    let data = envelope
+        .get("data")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     if data.is_null() {
         return None;
     }
@@ -163,7 +166,11 @@ pub(crate) fn list_cached_admin_get_paths(
 
     let mut paths = rows
         .filter_map(Result::ok)
-        .filter_map(|setting_key| setting_key.strip_prefix(ADMIN_API_CACHE_PREFIX).map(str::to_string))
+        .filter_map(|setting_key| {
+            setting_key
+                .strip_prefix(ADMIN_API_CACHE_PREFIX)
+                .map(str::to_string)
+        })
         .filter(|path| {
             trimmed_prefixes.is_empty()
                 || trimmed_prefixes
@@ -499,7 +506,10 @@ mod dto_tests {
     #[test]
     fn cacheable_admin_get_only_applies_to_pos_get_routes() {
         assert!(is_cacheable_admin_get("GET", "/api/pos/suppliers"));
-        assert!(is_cacheable_admin_get("get", "/api/pos/tables?branch_id=branch-1"));
+        assert!(is_cacheable_admin_get(
+            "get",
+            "/api/pos/tables?branch_id=branch-1"
+        ));
         assert!(!is_cacheable_admin_get("POST", "/api/pos/suppliers"));
         assert!(!is_cacheable_admin_get("GET", "/api/admin/users"));
     }

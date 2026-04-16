@@ -22,11 +22,19 @@ This guide covers operational support for the native-only `pos-tauri` desktop ru
 Bundle contents:
 
 - `about.json`: app/build/platform metadata
-- `system_health.json`: runtime health snapshot
+- `system_health.json`: runtime health snapshot, including terminal context and sync-status summary
+- `terminal_context.json`: explicit terminal, branch, org, ownership, mode, and sync-health identity
+- `sync_status.json`: queue telemetry, backpressure state, latest queue failure, and financial sync counts
+- `closeout_readiness.json`: resolved closeout window, active-staff blockers, payment blockers, sync blockers, and last z-report
+- `terminal_settings_snapshot.json`: cached terminal, organization, and restaurant settings snapshot
 - `sync_backlog.json`: queue counts by entity type
+- `payment_adjustment_backlog.json`: adjustment-specific deferred/waiting-parent breakdown
+- `sync_blocker_details.json`: self-describing blocker rows with payment/order context for failed payment sync issues
 - `sync_errors.json`: recent sync failures
 - `printer_diagnostics.json`: printer profiles and print-job state
 - `logs/`: recent application log files
+
+The diagnostics bundle is intended to be self-identifying. Support should be able to determine the affected `terminal_id`, `branch_id`, and `organization_id` from the bundle alone without opening raw logs.
 
 ## Runtime Health Surface
 

@@ -627,9 +627,13 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       const discountPercentage = orderData.discountPercentage || 0;
       const discountAmount = orderData.discountAmount || 0;
 
-      // Calculate tax using settings (applied after discount)
+      // Prices are entered gross for Greece, so VAT is extracted from the discounted amount.
       const subtotalAfterDiscount = orderData.total; // Already includes discount
-      const tax = Math.round(subtotalAfterDiscount * (taxRatePercentage / 100) * 100) / 100;
+      const taxDivisor = 1 + taxRatePercentage / 100;
+      const tax =
+        taxDivisor > 0
+          ? Math.round((subtotalAfterDiscount - subtotalAfterDiscount / taxDivisor) * 100) / 100
+          : 0;
       const total_amount = subtotalAfterDiscount + deliveryFee;
       const initialPayment =
         !isGhostOrder && !isSplitPayment && (orderData.paymentData?.method === 'cash' || orderData.paymentData?.method === 'card')
@@ -669,6 +673,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           name: item.name || item.menu_item_name || null,
           quantity: item.quantity,
           price: item.price,
+          unit_price: item.price,
+          vat_category_code: item.vatCategoryCode || item.vat_category_code || 'gr_standard_24',
+          price_includes_vat: item.priceIncludesVat ?? item.price_includes_vat ?? true,
+          tax_exemption_reason: item.taxExemptionReason || item.tax_exemption_reason || null,
+          fiscal_document_profile: item.fiscalDocumentProfile || item.fiscal_document_profile || null,
           customizations: item.customizations || item.selectedIngredients || null,
           notes: item.notes || item.special_instructions || null,
           is_manual: isManualItem
@@ -708,7 +717,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         // Use total_amount instead of total (matching shared types)
         total_amount: total_amount,
         subtotal: subtotalAfterDiscount,
-        tax,
+        tax_amount: tax,
+        country_code: 'GR',
+        pricing_mode: 'tax_inclusive',
         delivery_fee: deliveryFee,
 
         // Discount fields (matching shared types)

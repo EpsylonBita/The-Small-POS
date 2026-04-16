@@ -91,11 +91,14 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
   const discountAmount = isDiscountValid ? subtotal * (discountValue / 100) : 0;
   const subtotalAfterDiscount = subtotal - discountAmount;
 
-  // Use tax rate from settings (converted from percentage to decimal)
-  const tax = subtotalAfterDiscount * (taxRatePercentage / 100);
+  const inclusiveDivisor = 1 + taxRatePercentage / 100;
+  const tax =
+    inclusiveDivisor > 0
+      ? Math.max(0, subtotalAfterDiscount - subtotalAfterDiscount / inclusiveDivisor)
+      : 0;
   // Use delivery fee from prop (from delivery zone) only for delivery orders
   const deliveryFee = orderType === 'delivery' ? deliveryFeeProp : 0;
-  const total = subtotalAfterDiscount + tax + deliveryFee;
+  const total = subtotalAfterDiscount + deliveryFee;
 
   if (cartItems.length === 0) {
     return (

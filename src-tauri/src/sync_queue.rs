@@ -527,11 +527,9 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
 
     // Calculate oldest item age in milliseconds
     let oldest_created: Option<String> = conn
-        .query_row(
-            "SELECT MIN(created_at) FROM parity_sync_queue",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT MIN(created_at) FROM parity_sync_queue", [], |row| {
+            row.get(0)
+        })
         .map_err(|e| format!("sync_queue status oldest: {e}"))?;
 
     let oldest_item_age = oldest_created.and_then(|ts| {
@@ -728,11 +726,7 @@ pub fn mark_success(conn: &Connection, item_id: &str) -> Result<(), String> {
 /// Mark an item as failed with exponential backoff for retry.
 ///
 /// If max retries are exhausted, the item status changes to `failed`.
-pub fn mark_failure(
-    conn: &Connection,
-    item_id: &str,
-    error_message: &str,
-) -> Result<(), String> {
+pub fn mark_failure(conn: &Connection, item_id: &str, error_message: &str) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
 
     // Get current attempts and retry delay
@@ -975,7 +969,10 @@ fn prepare_order_request(
     body.insert("id".to_string(), Value::String(remote_id));
     body.insert("status".to_string(), Value::String(status));
 
-    if let Some(value) = payload.get("estimatedTime").or_else(|| payload.get("estimated_time")) {
+    if let Some(value) = payload
+        .get("estimatedTime")
+        .or_else(|| payload.get("estimated_time"))
+    {
         if !value.is_null() {
             body.insert("estimated_time".to_string(), value.clone());
         }
@@ -1012,7 +1009,10 @@ fn prepare_order_request(
             body.insert("items".to_string(), items.clone());
         }
     }
-    if let Some(order_notes) = payload.get("orderNotes").or_else(|| payload.get("order_notes")) {
+    if let Some(order_notes) = payload
+        .get("orderNotes")
+        .or_else(|| payload.get("order_notes"))
+    {
         if !order_notes.is_null() {
             body.insert("order_notes".to_string(), order_notes.clone());
         }
@@ -1174,10 +1174,10 @@ fn prepare_adjustment_request(
     let (terminal_id, branch_id, _) = resolve_runtime_context(conn, payload);
     let adjustment_type =
         string_field(payload, &["adjustmentType", "adjustment_type"]).unwrap_or_default();
-    let order_id_for_sync = string_field(payload, &["orderId", "order_id"])
-        .or_else(|| order_id.clone());
-    let client_order_id_for_sync = string_field(payload, &["clientOrderId", "client_order_id"])
-        .or_else(|| order_id.clone());
+    let order_id_for_sync =
+        string_field(payload, &["orderId", "order_id"]).or_else(|| order_id.clone());
+    let client_order_id_for_sync =
+        string_field(payload, &["clientOrderId", "client_order_id"]).or_else(|| order_id.clone());
     let idempotency_key = format!("adjustment:{}", item.record_id);
     let body = sync::build_adjustment_sync_body(
         item.record_id.as_str(),
@@ -1363,8 +1363,8 @@ fn apply_success(
             )
             .map_err(|e| format!("sync_queue apply_success adjustment: {e}"))?;
 
-            let payload =
-                serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Object(Map::new()));
+            let payload = serde_json::from_str::<Value>(&item.data)
+                .unwrap_or_else(|_| Value::Object(Map::new()));
             let adjustment_type =
                 string_field(&payload, &["adjustmentType", "adjustment_type"]).unwrap_or_default();
             if adjustment_type.eq_ignore_ascii_case("void") {
@@ -1520,9 +1520,7 @@ pub async fn process_queue(
                         _ => "auto-server-wins",
                     };
                     let requires_operator_review =
-                        resolution == "manual"
-                            || resolution == "client-wins"
-                            || is_monetary;
+                        resolution == "manual" || resolution == "client-wins" || is_monetary;
 
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                     log_conflict(
@@ -1800,13 +1798,25 @@ async fn fetch_server_record(
     body.get("data").cloned().or(Some(body))
 }
 
-fn derive_server_version(server_record: Option<&Value>, conflict_body: &str, local_version: i64) -> i64 {
+fn derive_server_version(
+    server_record: Option<&Value>,
+    conflict_body: &str,
+    local_version: i64,
+) -> i64 {
     let read_version = |value: &Value| -> Option<i64> {
         value
             .get("version")
             .and_then(|candidate| candidate.as_i64())
-            .or_else(|| value.get("server_version").and_then(|candidate| candidate.as_i64()))
-            .or_else(|| value.get("row_version").and_then(|candidate| candidate.as_i64()))
+            .or_else(|| {
+                value
+                    .get("server_version")
+                    .and_then(|candidate| candidate.as_i64())
+            })
+            .or_else(|| {
+                value
+                    .get("row_version")
+                    .and_then(|candidate| candidate.as_i64())
+            })
     };
 
     if let Some(record) = server_record {
@@ -1833,7 +1843,12 @@ use rusqlite::OptionalExtension;
 mod tests {
     use super::*;
 
-    fn queue_item(table_name: &str, operation: &str, record_id: &str, data: Value) -> SyncQueueItem {
+    fn queue_item(
+        table_name: &str,
+        operation: &str,
+        record_id: &str,
+        data: Value,
+    ) -> SyncQueueItem {
         SyncQueueItem {
             id: "queue-1".to_string(),
             table_name: table_name.to_string(),
@@ -1889,7 +1904,10 @@ mod tests {
         );
 
         assert_eq!(resolve_endpoint(&insert_customer), "/api/pos/customers");
-        assert_eq!(resolve_endpoint(&update_customer), "/api/pos/customers/cust-1");
+        assert_eq!(
+            resolve_endpoint(&update_customer),
+            "/api/pos/customers/cust-1"
+        );
         assert_eq!(
             resolve_endpoint(&insert_address),
             "/api/pos/customers/cust-1/addresses"
@@ -2008,7 +2026,10 @@ mod tests {
 
         assert_eq!(resolve_endpoint(&inventory_item), "/api/pos/inventory");
         assert_eq!(resolve_endpoint(&coupon_insert), "/api/pos/coupons");
-        assert_eq!(resolve_endpoint(&coupon_update), "/api/pos/coupons/coupon-1");
+        assert_eq!(
+            resolve_endpoint(&coupon_update),
+            "/api/pos/coupons/coupon-1"
+        );
         assert_eq!(
             resolve_endpoint(&reservation_item),
             "/api/pos/reservations/reservation-1"
@@ -2017,9 +2038,15 @@ mod tests {
             resolve_endpoint(&appointment_item),
             "/api/pos/appointments/appointment-1/status"
         );
-        assert_eq!(resolve_endpoint(&staff_shift_item), "/api/pos/staff-schedule");
+        assert_eq!(
+            resolve_endpoint(&staff_shift_item),
+            "/api/pos/staff-schedule"
+        );
         assert_eq!(resolve_endpoint(&drive_thru_item), "/api/pos/drive-through");
         assert_eq!(resolve_endpoint(&room_item), "/api/pos/rooms/room-101");
-        assert_eq!(resolve_endpoint(&product_item), "/api/pos/products/product-1");
+        assert_eq!(
+            resolve_endpoint(&product_item),
+            "/api/pos/products/product-1"
+        );
     }
 }

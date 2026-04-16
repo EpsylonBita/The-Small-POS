@@ -447,7 +447,11 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       const discountPercentage = Number(orderData.discountPercentage || 0);
       const discountAmount = Number(orderData.discountAmount || 0);
       const subtotalAfterDiscount = Number(orderData.total || 0);
-      const tax = Math.round(subtotalAfterDiscount * (taxRatePercentage / 100) * 100) / 100;
+      const taxDivisor = 1 + (taxRatePercentage / 100);
+      const tax =
+        taxRatePercentage > 0 && taxDivisor > 0
+          ? Math.round((subtotalAfterDiscount - (subtotalAfterDiscount / taxDivisor)) * 100) / 100
+          : 0;
       const totalAmount = subtotalAfterDiscount + deliveryFee;
       const initialPayment =
         !isGhostOrder && !isSplitPayment && (orderData.paymentData?.method === 'cash' || orderData.paymentData?.method === 'card')
@@ -485,10 +489,16 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           menu_item_id: isManualItem ? null : normalizedMenuItemId,
           name: item.name || item.menu_item_name || null,
           quantity: item.quantity,
+          unit_price: item.unitPrice || item.price,
           price: item.price,
           customizations: item.customizations || item.selectedIngredients || null,
           notes: item.notes || item.special_instructions || null,
           is_manual: isManualItem,
+          vat_category_code: item.vatCategoryCode || item.vat_category_code || (isManualItem ? 'gr_standard_24' : null),
+          price_includes_vat: item.priceIncludesVat ?? item.price_includes_vat ?? true,
+          tax_exemption_reason: item.taxExemptionReason || item.tax_exemption_reason || null,
+          fiscal_document_profile:
+            item.fiscalDocumentProfile || item.fiscal_document_profile || (isManualItem ? 'manual_item' : null),
         };
       });
       const invalidItems = normalizedItems.filter((item: any) => {
@@ -533,10 +543,12 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         organization_id: organizationId,
         total_amount: totalAmount,
         subtotal: subtotalAfterDiscount,
-        tax,
+        tax_amount: tax,
         delivery_fee: deliveryFee,
         discount_percentage: discountPercentage,
         discount_amount: discountAmount,
+        country_code: 'GR',
+        pricing_mode: 'tax_inclusive',
         status: 'pending' as const,
         payment_method: isGhostOrder ? null : (orderData.paymentData?.method || null),
         initialPayment,

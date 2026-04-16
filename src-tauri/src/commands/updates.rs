@@ -35,7 +35,8 @@ fn parse_update_channel_payload(arg0: Option<serde_json::Value>) -> String {
 }
 
 fn configured_updater_pubkey() -> Option<String> {
-    let config: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).ok()?;
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../../tauri.conf.json")).ok()?;
     config
         .get("plugins")
         .and_then(|value| value.get("updater"))
@@ -73,7 +74,10 @@ fn validate_updater_configuration(
 }
 
 fn ensure_updater_is_available() -> Result<(), String> {
-    validate_updater_configuration(cfg!(debug_assertions), configured_updater_pubkey().as_deref())
+    validate_updater_configuration(
+        cfg!(debug_assertions),
+        configured_updater_pubkey().as_deref(),
+    )
 }
 
 fn update_state_string(state: &serde_json::Value, key: &str) -> Option<String> {
@@ -848,7 +852,8 @@ mod dto_tests {
 
     #[test]
     fn validate_updater_configuration_accepts_release_with_pubkey() {
-        let result = validate_updater_configuration(false, Some("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu"));
+        let result =
+            validate_updater_configuration(false, Some("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu"));
         assert!(result.is_ok());
     }
 }

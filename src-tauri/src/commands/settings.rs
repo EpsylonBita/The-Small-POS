@@ -278,7 +278,7 @@ fn read_runtime_setting(db: &db::DbState, category: &str, key: &str) -> Option<S
     db::get_setting(&conn, category, key)
 }
 
-fn build_terminal_runtime_config(db: &db::DbState) -> Value {
+pub(crate) fn build_terminal_runtime_config(db: &db::DbState) -> Value {
     let terminal_id = storage::get_credential("terminal_id")
         .or_else(|| read_runtime_setting(db, "terminal", "terminal_id"));
     let branch_id = storage::get_credential("branch_id")
@@ -579,8 +579,9 @@ pub async fn settings_is_configured(db: tauri::State<'_, db::DbState>) -> Result
 #[tauri::command]
 pub async fn settings_get_reset_status() -> Result<Value, String> {
     match reset::get_reset_status()? {
-        Some(status) => serde_json::to_value(status)
-            .map_err(|e| format!("serialize reset status: {e}")),
+        Some(status) => {
+            serde_json::to_value(status).map_err(|e| format!("serialize reset status: {e}"))
+        }
         None => Ok(Value::Null),
     }
 }

@@ -231,6 +231,17 @@ export interface SyncBlockerDetail {
   paymentId?: string | null;
   adjustmentId?: string | null;
   lastError?: string | null;
+  paymentMethod?: string | null;
+  paymentAmount?: number | null;
+  paymentTransactionRef?: string | null;
+  paymentSyncState?: string | null;
+  paymentSyncStatus?: string | null;
+  remotePaymentIdPresent?: boolean | null;
+  orderTotalAmount?: number | null;
+  orderSettledAmount?: number | null;
+  orderOutstandingAmount?: number | null;
+  paymentCreatedAt?: string | null;
+  paymentUpdatedAt?: string | null;
 }
 
 export type ZReportSyncState =
@@ -421,11 +432,32 @@ export interface DiagnosticsPaymentAdjustmentBacklog {
   waitingForCanonicalRemotePaymentId: number;
 }
 
+export interface DiagnosticsSyncStatusSummary {
+  isOnline: boolean;
+  lastSync?: string | null;
+  lastSyncAt?: string | null;
+  pendingItems: number;
+  pendingChanges: number;
+  syncInProgress: boolean;
+  error?: string | null;
+  syncErrors: number;
+  queuedRemote: number;
+  backpressureDeferred: number;
+  oldestNextRetryAt?: string | null;
+  lastQueueFailure?: Record<string, unknown> | null;
+  historicalZReportConflicts: number;
+  pendingPaymentItems: number;
+  failedPaymentItems: number;
+  financialStats?: Record<string, unknown>;
+}
+
 export interface DiagnosticsSystemHealth {
   schemaVersion: number;
   syncBacklog: Record<string, Record<string, number>>;
   paymentAdjustmentBacklog: DiagnosticsPaymentAdjustmentBacklog;
   syncBlockerDetails?: SyncBlockerDetail[];
+  terminalContext?: DiagnosticsTerminalContext;
+  syncStatusSummary?: DiagnosticsSyncStatusSummary;
   lastSyncTimes: Record<string, string | null>;
   printerStatus: {
     configured: boolean;
@@ -478,7 +510,20 @@ export interface DiagnosticsTerminalContext {
   terminalId: string | null;
   branchId: string | null;
   organizationId: string | null;
-  syncHealthState: string | null;
+  terminalType?: string | null;
+  parentTerminalId?: string | null;
+  ownerTerminalId?: string | null;
+  ownerTerminalDbId?: string | null;
+  sourceTerminalId?: string | null;
+  sourceTerminalDbId?: string | null;
+  posOperatingMode?: string | null;
+  enabledFeatures?: Record<string, unknown>;
+  lastConfigSyncAt?: string | null;
+  syncHealth?: string | null;
+  syncHealthState?: string | null;
+  businessType?: string | null;
+  ghostModeFeatureEnabled?: boolean | string | null;
+  adminDashboardUrl?: string | null;
 }
 
 export type RecoveryIssueSeverity = 'critical' | 'error' | 'warning' | 'info';

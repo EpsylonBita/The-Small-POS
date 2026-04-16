@@ -468,9 +468,7 @@ fn build_remote_customer_create_body(source: &serde_json::Value) -> serde_json::
             serde_json::json!(formatted_address),
         );
     }
-    if let Some(resolved_street_number) =
-        string_field(source, &["resolved_street_number"])
-    {
+    if let Some(resolved_street_number) = string_field(source, &["resolved_street_number"]) {
         body.insert(
             "resolved_street_number".to_string(),
             serde_json::json!(resolved_street_number),
@@ -574,9 +572,7 @@ fn build_remote_address_body(source: &serde_json::Value) -> serde_json::Value {
             serde_json::json!(formatted_address),
         );
     }
-    if let Some(resolved_street_number) =
-        string_field(source, &["resolved_street_number"])
-    {
+    if let Some(resolved_street_number) = string_field(source, &["resolved_street_number"]) {
         body.insert(
             "resolved_street_number".to_string(),
             serde_json::json!(resolved_street_number),
@@ -1187,7 +1183,8 @@ pub async fn customer_create(
         }
         Err(remote_error) => {
             let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-            let customer = upsert_customer_cache_entry(&mut cache, build_local_customer_from_source(&payload));
+            let customer =
+                upsert_customer_cache_entry(&mut cache, build_local_customer_from_source(&payload));
             write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
 
             let customer_id =
@@ -1380,13 +1377,20 @@ pub async fn customer_add_address(
         return Err("Missing address street".into());
     }
     if let Some(obj) = queue_payload.as_object_mut() {
-        obj.insert("customer_id".to_string(), serde_json::json!(customer_id.clone()));
+        obj.insert(
+            "customer_id".to_string(),
+            serde_json::json!(customer_id.clone()),
+        );
     }
 
-    let (address, remote_failure) = match sync_customer_address_remote(&db, &customer_id, &payload.address).await {
-        Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
-        Err(error) => (normalize_address_for_cache(queue_payload.clone()), Some(error)),
-    };
+    let (address, remote_failure) =
+        match sync_customer_address_remote(&db, &customer_id, &payload.address).await {
+            Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
+            Err(error) => (
+                normalize_address_for_cache(queue_payload.clone()),
+                Some(error),
+            ),
+        };
 
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
     let mut updated: Option<serde_json::Value> = None;
@@ -1417,8 +1421,7 @@ pub async fn customer_add_address(
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
         Some(customer)
     } else if remote_failure.is_none() {
-        if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await?
-        {
+        if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await? {
             let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
             let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
             write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
@@ -1521,7 +1524,10 @@ pub async fn customer_update_address(
         return Err("Missing address updates".into());
     }
     if let Some(obj) = queue_payload.as_object_mut() {
-        obj.insert("customer_id".to_string(), serde_json::json!(customer_id.clone()));
+        obj.insert(
+            "customer_id".to_string(),
+            serde_json::json!(customer_id.clone()),
+        );
         if expected_version > 0 {
             obj.insert(
                 "expected_version".to_string(),
@@ -1530,23 +1536,17 @@ pub async fn customer_update_address(
         }
     }
 
-    let (address, remote_failure) = match sync_customer_address_update_remote(
-        &db,
-        &customer_id,
-        &target_id,
-        &updates,
-    )
-    .await
-    {
-        Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
-        Err(error) => {
-            let mut local_payload = queue_payload.clone();
-            if let Some(obj) = local_payload.as_object_mut() {
-                obj.insert("id".to_string(), serde_json::json!(target_id.clone()));
+    let (address, remote_failure) =
+        match sync_customer_address_update_remote(&db, &customer_id, &target_id, &updates).await {
+            Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
+            Err(error) => {
+                let mut local_payload = queue_payload.clone();
+                if let Some(obj) = local_payload.as_object_mut() {
+                    obj.insert("id".to_string(), serde_json::json!(target_id.clone()));
+                }
+                (normalize_address_for_cache(local_payload), Some(error))
             }
-            (normalize_address_for_cache(local_payload), Some(error))
-        }
-    };
+        };
 
     let mut updated_customer: Option<serde_json::Value> = None;
     let mut cache_touched = false;
@@ -1591,8 +1591,7 @@ pub async fn customer_update_address(
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
         updated_customer.clone()
     } else if remote_failure.is_none() {
-        if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await?
-        {
+        if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await? {
             let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
             let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
             write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;

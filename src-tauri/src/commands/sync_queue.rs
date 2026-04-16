@@ -25,14 +25,18 @@ pub fn sync_queue_enqueue(
 /// Marks the item as `processing` so it won't be dequeued again.
 /// Returns `null` if no items are ready.
 #[tauri::command]
-pub fn sync_queue_dequeue(db: State<'_, DbState>) -> Result<Option<sync_queue::SyncQueueItem>, String> {
+pub fn sync_queue_dequeue(
+    db: State<'_, DbState>,
+) -> Result<Option<sync_queue::SyncQueueItem>, String> {
     let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
     sync_queue::dequeue(&conn)
 }
 
 /// Peek at the next item without removing or changing its status.
 #[tauri::command]
-pub fn sync_queue_peek(db: State<'_, DbState>) -> Result<Option<sync_queue::SyncQueueItem>, String> {
+pub fn sync_queue_peek(
+    db: State<'_, DbState>,
+) -> Result<Option<sync_queue::SyncQueueItem>, String> {
     let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
     sync_queue::peek(&conn)
 }

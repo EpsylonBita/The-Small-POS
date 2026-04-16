@@ -415,10 +415,7 @@ fn resolve_effective_z_report_window(
 
 fn canonicalize_report_json_report_date(report_json: &mut Value, report_date: &str) {
     if let Some(obj) = report_json.as_object_mut() {
-        obj.insert(
-            "date".to_string(),
-            Value::String(report_date.to_string()),
-        );
+        obj.insert("date".to_string(), Value::String(report_date.to_string()));
         obj.insert(
             "reportDate".to_string(),
             Value::String(report_date.to_string()),
@@ -472,8 +469,8 @@ pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<u
         queue_payload_str,
     ) in rows
     {
-        let mut report_json =
-            serde_json::from_str::<Value>(&report_json_str).unwrap_or_else(|_| serde_json::json!({}));
+        let mut report_json = serde_json::from_str::<Value>(&report_json_str)
+            .unwrap_or_else(|_| serde_json::json!({}));
         let mut sync_payload_value = serde_json::from_str::<Value>(&queue_payload_str)
             .unwrap_or_else(|_| serde_json::json!({}));
         let (period_start, period_end) = extract_period_bounds_from_report_json(&report_json);
@@ -509,10 +506,7 @@ pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<u
                 "report_date".to_string(),
                 Value::String(normalized_report_date.clone()),
             );
-            sync_payload_obj.insert(
-                "report_data".to_string(),
-                report_json.clone(),
-            );
+            sync_payload_obj.insert("report_data".to_string(), report_json.clone());
         }
         let sync_payload = sync_payload_value.to_string();
 
@@ -526,7 +520,12 @@ pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<u
                  sync_next_retry_at = NULL,
                  updated_at = ?4
              WHERE id = ?1",
-            params![z_report_id, normalized_report_date, report_json.to_string(), now],
+            params![
+                z_report_id,
+                normalized_report_date,
+                report_json.to_string(),
+                now
+            ],
         )
         .map_err(|e| format!("update repaired z_report business date: {e}"))?;
 
@@ -590,6 +589,120 @@ pub(crate) fn unsettled_payment_blockers(
     )?;
     let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
     load_unsettled_payment_blockers_for_window(&conn, &branch_id, &window)
+}
+
+fn load_active_staff_closeout_blockers(
+    conn: &Connection,
+    branch_id: &str,
+    cutoff_at: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let cutoff_param = cutoff_at.map(str::to_string);
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                 id,
+                 staff_id,
+                 COALESCE(NULLIF(TRIM(staff_name), ''), staff_id),
+                 role_type,
+                 terminal_id,
+                 check_in_time
+             FROM staff_shifts
+             WHERE status = 'active'
+               AND (branch_id = ?1 OR branch_id IS NULL)
+               AND (?2 IS NULL OR check_in_time <= ?2)
+             ORDER BY COALESCE(check_in_time, created_at, updated_at) ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare active closeout staff blockers: {e}"))?;
+    let rows = stmt
+        .query_map(params![branch_id, cutoff_param], |row| {
+            Ok(serde_json::json!({
+                "shiftId": row.get::<_, String>(0)?,
+                "staffId": row.get::<_, String>(1)?,
+                "staffName": row.get::<_, String>(2)?,
+                "roleType": row.get::<_, String>(3)?,
+                "terminalId": row.get::<_, Option<String>>(4)?,
+                "checkInTime": row.get::<_, Option<String>>(5)?,
+            }))
+        })
+        .map_err(|e| format!("query active closeout staff blockers: {e}"))?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+pub(crate) fn get_closeout_readiness_snapshot(
+    db: &DbState,
+    payload: &Value,
+) -> Result<Value, String> {
+    let branch_id = str_field(payload, "branchId")
+        .or_else(|| str_field(payload, "branch_id"))
+        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+
+    let (window, active_staff_blockers, payment_blockers, last_z_report) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
+        let active_staff_blockers =
+            load_active_staff_closeout_blockers(&conn, &branch_id, window.cutoff_at.as_deref())?;
+        let payment_blockers =
+            load_unsettled_payment_blockers_for_window(&conn, &branch_id, &window)?;
+        let last_z_report = conn
+            .query_row(
+                "SELECT id, shift_id, generated_at, sync_state, gross_sales, net_sales
+                 FROM z_reports
+                 ORDER BY generated_at DESC
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "shiftId": row.get::<_, String>(1)?,
+                        "generatedAt": row.get::<_, String>(2)?,
+                        "syncState": row.get::<_, String>(3)?,
+                        "totalGrossSales": row.get::<_, f64>(4)?,
+                        "totalNetSales": row.get::<_, f64>(5)?,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(|e| format!("load latest z-report for closeout readiness: {e}"))?
+            .unwrap_or(Value::Null);
+        (
+            window,
+            active_staff_blockers,
+            payment_blockers,
+            last_z_report,
+        )
+    };
+
+    let sync_snapshot = crate::sync::capture_unsynced_sync_queue_snapshot(db)?;
+    let lower_bound_mode = match window.lower_bound_mode {
+        LowerBoundMode::Inclusive => "inclusive",
+        LowerBoundMode::Exclusive => "exclusive",
+    };
+    let payment_blocker_message = unsettled_payment_blocker_message(&payment_blockers);
+
+    Ok(serde_json::json!({
+        "branchId": if branch_id.trim().is_empty() { Value::Null } else { Value::String(branch_id) },
+        "window": {
+            "reportDate": window.report_date,
+            "periodStartAt": window.period_start_at,
+            "cutoffAt": window.cutoff_at,
+            "lowerBoundMode": lower_bound_mode,
+        },
+        "activeStaffBlockers": {
+            "count": active_staff_blockers.len(),
+            "details": active_staff_blockers,
+        },
+        "unsettledPaymentBlockers": {
+            "count": payment_blockers.len(),
+            "message": payment_blocker_message,
+            "details": payment_blockers,
+        },
+        "unsyncedSyncQueue": {
+            "count": sync_snapshot.count,
+            "blockersSummary": sync_snapshot.blockers_summary,
+            "details": sync_snapshot.blocker_details,
+        },
+        "lastZReport": last_z_report,
+    }))
 }
 
 fn extract_z_report_id(result: &Value) -> Option<String> {
@@ -6096,7 +6209,8 @@ mod tests {
         .expect("poison z_report queue row");
         drop(conn);
 
-        let repaired = repair_retryable_z_report_business_dates(&db).expect("repair should succeed");
+        let repaired =
+            repair_retryable_z_report_business_dates(&db).expect("repair should succeed");
         assert_eq!(repaired, 1);
 
         let conn = db.conn.lock().unwrap();
@@ -6153,8 +6267,14 @@ mod tests {
         assert_eq!(repaired_report_json["date"], "2026-04-02");
         assert_eq!(repaired_report_json["reportDate"], "2026-04-02");
         assert_eq!(repaired_report_json["report_date"], "2026-04-02");
-        assert_eq!(repaired_report_json["periodStart"], "2026-04-01T22:44:47.248Z");
-        assert_eq!(repaired_report_json["periodEnd"], "2026-04-01T23:38:24.403Z");
+        assert_eq!(
+            repaired_report_json["periodStart"],
+            "2026-04-01T22:44:47.248Z"
+        );
+        assert_eq!(
+            repaired_report_json["periodEnd"],
+            "2026-04-01T23:38:24.403Z"
+        );
 
         let repaired_queue_payload: Value =
             serde_json::from_str(&queue_payload).expect("repaired queue payload should parse");

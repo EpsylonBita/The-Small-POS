@@ -359,7 +359,10 @@ fn force_order_sync_retry_inner(
 
     let mut updated = 0usize;
     for (item_id, status, error_message) in &queue_rows {
-        if !matches!(status.as_str(), "pending" | "processing" | "failed" | "conflict") {
+        if !matches!(
+            status.as_str(),
+            "pending" | "processing" | "failed" | "conflict"
+        ) {
             continue;
         }
         if status == "failed" && error_message.contains("invalid status transition") {
@@ -694,10 +697,7 @@ fn net_paid_amount_from_edit_payment(payment: &serde_json::Value) -> f64 {
 }
 
 fn load_net_paid_for_order(conn: &rusqlite::Connection, order_id: &str) -> Result<f64, String> {
-    Ok(list_completed_payments_for_edit(conn, order_id)?
-        .iter()
-        .map(net_paid_amount_from_edit_payment)
-        .sum())
+    payments::load_net_paid_for_order(conn, order_id)
 }
 
 fn determine_edit_settlement_required_action(paid_total: f64, next_total: f64) -> &'static str {
@@ -1731,55 +1731,11 @@ pub async fn order_update_financials(
         })
         .max(0.0);
 
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let (current_payment_status, current_payment_method): (String, String) = conn
-            .query_row(
-                "SELECT COALESCE(payment_status, 'pending'), COALESCE(payment_method, '')
-                 FROM orders
-                 WHERE id = ?1",
-                rusqlite::params![actual_order_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|e| format!("load existing financial state: {e}"))?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
 
-        let total_paid: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(amount), 0)
-                 FROM order_payments
-                 WHERE order_id = ?1 AND status = 'completed'",
-                rusqlite::params![actual_order_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-
-        let completed_payment_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*)
-                 FROM order_payments
-                 WHERE order_id = ?1 AND status = 'completed'",
-                rusqlite::params![actual_order_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        let next_payment_status = if total_paid >= payload.total_amount - 0.01 {
-            "paid".to_string()
-        } else if total_paid > 0.009 {
-            "partially_paid".to_string()
-        } else {
-            current_payment_status
-        };
-
-        let next_payment_method = if completed_payment_count > 1
-            || current_payment_method.eq_ignore_ascii_case("split")
-            || current_payment_method.eq_ignore_ascii_case("mixed")
-        {
-            "split".to_string()
-        } else {
-            current_payment_method
-        };
-
+    let result = (|| -> Result<serde_json::Value, String> {
         conn.execute(
             "UPDATE orders
              SET total_amount = ?1,
@@ -1789,11 +1745,9 @@ pub async fn order_update_financials(
                  tax_amount = ?5,
                  delivery_fee = ?6,
                  tip_amount = ?7,
-                 payment_status = ?8,
-                 payment_method = ?9,
                  sync_status = 'pending',
-                 updated_at = ?10
-             WHERE id = ?11",
+                 updated_at = ?8
+             WHERE id = ?9",
             rusqlite::params![
                 payload.total_amount,
                 subtotal,
@@ -1802,13 +1756,16 @@ pub async fn order_update_financials(
                 tax_amount,
                 delivery_fee,
                 tip_amount,
-                next_payment_status,
-                next_payment_method,
                 now,
                 actual_order_id,
             ],
         )
         .map_err(|e| format!("update order financials: {e}"))?;
+
+        let stale_payment_ids =
+            resolve_stale_unsynced_overpay_payments_for_order(&conn, &actual_order_id, &now)?;
+        let (payment_status, payment_method, paid_total) =
+            refresh_order_payment_snapshot(&conn, &actual_order_id, &now)?;
 
         let sync_payload = serde_json::json!({
             "orderId": actual_order_id,
@@ -1819,20 +1776,41 @@ pub async fn order_update_financials(
             "taxAmount": tax_amount,
             "deliveryFee": delivery_fee,
             "tipAmount": tip_amount,
-            "paymentStatus": next_payment_status,
-            "paymentMethod": next_payment_method,
+            "paymentStatus": payment_status,
+            "paymentMethod": payment_method,
         });
-        let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
-    }
+        enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)
+            .map_err(|e| format!("enqueue order financial sync: {e}"))?;
+
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": actual_order_id.clone(),
+            "paymentStatus": payment_status,
+            "paymentMethod": payment_method,
+            "paidTotal": paid_total,
+            "stalePaymentIdsVoided": stale_payment_ids,
+        }))
+    })();
+
+    let response = match result {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }?;
+
+    drop(conn);
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
         let _ = app.emit("order_realtime_update", order_json);
     }
 
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": actual_order_id,
-    }))
+    Ok(response)
 }
 
 #[tauri::command]
@@ -3677,6 +3655,124 @@ mod transition_tests {
         assert_eq!(payment_status, "partially_paid");
         assert_eq!(payment_method, "split");
         assert!((total_paid - 1.9).abs() < 0.001);
+    }
+
+    #[test]
+    fn order_update_financials_flow_voids_stale_unsynced_payment_after_total_drop() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-financial-drop",
+            r#"[{"name":"Toast","quantity":1,"unit_price":10.0,"total_price":10.0}]"#,
+            10.0,
+            10.0,
+            "split",
+            "partially_paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'payment-financial-drop', 'order-financial-drop', 'cash', 7.4, 'completed',
+                 'failed', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-payment-financial-drop', 'payments', 'payment-financial-drop', 'INSERT', '{}', 'org-test',
+                 datetime('now'), 5, 1000, 1, 'financial',
+                 'manual', 1, 'failed', 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-payment-financial-drop-compat', 'order_payments', 'payment-financial-drop', 'INSERT', '{}', 'org-test',
+                 datetime('now'), 5, 1000, 1, 'financial',
+                 'manual', 1, 'failed', 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let now = "2026-04-16T09:39:05Z";
+        conn.execute(
+            "UPDATE orders
+             SET total_amount = 6.9,
+                 subtotal = 6.9,
+                 discount_amount = 0,
+                 discount_percentage = 0,
+                 tax_amount = 0,
+                 delivery_fee = 0,
+                 tip_amount = 0,
+                 sync_status = 'pending',
+                 updated_at = ?2
+             WHERE id = ?1",
+            rusqlite::params!["order-financial-drop", now],
+        )
+        .unwrap();
+
+        let stale_payment_ids =
+            resolve_stale_unsynced_overpay_payments_for_order(&conn, "order-financial-drop", now)
+                .expect("void stale payment during financial update");
+        let (payment_status, payment_method, paid_total) =
+            refresh_order_payment_snapshot(&conn, "order-financial-drop", now)
+                .expect("refresh payment snapshot");
+        enqueue_order_sync_payload(
+            &conn,
+            "order-financial-drop",
+            &serde_json::json!({
+                "orderId": "order-financial-drop",
+                "totalAmount": 6.9,
+                "subtotal": 6.9,
+                "discountAmount": 0.0,
+                "discountPercentage": 0.0,
+                "taxAmount": 0.0,
+                "deliveryFee": 0.0,
+                "tipAmount": 0.0,
+                "paymentStatus": payment_status,
+                "paymentMethod": payment_method,
+            }),
+        )
+        .expect("enqueue order financial sync");
+
+        assert_eq!(
+            stale_payment_ids,
+            vec!["payment-financial-drop".to_string()]
+        );
+        assert_eq!(payment_status, "pending");
+        assert_eq!(payment_method, "pending");
+        assert!(paid_total.abs() < 0.001);
+
+        let (payment_row_status, payment_row_sync_status, payment_row_sync_state): (
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = 'payment-financial-drop'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_row_status, "voided");
+        assert_eq!(payment_row_sync_status, "synced");
+        assert_eq!(payment_row_sync_state, "applied");
     }
 
     #[test]

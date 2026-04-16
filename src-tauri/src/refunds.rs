@@ -487,8 +487,8 @@ pub(crate) fn refund_payment_in_connection(
         Some(adjustment_context.as_str()),
     );
 
-    let sync_payload_value =
-        serde_json::from_str::<Value>(&sync_payload).map_err(|e| format!("parse adjustment payload: {e}"))?;
+    let sync_payload_value = serde_json::from_str::<Value>(&sync_payload)
+        .map_err(|e| format!("parse adjustment payload: {e}"))?;
     crate::sync_queue::enqueue_payload_item(
         &conn,
         "payment_adjustments",

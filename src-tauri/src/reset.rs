@@ -411,11 +411,7 @@ fn remove_path_with_retries(path: &Path) -> Result<(), String> {
 fn verify_reset(manifest: &ResetManifest) -> Result<(), (String, Option<String>, Option<String>)> {
     for key in &manifest.credential_keys {
         if crate::storage::get_credential(key).is_some() {
-            return Err((
-                "keyring_delete_failed".to_string(),
-                Some(key.clone()),
-                None,
-            ));
+            return Err(("keyring_delete_failed".to_string(), Some(key.clone()), None));
         }
     }
 

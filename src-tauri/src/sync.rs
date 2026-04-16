@@ -201,7 +201,7 @@ const ADJUSTMENT_QUEUE_ERROR_AMBIGUOUS_CANONICAL_REMOTE_PAYMENT: &str =
     "Ambiguous canonical remote payment";
 pub const SYNC_CLOSEOUT_BLOCKED_ERROR_CODE: &str = "SYNC_CLOSEOUT_BLOCKED";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncBlockerDetail {
     pub queue_id: i64,
@@ -215,9 +215,20 @@ pub struct SyncBlockerDetail {
     pub payment_id: Option<String>,
     pub adjustment_id: Option<String>,
     pub last_error: Option<String>,
+    pub payment_method: Option<String>,
+    pub payment_amount: Option<f64>,
+    pub payment_transaction_ref: Option<String>,
+    pub payment_sync_state: Option<String>,
+    pub payment_sync_status: Option<String>,
+    pub remote_payment_id_present: Option<bool>,
+    pub order_total_amount: Option<f64>,
+    pub order_settled_amount: Option<f64>,
+    pub order_outstanding_amount: Option<f64>,
+    pub payment_created_at: Option<String>,
+    pub payment_updated_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct UnsyncedSyncQueueSnapshot {
     pub count: i64,
     pub blockers_summary: String,
@@ -1117,13 +1128,15 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         &order_id,
         "INSERT",
         &sync_data,
-        Some(if payment_method.as_deref() == Some("paid")
-            || payment_method.as_deref() == Some("partially_paid")
-        {
-            1
-        } else {
-            0
-        }),
+        Some(
+            if payment_method.as_deref() == Some("paid")
+                || payment_method.as_deref() == Some("partially_paid")
+            {
+                1
+            } else {
+                0
+            },
+        ),
         Some("orders"),
         Some("server-wins"),
         Some(1),
@@ -1880,11 +1893,11 @@ fn requeue_stale_in_progress_sync_rows(db: &DbState) -> Result<usize, String> {
 
         let rows = stmt
             .query_map(params![lease_modifier.as_str()], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .map_err(|e| format!("query stale in-progress selector: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|e| format!("query stale in-progress selector: {e}"))?
+            .filter_map(Result::ok)
+            .collect();
         rows
     };
 
@@ -2379,7 +2392,10 @@ pub fn capture_unsynced_sync_queue_snapshot(
     capture_unsynced_sync_queue_snapshot_with_limit(db, CLOSEOUT_SYNC_BLOCKER_SUMMARY_LIMIT)
 }
 
-pub fn get_sync_blocker_details(db: &DbState, limit: i64) -> Result<Vec<SyncBlockerDetail>, String> {
+pub fn get_sync_blocker_details(
+    db: &DbState,
+    limit: i64,
+) -> Result<Vec<SyncBlockerDetail>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let historical_pattern = format!("{HISTORICAL_Z_REPORT_CONFLICT_PREFIX}%");
     query_sync_blocker_details_with_conn(&conn, limit, historical_pattern.as_str())
@@ -2468,6 +2484,17 @@ fn build_sync_blocker_detail_with_conn(
         payment_id: None,
         adjustment_id: None,
         last_error,
+        payment_method: None,
+        payment_amount: None,
+        payment_transaction_ref: None,
+        payment_sync_state: None,
+        payment_sync_status: None,
+        remote_payment_id_present: None,
+        order_total_amount: None,
+        order_settled_amount: None,
+        order_outstanding_amount: None,
+        payment_created_at: None,
+        payment_updated_at: None,
     };
 
     match entity_type {
@@ -2518,11 +2545,19 @@ fn build_sync_blocker_detail_with_conn(
                     "SELECT
                          op.id,
                          op.order_id,
+                         op.method,
+                         op.amount,
+                         NULLIF(TRIM(COALESCE(op.transaction_ref, '')), ''),
+                         COALESCE(op.sync_state, ''),
+                         COALESCE(op.sync_status, ''),
+                         NULLIF(TRIM(COALESCE(op.remote_payment_id, '')), ''),
+                         op.created_at,
+                         op.updated_at,
                          NULLIF(TRIM(COALESCE(op.sync_last_error, '')), ''),
                          NULLIF(TRIM(COALESCE(o.order_number, '')), '')
-                     FROM order_payments op
-                     LEFT JOIN orders o ON o.id = op.order_id
-                     WHERE op.id = ?1
+                      FROM order_payments op
+                      LEFT JOIN orders o ON o.id = op.order_id
+                      WHERE op.id = ?1
                      LIMIT 1",
                     params![entity_id],
                     |row| {
@@ -2530,17 +2565,62 @@ fn build_sync_blocker_detail_with_conn(
                             row.get::<_, Option<String>>(0)?,
                             row.get::<_, Option<String>>(1)?,
                             row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<f64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                            row.get::<_, Option<String>>(9)?,
+                            row.get::<_, Option<String>>(10)?,
+                            row.get::<_, Option<String>>(11)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(|e| format!("load payment blocker detail: {e}"))?;
 
-            if let Some((payment_id, order_id, blocker_reason, order_number)) = blocker_context {
+            if let Some((
+                payment_id,
+                order_id,
+                payment_method,
+                payment_amount,
+                payment_transaction_ref,
+                payment_sync_state,
+                payment_sync_status,
+                remote_payment_id,
+                payment_created_at,
+                payment_updated_at,
+                blocker_reason,
+                order_number,
+            )) = blocker_context
+            {
                 detail.payment_id = payment_id;
                 detail.order_id = order_id;
                 detail.order_number = order_number;
+                detail.payment_method = payment_method;
+                detail.payment_amount = payment_amount;
+                detail.payment_transaction_ref = payment_transaction_ref;
+                detail.payment_sync_state = payment_sync_state;
+                detail.payment_sync_status = payment_sync_status;
+                detail.remote_payment_id_present = Some(
+                    remote_payment_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .is_some(),
+                );
+                detail.payment_created_at = payment_created_at;
+                detail.payment_updated_at = payment_updated_at;
+                if let Some(order_id) = detail.order_id.as_deref() {
+                    if let Ok(balance_snapshot) =
+                        payments::load_order_payment_balance_snapshot(conn, order_id)
+                    {
+                        detail.order_total_amount = Some(balance_snapshot.order_total);
+                        detail.order_settled_amount = Some(balance_snapshot.net_paid);
+                        detail.order_outstanding_amount = Some(balance_snapshot.outstanding_amount);
+                    }
+                }
                 if let Some(blocker_reason) = blocker_reason {
                     detail.blocker_reason = blocker_reason;
                 }
@@ -2577,7 +2657,10 @@ fn build_sync_blocker_detail_with_conn(
     Ok(detail)
 }
 
-fn format_sync_closeout_blocked_message(stage: &str, snapshot: &UnsyncedSyncQueueSnapshot) -> String {
+fn format_sync_closeout_blocked_message(
+    stage: &str,
+    snapshot: &UnsyncedSyncQueueSnapshot,
+) -> String {
     let detail = if snapshot.blockers_summary.is_empty() {
         String::new()
     } else {
@@ -4812,10 +4895,11 @@ fn find_canonical_adjustment_payment_target_with_conn(
         .and_then(|context| context.mirrored_payments_by_order.get(&order_id))
         .cloned()
         .unwrap_or_default();
-    let mirrored_payment_by_local_id: HashMap<String, SyncedRemotePaymentMirror> = mirrored_payments
-        .into_iter()
-        .map(|payment| (payment.local_payment_id.clone(), payment))
-        .collect();
+    let mirrored_payment_by_local_id: HashMap<String, SyncedRemotePaymentMirror> =
+        mirrored_payments
+            .into_iter()
+            .map(|payment| (payment.local_payment_id.clone(), payment))
+            .collect();
 
     let mut stmt = conn
         .prepare(
@@ -5004,8 +5088,9 @@ fn find_canonical_adjustment_payment_target_with_conn(
         });
     }
 
-    let strong_signal_seen =
-        metadata_match_count > 0 || transaction_ref_match_count > 0 || !method_amount_status_matches.is_empty();
+    let strong_signal_seen = metadata_match_count > 0
+        || transaction_ref_match_count > 0
+        || !method_amount_status_matches.is_empty();
 
     if strong_signal_seen || candidates.len() > 1 {
         return Ok(AdjustmentCanonicalPaymentResolution::Ambiguous);
@@ -5164,7 +5249,9 @@ fn rebind_waiting_adjustments_to_canonical_duplicate_payments(
             )
             .map_err(|e| format!("prepare waiting adjustment queue payload rewrite: {e}"))?;
         let queue_rows: Vec<(i64, String)> = queue_stmt
-            .query_map(params![adjustment_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map(params![adjustment_id.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .map_err(|e| format!("query waiting adjustment queue payload rewrite: {e}"))?
             .filter_map(|row| row.ok())
             .collect();
@@ -5196,9 +5283,11 @@ fn rebind_waiting_adjustments_to_canonical_duplicate_payments(
     }
 
     for stale_payment_id in stale_payment_ids {
-        if let Some(canonical_payment_id) =
-            resolve_duplicate_payment_total_conflict_with_conn(&conn, &stale_payment_id, &rebound_at)?
-        {
+        if let Some(canonical_payment_id) = resolve_duplicate_payment_total_conflict_with_conn(
+            &conn,
+            &stale_payment_id,
+            &rebound_at,
+        )? {
             info!(
                 stale_payment_id = %stale_payment_id,
                 canonical_payment_id = %canonical_payment_id,
@@ -5842,40 +5931,103 @@ fn sync_remote_payment_into_local(
     Ok(sync_remote_payment_into_local_with_context(conn, remote_payment)?.is_some() as usize)
 }
 
-fn reconcile_applied_payment_queue_rows(db: &DbState) -> Result<usize, String> {
+fn collect_applied_payment_queue_reconciliation_candidates(
+    conn: &Connection,
+    order_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let base_sql = "SELECT DISTINCT op.id
+         FROM sync_queue sq
+         JOIN order_payments op ON op.id = sq.entity_id
+         WHERE sq.entity_type IN ('payment', 'order_payments')
+           AND sq.status != 'synced'
+           AND (
+                COALESCE(op.remote_payment_id, '') != ''
+                OR COALESCE(op.sync_state, '') = 'applied'
+           )";
+    let sql = if order_id.is_some() {
+        format!("{base_sql}\n           AND op.order_id = ?1\n         ORDER BY op.id ASC")
+    } else {
+        format!("{base_sql}\n         ORDER BY op.id ASC")
+    };
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    if let Some(order_id) = order_id {
+        Ok(stmt
+            .query_map(params![order_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|row| row.ok())
+            .collect())
+    } else {
+        Ok(stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|row| row.ok())
+            .collect())
+    }
+}
+
+fn payment_has_unsynced_queue_rows(conn: &Connection, payment_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM sync_queue
+            WHERE entity_type IN ('payment', 'order_payments')
+              AND entity_id = ?1
+              AND status != 'synced'
+         )",
+        params![payment_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value == 1)
+    .map_err(|e| format!("check unresolved payment queue rows: {e}"))
+}
+
+fn reconcile_applied_payment_queue_rows_for_candidates(
+    conn: &Connection,
+    payment_ids: &[String],
+    reconciled_at: &str,
+) -> Result<usize, String> {
+    let mut reconciled = 0usize;
+    for payment_id in payment_ids {
+        mark_local_payment_applied(conn, payment_id, reconciled_at, None)?;
+        reconciled += 1;
+    }
+    Ok(reconciled)
+}
+
+fn reconcile_applied_payment_queue_rows_for_order(
+    db: &DbState,
+    order_id: &str,
+) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT op.id
-             FROM sync_queue sq
-             JOIN order_payments op ON op.id = sq.entity_id
-             WHERE sq.entity_type IN ('payment', 'order_payments')
-               AND sq.status != 'synced'
-               AND (
-                    COALESCE(op.remote_payment_id, '') != ''
-                    OR COALESCE(op.sync_state, '') = 'applied'
-               )
-             ORDER BY op.id ASC",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let payment_ids: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .map_err(|e| e.to_string())?
-        .filter_map(|row| row.ok())
-        .collect();
-    drop(stmt);
-
+    let payment_ids =
+        collect_applied_payment_queue_reconciliation_candidates(&conn, Some(order_id))?;
     if payment_ids.is_empty() {
         return Ok(0);
     }
 
     let now = Utc::now().to_rfc3339();
-    let mut reconciled = 0usize;
-    for payment_id in payment_ids {
-        mark_local_payment_applied(&conn, &payment_id, &now, None)?;
-        reconciled += 1;
+    let reconciled =
+        reconcile_applied_payment_queue_rows_for_candidates(&conn, &payment_ids, &now)?;
+    if reconciled > 0 {
+        info!(
+            order_id = %order_id,
+            reconciled,
+            "Payment reconciliation: marked order-scoped applied payment queue rows as synced"
+        );
     }
+    Ok(reconciled)
+}
+
+fn reconcile_applied_payment_queue_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let payment_ids = collect_applied_payment_queue_reconciliation_candidates(&conn, None)?;
+    if payment_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let reconciled =
+        reconcile_applied_payment_queue_rows_for_candidates(&conn, &payment_ids, &now)?;
 
     if reconciled > 0 {
         info!(
@@ -6952,14 +7104,6 @@ async fn resolve_remote_order_for_local_order(
         return Ok(None);
     };
 
-    if let Some(remote_order_id) = lookup
-        .supabase_id
-        .as_deref()
-        .and_then(|value| normalize_optional_uuid_str(Some(value)))
-    {
-        return Ok(Some((remote_order_id, None)));
-    }
-
     let mut search_terms = Vec::new();
     if let Some(remote_order_id) = lookup.supabase_id.as_ref() {
         search_terms.push(remote_order_id.clone());
@@ -7163,11 +7307,14 @@ async fn reconcile_remote_payments_for_local_order(
     api_key: &str,
     local_order_id: &str,
 ) -> Result<usize, String> {
-    Ok(
-        reconcile_remote_payments_for_local_order_with_context(db, admin_url, api_key, local_order_id)
-            .await?
-            .changed,
+    Ok(reconcile_remote_payments_for_local_order_with_context(
+        db,
+        admin_url,
+        api_key,
+        local_order_id,
     )
+    .await?
+    .changed)
 }
 
 fn collect_waiting_adjustment_order_ids_missing_canonical_remote_payment_id(
@@ -7237,10 +7384,8 @@ where
     } else {
         repair_orders(order_ids).await?
     };
-    let rebound_adjustments = rebind_waiting_adjustments_to_canonical_duplicate_payments(
-        db,
-        Some(&repair_context),
-    )?;
+    let rebound_adjustments =
+        rebind_waiting_adjustments_to_canonical_duplicate_payments(db, Some(&repair_context))?;
     let promoted_adjustments = reconcile_deferred_adjustments(db)?;
 
     let summary = DeferredAdjustmentAutoHealSummary {
@@ -7290,10 +7435,8 @@ where
         repaired_payment_mirrors,
         mirrored_payments_by_order: HashMap::new(),
     };
-    let rebound_adjustments = rebind_waiting_adjustments_to_canonical_duplicate_payments(
-        db,
-        Some(&repair_context),
-    )?;
+    let rebound_adjustments =
+        rebind_waiting_adjustments_to_canonical_duplicate_payments(db, Some(&repair_context))?;
     let promoted_adjustments = reconcile_deferred_adjustments(db)?;
 
     Ok(DeferredAdjustmentAutoHealSummary {
@@ -7313,10 +7456,7 @@ async fn auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids(
         db,
         |order_ids| async move {
             repair_local_payment_mirrors_for_orders_with_auth_context(
-                db,
-                &order_ids,
-                admin_url,
-                api_key,
+                db, &order_ids, admin_url, api_key,
             )
             .await
         },
@@ -7347,10 +7487,7 @@ async fn repair_local_payment_mirrors_for_orders_with_auth_context(
         }
 
         let outcome = reconcile_remote_payments_for_local_order_with_context(
-            db,
-            admin_url,
-            api_key,
-            normalized,
+            db, admin_url, api_key, normalized,
         )
         .await?;
         repaired += outcome.changed;
@@ -7378,9 +7515,11 @@ async fn repair_local_payment_mirrors_for_orders_with_auth(
     api_key: &str,
 ) -> Result<usize, String> {
     Ok(
-        repair_local_payment_mirrors_for_orders_with_auth_context(db, order_ids, admin_url, api_key)
-            .await?
-            .repaired_payment_mirrors,
+        repair_local_payment_mirrors_for_orders_with_auth_context(
+            db, order_ids, admin_url, api_key,
+        )
+        .await?
+        .repaired_payment_mirrors,
     )
 }
 
@@ -7422,14 +7561,36 @@ async fn recover_payment_total_conflicts(
         rows
     };
 
-    let mut remote_reconciled = 0usize;
+    let mut remote_payments_mirrored = 0usize;
+    let mut resolved_queue_blockers_from_remote_state = 0usize;
     let mut duplicate_resolved = 0usize;
     let mut stale_overpay_resolved = 0usize;
 
     for (payment_id, local_order_id) in pending_conflicts {
-        remote_reconciled +=
-            reconcile_remote_payments_for_local_order(db, admin_url, api_key, &local_order_id)
-                .await?;
+        let remote_outcome = reconcile_remote_payments_for_local_order_with_context(
+            db,
+            admin_url,
+            api_key,
+            &local_order_id,
+        )
+        .await?;
+        remote_payments_mirrored += remote_outcome.changed;
+        resolved_queue_blockers_from_remote_state +=
+            reconcile_applied_payment_queue_rows_for_order(db, &local_order_id)?;
+
+        let conflict_still_blocked = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            payment_has_unsynced_queue_rows(&conn, &payment_id)?
+        };
+        if !conflict_still_blocked {
+            info!(
+                payment_id = %payment_id,
+                order_id = %local_order_id,
+                mirrored_remote_payments = remote_outcome.changed,
+                "Resolved payment total conflict after canonical remote payment recovery"
+            );
+            continue;
+        }
 
         if let Some(canonical_payment_id) =
             resolve_duplicate_payment_total_conflict(db, &payment_id)?
@@ -7456,16 +7617,21 @@ async fn recover_payment_total_conflicts(
         }
     }
 
-    if remote_reconciled > 0 || duplicate_resolved > 0 || stale_overpay_resolved > 0 {
+    if remote_payments_mirrored > 0
+        || resolved_queue_blockers_from_remote_state > 0
+        || duplicate_resolved > 0
+        || stale_overpay_resolved > 0
+    {
         info!(
-            remote_reconciled,
+            remote_payments_mirrored,
+            resolved_queue_blockers_from_remote_state,
             duplicate_resolved,
             stale_overpay_resolved,
             "Recovered stale payment total-conflict rows from canonical remote payments"
         );
     }
 
-    Ok(remote_reconciled + duplicate_resolved + stale_overpay_resolved)
+    Ok(resolved_queue_blockers_from_remote_state + duplicate_resolved + stale_overpay_resolved)
 }
 
 /// Execute one sync cycle: read pending queue items and POST to admin.
@@ -10680,7 +10846,7 @@ async fn sync_payment_items(
             }
             Err(e) => {
                 if is_payment_total_conflict_error(&e) {
-                    match reconcile_remote_payments_for_local_order(
+                    match reconcile_remote_payments_for_local_order_with_context(
                         db,
                         admin_url,
                         api_key,
@@ -10688,43 +10854,42 @@ async fn sync_payment_items(
                     )
                     .await
                     {
-                        Ok(recovered) if recovered > 0 => {
-                            let recovered_state = db
-                                .conn
-                                .lock()
-                                .ok()
-                                .and_then(|conn| {
-                                    conn.query_row(
-                                        "SELECT COALESCE(sync_state, ''), COALESCE(remote_payment_id, '')
-                                         FROM order_payments
-                                         WHERE id = ?1",
-                                        params![entity_id],
-                                        |row| {
-                                            Ok((
-                                                row.get::<_, String>(0)?,
-                                                row.get::<_, String>(1)?,
-                                            ))
-                                        },
-                                    )
-                                    .optional()
-                                    .ok()
-                                    .flatten()
-                                });
+                        Ok(outcome) => {
+                            let reconciled_queue_rows =
+                                match reconcile_applied_payment_queue_rows_for_order(
+                                    db,
+                                    local_order_id,
+                                ) {
+                                    Ok(reconciled) => reconciled,
+                                    Err(reconcile_error) => {
+                                        warn!(
+                                            payment_id = %entity_id,
+                                            order_id = %local_order_id,
+                                            error = %reconcile_error,
+                                            "Failed to reconcile applied payment queue rows after canonical remote payment recovery"
+                                        );
+                                        0
+                                    }
+                                };
 
-                            if let Some((sync_state, remote_payment_id)) = recovered_state {
-                                if sync_state == "applied" || !remote_payment_id.trim().is_empty() {
-                                    info!(
-                                        payment_id = %entity_id,
-                                        order_id = %local_order_id,
-                                        recovered,
-                                        "Payment sync conflict resolved from canonical remote payment state"
-                                    );
-                                    synced += 1;
-                                    continue;
-                                }
+                            let resolved_from_remote_state = db.conn.lock().ok().and_then(|conn| {
+                                payment_has_unsynced_queue_rows(&conn, entity_id)
+                                    .ok()
+                                    .map(|has_unsynced_rows| !has_unsynced_rows)
+                            });
+
+                            if matches!(resolved_from_remote_state, Some(true)) {
+                                info!(
+                                    payment_id = %entity_id,
+                                    order_id = %local_order_id,
+                                    mirrored_remote_payments = outcome.changed,
+                                    reconciled_queue_rows,
+                                    "Payment sync conflict resolved from canonical remote payment state"
+                                );
+                                synced += 1;
+                                continue;
                             }
                         }
-                        Ok(_) => {}
                         Err(recovery_error) => {
                             warn!(
                                 payment_id = %entity_id,
@@ -12912,6 +13077,51 @@ mod tests {
         (format!("http://{}", addr), handle)
     }
 
+    fn spawn_json_sequence_server(
+        responses: Vec<(String, String)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock sequence server");
+        let addr = listener.local_addr().expect("mock sequence server address");
+        let scripted = Arc::new(Mutex::new(responses));
+        let scripted_for_thread = Arc::clone(&scripted);
+
+        let handle = std::thread::spawn(move || loop {
+            let next = {
+                let mut scripted = scripted_for_thread.lock().expect("lock scripted responses");
+                if scripted.is_empty() {
+                    break;
+                }
+                scripted.remove(0)
+            };
+
+            let (expected_path, body) = next;
+            let (mut stream, _) = listener.accept().expect("accept mock request");
+            let mut buffer = vec![0u8; 32 * 1024];
+            let bytes_read = stream.read(&mut buffer).expect("read mock request");
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+            let request_line = request.lines().next().unwrap_or_default().to_string();
+            assert!(
+                request_line.contains(&expected_path),
+                "expected path {expected_path}, got request line {request_line}"
+            );
+
+            let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write mock response");
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
     fn insert_minimal_order(db: &DbState, order_id: &str, sync_status: &str) {
         let conn = db.conn.lock().unwrap();
         conn.execute(
@@ -14022,6 +14232,244 @@ mod tests {
             .unwrap();
         assert_eq!(other_status, "completed");
         assert_eq!(other_remote_id.as_deref(), Some("remote-pay-other"));
+    }
+
+    #[test]
+    fn test_recover_payment_total_conflicts_refreshes_remote_order_snapshot_before_voiding_stale_local_payment(
+    ) {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, order_number, items, total_amount, status, payment_status, payment_method,
+                payment_transaction_id, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-payment-refresh', 'remote-order-refresh', 'ORD-REFRESH-1', '[]', 9.95, 'completed',
+                'partially_paid', 'split', 'pay-refresh-stale', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-refresh-canonical', 'ord-payment-refresh', 'cash', 9.7, 'EUR', 'completed',
+                'remote-pay-refresh-canonical', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-refresh-stale', 'ord-payment-refresh', 'cash', 0.25, 'EUR', 'completed',
+                'failed', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+             ) VALUES (
+                'payment', 'pay-refresh-stale', 'insert', '{}', 'payment:pay-refresh-stale',
+                'failed', 5, 5, 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+             ) VALUES (
+                'order_payments', 'pay-refresh-stale', 'insert', '{}', 'order_payments:pay-refresh-stale',
+                'failed', 5, 5, 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let (mock_url, server_handle) = spawn_json_sequence_server(vec![
+            (
+                "/api/pos/orders?limit=25&search=remote-order-refresh".to_string(),
+                serde_json::json!({
+                    "orders": [{
+                        "id": "remote-order-refresh",
+                        "order_number": "ORD-REFRESH-1",
+                        "total_amount": 9.7,
+                        "payment_status": "paid",
+                        "payment_method": "cash",
+                        "updated_at": "2026-04-16T09:39:05Z",
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "/api/pos/payments?limit=200&order_id=remote-order-refresh".to_string(),
+                serde_json::json!({
+                    "payments": [{
+                        "id": "remote-pay-refresh-canonical",
+                        "order_id": "remote-order-refresh",
+                        "amount": 9.7,
+                        "payment_method": "cash",
+                        "created_at": "2026-04-16T09:00:00Z",
+                        "updated_at": "2026-04-16T09:00:00Z",
+                    }]
+                })
+                .to_string(),
+            ),
+        ]);
+
+        let recovered = tauri::async_runtime::block_on(recover_payment_total_conflicts(
+            &db,
+            &mock_url,
+            "test-api-key",
+        ))
+        .expect("recover stale payment total conflicts");
+        assert_eq!(recovered, 1);
+        server_handle.join().expect("join mock sequence server");
+
+        let conn = db.conn.lock().unwrap();
+        let (order_total, payment_status): (f64, String) = conn
+            .query_row(
+                "SELECT total_amount, payment_status
+                 FROM orders
+                 WHERE id = 'ord-payment-refresh'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!((order_total - 9.7).abs() < 0.001);
+        assert_eq!(payment_status, "paid");
+
+        let (status, sync_status, sync_state): (String, String, String) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = 'pay-refresh-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "voided");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(sync_state, "applied");
+        assert!(!payment_has_unsynced_queue_rows(&conn, "pay-refresh-stale")
+            .expect("stale queue rows should be cleared"));
+    }
+
+    #[test]
+    fn test_recover_payment_total_conflicts_does_not_count_remote_mirror_without_clearing_queue_blocker(
+    ) {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, order_number, items, total_amount, status, payment_status, payment_method,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-payment-mirror-only', 'remote-order-mirror-only', 'ORD-MIRROR-1', '[]', 15.0, 'completed',
+                'partially_paid', 'split', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-mirror-blocked', 'ord-payment-mirror-only', 'card', 5.0, 'EUR', 'completed',
+                'failed', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+             ) VALUES (
+                'payment', 'pay-mirror-blocked', 'insert', '{}', 'payment:pay-mirror-blocked',
+                'failed', 5, 5, 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+             ) VALUES (
+                'order_payments', 'pay-mirror-blocked', 'insert', '{}', 'order_payments:pay-mirror-blocked',
+                'failed', 5, 5, 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let (mock_url, server_handle) = spawn_json_sequence_server(vec![
+            (
+                "/api/pos/orders?limit=25&search=remote-order-mirror-only".to_string(),
+                serde_json::json!({
+                    "orders": [{
+                        "id": "remote-order-mirror-only",
+                        "order_number": "ORD-MIRROR-1",
+                        "total_amount": 15.0,
+                        "payment_status": "partially_paid",
+                        "payment_method": "split",
+                        "updated_at": "2026-04-16T09:39:05Z",
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "/api/pos/payments?limit=200&order_id=remote-order-mirror-only".to_string(),
+                serde_json::json!({
+                    "payments": [{
+                        "id": "remote-pay-mirror-only",
+                        "order_id": "remote-order-mirror-only",
+                        "amount": 10.0,
+                        "payment_method": "cash",
+                        "created_at": "2026-04-16T09:00:00Z",
+                        "updated_at": "2026-04-16T09:00:00Z",
+                    }]
+                })
+                .to_string(),
+            ),
+        ]);
+
+        let recovered = tauri::async_runtime::block_on(recover_payment_total_conflicts(
+            &db,
+            &mock_url,
+            "test-api-key",
+        ))
+        .expect("recover mirror-only payment conflicts");
+        assert_eq!(recovered, 0);
+        server_handle.join().expect("join mock sequence server");
+
+        let conn = db.conn.lock().unwrap();
+        let mirrored_payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM order_payments
+                 WHERE order_id = 'ord-payment-mirror-only'
+                   AND payment_origin = 'sync_reconstructed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mirrored_payment_count, 1);
+        assert!(payment_has_unsynced_queue_rows(&conn, "pay-mirror-blocked")
+            .expect("mirror-only blocker should remain unresolved"));
     }
 
     #[test]
@@ -15394,8 +15842,8 @@ mod tests {
         assert_eq!(adjustment_state, "pending");
         assert!(adjustment_error.is_none());
 
-        let (queue_state, queue_error, queue_payload_after): (String, Option<String>, String) = conn
-            .query_row(
+        let (queue_state, queue_error, queue_payload_after): (String, Option<String>, String) =
+            conn.query_row(
                 "SELECT status, last_error, payload
                  FROM sync_queue
                  WHERE entity_type = 'payment_adjustment'
@@ -15704,38 +16152,38 @@ mod tests {
                 |_order_ids| {
                     let updated_at = updated_at.clone();
                     async move {
-                    let mut mirrored_payments_by_order = HashMap::new();
-                    mirrored_payments_by_order.insert(
-                        "ord-adj-live-shape".to_string(),
-                        vec![
-                            build_synced_remote_payment_mirror(
-                                "ord-adj-live-shape",
-                                "pay-adj-live-canonical-a",
-                                "33333333-3333-3333-3333-333333333333",
-                                "cash",
-                                40.0,
-                                None,
-                                Some("pay-adj-live-stale"),
-                                &updated_at,
-                            ),
-                            build_synced_remote_payment_mirror(
-                                "ord-adj-live-shape",
-                                "pay-adj-live-canonical-b",
-                                "44444444-4444-4444-4444-444444444444",
-                                "cash",
-                                40.0,
-                                None,
-                                Some("different-local-payment-id"),
-                                &updated_at,
-                            ),
-                        ],
-                    );
+                        let mut mirrored_payments_by_order = HashMap::new();
+                        mirrored_payments_by_order.insert(
+                            "ord-adj-live-shape".to_string(),
+                            vec![
+                                build_synced_remote_payment_mirror(
+                                    "ord-adj-live-shape",
+                                    "pay-adj-live-canonical-a",
+                                    "33333333-3333-3333-3333-333333333333",
+                                    "cash",
+                                    40.0,
+                                    None,
+                                    Some("pay-adj-live-stale"),
+                                    &updated_at,
+                                ),
+                                build_synced_remote_payment_mirror(
+                                    "ord-adj-live-shape",
+                                    "pay-adj-live-canonical-b",
+                                    "44444444-4444-4444-4444-444444444444",
+                                    "cash",
+                                    40.0,
+                                    None,
+                                    Some("different-local-payment-id"),
+                                    &updated_at,
+                                ),
+                            ],
+                        );
 
-                    Ok(CanonicalPaymentRepairContext {
-                        repaired_payment_mirrors: 2,
-                        mirrored_payments_by_order,
-                    })
-                }
+                        Ok(CanonicalPaymentRepairContext {
+                            repaired_payment_mirrors: 2,
+                            mirrored_payments_by_order,
+                        })
+                    }
                 },
             ),
         )
@@ -16529,7 +16977,10 @@ mod tests {
             )
             .unwrap();
 
-        assert!(age_seconds >= 240, "expected stale in-progress age to be preserved, got {age_seconds}");
+        assert!(
+            age_seconds >= 240,
+            "expected stale in-progress age to be preserved, got {age_seconds}"
+        );
     }
 
     #[test]

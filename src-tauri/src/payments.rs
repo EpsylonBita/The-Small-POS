@@ -82,15 +82,10 @@ fn load_shift_role_status_and_staff(
     .map_err(|e| format!("load shift role/status for payment repair: {e}"))
 }
 
-fn outstanding_amount_for_blocker(blocker: &payment_integrity::UnsettledPaymentBlocker) -> f64 {
-    (blocker.total_amount - blocker.settled_amount).max(0.0)
-}
-
 fn blocker_is_resolvable_from_z_report(
     blocker: &payment_integrity::UnsettledPaymentBlocker,
 ) -> bool {
     blocker.reason_code != "unsupported_payment_method"
-        && outstanding_amount_for_blocker(blocker) > 0.009
 }
 
 fn build_payment_blocker_failure(
@@ -283,6 +278,13 @@ pub(crate) struct RecordedPayment {
     pub sync_state: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct OrderPaymentBalanceSnapshot {
+    pub order_total: f64,
+    pub net_paid: f64,
+    pub outstanding_amount: f64,
+}
+
 fn parse_payment_items(payload: &Value) -> Vec<PaymentItemInput> {
     payload
         .get("items")
@@ -457,6 +459,97 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
     })
 }
 
+pub(crate) fn load_net_paid_for_order(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<f64, String> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(
+            CASE
+                WHEN op.amount > COALESCE(refunds.refunded_amount, 0)
+                    THEN op.amount - COALESCE(refunds.refunded_amount, 0)
+                ELSE 0
+            END
+        ), 0)
+         FROM order_payments op
+         LEFT JOIN (
+             SELECT payment_id, SUM(amount) AS refunded_amount
+             FROM payment_adjustments
+             WHERE adjustment_type = 'refund'
+             GROUP BY payment_id
+         ) refunds ON refunds.payment_id = op.id
+         WHERE op.order_id = ?1
+           AND op.status = 'completed'",
+        params![order_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("load net paid for order {order_id}: {e}"))
+}
+
+pub(crate) fn load_order_payment_balance_snapshot(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<OrderPaymentBalanceSnapshot, String> {
+    let order_total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(total_amount, 0)
+             FROM orders
+             WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load order total for payment balance snapshot {order_id}: {e}"))?;
+    let net_paid = load_net_paid_for_order(conn, order_id)?;
+    Ok(OrderPaymentBalanceSnapshot {
+        order_total,
+        net_paid,
+        outstanding_amount: (order_total - net_paid).max(0.0),
+    })
+}
+
+fn should_enforce_local_outstanding_guard(
+    input: &PaymentRecordInput,
+    options: &PaymentInsertOptions,
+) -> bool {
+    if input
+        .payment_origin
+        .eq_ignore_ascii_case("sync_reconstructed")
+    {
+        return false;
+    }
+
+    options
+        .remote_payment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+}
+
+fn validate_payment_amount_against_outstanding(
+    conn: &rusqlite::Connection,
+    input: &PaymentRecordInput,
+    options: &PaymentInsertOptions,
+) -> Result<(), String> {
+    if !should_enforce_local_outstanding_guard(input, options) {
+        return Ok(());
+    }
+
+    let snapshot = load_order_payment_balance_snapshot(conn, &input.order_id)?;
+    if input.amount > snapshot.outstanding_amount + 0.01 {
+        return Err(format!(
+            "Payment amount {:.2} exceeds outstanding balance {:.2} for order {} (total {:.2}, settled {:.2})",
+            input.amount,
+            snapshot.outstanding_amount,
+            input.order_id,
+            snapshot.order_total,
+            snapshot.net_paid,
+        ));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn recompute_order_payment_state(
     conn: &Connection,
     order_id: &str,
@@ -465,22 +558,16 @@ pub(crate) fn recompute_order_payment_state(
     now: &str,
     payment_id: &str,
 ) -> Result<(), String> {
-    let total_paid: f64 = conn
+    let balance_snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
+    let total_paid = balance_snapshot.net_paid;
+    let order_total = balance_snapshot.order_total;
+    let current_order_payment_method: Option<String> = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM order_payments
-             WHERE order_id = ?1 AND status = 'completed'",
+            "SELECT payment_method FROM orders WHERE id = ?1",
             params![order_id],
             |row| row.get(0),
         )
-        .unwrap_or(0.0);
-
-    let (order_total, current_order_payment_method): (f64, Option<String>) = conn
-        .query_row(
-            "SELECT COALESCE(total_amount, 0), payment_method FROM orders WHERE id = ?1",
-            params![order_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|e| format!("load order payment context: {e}"))?;
+        .map_err(|e| format!("load order payment method context: {e}"))?;
 
     let completed_payment_count: i64 = conn
         .query_row(
@@ -490,7 +577,9 @@ pub(crate) fn recompute_order_payment_state(
         )
         .unwrap_or(0);
 
-    let new_payment_status = if total_paid >= order_total - 0.01 {
+    let new_payment_status = if total_paid <= 0.009 {
+        "pending"
+    } else if total_paid >= order_total - 0.01 {
         "paid"
     } else {
         "partially_paid"
@@ -682,6 +771,8 @@ pub(crate) fn record_payment_in_connection(
                 .or(order_staff_id.as_deref()),
         )?
     };
+
+    validate_payment_amount_against_outstanding(conn, input, options)?;
 
     if options.sync_order_owner_with_payment
         && (resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id)
@@ -960,7 +1051,14 @@ pub fn resolve_unsettled_payment_blocker_payment(
         ));
     }
 
-    let outstanding_amount = outstanding_amount_for_blocker(blocker);
+    let balance_snapshot = load_order_payment_balance_snapshot(&conn, &actual_order_id)?;
+    let outstanding_amount = balance_snapshot.outstanding_amount;
+    if outstanding_amount <= 0.009 {
+        return Ok(build_payment_blocker_failure(
+            "This order no longer has a collectible outstanding balance. Refresh the Z-report preview.",
+            &blockers,
+        ));
+    }
     let repair_context = match resolve_historical_cashier_repair_context(&conn, &actual_order_id) {
         Ok(context) => context,
         Err(error) => return Ok(build_payment_blocker_failure(error, &blockers)),
@@ -1130,10 +1228,9 @@ fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Resu
     } else {
         "waiting_parent"
     };
-    let sync_payload = serde_json::from_str::<Value>(&build_payment_sync_payload_for_payment(
-        conn, payment_id,
-    )?)
-    .map_err(|e| format!("parse refreshed payment sync payload: {e}"))?;
+    let sync_payload =
+        serde_json::from_str::<Value>(&build_payment_sync_payload_for_payment(conn, payment_id)?)
+            .map_err(|e| format!("parse refreshed payment sync payload: {e}"))?;
 
     crate::sync_queue::clear_unsynced_items(conn, "payments", payment_id)?;
     crate::sync_queue::enqueue_payload_item(
@@ -2006,6 +2103,117 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn test_record_payment_rejects_amount_above_outstanding_balance() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, payment_status, payment_method, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-fully-paid', '[]', 9.7, 'completed', 'pending', 'pending', 'pending',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert fully paid order");
+        drop(conn);
+
+        record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-fully-paid",
+                "method": "cash",
+                "amount": 9.7,
+                "cashReceived": 10.0,
+                "changeGiven": 0.3,
+                "transactionRef": "CASH-FULLY-PAID-1",
+            }),
+        )
+        .expect("record initial payment");
+
+        let error = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-fully-paid",
+                "method": "card",
+                "amount": 0.25,
+                "transactionRef": "CARD-OVERPAY-1",
+            }),
+        )
+        .expect_err("second payment should be rejected locally");
+        assert!(error.contains("exceeds outstanding balance"));
+
+        let conn = db.conn.lock().unwrap();
+        let payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id = 'ord-fully-paid'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count payments after rejected overpay");
+        assert_eq!(payment_count, 1);
+    }
+
+    #[test]
+    fn test_sync_reconstructed_payment_bypasses_local_outstanding_guard() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, payment_status, payment_method, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-sync-reconstructed', '[]', 5.0, 'completed', 'paid', 'cash', 'synced',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert reconstructed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, remote_payment_id,
+                sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'payment-sync-existing', 'ord-sync-reconstructed', 'cash', 5.0, 'completed',
+                'remote-payment-existing', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert canonical existing payment");
+
+        let payload = serde_json::json!({
+            "orderId": "ord-sync-reconstructed",
+            "method": "cash",
+            "amount": 5.0,
+            "transactionRef": "REMOTE-MIRROR-1",
+            "paymentOrigin": "sync_reconstructed",
+        });
+        let input = build_payment_record_input(&payload).expect("prepare reconstructed payment");
+        let mut options =
+            PaymentInsertOptions::applied(Some("remote-payment-reconstructed".into()));
+        options.created_at = Some("2026-04-16T09:39:05Z".to_string());
+        options.updated_at = Some("2026-04-16T09:39:05Z".to_string());
+
+        let recorded =
+            record_payment_in_connection(&conn, &input, &options).expect("insert remote mirror");
+
+        let (payment_origin, remote_payment_id, sync_state): (String, Option<String>, String) =
+            conn.query_row(
+                "SELECT payment_origin, remote_payment_id, sync_state
+                 FROM order_payments
+                 WHERE id = ?1",
+                params![recorded.payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("query mirrored payment");
+        assert_eq!(payment_origin, "sync_reconstructed");
+        assert_eq!(
+            remote_payment_id.as_deref(),
+            Some("remote-payment-reconstructed")
+        );
+        assert_eq!(sync_state, "applied");
     }
 
     #[test]

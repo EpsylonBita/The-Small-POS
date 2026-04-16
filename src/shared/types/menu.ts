@@ -38,6 +38,10 @@ export interface MenuItem {
   pickupPrice?: number | null;
   deliveryPrice?: number | null;  // Only available when Delivery module is acquired
   instorePrice?: number | null;   // Only available when Tables module is acquired
+  vatCategoryCode?: string | null;
+  priceIncludesVat?: boolean | null;
+  taxExemptionReason?: string | null;
+  fiscalDocumentProfile?: string | null;
 
   // Display and media
   imageUrl?: string | null;
@@ -164,6 +168,10 @@ export interface MenuItemRow {
   pickup_price?: number | null;
   delivery_price?: number | null;
   instore_price?: number | null;
+  vat_category_code?: string | null;
+  price_includes_vat?: boolean | null;
+  tax_exemption_reason?: string | null;
+  fiscal_document_profile?: string | null;
   image_url?: string | null;
   preparation_time?: number | null;
   allergens?: string[] | null;
@@ -201,6 +209,10 @@ export function menuItemFromRow(row: MenuItemRow): MenuItem {
     pickupPrice: row.pickup_price ?? (row.price ?? row.base_price ?? 0), // Use price as fallback for specific prices
     deliveryPrice: row.delivery_price ?? (row.price ?? row.base_price ?? 0),
     instorePrice: row.instore_price ?? (row.price ?? row.base_price ?? 0),
+    vatCategoryCode: row.vat_category_code ?? null,
+    priceIncludesVat: row.price_includes_vat ?? true,
+    taxExemptionReason: row.tax_exemption_reason ?? null,
+    fiscalDocumentProfile: row.fiscal_document_profile ?? null,
     imageUrl: row.image_url,
     preparationTime: row.preparation_time,
     allergens: row.allergens,

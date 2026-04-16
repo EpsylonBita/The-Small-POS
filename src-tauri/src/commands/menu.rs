@@ -9,9 +9,9 @@ use tracing::{debug, info, warn};
 
 use super::offline_mutations::patch_menu_flag;
 use crate::{
-    db, handle_invalid_terminal_credentials,
-    hydrate_terminal_credentials_from_local_settings, is_terminal_auth_failure, mask_terminal_id,
-    maybe_lazy_warm_menu_cache, menu, read_local_setting, storage, sync_queue, value_str,
+    db, handle_invalid_terminal_credentials, hydrate_terminal_credentials_from_local_settings,
+    is_terminal_auth_failure, mask_terminal_id, maybe_lazy_warm_menu_cache, menu,
+    read_local_setting, storage, sync_queue, value_str,
 };
 
 #[derive(Debug, Deserialize)]
@@ -758,7 +758,10 @@ pub async fn menu_update_category(
         sync_queue::enqueue_payload_item(
             &conn,
             "menu_categories",
-            queue_payload.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
+            queue_payload
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             Some(0),
@@ -778,7 +781,10 @@ pub async fn menu_update_category(
             "item": updated,
         }),
     );
-    let _ = app.emit("sync:status", serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }));
+    let _ = app.emit(
+        "sync:status",
+        serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
+    );
 
     Ok(serde_json::json!({
         "success": true,
@@ -808,7 +814,10 @@ pub async fn menu_update_subcategory(
         sync_queue::enqueue_payload_item(
             &conn,
             "menu_subcategories",
-            queue_payload.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
+            queue_payload
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             Some(0),
@@ -828,7 +837,10 @@ pub async fn menu_update_subcategory(
             "item": updated,
         }),
     );
-    let _ = app.emit("sync:status", serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }));
+    let _ = app.emit(
+        "sync:status",
+        serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
+    );
 
     Ok(serde_json::json!({
         "success": true,
@@ -858,7 +870,10 @@ pub async fn menu_update_ingredient(
         sync_queue::enqueue_payload_item(
             &conn,
             "menu_ingredients",
-            queue_payload.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
+            queue_payload
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             Some(0),
@@ -878,7 +893,10 @@ pub async fn menu_update_ingredient(
             "item": updated,
         }),
     );
-    let _ = app.emit("sync:status", serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }));
+    let _ = app.emit(
+        "sync:status",
+        serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
+    );
 
     Ok(serde_json::json!({
         "success": true,
@@ -908,7 +926,10 @@ pub async fn menu_update_combo(
         sync_queue::enqueue_payload_item(
             &conn,
             "menu_combos",
-            queue_payload.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
+            queue_payload
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             Some(0),
@@ -928,7 +949,10 @@ pub async fn menu_update_combo(
             "item": updated,
         }),
     );
-    let _ = app.emit("sync:status", serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }));
+    let _ = app.emit(
+        "sync:status",
+        serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
+    );
 
     Ok(serde_json::json!({
         "success": true,

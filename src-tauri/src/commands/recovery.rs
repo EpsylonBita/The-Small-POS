@@ -189,14 +189,10 @@ pub async fn recovery_execute_action(
                 "reason": reason,
             });
 
-            let api_result = crate::admin_fetch(
-                Some(&db),
-                "/api/pos/shifts/force-close",
-                "POST",
-                Some(body),
-            )
-            .await
-            .map_err(|e| format!("Force-close API call failed: {e}"))?;
+            let api_result =
+                crate::admin_fetch(Some(&db), "/api/pos/shifts/force-close", "POST", Some(body))
+                    .await
+                    .map_err(|e| format!("Force-close API call failed: {e}"))?;
 
             let api_success = api_result
                 .get("success")
@@ -246,9 +242,7 @@ pub async fn recovery_execute_action(
         }
 
         "retrySync" => {
-            let queue_id = request
-                .get("queueId")
-                .and_then(|v| v.as_i64());
+            let queue_id = request.get("queueId").and_then(|v| v.as_i64());
             let entity_id = request
                 .get("entityId")
                 .and_then(|v| v.as_str())

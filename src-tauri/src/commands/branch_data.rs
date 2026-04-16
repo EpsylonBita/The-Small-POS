@@ -602,12 +602,8 @@ pub async fn branch_data_update_table_status(
                     "Local tables cache is missing. Connect once while online before updating tables offline."
                         .to_string()
                 })?;
-            let updated_table = update_tables_cached_payload(
-                &mut cached_tables.payload,
-                &table_id,
-                &status,
-                &now,
-            )?;
+            let updated_table =
+                update_tables_cached_payload(&mut cached_tables.payload, &table_id, &status, &now)?;
             cache_payload(
                 &conn,
                 &branch_id,
@@ -1030,7 +1026,7 @@ pub async fn branch_data_get_bundle_status(
             available: false,
             source: "local_settings",
             item_count: None,
-    });
+        });
     datasets.push(delivery_local_status);
 
     if let Some(terminal_id) = terminal_id.as_deref() {
@@ -1072,18 +1068,8 @@ pub async fn branch_data_get_bundle_status(
             "integrations_config",
             "default",
         ),
-        cached_admin_get_dataset_status(
-            &db,
-            "/api/pos/mydata/config",
-            "mydata_config",
-            "default",
-        ),
-        cached_admin_get_dataset_status(
-            &db,
-            "/api/pos/kiosk/status",
-            "kiosk_status",
-            "default",
-        ),
+        cached_admin_get_dataset_status(&db, "/api/pos/mydata/config", "mydata_config", "default"),
+        cached_admin_get_dataset_status(&db, "/api/pos/kiosk/status", "kiosk_status", "default"),
         cached_admin_get_dataset_status(
             &db,
             "/api/pos/kiosk/orders?limit=10",
@@ -1132,18 +1118,8 @@ pub async fn branch_data_get_bundle_status(
             "inventory_items",
             "default",
         ),
-        cached_admin_get_dataset_status(
-            &db,
-            "/api/pos/suppliers",
-            "suppliers",
-            "default",
-        ),
-        cached_admin_get_dataset_status(
-            &db,
-            "/api/pos/coupons",
-            "coupons_page",
-            "default",
-        ),
+        cached_admin_get_dataset_status(&db, "/api/pos/suppliers", "suppliers", "default"),
+        cached_admin_get_dataset_status(&db, "/api/pos/coupons", "coupons_page", "default"),
         cached_admin_get_dataset_status(
             &db,
             "/api/pos/reservations",
@@ -1162,12 +1138,7 @@ pub async fn branch_data_get_bundle_status(
             "drive_through_page",
             "default",
         ),
-        cached_admin_get_dataset_status(
-            &db,
-            "/api/pos/rooms",
-            "rooms_page",
-            "default",
-        ),
+        cached_admin_get_dataset_status(&db, "/api/pos/rooms", "rooms_page", "default"),
         cached_admin_get_dataset_status(
             &db,
             "/api/pos/housekeeping?status=all",
@@ -1180,12 +1151,7 @@ pub async fn branch_data_get_bundle_status(
             "guest_billing_page",
             "default",
         ),
-        cached_admin_get_dataset_status(
-            &db,
-            "/api/pos/products",
-            "products_page",
-            "default",
-        ),
+        cached_admin_get_dataset_status(&db, "/api/pos/products", "products_page", "default"),
         cached_admin_get_dataset_status(
             &db,
             "/api/pos/product-categories",

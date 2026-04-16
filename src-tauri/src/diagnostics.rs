@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
@@ -133,12 +135,16 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         .unwrap_or(json!([]));
     let invalid_orders_count = invalid_orders.as_array().map(|arr| arr.len()).unwrap_or(0);
     let sync_blocker_details = crate::sync::get_sync_blocker_details(db, 10).unwrap_or_default();
+    let terminal_context = get_terminal_context(db);
+    let sync_status_summary = get_sync_status_summary(db).unwrap_or_else(|_| json!({}));
 
     Ok(json!({
         "schemaVersion": schema_version,
         "syncBacklog": sync_backlog,
         "paymentAdjustmentBacklog": payment_adjustment_backlog,
         "syncBlockerDetails": sync_blocker_details,
+        "terminalContext": terminal_context,
+        "syncStatusSummary": sync_status_summary,
         "lastSyncTimes": last_sync_times,
         "printerStatus": printer_status,
         "lastZReport": last_zreport,
@@ -253,10 +259,119 @@ fn get_payment_adjustment_backlog(conn: &rusqlite::Connection) -> Value {
     })
 }
 
-fn get_sync_blocker_details_json(
-    details: Vec<SyncBlockerDetail>,
-) -> Value {
+fn get_sync_blocker_details_json(details: Vec<SyncBlockerDetail>) -> Value {
     serde_json::to_value(details).unwrap_or_else(|_| json!([]))
+}
+
+fn parse_local_setting_value(raw: &str) -> Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Value::Null;
+    }
+    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+        return parsed;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        _ => Value::String(trimmed.to_string()),
+    }
+}
+
+fn read_local_setting_json(db: &DbState, category: &str, key: &str) -> Option<Value> {
+    let conn = db.conn.lock().ok()?;
+    crate::db::get_setting(&conn, category, key).map(|value| parse_local_setting_value(&value))
+}
+
+fn get_terminal_context(db: &DbState) -> Value {
+    let runtime = crate::commands::settings::build_terminal_runtime_config(db);
+    let prefer_local = |category: &str, key: &str, runtime_key: &str| {
+        read_local_setting_json(db, category, key)
+            .unwrap_or_else(|| runtime.get(runtime_key).cloned().unwrap_or(Value::Null))
+    };
+    json!({
+        "terminalId": prefer_local("terminal", "terminal_id", "terminal_id"),
+        "branchId": prefer_local("terminal", "branch_id", "branch_id"),
+        "organizationId": prefer_local("terminal", "organization_id", "organization_id"),
+        "terminalType": prefer_local("terminal", "terminal_type", "terminal_type"),
+        "parentTerminalId": prefer_local("terminal", "parent_terminal_id", "parent_terminal_id"),
+        "ownerTerminalId": prefer_local("terminal", "owner_terminal_id", "owner_terminal_id"),
+        "ownerTerminalDbId": prefer_local("terminal", "owner_terminal_db_id", "owner_terminal_db_id"),
+        "sourceTerminalId": prefer_local("terminal", "source_terminal_id", "source_terminal_id"),
+        "sourceTerminalDbId": prefer_local("terminal", "source_terminal_db_id", "source_terminal_db_id"),
+        "posOperatingMode": prefer_local("terminal", "pos_operating_mode", "pos_operating_mode"),
+        "enabledFeatures": prefer_local("terminal", "enabled_features", "enabled_features"),
+        "lastConfigSyncAt": prefer_local("terminal", "last_config_sync_at", "last_config_sync_at"),
+        "syncHealth": runtime.get("sync_health").cloned().unwrap_or(Value::Null),
+        "syncHealthState": runtime.get("sync_health").cloned().unwrap_or(Value::Null),
+        "businessType": runtime.get("business_type").cloned().unwrap_or(Value::Null),
+        "ghostModeFeatureEnabled": runtime
+            .get("ghost_mode_feature_enabled")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "adminDashboardUrl": runtime.get("admin_dashboard_url").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn build_diagnostics_sync_state() -> crate::sync::SyncState {
+    crate::sync::SyncState {
+        is_running: Arc::new(AtomicBool::new(false)),
+        last_sync: Arc::new(Mutex::new(None)),
+    }
+}
+
+fn get_sync_status_summary(db: &DbState) -> Result<Value, String> {
+    let sync_state = build_diagnostics_sync_state();
+    crate::sync::get_sync_status(db, &sync_state)
+}
+
+fn get_terminal_settings_snapshot(conn: &rusqlite::Connection) -> Value {
+    let mut snapshot = serde_json::Map::new();
+    let mut stmt = match conn.prepare(
+        "SELECT setting_category, setting_key, setting_value
+         FROM local_settings
+         WHERE setting_category IN ('terminal', 'organization', 'restaurant')
+         ORDER BY setting_category ASC, setting_key ASC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Value::Object(snapshot),
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return Value::Object(snapshot),
+    };
+
+    for row in rows.flatten() {
+        let (category, key, value) = row;
+        let category_entry = snapshot
+            .entry(category)
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(category_map) = category_entry.as_object_mut() {
+            category_map.insert(key, parse_local_setting_value(&value));
+        }
+    }
+
+    Value::Object(snapshot)
+}
+
+fn write_json_to_zip(
+    zip: &mut zip::ZipWriter<fs::File>,
+    zip_options: &zip::write::SimpleFileOptions,
+    file_name: &str,
+    value: &Value,
+) -> Result<(), String> {
+    zip.start_file(file_name, zip_options.clone())
+        .map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("Failed to serialize {file_name}: {e}"))?;
+    zip.write_all(json.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn get_last_sync_times(conn: &rusqlite::Connection) -> Value {
@@ -321,7 +436,7 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
 
 fn get_last_zreport(conn: &rusqlite::Connection) -> Value {
     conn.query_row(
-        "SELECT id, shift_id, generated_at, sync_state, total_gross_sales, total_net_sales
+        "SELECT id, shift_id, generated_at, sync_state, gross_sales, net_sales
          FROM z_reports ORDER BY generated_at DESC LIMIT 1",
         [],
         |row| {
@@ -370,81 +485,88 @@ pub fn export_diagnostics_with_options(
 
     // 1. About info
     let about = redact_value_for_export(get_about_info(), export_options.redact_sensitive);
-    zip.start_file("about.json", zip_options)
-        .map_err(|e| e.to_string())?;
-    let about_json = serde_json::to_string_pretty(&about)
-        .map_err(|e| format!("Failed to serialize about info: {e}"))?;
-    zip.write_all(about_json.as_bytes())
-        .map_err(|e| e.to_string())?;
+    write_json_to_zip(&mut zip, &zip_options, "about.json", &about)?;
 
-    // 2. System health
-    drop(conn); // Release lock temporarily
+    drop(conn); // Release lock while cross-module helpers acquire the DB mutex.
     let health = redact_value_for_export(get_system_health(db)?, export_options.redact_sensitive);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    zip.start_file("system_health.json", zip_options)
-        .map_err(|e| e.to_string())?;
-    let health_json = serde_json::to_string_pretty(&health)
-        .map_err(|e| format!("Failed to serialize system health: {e}"))?;
-    zip.write_all(health_json.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    // 3. Pending sync counts by entity type
-    let backlog = redact_value_for_export(get_sync_backlog(&conn), export_options.redact_sensitive);
-    zip.start_file("sync_backlog.json", zip_options)
-        .map_err(|e| e.to_string())?;
-    let backlog_json = serde_json::to_string_pretty(&backlog)
-        .map_err(|e| format!("Failed to serialize sync backlog: {e}"))?;
-    zip.write_all(backlog_json.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    // 4. Payment-adjustment backlog breakdown
-    let payment_adjustment_backlog = redact_value_for_export(
-        get_payment_adjustment_backlog(&conn),
+    let terminal_context =
+        redact_value_for_export(get_terminal_context(db), export_options.redact_sensitive);
+    let sync_status = redact_value_for_export(
+        get_sync_status_summary(db)?,
         export_options.redact_sensitive,
     );
-    zip.start_file("payment_adjustment_backlog.json", zip_options)
-        .map_err(|e| e.to_string())?;
-    let payment_adjustment_backlog_json = serde_json::to_string_pretty(&payment_adjustment_backlog)
-        .map_err(|e| format!("Failed to serialize payment adjustment backlog: {e}"))?;
-    zip.write_all(payment_adjustment_backlog_json.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    drop(conn);
+    let closeout_readiness = redact_value_for_export(
+        crate::zreport::get_closeout_readiness_snapshot(db, &json!({}))?,
+        export_options.redact_sensitive,
+    );
     let sync_blocker_details = redact_value_for_export(
         get_sync_blocker_details_json(crate::sync::get_sync_blocker_details(db, 25)?),
         export_options.redact_sensitive,
     );
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    zip.start_file("sync_blocker_details.json", zip_options)
-        .map_err(|e| e.to_string())?;
-    let sync_blocker_details_json = serde_json::to_string_pretty(&sync_blocker_details)
-        .map_err(|e| format!("Failed to serialize sync blocker details: {e}"))?;
-    zip.write_all(sync_blocker_details_json.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    // 5. Last 20 sync errors
+    let terminal_settings_snapshot = redact_value_for_export(
+        get_terminal_settings_snapshot(&conn),
+        export_options.redact_sensitive,
+    );
+    let backlog = redact_value_for_export(get_sync_backlog(&conn), export_options.redact_sensitive);
+    let payment_adjustment_backlog = redact_value_for_export(
+        get_payment_adjustment_backlog(&conn),
+        export_options.redact_sensitive,
+    );
     let errors = redact_value_for_export(
         json!(get_recent_sync_errors(&conn, 20)),
         export_options.redact_sensitive,
     );
-    zip.start_file("sync_errors.json", zip_options)
-        .map_err(|e| e.to_string())?;
-    let errors_json = serde_json::to_string_pretty(&errors)
-        .map_err(|e| format!("Failed to serialize sync errors: {e}"))?;
-    zip.write_all(errors_json.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    // 6. Printer profiles + last print job statuses
     let printers = redact_value_for_export(
         get_printer_diagnostics(&conn),
         export_options.redact_sensitive,
     );
-    zip.start_file("printer_diagnostics.json", zip_options)
-        .map_err(|e| e.to_string())?;
-    let printers_json = serde_json::to_string_pretty(&printers)
-        .map_err(|e| format!("Failed to serialize printer diagnostics: {e}"))?;
-    zip.write_all(printers_json.as_bytes())
-        .map_err(|e| e.to_string())?;
+
+    // 2. System identity + runtime state
+    write_json_to_zip(&mut zip, &zip_options, "system_health.json", &health)?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "terminal_context.json",
+        &terminal_context,
+    )?;
+    write_json_to_zip(&mut zip, &zip_options, "sync_status.json", &sync_status)?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "closeout_readiness.json",
+        &closeout_readiness,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "terminal_settings_snapshot.json",
+        &terminal_settings_snapshot,
+    )?;
+
+    // 3. Queue/backlog snapshots
+    write_json_to_zip(&mut zip, &zip_options, "sync_backlog.json", &backlog)?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "payment_adjustment_backlog.json",
+        &payment_adjustment_backlog,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "sync_blocker_details.json",
+        &sync_blocker_details,
+    )?;
+
+    // 4. Recent operational history
+    write_json_to_zip(&mut zip, &zip_options, "sync_errors.json", &errors)?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "printer_diagnostics.json",
+        &printers,
+    )?;
 
     // 6. Include log files
     let log_dir = get_log_dir();
@@ -464,7 +586,7 @@ pub fn export_diagnostics_with_options(
                         .to_string_lossy()
                         .to_string();
                     let zip_entry = format!("logs/{fname}");
-                    if zip.start_file(&zip_entry, zip_options).is_ok() {
+                    if zip.start_file(&zip_entry, zip_options.clone()).is_ok() {
                         if let Ok(f) = fs::File::open(&path) {
                             let mut buf = Vec::new();
                             // Cap at 5MB per file to keep zip manageable
@@ -675,6 +797,14 @@ pub fn prune_old_logs() {
 mod tests {
     use super::*;
 
+    fn read_zip_json(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Value {
+        let mut file = archive.by_name(name).expect("zip entry should exist");
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .expect("read zip json contents");
+        serde_json::from_str(&contents).expect("parse zip json")
+    }
+
     #[test]
     fn test_about_info_has_required_fields() {
         let info = get_about_info();
@@ -702,6 +832,8 @@ mod tests {
         assert!(health.get("schemaVersion").is_some());
         assert!(health.get("syncBacklog").is_some());
         assert!(health.get("paymentAdjustmentBacklog").is_some());
+        assert!(health.get("terminalContext").is_some());
+        assert!(health.get("syncStatusSummary").is_some());
         assert!(health.get("printerStatus").is_some());
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
@@ -795,6 +927,132 @@ mod tests {
         let archive = zip::ZipArchive::new(file).unwrap();
         assert!(archive.len() >= 4); // at least about, health, backlog, errors
                                      // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_export_diagnostics_is_self_describing_and_preserves_ids_when_redacted() {
+        let dir = std::env::temp_dir().join(format!("diag_bundle_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let conn = db_state.conn.lock().unwrap();
+
+        crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-d80762ac").unwrap();
+        crate::db::set_setting(
+            &conn,
+            "terminal",
+            "branch_id",
+            "d28cef2e-bbf2-496a-b922-45b497525715",
+        )
+        .unwrap();
+        crate::db::set_setting(
+            &conn,
+            "terminal",
+            "organization_id",
+            "95e63e0b-5b3a-48f8-9c96-fb9f041a0255",
+        )
+        .unwrap();
+        crate::db::set_setting(&conn, "terminal", "terminal_type", "secondary").unwrap();
+        crate::db::set_setting(&conn, "terminal", "api_key", "super-secret").unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, payment_status, payment_method,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-diag-blocker', 'ORD-DIAG-0070', '[]', 9.7, 'completed', 'partially_paid', 'split',
+                'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status, transaction_ref,
+                sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-diag-blocker', 'ord-diag-blocker', 'cash', 0.25, 'EUR', 'completed', 'TX-DIAG-1',
+                'failed', 'failed', '2026-04-16T09:39:05Z', '2026-04-16T09:39:05Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error
+             ) VALUES (
+                'payment', 'pay-diag-blocker', 'insert', '{}', 'payment:pay-diag-blocker',
+                'failed', 5, 5, 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let export_path = export_diagnostics_with_options(
+            &db_state,
+            &dir,
+            DiagnosticsExportOptions {
+                include_logs: false,
+                redact_sensitive: true,
+            },
+        )
+        .expect("export diagnostics bundle");
+
+        let file = std::fs::File::open(&export_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let entry_names: Vec<String> = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .collect();
+        assert!(entry_names.contains(&"terminal_context.json".to_string()));
+        assert!(entry_names.contains(&"sync_status.json".to_string()));
+        assert!(entry_names.contains(&"closeout_readiness.json".to_string()));
+        assert!(entry_names.contains(&"terminal_settings_snapshot.json".to_string()));
+
+        let terminal_context = read_zip_json(&mut archive, "terminal_context.json");
+        assert_eq!(terminal_context["terminalId"], json!("terminal-d80762ac"));
+        assert_eq!(
+            terminal_context["branchId"],
+            json!("d28cef2e-bbf2-496a-b922-45b497525715")
+        );
+        assert_eq!(
+            terminal_context["organizationId"],
+            json!("95e63e0b-5b3a-48f8-9c96-fb9f041a0255")
+        );
+
+        let terminal_settings = read_zip_json(&mut archive, "terminal_settings_snapshot.json");
+        assert_eq!(
+            terminal_settings["terminal"]["terminal_id"],
+            json!("terminal-d80762ac")
+        );
+        assert_eq!(
+            terminal_settings["terminal"]["api_key"],
+            json!("[REDACTED]")
+        );
+
+        let blocker_details = read_zip_json(&mut archive, "sync_blocker_details.json");
+        let first_blocker = blocker_details
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("payment blocker detail should be exported");
+        assert_eq!(first_blocker["paymentId"], json!("pay-diag-blocker"));
+        assert_eq!(first_blocker["paymentAmount"], json!(0.25));
+        assert_eq!(first_blocker["paymentMethod"], json!("cash"));
+        assert_eq!(first_blocker["paymentTransactionRef"], json!("TX-DIAG-1"));
+        assert_eq!(first_blocker["paymentSyncState"], json!("failed"));
+        assert_eq!(first_blocker["paymentSyncStatus"], json!("failed"));
+        assert_eq!(first_blocker["remotePaymentIdPresent"], json!(false));
+        assert_eq!(first_blocker["orderTotalAmount"], json!(9.7));
+        assert_eq!(first_blocker["orderSettledAmount"], json!(0.25));
+        assert_eq!(first_blocker["orderOutstandingAmount"], json!(9.45));
+        assert_eq!(
+            first_blocker["paymentCreatedAt"],
+            json!("2026-04-16T09:39:05Z")
+        );
+        assert_eq!(
+            first_blocker["paymentUpdatedAt"],
+            json!("2026-04-16T09:39:05Z")
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

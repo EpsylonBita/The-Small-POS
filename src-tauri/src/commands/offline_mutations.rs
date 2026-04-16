@@ -241,8 +241,8 @@ where
     drop(stmt);
 
     for (scope_key, payload_json) in row_values {
-        let mut payload =
-            serde_json::from_str::<Value>(&payload_json).map_err(|e| format!("parse cache: {e}"))?;
+        let mut payload = serde_json::from_str::<Value>(&payload_json)
+            .map_err(|e| format!("parse cache: {e}"))?;
         if !patcher(&scope_key, &mut payload) {
             continue;
         }
@@ -465,7 +465,9 @@ pub async fn offline_coupon_upsert(
     set_object_field(object, "updated_at", Value::String(now.clone()));
     if operation == "INSERT" {
         set_object_field(object, "created_at", Value::String(now.clone()));
-        object.entry("usage_count".to_string()).or_insert(Value::from(0));
+        object
+            .entry("usage_count".to_string())
+            .or_insert(Value::from(0));
     }
     object
         .entry("branch_id".to_string())
@@ -535,7 +537,10 @@ pub async fn offline_coupon_set_active(
         enqueue_parity_item(
             &conn,
             "coupons",
-            queue_payload.get("id").and_then(Value::as_str).unwrap_or_default(),
+            queue_payload
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             "promotions",
@@ -720,8 +725,8 @@ pub async fn offline_reservation_update(
 }
 
 fn default_end_time(start_time: &str, duration_minutes: i64) -> String {
-    let parsed = chrono::DateTime::parse_from_rfc3339(start_time)
-        .map(|value| value.with_timezone(&Utc));
+    let parsed =
+        chrono::DateTime::parse_from_rfc3339(start_time).map(|value| value.with_timezone(&Utc));
     match parsed {
         Ok(start) => (start + ChronoDuration::minutes(duration_minutes)).to_rfc3339(),
         Err(_) => start_time.to_string(),
@@ -732,7 +737,8 @@ fn build_local_appointment(db: &db::DbState, payload: &Value) -> Value {
     let now = now_rfc3339();
     let appointment_id = read_string(payload, &["id"]).unwrap_or_else(|| temp_id("appointment"));
     let start_time = read_string(payload, &["start_time", "startTime"]).unwrap_or_else(now_rfc3339);
-    let duration_minutes = read_i64(payload, &["total_duration_minutes", "duration_minutes"]).unwrap_or(30);
+    let duration_minutes =
+        read_i64(payload, &["total_duration_minutes", "duration_minutes"]).unwrap_or(30);
     let end_time = read_string(payload, &["end_time", "endTime"])
         .unwrap_or_else(|| default_end_time(&start_time, duration_minutes));
     json!({
@@ -832,7 +838,8 @@ pub async fn offline_appointment_update_status(
     let payload = object_payload(arg0, arg1)?;
     let appointment_id = read_string(&payload, &["appointmentId", "appointment_id", "id"])
         .ok_or_else(|| "Missing appointment id".to_string())?;
-    let status = read_string(&payload, &["status"]).ok_or_else(|| "Missing appointment status".to_string())?;
+    let status = read_string(&payload, &["status"])
+        .ok_or_else(|| "Missing appointment status".to_string())?;
     let mut appointment = build_local_appointment(&db, &payload);
     if let Some(object) = appointment.as_object_mut() {
         set_object_field(object, "id", Value::String(appointment_id.clone()));
@@ -850,7 +857,10 @@ pub async fn offline_appointment_update_status(
         enqueue_parity_item(
             &conn,
             "appointments",
-            queue_payload.get("id").and_then(Value::as_str).unwrap_or_default(),
+            queue_payload
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             "salon",
@@ -878,11 +888,7 @@ pub async fn offline_appointment_update_status(
     }))
 }
 
-fn patch_staff_schedule_cache(
-    db: &db::DbState,
-    branch: &str,
-    shift: &Value,
-) -> Result<(), String> {
+fn patch_staff_schedule_cache(db: &db::DbState, branch: &str, shift: &Value) -> Result<(), String> {
     patch_branch_cache_rows(db, branch, "staff_schedule", |_scope_key, payload| {
         let Some(shifts) = get_array_mut_path(payload, &["shifts"]) else {
             return false;
@@ -987,9 +993,18 @@ pub async fn offline_drive_thru_update_status(
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
     let payload = object_payload(arg0, arg1)?;
-    let order_id = read_string(&payload, &["drive_through_order_id", "driveThruOrderId", "orderId", "id"])
-        .ok_or_else(|| "Missing drive-through order id".to_string())?;
-    let status = read_string(&payload, &["status"]).ok_or_else(|| "Missing drive-through status".to_string())?;
+    let order_id = read_string(
+        &payload,
+        &[
+            "drive_through_order_id",
+            "driveThruOrderId",
+            "orderId",
+            "id",
+        ],
+    )
+    .ok_or_else(|| "Missing drive-through order id".to_string())?;
+    let status = read_string(&payload, &["status"])
+        .ok_or_else(|| "Missing drive-through status".to_string())?;
     let updated_order = patch_drive_thru_cache(&db, &order_id, &status)?;
     let queue_payload = json!({
         "drive_through_order_id": order_id,
@@ -1024,7 +1039,11 @@ pub async fn offline_drive_thru_update_status(
     }))
 }
 
-fn patch_rooms_cache(db: &db::DbState, room_id: &str, status: &str) -> Result<Option<Value>, String> {
+fn patch_rooms_cache(
+    db: &db::DbState,
+    room_id: &str,
+    status: &str,
+) -> Result<Option<Value>, String> {
     let mut updated: Option<Value> = None;
     patch_cached_admin_paths(db, "/api/pos/rooms", |_path, data| {
         let Some(items) = get_array_mut_path(data, &["rooms"]) else {
@@ -1053,7 +1072,8 @@ pub async fn offline_room_update_status(
     let payload = object_payload(arg0, arg1)?;
     let room_id = read_string(&payload, &["roomId", "room_id", "id"])
         .ok_or_else(|| "Missing room id".to_string())?;
-    let status = read_string(&payload, &["status"]).ok_or_else(|| "Missing room status".to_string())?;
+    let status =
+        read_string(&payload, &["status"]).ok_or_else(|| "Missing room status".to_string())?;
     let updated_room = patch_rooms_cache(&db, &room_id, &status)?;
     let queue_payload = json!({
         "room_id": room_id,
@@ -1066,7 +1086,10 @@ pub async fn offline_room_update_status(
         enqueue_parity_item(
             &conn,
             "rooms",
-            queue_payload.get("room_id").and_then(Value::as_str).unwrap_or_default(),
+            queue_payload
+                .get("room_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             "hospitality",
@@ -1119,8 +1142,10 @@ pub async fn offline_housekeeping_update_status(
     let payload = object_payload(arg0, arg1)?;
     let task_id = read_string(&payload, &["taskId", "task_id", "id"])
         .ok_or_else(|| "Missing housekeeping task id".to_string())?;
-    let status = read_string(&payload, &["status"]).ok_or_else(|| "Missing housekeeping status".to_string())?;
-    let updated_task = patch_housekeeping_cache(&db, &task_id, "status", Value::String(status.clone()))?;
+    let status = read_string(&payload, &["status"])
+        .ok_or_else(|| "Missing housekeeping status".to_string())?;
+    let updated_task =
+        patch_housekeeping_cache(&db, &task_id, "status", Value::String(status.clone()))?;
     let queue_payload = json!({
         "task_id": task_id,
         "status": status,
@@ -1132,7 +1157,10 @@ pub async fn offline_housekeeping_update_status(
         enqueue_parity_item(
             &conn,
             "housekeeping_tasks",
-            queue_payload.get("task_id").and_then(Value::as_str).unwrap_or_default(),
+            queue_payload
+                .get("task_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             "hospitality",
@@ -1166,7 +1194,8 @@ pub async fn offline_housekeeping_assign_staff(
         .or_else(|| payload.get("assignedStaffId"))
         .cloned()
         .unwrap_or(Value::Null);
-    let updated_task = patch_housekeeping_cache(&db, &task_id, "assigned_staff_id", staff_id.clone())?;
+    let updated_task =
+        patch_housekeeping_cache(&db, &task_id, "assigned_staff_id", staff_id.clone())?;
     let queue_payload = json!({
         "id": task_id,
         "assigned_staff_id": staff_id,
@@ -1178,7 +1207,10 @@ pub async fn offline_housekeeping_assign_staff(
         enqueue_parity_item(
             &conn,
             "housekeeping_tasks",
-            queue_payload.get("id").and_then(Value::as_str).unwrap_or_default(),
+            queue_payload
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
             "UPDATE",
             &queue_payload,
             "hospitality",
@@ -1232,7 +1264,8 @@ pub async fn offline_product_update_quantity(
     let payload = object_payload(arg0, arg1)?;
     let product_id = read_string(&payload, &["productId", "product_id", "id"])
         .ok_or_else(|| "Missing product id".to_string())?;
-    let quantity = read_i64(&payload, &["quantity"]).ok_or_else(|| "Missing quantity".to_string())?;
+    let quantity =
+        read_i64(&payload, &["quantity"]).ok_or_else(|| "Missing quantity".to_string())?;
     let updated_product = patch_products_cache(&db, &product_id, quantity)?;
     let queue_payload = json!({
         "quantity": quantity,
