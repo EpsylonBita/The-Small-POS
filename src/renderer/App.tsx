@@ -330,6 +330,8 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       let message = t('system.remoteWipe') || 'Terminal has been reset remotely';
       if (reason === 'terminal_deleted') {
         message = t('system.terminalDeleted') || 'This terminal has been deleted from the admin dashboard. Please reconfigure.';
+      } else if (reason === 'terminal_inactive') {
+        message = t('system.terminalInactive') || 'This terminal has been disabled in the admin dashboard. Please contact an operator or restore access.';
       } else if (reason === 'admin_command') {
         message = t('system.factoryReset') || 'Factory reset command received from admin dashboard.';
       }
@@ -596,6 +598,26 @@ function AppContent() {
     setShowSyncRecoveryModal(false);
     setSyncRecoveryContext(null);
   }, []);
+
+  useEffect(() => {
+    const handleRecoveryRoute = (event: Event) => {
+      const detail = (event as CustomEvent<{ screen?: string; params?: Record<string, unknown> }>).detail;
+      if (!detail?.screen) {
+        return;
+      }
+
+      if (detail.screen === 'connectionSettings') {
+        const requestedSection =
+          detail.params?.section === 'recovery' ? 'recovery' : null;
+        openConnectionSettings(requestedSection);
+      }
+    };
+
+    window.addEventListener('pos:recovery-route', handleRecoveryRoute as EventListener);
+    return () => {
+      window.removeEventListener('pos:recovery-route', handleRecoveryRoute as EventListener);
+    };
+  }, [openConnectionSettings]);
 
   // Auto-check for updates on app startup
   useEffect(() => {

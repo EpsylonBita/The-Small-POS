@@ -145,7 +145,8 @@ pub(crate) use terminal_helpers::{
     hydrate_terminal_credentials_from_local_settings, is_sensitive_terminal_setting,
     is_terminal_auth_failure, mask_terminal_id,
     purge_hydrated_terminal_credentials_from_local_settings, read_local_setting,
-    scrub_sensitive_local_settings, terminal_access_reset_reason,
+    scrub_sensitive_local_settings, terminal_access_reset_reason, terminal_auth_failure_code,
+    terminal_auth_failure_source, terminal_auth_failure_terminal_active,
 };
 
 pub(crate) async fn maybe_lazy_warm_menu_cache(

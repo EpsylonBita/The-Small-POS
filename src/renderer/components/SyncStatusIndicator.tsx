@@ -18,6 +18,7 @@ import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
 import type { SyncRecoveryOpenContext } from './recovery/SyncRecoveryModal';
+import { buildSyncRecoveryIssues } from './recovery/sync-recovery-issues';
 import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useFeatures } from '../hooks/useFeatures';
 import { useShift } from '../contexts/shift-context';
@@ -35,6 +36,7 @@ import {
   type DiagnosticsLastParitySync,
   type DiagnosticsSystemHealth,
   type DiagnosticsExportOptions,
+  type SyncFinancialIntegrityResponse,
 } from '../../lib';
 import {
   PARITY_QUEUE_STATUS_EVENT,
@@ -44,6 +46,7 @@ import {
   runParitySyncCycle,
 } from '../services/ParitySyncCoordinator';
 import type { QueueStatus } from '../../../../shared/pos/sync-queue-types';
+import { getSyncQueueBridge } from '../services/SyncQueueBridge';
 import type { SubscriptionConnectionStatus } from '../services/RealtimeManager';
 
 // ---------------------------------------------------------------------------
@@ -521,6 +524,17 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const systemLoaded = useRef(false);
   const [exporting, setExporting] = useState(false);
   const [exportPath, setExportPath] = useState<string | null>(null);
+  const [recoveryFinancialItems, setRecoveryFinancialItems] = useState<
+    Awaited<ReturnType<typeof bridge.sync.getFailedFinancialItems>>
+  >([]);
+  const [recoveryIntegrity, setRecoveryIntegrity] =
+    useState<SyncFinancialIntegrityResponse>({
+      valid: true,
+      issues: [],
+    });
+  const [recoveryParityItems, setRecoveryParityItems] = useState<
+    Awaited<ReturnType<ReturnType<typeof getSyncQueueBridge>['listItems']>>
+  >([]);
 
   const { isMobileWaiter, parentTerminalId } = useFeatures();
   const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(
@@ -615,7 +629,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const loadSystemHealth = useCallback(async () => {
     setSystemLoading(true);
     try {
-      const data = await bridge.diagnostics.getSystemHealth();
+      const [data, financialItems, integrity, parityItems] = await Promise.all([
+        bridge.diagnostics.getSystemHealth(),
+        bridge.sync.getFailedFinancialItems(250),
+        bridge.sync.validateFinancialIntegrity(),
+        getSyncQueueBridge().listItems({ limit: 250 }),
+      ]);
       setSystemHealth(data);
       setFinancialStats(
         normalizeFinancialStats(
@@ -628,6 +647,16 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         ),
       );
       setLastParitySync(normalizeLastParitySync(data.lastParitySync));
+      setRecoveryFinancialItems(
+        Array.isArray(financialItems) ? financialItems : [],
+      );
+      setRecoveryIntegrity(
+        integrity ?? {
+          valid: true,
+          issues: [],
+        },
+      );
+      setRecoveryParityItems(Array.isArray(parityItems) ? parityItems : []);
       systemLoaded.current = true;
     } catch (err) {
       console.error('Failed to load system health:', err);
@@ -663,6 +692,20 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         setLastParitySync(
           normalizeLastParitySync((candidate as DiagnosticsSystemHealth).lastParitySync),
         );
+        void bridge.sync
+          .getFailedFinancialItems(250)
+          .then((items) => setRecoveryFinancialItems(Array.isArray(items) ? items : []))
+          .catch(() => {});
+        void bridge.sync
+          .validateFinancialIntegrity()
+          .then((result) =>
+            setRecoveryIntegrity(result ?? { valid: true, issues: [] }),
+          )
+          .catch(() => {});
+        void getSyncQueueBridge()
+          .listItems({ limit: 250 })
+          .then((items) => setRecoveryParityItems(Array.isArray(items) ? items : []))
+          .catch(() => {});
       }
     };
     onEvent('database-health-update', handleHealthUpdate);
@@ -1069,17 +1112,33 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       }, 0)
     : 0;
   const syncBlockerDetails = systemHealth?.syncBlockerDetails ?? [];
+  const sharedRecoveryIssues = useMemo(
+    () =>
+      buildSyncRecoveryIssues({
+        systemHealth,
+        lastParitySync: effectiveLastParitySync ?? null,
+        financialItems: recoveryFinancialItems,
+        integrity: recoveryIntegrity,
+        parityItems: recoveryParityItems,
+      }).issues,
+    [
+      effectiveLastParitySync,
+      recoveryFinancialItems,
+      recoveryIntegrity,
+      recoveryParityItems,
+      systemHealth,
+    ],
+  );
 
   const totalPending =
     syncStatus.pendingItems + financialPendingCount + parityPendingCount;
   const nextRetryAt = syncStatus.oldestNextRetryAt ?? queueFailure?.nextRetryAt ?? null;
   const hasInvalidOrders = (systemHealth?.invalidOrders?.count ?? 0) > 0;
   const advancedIssueCount =
-    (totalBacklog > 0 ? 1 : 0) +
-    (hasInvalidOrders ? 1 : 0) +
+    sharedRecoveryIssues.length +
     (systemHealth === null && !systemLoading ? 1 : 0);
   const shouldOpenAdvancedByDefault =
-    totalBacklog > 0 || hasInvalidOrders || (systemHealth === null && !systemLoading);
+    sharedRecoveryIssues.length > 0 || (systemHealth === null && !systemLoading);
   const syncErrorDisplay = useMemo(
     () => resolveSyncErrorMessage(syncStatus.error, t),
     [syncStatus.error, t],
@@ -1655,6 +1714,77 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             </div>
           ) : systemHealth ? (
             <>
+              <div className={cn(modalInsetClass, 'xl:col-span-2')}>
+                <div className="flex items-center justify-between">
+                  <div className={modalEyebrowClass}>
+                    {t('sync.recoveryCenter.title', { defaultValue: 'Recovery Center' })}
+                  </div>
+                  <span className={cn(
+                    'text-xs font-semibold',
+                    sharedRecoveryIssues.length > 0
+                      ? 'text-amber-600 dark:text-amber-300'
+                      : 'text-emerald-600 dark:text-emerald-300',
+                  )}>
+                    {sharedRecoveryIssues.length > 0
+                      ? t('sync.system.pending', { count: sharedRecoveryIssues.length })
+                      : t('sync.dashboard.allClear')}
+                  </span>
+                </div>
+                <div className="mt-4 space-y-3">
+                  {sharedRecoveryIssues.length > 0 ? (
+                    sharedRecoveryIssues.slice(0, 6).map((issue) => (
+                      <div
+                        key={issue.id}
+                        className={cn(
+                          'rounded-[18px] border px-4 py-3',
+                          issue.status === 'recovering'
+                            ? 'border-sky-200/80 bg-sky-50/80 dark:border-sky-400/25 dark:bg-sky-500/10'
+                            : issue.severity === 'critical'
+                              ? 'border-red-200/80 bg-red-50/80 dark:border-red-400/25 dark:bg-red-500/10'
+                              : issue.severity === 'error'
+                                ? 'border-amber-200/80 bg-amber-50/80 dark:border-amber-400/25 dark:bg-amber-500/10'
+                                : 'border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-black/20',
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-900 dark:text-white">
+                              {t(issue.titleKey, {
+                                ...issue.params,
+                                defaultValue: issue.code,
+                              })}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-600 dark:text-slate-300/80">
+                              {t(issue.summaryKey, {
+                                ...issue.params,
+                                defaultValue: issue.entityId,
+                              })}
+                            </div>
+                          </div>
+                          <span className="rounded-full border border-white/60 bg-white/80 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-700 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-200">
+                            {t(`recovery.status.${issue.status}`, {
+                              defaultValue: issue.status,
+                            })}
+                          </span>
+                        </div>
+                        <div className="mt-2 text-xs text-slate-600 dark:text-slate-300/80">
+                          {t(issue.guidanceKey, {
+                            ...issue.params,
+                            defaultValue: issue.code,
+                          })}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                      {t('sync.recoveryCenter.noIssues', {
+                        defaultValue: 'No actionable recovery issues are currently visible.',
+                      })}
+                    </p>
+                  )}
+                </div>
+              </div>
+
               <div className={modalInsetClass}>
                 <div className="flex items-center justify-between">
                   <div className={modalEyebrowClass}>{t('sync.system.syncBacklog')}</div>

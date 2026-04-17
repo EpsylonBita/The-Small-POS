@@ -290,15 +290,30 @@ enum AdjustmentCanonicalPaymentResolution {
 // ---------------------------------------------------------------------------
 
 fn is_terminal_auth_failure(error: &str) -> bool {
+    if let Some(code) = crate::terminal_auth_failure_code(error) {
+        return matches!(
+            code.as_str(),
+            "terminal_not_found"
+                | "terminal_inactive"
+                | "invalid_terminal_api_key"
+                | "terminal_identity_mismatch"
+        );
+    }
+
     let lower = error.to_lowercase();
     lower.contains("invalid api key for terminal")
         || lower.contains("terminal identity mismatch")
         || lower.contains("api key is invalid or expired")
         || lower.contains("terminal not authorized")
         || lower.contains("terminal not found or inactive")
+        || lower.contains("terminal is inactive")
 }
 
 fn is_non_authoritative_terminal_lookup_miss(error: &str) -> bool {
+    if crate::terminal_auth_failure_code(error).is_some() {
+        return false;
+    }
+
     let lower = error.to_lowercase();
     lower.contains("terminal not found") && !lower.contains("terminal not found or inactive")
 }
@@ -316,9 +331,15 @@ fn load_zeroized_pos_api_key_optional() -> Option<Zeroizing<String>> {
 /// terminal can be reconfigured without destroying recoverable state.
 fn handle_terminal_auth_failure_from_sync(db: &DbState, app: &AppHandle, error: &str) {
     let reason = crate::terminal_access_reset_reason(error);
+    let auth_code = crate::terminal_auth_failure_code(error);
+    let auth_source = crate::terminal_auth_failure_source(error);
+    let terminal_active = crate::terminal_auth_failure_terminal_active(error);
     warn!(
         reason = %reason,
         error = %error,
+        auth_code = auth_code.as_deref().unwrap_or("unknown"),
+        auth_source = auth_source.as_deref().unwrap_or("unknown"),
+        terminal_active = ?terminal_active,
         "Sync loop detected terminal access revocation; preserving local data and forcing re-onboarding"
     );
     crate::handle_invalid_terminal_credentials(Some(db), app, "sync_loop", error);
@@ -2870,7 +2891,7 @@ fn cleanup_unsupported_order_delete_ops(db: &DbState) -> Result<usize, String> {
 
 /// Requeue failed order sync rows that failed with validation errors so they
 /// can be retried after deploy fixes.
-fn requeue_failed_order_validation_rows(db: &DbState) -> Result<usize, String> {
+pub(crate) fn requeue_failed_order_validation_rows(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE sync_queue
@@ -10231,7 +10252,7 @@ fn align_local_financial_sync_state(
     );
 }
 
-fn requeue_retryable_failed_shift_rows(db: &DbState) -> Result<usize, String> {
+pub(crate) fn requeue_retryable_failed_shift_rows(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
     let mut repaired = 0usize;
@@ -11863,7 +11884,7 @@ fn get_sync_status_for_event(
 ///
 /// This handles the case where the app restarts between order sync and
 /// payment sync — the periodic sweep picks them up.
-fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String> {
+pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     // Find waiting_parent payments whose order now has supabase_id
@@ -11927,7 +11948,7 @@ fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String> {
 ///
 /// Called once per sync loop iteration, before `run_sync_cycle`, mirroring the
 /// pattern used by `reconcile_deferred_payments` for order→payment dependencies.
-fn reconcile_failed_shift_bound_financials(db: &DbState) -> Result<usize, String> {
+pub(crate) fn reconcile_failed_shift_bound_financials(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -12543,7 +12564,7 @@ async fn repair_historical_z_report_rows_after_cutoff(
 /// One-time requeue: recover financial items that failed with "was not found on
 /// the backend" due to the missing parent-shift deferral logic. These items will
 /// now benefit from the new deferral pre-check.
-fn requeue_failed_financial_shift_rows(db: &DbState) -> Result<usize, String> {
+pub(crate) fn requeue_failed_financial_shift_rows(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
     let requeued = conn
@@ -12648,7 +12669,7 @@ fn requeue_falsely_synced_shifts(db: &DbState) -> Result<usize, String> {
     Ok(requeued)
 }
 
-fn requeue_failed_shift_cashier_reference_rows(db: &DbState) -> Result<usize, String> {
+pub(crate) fn requeue_failed_shift_cashier_reference_rows(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
 
@@ -12689,7 +12710,9 @@ fn requeue_failed_shift_cashier_reference_rows(db: &DbState) -> Result<usize, St
     Ok(requeued)
 }
 
-fn requeue_failed_adjustment_missing_endpoint_rows(db: &DbState) -> Result<usize, String> {
+pub(crate) fn requeue_failed_adjustment_missing_endpoint_rows(
+    db: &DbState,
+) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
 
@@ -12745,7 +12768,9 @@ fn is_legacy_adjustment_validation_failure(error: &str) -> bool {
         && normalized.contains("canonical_payment_id")
 }
 
-fn requeue_failed_adjustment_legacy_validation_rows(db: &DbState) -> Result<usize, String> {
+pub(crate) fn requeue_failed_adjustment_legacy_validation_rows(
+    db: &DbState,
+) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
 
@@ -12999,7 +13024,7 @@ pub(crate) fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: 
 /// Finds `payment_adjustments` with `sync_state = 'waiting_parent'` whose
 /// parent `order_payments` has `sync_state = 'applied'` and a canonical
 /// `remote_payment_id`, and transitions them to `sync_state = 'pending'`.
-fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, String> {
+pub(crate) fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let mut stmt = conn

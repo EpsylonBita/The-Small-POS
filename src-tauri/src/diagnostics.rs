@@ -298,10 +298,39 @@ fn get_terminal_context(db: &DbState) -> Value {
         read_local_setting_json(db, category, key)
             .unwrap_or_else(|| runtime.get(runtime_key).cloned().unwrap_or(Value::Null))
     };
+    let prefer_local_text = |keys: &[(&str, &str)]| -> Value {
+        for (category, key) in keys {
+            if let Some(value) = read_local_setting_json(db, category, key) {
+                match value {
+                    Value::String(text) => {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            return Value::String(trimmed.to_string());
+                        }
+                    }
+                    Value::Number(number) => return Value::String(number.to_string()),
+                    Value::Bool(flag) => {
+                        return Value::String(if flag { "true" } else { "false" }.to_string())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Value::Null
+    };
     json!({
         "terminalId": prefer_local("terminal", "terminal_id", "terminal_id"),
         "branchId": prefer_local("terminal", "branch_id", "branch_id"),
+        "branchName": prefer_local_text(&[
+            ("restaurant", "name"),
+            ("restaurant", "subtitle"),
+            ("terminal", "store_name"),
+        ]),
         "organizationId": prefer_local("terminal", "organization_id", "organization_id"),
+        "organizationName": prefer_local_text(&[
+            ("organization", "name"),
+            ("general", "company_name"),
+        ]),
         "terminalType": prefer_local("terminal", "terminal_type", "terminal_type"),
         "parentTerminalId": prefer_local("terminal", "parent_terminal_id", "parent_terminal_id"),
         "ownerTerminalId": prefer_local("terminal", "owner_terminal_id", "owner_terminal_id"),
@@ -348,6 +377,57 @@ fn get_parity_queue_status(db: &DbState) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     serde_json::to_value(crate::sync_queue::get_status(&conn)?)
         .map_err(|e| format!("serialize parity queue status: {e}"))
+}
+
+fn get_parity_actionable_items(db: &DbState, limit: i64) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let items = crate::sync_queue::list_actionable_items(
+        &conn,
+        &crate::sync_queue::QueueListQuery {
+            limit: Some(limit),
+            module_type: None,
+        },
+    )?;
+    serde_json::to_value(items).map_err(|e| format!("serialize parity actionable items: {e}"))
+}
+
+fn get_parity_failure_families(db: &DbState) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let items = crate::sync_queue::list_actionable_items(
+        &conn,
+        &crate::sync_queue::QueueListQuery {
+            limit: Some(250),
+            module_type: None,
+        },
+    )?;
+
+    let mut families: std::collections::BTreeMap<String, serde_json::Map<String, Value>> =
+        std::collections::BTreeMap::new();
+
+    for item in items {
+        let key = format!("{}::{}", item.module_type, item.status);
+        let entry = families.entry(key).or_insert_with(|| {
+            let mut map = serde_json::Map::new();
+            map.insert("moduleType".into(), json!(item.module_type));
+            map.insert("status".into(), json!(item.status));
+            map.insert("count".into(), json!(0));
+            map.insert("sampleItemId".into(), json!(item.id.clone()));
+            map.insert("sampleTableName".into(), json!(item.table_name.clone()));
+            map.insert("sampleRecordId".into(), json!(item.record_id.clone()));
+            map.insert("sampleError".into(), json!(item.error_message.clone()));
+            map
+        });
+
+        let current_count = entry.get("count").and_then(Value::as_i64).unwrap_or(0);
+        entry.insert("count".into(), json!(current_count + 1));
+    }
+
+    Ok(Value::Array(
+        families
+            .into_values()
+            .map(Value::Object)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn get_financial_queue_status(db: &DbState) -> Result<Value, String> {
@@ -575,6 +655,14 @@ pub fn export_diagnostics_with_options(
         get_parity_queue_status(db).unwrap_or(Value::Null),
         export_options.redact_sensitive,
     );
+    let parity_actionable_items = redact_value_for_export(
+        get_parity_actionable_items(db, 50).unwrap_or(Value::Null),
+        export_options.redact_sensitive,
+    );
+    let parity_failure_families = redact_value_for_export(
+        get_parity_failure_families(db).unwrap_or(Value::Null),
+        export_options.redact_sensitive,
+    );
     let financial_queue_status = redact_value_for_export(
         get_financial_queue_status(db).unwrap_or(Value::Null),
         export_options.redact_sensitive,
@@ -632,6 +720,18 @@ pub fn export_diagnostics_with_options(
         &zip_options,
         "parity_queue_status.json",
         &parity_queue_status,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "parity_actionable_items.json",
+        &parity_actionable_items,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "parity_failure_families.json",
+        &parity_failure_families,
     )?;
     write_json_to_zip(
         &mut zip,
@@ -1068,6 +1168,15 @@ mod tests {
             "95e63e0b-5b3a-48f8-9c96-fb9f041a0255",
         )
         .unwrap();
+        crate::db::set_setting(&conn, "restaurant", "name", "Kifisia Branch").unwrap();
+        crate::db::set_setting(&conn, "organization", "name", "The Small Group").unwrap();
+        crate::db::set_setting(
+            &conn,
+            "terminal",
+            "admin_dashboard_url",
+            "https://admin.example.com",
+        )
+        .unwrap();
         crate::db::set_setting(&conn, "terminal", "terminal_type", "secondary").unwrap();
         crate::db::set_setting(&conn, "terminal", "api_key", "super-secret").unwrap();
         conn.execute(
@@ -1124,6 +1233,8 @@ mod tests {
         assert!(entry_names.contains(&"closeout_readiness.json".to_string()));
         assert!(entry_names.contains(&"terminal_settings_snapshot.json".to_string()));
         assert!(entry_names.contains(&"parity_queue_status.json".to_string()));
+        assert!(entry_names.contains(&"parity_actionable_items.json".to_string()));
+        assert!(entry_names.contains(&"parity_failure_families.json".to_string()));
         assert!(entry_names.contains(&"financial_queue_status.json".to_string()));
         assert!(entry_names.contains(&"last_parity_sync.json".to_string()));
         assert!(entry_names.contains(&"credential_state.json".to_string()));
@@ -1138,6 +1249,8 @@ mod tests {
             terminal_context["organizationId"],
             json!("95e63e0b-5b3a-48f8-9c96-fb9f041a0255")
         );
+        assert_eq!(terminal_context["branchName"], json!("Kifisia Branch"));
+        assert_eq!(terminal_context["organizationName"], json!("The Small Group"));
 
         let terminal_settings = read_zip_json(&mut archive, "terminal_settings_snapshot.json");
         assert_eq!(

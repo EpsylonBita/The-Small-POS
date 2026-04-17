@@ -3581,6 +3581,7 @@
     "sessionExpired": "Session expired. Please log in again.",
     "remoteWipe": "Terminal has been reset remotely",
     "terminalDeleted": "This terminal has been deleted from the admin dashboard. Please reconfigure.",
+    "terminalInactive": "This terminal has been disabled in the admin dashboard. Please contact an operator or restore access.",
     "factoryReset": "Factory reset command received from admin dashboard."
   },
   "orderFlow": {
@@ -4908,5 +4909,141 @@
     "processing": "Processing...",
     "success": "Split payment completed successfully",
     "failed": "Split payment failed. Please try again."
+  },
+  "recovery": {
+    "common": {
+      "reference": "Reference",
+      "entityId": "Entity ID",
+      "order": "Order",
+      "payment": "Payment",
+      "adjustment": "Adjustment",
+      "issueCount_one": "{{count}} issue",
+      "issueCount_other": "{{count}} issues",
+      "unknownActor": "Unknown actor"
+    },
+    "status": {
+      "blocking": "Blocking",
+      "recovering": "Recovering",
+      "resolved": "Resolved",
+      "polling": "Polling",
+      "stale": "Stale",
+      "offline": "Offline",
+      "healthy": "Healthy",
+      "pending": "Pending",
+      "error": "Error"
+    },
+    "messages": {
+      "actionSucceeded": "Action completed successfully.",
+      "actionFailed": "Action failed. Review the issue details and try again."
+    },
+    "actions": {
+      "refresh": { "label": "Refresh issues" },
+      "openConnectionSettings": { "label": "Open connection settings" },
+      "runParitySyncNow": { "label": "Run sync now" },
+      "retryParityItem": { "label": "Retry parity item" },
+      "retryParityModule": { "label": "Retry parity module" },
+      "retrySync": { "label": "Retry sync row" },
+      "validatePendingOrders": { "label": "Validate pending orders" },
+      "removeInvalidOrders": {
+        "label": "Remove invalid orders",
+        "confirmTitle": "Remove invalid local orders?",
+        "confirmMessage": "This removes the invalid local order rows that cannot sync."
+      },
+      "retryFinancialItem": { "label": "Retry financial item" },
+      "retryAllFailedFinancial": { "label": "Retry all failed financial items" },
+      "repairOrphanedFinancial": { "label": "Repair orphaned financial rows" },
+      "repairWaitingParentPayments": { "label": "Promote waiting payments" },
+      "repairWaitingParentAdjustments": { "label": "Promote waiting adjustments" },
+      "requeueFailedFinancialShiftRows": { "label": "Requeue shift-bound financial rows" },
+      "requeueFailedAdjustmentMissingEndpointRows": { "label": "Requeue endpoint-blocked adjustments" },
+      "requeueFailedAdjustmentLegacyValidationRows": { "label": "Requeue legacy validation adjustments" },
+      "contactOperator": { "label": "Contact operator" },
+      "confirmTitle": "Confirm recovery action",
+      "confirmMessage": "This action changes local recovery data for the selected issue."
+    },
+    "context": {
+      "terminalId": "Terminal ID",
+      "branchId": "Branch ID",
+      "branchName": "Branch",
+      "organizationId": "Organization ID",
+      "organizationName": "Organization",
+      "syncHealthState": "Sync health"
+    },
+    "center": {
+      "eyebrow": "Recovery center",
+      "title": "Self-service recovery",
+      "subtitle": "Use guided repair actions to resolve blocked sync problems without leaving the POS.",
+      "needsAttentionTitle": "Needs attention",
+      "needsAttentionSubtitle": "Blocking issues that currently need repair or operator intervention.",
+      "noBlockingIssues": "No blocking recovery issues are currently visible.",
+      "recoveringTitle": "Recovering",
+      "recoveringSubtitle": "Issues that are queued, deferred, or ready for another sync attempt.",
+      "noRecoveringIssues": "No recovering issues are currently visible.",
+      "recentActionsTitle": "Resolved recently",
+      "recentActionsSubtitle": "Every repair attempt is audited locally so staff can see what was tried and what succeeded.",
+      "noRecentActions": "No recovery actions have been recorded yet."
+    },
+    "issues": {
+      "invalidOrders": {
+        "title": "{{count}} invalid local orders",
+        "summary": "These local orders are missing menu data or cache references and cannot be synced safely.",
+        "guidance": "Validate the pending orders first. Remove only the rows that stay invalid after validation."
+      },
+      "syncBlocker": {
+        "title": "Blocked sync row for {{entityType}}",
+        "summary": "A queue row is blocked by {{blockerReason}} and still needs a retry or manual repair.",
+        "guidance": "Retry the blocked sync row first. If the same blocker returns, contact operator with the blocker reason and queue details."
+      },
+      "parityMissingCredentials": {
+        "title": "Terminal credentials need attention",
+        "summary": "Parity sync cannot drain until the terminal admin URL and POS API key are configured.",
+        "guidance": "Open connection settings and confirm the terminal connection code, admin URL, and POS API key."
+      },
+      "parityProcessorStalled": {
+        "title": "Parity processor stalled",
+        "summary": "The last parity cycle processed {{processed}} items and still left {{remaining}} queued.",
+        "guidance": "Run parity sync now. If the same backlog remains, inspect the module-level parity issues below or contact operator."
+      },
+      "parityModuleFailed": {
+        "title": "{{moduleLabel}} parity failures",
+        "summary": "{{count}} parity items in {{moduleLabel}} are failed and need a retry.",
+        "guidance": "Retry the sample item if you want a narrow test, or retry the full parity module to unblock the whole family."
+      },
+      "parityModulePending": {
+        "title": "{{moduleLabel}} parity backlog",
+        "summary": "{{count}} parity items in {{moduleLabel}} are still pending.",
+        "guidance": "Run parity sync now or retry the module if the backlog is stuck waiting for another cycle."
+      },
+      "orderPaymentWaitingParent": {
+        "title": "Payment waiting for parent order",
+        "summary": "This payment is still waiting for its parent order to complete sync.",
+        "guidance": "Promote waiting-parent payments after the order is available remotely, then run parity sync again."
+      },
+      "paymentAdjustmentWaitingParent": {
+        "title": "Adjustment waiting for parent payment",
+        "summary": "This adjustment is still waiting for its parent payment to reach the applied state.",
+        "guidance": "Promote waiting-parent adjustments after the parent payment is applied, then retry sync."
+      },
+      "paymentAdjustmentMissingCanonicalRemotePayment": {
+        "title": "Adjustment missing canonical remote payment",
+        "summary": "The parent payment is applied, but its canonical remote payment id is still missing.",
+        "guidance": "Run the orphaned financial repair. If the adjustment still cannot be linked to the backend payment, contact operator."
+      },
+      "financialIntegrity": {
+        "title": "Financial integrity issue",
+        "summary": "A payment or adjustment record needs repair before sync can complete.",
+        "guidance": "Use the suggested recovery action if available. If the issue remains unchanged, contact operator with the exact reason code."
+      },
+      "financialQueueFailed": {
+        "title": "Failed financial sync row",
+        "summary": "A financial sync row failed with {{lastError}}.",
+        "guidance": "Use the mapped recovery action when available. If the same failure returns after retry, contact operator."
+      },
+      "contactOperatorFallback": {
+        "title": "Operator attention required",
+        "summary": "Sync backlog is visible, but there is no guided fix mapped for this exact failure yet.",
+        "guidance": "Contact operator and include the diagnostics bundle so the next occurrence can be mapped to a guided fix."
+      }
+    }
   }
 }

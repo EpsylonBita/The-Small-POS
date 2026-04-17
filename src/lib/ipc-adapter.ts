@@ -40,6 +40,7 @@ import type {
   SettingsGetRequest,
   SettingsSetRequest,
   SettingsUpdateLocalRequest,
+  SyncFinancialIntegrityResponse,
   SyncFinancialQueueItem,
   SyncFinancialQueueItemsResponse,
   SyncRemoveInvalidOrdersResponse,
@@ -1167,7 +1168,7 @@ export interface PlatformBridge {
     retryFinancialItem(syncId: number | string): Promise<IpcResult>;
     retryAllFailedFinancial(): Promise<IpcResult>;
     getUnsyncedFinancialSummary(): Promise<any>;
-    validateFinancialIntegrity(): Promise<IpcResult>;
+    validateFinancialIntegrity(): Promise<SyncFinancialIntegrityResponse>;
     requeueOrphanedFinancial(): Promise<IpcResult>;
     testParentConnection(): Promise<IpcResult>;
     rediscoverParent(): Promise<IpcResult>;

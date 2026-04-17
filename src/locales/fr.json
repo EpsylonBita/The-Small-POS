@@ -3581,6 +3581,7 @@
     "sessionExpired": "Session expirée. Veuillez vous reconnecter.",
     "remoteWipe": "Le terminal a été réinitialisé à distance",
     "terminalDeleted": "Ce terminal a été supprimé du tableau de bord d'administration. Veuillez le reconfigurer.",
+    "terminalInactive": "Ce terminal a été désactivé dans le tableau de bord d'administration. Veuillez contacter un opérateur ou rétablir l'accès.",
     "factoryReset": "Commande de réinitialisation d'usine reçue du tableau de bord d'administration."
   },
   "orderFlow": {
@@ -4908,5 +4909,141 @@
     "processing": "Processing...",
     "success": "Split payment completed successfully",
     "failed": "Split payment failed. Please try again."
+  },
+  "recovery": {
+    "common": {
+      "reference": "Référence",
+      "entityId": "ID de l'entité",
+      "order": "Commande",
+      "payment": "Paiement",
+      "adjustment": "Ajustement",
+      "issueCount_one": "{{count}} problème",
+      "issueCount_other": "{{count}} problèmes",
+      "unknownActor": "Acteur inconnu"
+    },
+    "status": {
+      "blocking": "Bloqué",
+      "recovering": "En récupération",
+      "resolved": "Résolu",
+      "polling": "Vérification",
+      "stale": "Obsolète",
+      "offline": "Hors ligne",
+      "healthy": "Sain",
+      "pending": "En attente",
+      "error": "Erreur"
+    },
+    "messages": {
+      "actionSucceeded": "Action terminée avec succès.",
+      "actionFailed": "L'action a échoué. Vérifiez les détails du problème et réessayez."
+    },
+    "actions": {
+      "refresh": { "label": "Actualiser les problèmes" },
+      "openConnectionSettings": { "label": "Ouvrir les paramètres de connexion" },
+      "runParitySyncNow": { "label": "Lancer la synchronisation maintenant" },
+      "retryParityItem": { "label": "Réessayer l'élément parity" },
+      "retryParityModule": { "label": "Réessayer le module parity" },
+      "retrySync": { "label": "Réessayer la ligne de synchro" },
+      "validatePendingOrders": { "label": "Valider les commandes en attente" },
+      "removeInvalidOrders": {
+        "label": "Supprimer les commandes invalides",
+        "confirmTitle": "Supprimer les commandes locales invalides ?",
+        "confirmMessage": "Cette action supprime les lignes de commandes locales invalides qui ne peuvent pas être synchronisées."
+      },
+      "retryFinancialItem": { "label": "Réessayer l'élément financier" },
+      "retryAllFailedFinancial": { "label": "Réessayer tous les éléments financiers en échec" },
+      "repairOrphanedFinancial": { "label": "Réparer les lignes financières orphelines" },
+      "repairWaitingParentPayments": { "label": "Promouvoir les paiements en attente" },
+      "repairWaitingParentAdjustments": { "label": "Promouvoir les ajustements en attente" },
+      "requeueFailedFinancialShiftRows": { "label": "Réenfiler les lignes financières liées à la vacation" },
+      "requeueFailedAdjustmentMissingEndpointRows": { "label": "Réenfiler les ajustements bloqués par l'endpoint" },
+      "requeueFailedAdjustmentLegacyValidationRows": { "label": "Réenfiler les ajustements de validation legacy" },
+      "contactOperator": { "label": "Contacter l'operator" },
+      "confirmTitle": "Confirmer l'action de récupération",
+      "confirmMessage": "Cette action modifie les données locales de récupération pour le problème sélectionné."
+    },
+    "context": {
+      "terminalId": "ID du terminal",
+      "branchId": "ID de l'agence",
+      "branchName": "Agence",
+      "organizationId": "ID de l'organisation",
+      "organizationName": "Organisation",
+      "syncHealthState": "Santé de la synchro"
+    },
+    "center": {
+      "eyebrow": "Centre de récupération",
+      "title": "Récupération en libre-service",
+      "subtitle": "Utilisez des actions de réparation guidées pour résoudre les problèmes de synchronisation bloqués sans quitter le POS.",
+      "needsAttentionTitle": "Nécessite une attention",
+      "needsAttentionSubtitle": "Problèmes bloquants qui nécessitent actuellement une réparation ou l'intervention de l'operator.",
+      "noBlockingIssues": "Aucun problème de récupération bloquant n'est actuellement visible.",
+      "recoveringTitle": "En récupération",
+      "recoveringSubtitle": "Problèmes en file, différés ou prêts pour une nouvelle tentative de synchronisation.",
+      "noRecoveringIssues": "Aucun problème en récupération n'est actuellement visible.",
+      "recentActionsTitle": "Résolu récemment",
+      "recentActionsSubtitle": "Chaque tentative de réparation est auditée localement afin que le personnel voie ce qui a été essayé et ce qui a réussi.",
+      "noRecentActions": "Aucune action de récupération n'a encore été enregistrée."
+    },
+    "issues": {
+      "invalidOrders": {
+        "title": "{{count}} commandes locales invalides",
+        "summary": "Ces commandes locales n'ont pas de données de menu ou de références de cache valides et ne peuvent pas être synchronisées en toute sécurité.",
+        "guidance": "Validez d'abord les commandes en attente. Supprimez uniquement les lignes qui restent invalides après validation."
+      },
+      "syncBlocker": {
+        "title": "Ligne de synchro bloquée pour {{entityType}}",
+        "summary": "Une ligne de file est bloquée par {{blockerReason}} et nécessite encore une nouvelle tentative ou une réparation manuelle.",
+        "guidance": "Réessayez d'abord la ligne de synchro bloquée. Si le même blocage revient, contactez l'operator avec la raison du blocage et les détails de la file."
+      },
+      "parityMissingCredentials": {
+        "title": "Les identifiants du terminal nécessitent une attention",
+        "summary": "La synchronisation parity ne peut pas se vider tant que l'URL admin et la clé API POS du terminal ne sont pas configurées.",
+        "guidance": "Ouvrez les paramètres de connexion et vérifiez le code de connexion du terminal, l'URL admin et la clé API POS."
+      },
+      "parityProcessorStalled": {
+        "title": "Le processeur parity est bloqué",
+        "summary": "Le dernier cycle parity a traité {{processed}} éléments et a laissé {{remaining}} éléments en file.",
+        "guidance": "Lancez la synchronisation parity maintenant. Si le même backlog persiste, inspectez les problèmes parity par module ci-dessous ou contactez l'operator."
+      },
+      "parityModuleFailed": {
+        "title": "Échecs parity dans {{moduleLabel}}",
+        "summary": "{{count}} éléments parity dans {{moduleLabel}} ont échoué et nécessitent une nouvelle tentative.",
+        "guidance": "Réessayez d'abord l'élément d'exemple pour un test ciblé ou réessayez tout le module parity pour débloquer toute la famille."
+      },
+      "parityModulePending": {
+        "title": "Backlog parity dans {{moduleLabel}}",
+        "summary": "{{count}} éléments parity dans {{moduleLabel}} sont toujours en attente.",
+        "guidance": "Lancez la synchronisation parity maintenant ou réessayez le module si le backlog reste bloqué en attente d'un autre cycle."
+      },
+      "orderPaymentWaitingParent": {
+        "title": "Paiement en attente de la commande parente",
+        "summary": "Ce paiement attend encore que sa commande parente termine la synchronisation.",
+        "guidance": "Promouvez les paiements waiting-parent une fois que la commande est disponible à distance, puis relancez la synchronisation parity."
+      },
+      "paymentAdjustmentWaitingParent": {
+        "title": "Ajustement en attente du paiement parent",
+        "summary": "Cet ajustement attend encore que son paiement parent atteigne l'état applied.",
+        "guidance": "Promouvez les ajustements waiting-parent après que le paiement parent soit applied, puis réessayez la synchronisation."
+      },
+      "paymentAdjustmentMissingCanonicalRemotePayment": {
+        "title": "Ajustement sans paiement distant canonique",
+        "summary": "Le paiement parent est applied, mais son identifiant de paiement distant canonique manque encore.",
+        "guidance": "Lancez la réparation des lignes financières orphelines. Si l'ajustement ne peut toujours pas être lié au paiement backend, contactez l'operator."
+      },
+      "financialIntegrity": {
+        "title": "Problème d'intégrité financière",
+        "summary": "Un enregistrement de paiement ou d'ajustement doit être réparé avant la fin de la synchronisation.",
+        "guidance": "Utilisez l'action de récupération proposée si elle est disponible. Si le problème reste inchangé, contactez l'operator avec le reason code exact."
+      },
+      "financialQueueFailed": {
+        "title": "Ligne de synchro financière en échec",
+        "summary": "Une ligne de synchro financière a échoué avec {{lastError}}.",
+        "guidance": "Utilisez l'action de récupération associée lorsqu'elle existe. Si le même échec revient après une nouvelle tentative, contactez l'operator."
+      },
+      "contactOperatorFallback": {
+        "title": "Intervention de l'operator requise",
+        "summary": "Un backlog de synchronisation est visible, mais aucune solution guidée n'est encore associée à cet échec précis.",
+        "guidance": "Contactez l'operator et joignez le bundle de diagnostics afin que la prochaine occurrence puisse être reliée à une solution guidée."
+      }
+    }
   }
 }

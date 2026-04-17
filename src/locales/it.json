@@ -3581,6 +3581,7 @@
     "sessionExpired": "Sessione scaduta. Effettua nuovamente l'accesso.",
     "remoteWipe": "Il terminale è stato ripristinato da remoto",
     "terminalDeleted": "Questo terminale è stato eliminato dal pannello di amministrazione. Riconfigurare.",
+    "terminalInactive": "Questo terminale è stato disattivato nel pannello di amministrazione. Contatta un operatore o ripristina l'accesso.",
     "factoryReset": "Comando di ripristino di fabbrica ricevuto dal pannello di amministrazione."
   },
   "orderFlow": {
@@ -4908,5 +4909,141 @@
     "processing": "Processing...",
     "success": "Split payment completed successfully",
     "failed": "Split payment failed. Please try again."
+  },
+  "recovery": {
+    "common": {
+      "reference": "Riferimento",
+      "entityId": "ID entità",
+      "order": "Ordine",
+      "payment": "Pagamento",
+      "adjustment": "Rettifica",
+      "issueCount_one": "{{count}} problema",
+      "issueCount_other": "{{count}} problemi",
+      "unknownActor": "Attore sconosciuto"
+    },
+    "status": {
+      "blocking": "Bloccato",
+      "recovering": "In recupero",
+      "resolved": "Risolto",
+      "polling": "Controllo",
+      "stale": "Obsoleto",
+      "offline": "Offline",
+      "healthy": "OK",
+      "pending": "In attesa",
+      "error": "Errore"
+    },
+    "messages": {
+      "actionSucceeded": "Azione completata con successo.",
+      "actionFailed": "Azione non riuscita. Controlla i dettagli del problema e riprova."
+    },
+    "actions": {
+      "refresh": { "label": "Aggiorna problemi" },
+      "openConnectionSettings": { "label": "Apri impostazioni di connessione" },
+      "runParitySyncNow": { "label": "Esegui sincronizzazione ora" },
+      "retryParityItem": { "label": "Riprova elemento parity" },
+      "retryParityModule": { "label": "Riprova modulo parity" },
+      "retrySync": { "label": "Riprova riga di sincronizzazione" },
+      "validatePendingOrders": { "label": "Valida ordini in attesa" },
+      "removeInvalidOrders": {
+        "label": "Rimuovi ordini non validi",
+        "confirmTitle": "Rimuovere gli ordini locali non validi?",
+        "confirmMessage": "Questa azione rimuove le righe di ordine locali non valide che non possono essere sincronizzate."
+      },
+      "retryFinancialItem": { "label": "Riprova elemento finanziario" },
+      "retryAllFailedFinancial": { "label": "Riprova tutti gli elementi finanziari non riusciti" },
+      "repairOrphanedFinancial": { "label": "Ripara righe finanziarie orfane" },
+      "repairWaitingParentPayments": { "label": "Promuovi pagamenti in attesa" },
+      "repairWaitingParentAdjustments": { "label": "Promuovi rettifiche in attesa" },
+      "requeueFailedFinancialShiftRows": { "label": "Rimetti in coda le righe finanziarie legate al turno" },
+      "requeueFailedAdjustmentMissingEndpointRows": { "label": "Rimetti in coda le rettifiche bloccate dall'endpoint" },
+      "requeueFailedAdjustmentLegacyValidationRows": { "label": "Rimetti in coda le rettifiche di validazione legacy" },
+      "contactOperator": { "label": "Contatta operatore" },
+      "confirmTitle": "Conferma azione di recupero",
+      "confirmMessage": "Questa azione modifica i dati locali di recupero per il problema selezionato."
+    },
+    "context": {
+      "terminalId": "ID terminale",
+      "branchId": "ID sede",
+      "branchName": "Sede",
+      "organizationId": "ID organizzazione",
+      "organizationName": "Organizzazione",
+      "syncHealthState": "Stato salute sync"
+    },
+    "center": {
+      "eyebrow": "Centro di recupero",
+      "title": "Recupero self-service",
+      "subtitle": "Usa azioni di riparazione guidate per risolvere problemi di sincronizzazione bloccati senza uscire dal POS.",
+      "needsAttentionTitle": "Richiede attenzione",
+      "needsAttentionSubtitle": "Problemi bloccanti che al momento richiedono una riparazione o l'intervento dell'operatore.",
+      "noBlockingIssues": "Al momento non sono visibili problemi di recupero bloccanti.",
+      "recoveringTitle": "In recupero",
+      "recoveringSubtitle": "Problemi in coda, rimandati o pronti per un nuovo tentativo di sincronizzazione.",
+      "noRecoveringIssues": "Al momento non sono visibili problemi in recupero.",
+      "recentActionsTitle": "Risolto di recente",
+      "recentActionsSubtitle": "Ogni tentativo di riparazione viene registrato localmente così il personale può vedere cosa è stato provato e cosa ha funzionato.",
+      "noRecentActions": "Nessuna azione di recupero è stata ancora registrata."
+    },
+    "issues": {
+      "invalidOrders": {
+        "title": "{{count}} ordini locali non validi",
+        "summary": "Questi ordini locali non hanno dati menu o riferimenti cache validi e non possono essere sincronizzati in sicurezza.",
+        "guidance": "Valida prima gli ordini in attesa. Rimuovi solo le righe che restano non valide dopo la validazione."
+      },
+      "syncBlocker": {
+        "title": "Riga di sincronizzazione bloccata per {{entityType}}",
+        "summary": "Una riga di coda è bloccata da {{blockerReason}} e richiede un nuovo tentativo o una riparazione manuale.",
+        "guidance": "Riprova prima la riga di sincronizzazione bloccata. Se lo stesso blocco ritorna, contatta l'operatore con il motivo del blocco e i dettagli della coda."
+      },
+      "parityMissingCredentials": {
+        "title": "Le credenziali del terminale richiedono attenzione",
+        "summary": "La sincronizzazione parity non può svuotarsi finché l'URL admin e la chiave API POS del terminale non sono configurati.",
+        "guidance": "Apri le impostazioni di connessione e verifica il codice di connessione del terminale, l'URL admin e la chiave API POS."
+      },
+      "parityProcessorStalled": {
+        "title": "Il processore parity è bloccato",
+        "summary": "L'ultimo ciclo parity ha elaborato {{processed}} elementi e ne ha lasciati ancora {{remaining}} in coda.",
+        "guidance": "Esegui ora la sincronizzazione parity. Se lo stesso backlog rimane, controlla i problemi parity a livello di modulo qui sotto o contatta l'operatore."
+      },
+      "parityModuleFailed": {
+        "title": "Errori parity in {{moduleLabel}}",
+        "summary": "{{count}} elementi parity in {{moduleLabel}} sono falliti e richiedono un nuovo tentativo.",
+        "guidance": "Riprova prima l'elemento di esempio per un test mirato oppure riprova l'intero modulo parity per sbloccare tutta la famiglia."
+      },
+      "parityModulePending": {
+        "title": "Backlog parity in {{moduleLabel}}",
+        "summary": "{{count}} elementi parity in {{moduleLabel}} sono ancora in attesa.",
+        "guidance": "Esegui ora la sincronizzazione parity oppure riprova il modulo se il backlog è fermo in attesa di un altro ciclo."
+      },
+      "orderPaymentWaitingParent": {
+        "title": "Pagamento in attesa dell'ordine padre",
+        "summary": "Questo pagamento sta ancora aspettando che il relativo ordine completi la sincronizzazione.",
+        "guidance": "Promuovi i pagamenti waiting-parent dopo che l'ordine è disponibile in remoto, quindi esegui di nuovo la sincronizzazione parity."
+      },
+      "paymentAdjustmentWaitingParent": {
+        "title": "Rettifica in attesa del pagamento padre",
+        "summary": "Questa rettifica sta ancora aspettando che il pagamento padre raggiunga lo stato applied.",
+        "guidance": "Promuovi le rettifiche waiting-parent dopo che il pagamento padre è applied, poi riprova la sincronizzazione."
+      },
+      "paymentAdjustmentMissingCanonicalRemotePayment": {
+        "title": "Rettifica senza pagamento remoto canonico",
+        "summary": "Il pagamento padre è applied, ma manca ancora il suo canonical remote payment id.",
+        "guidance": "Esegui la riparazione delle righe finanziarie orfane. Se la rettifica continua a non poter essere collegata al pagamento backend, contatta l'operatore."
+      },
+      "financialIntegrity": {
+        "title": "Problema di integrità finanziaria",
+        "summary": "Un record di pagamento o di rettifica richiede una riparazione prima che la sincronizzazione possa completarsi.",
+        "guidance": "Usa l'azione di recupero suggerita se disponibile. Se il problema resta invariato, contatta l'operatore con il reason code esatto."
+      },
+      "financialQueueFailed": {
+        "title": "Riga di sincronizzazione finanziaria fallita",
+        "summary": "Una riga di sincronizzazione finanziaria è fallita con {{lastError}}.",
+        "guidance": "Usa l'azione di recupero mappata quando disponibile. Se lo stesso errore ritorna dopo il nuovo tentativo, contatta l'operatore."
+      },
+      "contactOperatorFallback": {
+        "title": "Serve l'intervento dell'operatore",
+        "summary": "È visibile un backlog di sincronizzazione, ma non esiste ancora una correzione guidata per questo errore specifico.",
+        "guidance": "Contatta l'operatore e includi il bundle diagnostico così la prossima occorrenza potrà essere associata a una soluzione guidata."
+      }
+    }
   }
 }

@@ -841,19 +841,108 @@ pub(crate) fn hydrate_terminal_credentials_from_local_settings(db: &db::DbState)
     }
 }
 
+fn extract_terminal_auth_failure_json(error: &str) -> Option<serde_json::Value> {
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return Some(parsed);
+        }
+    }
+
+    if let Some(marker_index) = trimmed.find("):") {
+        let candidate = trimmed[(marker_index + 2)..].trim_start_matches(':').trim();
+        if candidate.starts_with('{') || candidate.starts_with('[') {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(candidate) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn terminal_auth_failure_code(error: &str) -> Option<String> {
+    extract_terminal_auth_failure_json(error).and_then(|payload| {
+        payload
+            .get("code")
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+pub(crate) fn terminal_auth_failure_source(error: &str) -> Option<String> {
+    extract_terminal_auth_failure_json(error).and_then(|payload| {
+        payload
+            .get("authSource")
+            .or_else(|| payload.get("auth_source"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+pub(crate) fn terminal_auth_failure_terminal_active(error: &str) -> Option<bool> {
+    extract_terminal_auth_failure_json(error).and_then(|payload| {
+        payload
+            .get("terminalActive")
+            .or_else(|| payload.get("terminal_active"))
+            .and_then(|value| {
+                value
+                    .as_bool()
+                    .or_else(|| value.as_i64().map(|flag| flag == 1))
+                    .or_else(|| {
+                        value.as_str().and_then(|flag| {
+                            match flag.trim().to_ascii_lowercase().as_str() {
+                                "true" | "1" | "yes" | "on" => Some(true),
+                                "false" | "0" | "no" | "off" => Some(false),
+                                _ => None,
+                            }
+                        })
+                    })
+            })
+    })
+}
+
 pub(crate) fn is_terminal_auth_failure(error: &str) -> bool {
+    if let Some(code) = terminal_auth_failure_code(error) {
+        return matches!(
+            code.as_str(),
+            "terminal_not_found"
+                | "terminal_inactive"
+                | "invalid_terminal_api_key"
+                | "terminal_identity_mismatch"
+        );
+    }
+
     let lower = error.to_lowercase();
     lower.contains("invalid api key for terminal")
         || lower.contains("terminal identity mismatch")
         || lower.contains("api key is invalid or expired")
         || lower.contains("terminal not authorized")
         || lower.contains("terminal not found or inactive")
+        || lower.contains("terminal is inactive")
 }
 
 pub(crate) fn terminal_access_reset_reason(error: &str) -> &'static str {
+    if let Some(code) = terminal_auth_failure_code(error) {
+        return match code.as_str() {
+            "terminal_not_found" => "terminal_deleted",
+            "terminal_inactive" => "terminal_inactive",
+            "invalid_terminal_api_key" | "terminal_identity_mismatch" => {
+                "invalid_terminal_credentials"
+            }
+            _ => "invalid_terminal_credentials",
+        };
+    }
+
     let lower = error.to_lowercase();
-    if lower.contains("terminal not found or inactive") {
-        "terminal_deleted"
+    if lower.contains("terminal is inactive") {
+        "terminal_inactive"
     } else {
         "invalid_terminal_credentials"
     }
@@ -880,10 +969,16 @@ pub(crate) fn handle_invalid_terminal_credentials(
     error: &str,
 ) {
     let reason = terminal_access_reset_reason(error);
+    let auth_code = terminal_auth_failure_code(error);
+    let auth_source = terminal_auth_failure_source(error);
+    let terminal_active = terminal_auth_failure_terminal_active(error);
     warn!(
         source = %source,
         error = %error,
         reason = %reason,
+        auth_code = auth_code.as_deref().unwrap_or("unknown"),
+        auth_source = auth_source.as_deref().unwrap_or("unknown"),
+        terminal_active = ?terminal_active,
         "Terminal access revoked; clearing stored API key and forcing onboarding reset without deleting local data"
     );
     clear_terminal_api_key(db);
@@ -1155,19 +1250,35 @@ mod tests {
     }
 
     #[test]
-    fn terminal_access_reset_reason_maps_explicitly_inactive_terminal_to_terminal_deleted() {
+    fn terminal_access_reset_reason_maps_structured_not_found_to_terminal_deleted() {
         assert_eq!(
-            terminal_access_reset_reason("Terminal not found or inactive (HTTP 401)"),
+            terminal_access_reset_reason(
+                r#"Terminal not found (HTTP 401): {"success":false,"error":"Terminal not found","code":"terminal_not_found","authSource":"db"}"#
+            ),
             "terminal_deleted"
         );
     }
 
     #[test]
-    fn generic_terminal_lookup_miss_is_not_treated_as_terminal_revocation() {
+    fn terminal_access_reset_reason_maps_structured_inactive_terminal_to_terminal_inactive() {
         assert_eq!(
-            terminal_access_reset_reason("Terminal not found (HTTP 404)"),
+            terminal_access_reset_reason(
+                r#"Terminal is inactive (HTTP 401): {"success":false,"error":"Terminal is inactive","code":"terminal_inactive","authSource":"cache","terminalActive":false}"#
+            ),
+            "terminal_inactive"
+        );
+    }
+
+    #[test]
+    fn legacy_combined_terminal_message_no_longer_infers_terminal_deleted() {
+        assert_eq!(
+            terminal_access_reset_reason("Terminal not found or inactive (HTTP 401)"),
             "invalid_terminal_credentials"
         );
+    }
+
+    #[test]
+    fn generic_terminal_lookup_miss_is_not_treated_as_terminal_revocation() {
         assert!(
             !is_terminal_auth_failure("Terminal not found (HTTP 404)"),
             "generic lookup misses must not wipe local terminal credentials"
@@ -1177,13 +1288,33 @@ mod tests {
     #[test]
     fn terminal_access_reset_reason_keeps_key_mismatch_non_destructive() {
         assert_eq!(
-            terminal_access_reset_reason("Invalid API key for terminal (HTTP 401)"),
+            terminal_access_reset_reason(
+                r#"Invalid API key for terminal (HTTP 401): {"success":false,"error":"Invalid API key for terminal","code":"invalid_terminal_api_key","authSource":"db","terminalActive":true}"#
+            ),
             "invalid_terminal_credentials"
         );
         assert_eq!(
-            terminal_access_reset_reason("Terminal identity mismatch (HTTP 403)"),
+            terminal_access_reset_reason(
+                r#"Terminal identity mismatch (HTTP 403): {"success":false,"error":"Terminal identity mismatch","code":"terminal_identity_mismatch","authSource":"db","terminalActive":true}"#
+            ),
             "invalid_terminal_credentials"
         );
+    }
+
+    #[test]
+    fn terminal_auth_failure_helpers_extract_structured_metadata() {
+        let error = r#"Terminal is inactive (HTTP 401): {"success":false,"error":"Terminal is inactive","code":"terminal_inactive","authSource":"cache","terminalActive":false}"#;
+
+        assert_eq!(
+            terminal_auth_failure_code(error).as_deref(),
+            Some("terminal_inactive")
+        );
+        assert_eq!(
+            terminal_auth_failure_source(error).as_deref(),
+            Some("cache")
+        );
+        assert_eq!(terminal_auth_failure_terminal_active(error), Some(false));
+        assert!(is_terminal_auth_failure(error));
     }
 
     #[test]

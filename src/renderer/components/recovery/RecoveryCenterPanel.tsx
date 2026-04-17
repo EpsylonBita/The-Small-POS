@@ -29,6 +29,7 @@ interface RecoveryCenterPanelProps {
   terminalContext?: DiagnosticsTerminalContext | null;
   onRefresh: () => Promise<void> | void;
   onNavigate?: () => void;
+  onActionResolved?: (entry: RecoveryActionLogEntry) => void;
 }
 
 const severityOrder: Record<RecoveryIssue['severity'], number> = {
@@ -122,6 +123,7 @@ const buildActionRequest = (
       : typeof issue.params?.pendingReportDate === 'string'
         ? issue.params.pendingReportDate
         : action.routeTarget?.zReportDate ?? null,
+  params: issue.params,
 });
 
 const dispatchRecoveryRoute = (target: RecoveryRouteTarget) => {
@@ -284,6 +286,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
   terminalContext,
   onRefresh,
   onNavigate,
+  onActionResolved,
 }) => {
   const { t } = useTranslation();
   const bridge = getBridge();
@@ -311,6 +314,14 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     () => recentActions.slice(0, 8),
     [recentActions],
   );
+  const branchDisplayName =
+    terminalContext?.branchName?.trim() ||
+    terminalContext?.branchId?.trim() ||
+    '-';
+  const organizationDisplayName =
+    terminalContext?.organizationName?.trim() ||
+    terminalContext?.organizationId?.trim() ||
+    '-';
 
   const runAction = async (
     issue: RecoveryIssue,
@@ -324,11 +335,30 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
       );
 
       toast.success(
-        t('recovery.messages.actionSucceeded', {
-          action: t(action.labelKey, { defaultValue: action.id }),
-          defaultValue: 'Action completed successfully.',
-        }),
+        result.message ||
+          t('recovery.messages.actionSucceeded', {
+            action: t(action.labelKey, { defaultValue: action.id }),
+            defaultValue: 'Action completed successfully.',
+          }),
       );
+
+      onActionResolved?.({
+        id: `${issue.id}:${action.id}:${Date.now()}`,
+        actionId: action.id,
+        issueCode: issue.code,
+        success: true,
+        timestamp: new Date().toISOString(),
+        actor: {
+          staffId: null,
+          staffName: terminalContext?.terminalId ?? null,
+        },
+        targetRefs: {
+          entityId: issue.entityId,
+          orderId: issue.orderId ?? null,
+          orderNumber: issue.orderNumber ?? null,
+          shiftId: issue.shiftId ?? null,
+        },
+      });
 
       if (result.routeTarget || action.routeTarget) {
         dispatchRecoveryRoute(result.routeTarget || action.routeTarget!);
@@ -343,10 +373,12 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     } catch (error) {
       console.error('[RecoveryCenter] action failed', error);
       toast.error(
-        t('recovery.messages.actionFailed', {
-          action: t(action.labelKey, { defaultValue: action.id }),
-          defaultValue: 'Action failed. Review the issue details and try again.',
-        }),
+        error instanceof Error && error.message
+          ? error.message
+          : t('recovery.messages.actionFailed', {
+              action: t(action.labelKey, { defaultValue: action.id }),
+              defaultValue: 'Action failed. Review the issue details and try again.',
+            }),
       );
     } finally {
       setBusyActionId(null);
@@ -458,20 +490,20 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
             </div>
             <div className="rounded-[22px] border border-slate-200/80 bg-slate-50/90 px-4 py-4 dark:border-white/10 dark:bg-black/20">
               <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-                {t('recovery.context.branchId', { defaultValue: 'Branch ID' })}
+                {t('recovery.context.branchName', { defaultValue: 'Branch' })}
               </div>
               <div className="mt-2 break-all text-sm font-semibold text-slate-900 dark:text-white">
-                {terminalContext?.branchId || '-'}
+                {branchDisplayName}
               </div>
             </div>
             <div className="rounded-[22px] border border-slate-200/80 bg-slate-50/90 px-4 py-4 dark:border-white/10 dark:bg-black/20">
               <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-                {t('recovery.context.organizationId', {
-                  defaultValue: 'Organization ID',
+                {t('recovery.context.organizationName', {
+                  defaultValue: 'Organization',
                 })}
               </div>
               <div className="mt-2 break-all text-sm font-semibold text-slate-900 dark:text-white">
-                {terminalContext?.organizationId || '-'}
+                {organizationDisplayName}
               </div>
             </div>
             <div className="rounded-[22px] border border-slate-200/80 bg-slate-50/90 px-4 py-4 dark:border-white/10 dark:bg-black/20">

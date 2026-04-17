@@ -3581,6 +3581,7 @@
     "sessionExpired": "Sitzung abgelaufen. Bitte melden Sie sich erneut an.",
     "remoteWipe": "Terminal wurde ferngesteuert zurückgesetzt",
     "terminalDeleted": "Dieses Terminal wurde vom Admin-Dashboard gelöscht. Bitte neu konfigurieren.",
+    "terminalInactive": "Dieses Terminal wurde im Admin-Dashboard deaktiviert. Bitte wenden Sie sich an einen Betreiber oder stellen Sie den Zugriff wieder her.",
     "factoryReset": "Werksreset-Befehl vom Admin-Dashboard empfangen."
   },
   "orderFlow": {
@@ -4908,5 +4909,141 @@
     "processing": "Processing...",
     "success": "Split payment completed successfully",
     "failed": "Split payment failed. Please try again."
+  },
+  "recovery": {
+    "common": {
+      "reference": "Referenz",
+      "entityId": "Entitäts-ID",
+      "order": "Bestellung",
+      "payment": "Zahlung",
+      "adjustment": "Anpassung",
+      "issueCount_one": "{{count}} Problem",
+      "issueCount_other": "{{count}} Probleme",
+      "unknownActor": "Unbekannter Benutzer"
+    },
+    "status": {
+      "blocking": "Blockiert",
+      "recovering": "Wird wiederhergestellt",
+      "resolved": "Gelöst",
+      "polling": "Wird geprüft",
+      "stale": "Veraltet",
+      "offline": "Offline",
+      "healthy": "Gesund",
+      "pending": "Ausstehend",
+      "error": "Fehler"
+    },
+    "messages": {
+      "actionSucceeded": "Aktion erfolgreich abgeschlossen.",
+      "actionFailed": "Aktion fehlgeschlagen. Prüfen Sie die Details und versuchen Sie es erneut."
+    },
+    "actions": {
+      "refresh": { "label": "Probleme aktualisieren" },
+      "openConnectionSettings": { "label": "Verbindungseinstellungen öffnen" },
+      "runParitySyncNow": { "label": "Synchronisierung jetzt ausführen" },
+      "retryParityItem": { "label": "Parity-Eintrag erneut versuchen" },
+      "retryParityModule": { "label": "Parity-Modul erneut versuchen" },
+      "retrySync": { "label": "Sync-Zeile erneut versuchen" },
+      "validatePendingOrders": { "label": "Ausstehende Bestellungen prüfen" },
+      "removeInvalidOrders": {
+        "label": "Ungültige Bestellungen entfernen",
+        "confirmTitle": "Ungültige lokale Bestellungen entfernen?",
+        "confirmMessage": "Dadurch werden ungültige lokale Bestellzeilen entfernt, die nicht synchronisiert werden können."
+      },
+      "retryFinancialItem": { "label": "Finanzeintrag erneut versuchen" },
+      "retryAllFailedFinancial": { "label": "Alle fehlgeschlagenen Finanzeinträge erneut versuchen" },
+      "repairOrphanedFinancial": { "label": "Verwaiste Finanzzeilen reparieren" },
+      "repairWaitingParentPayments": { "label": "Wartende Zahlungen freigeben" },
+      "repairWaitingParentAdjustments": { "label": "Wartende Anpassungen freigeben" },
+      "requeueFailedFinancialShiftRows": { "label": "Schichtgebundene Finanzzeilen erneut einreihen" },
+      "requeueFailedAdjustmentMissingEndpointRows": { "label": "Durch Endpoint blockierte Anpassungen erneut einreihen" },
+      "requeueFailedAdjustmentLegacyValidationRows": { "label": "Legacy-Validation-Anpassungen erneut einreihen" },
+      "contactOperator": { "label": "Operator kontaktieren" },
+      "confirmTitle": "Wiederherstellungsaktion bestätigen",
+      "confirmMessage": "Diese Aktion ändert lokale Wiederherstellungsdaten für das ausgewählte Problem."
+    },
+    "context": {
+      "terminalId": "Terminal-ID",
+      "branchId": "Filial-ID",
+      "branchName": "Filiale",
+      "organizationId": "Organisations-ID",
+      "organizationName": "Organisation",
+      "syncHealthState": "Sync-Zustand"
+    },
+    "center": {
+      "eyebrow": "Wiederherstellungszentrum",
+      "title": "Selbstbedienungs-Wiederherstellung",
+      "subtitle": "Nutzen Sie geführte Reparaturaktionen, um blockierte Synchronisierungsprobleme zu beheben, ohne das POS zu verlassen.",
+      "needsAttentionTitle": "Benötigt Aufmerksamkeit",
+      "needsAttentionSubtitle": "Blockierende Probleme, die derzeit eine Reparatur oder einen Eingriff durch den Operator benötigen.",
+      "noBlockingIssues": "Derzeit sind keine blockierenden Wiederherstellungsprobleme sichtbar.",
+      "recoveringTitle": "Wird wiederhergestellt",
+      "recoveringSubtitle": "Probleme, die in der Warteschlange sind, verschoben wurden oder für einen weiteren Synchronisierungsversuch bereit sind.",
+      "noRecoveringIssues": "Derzeit sind keine wiederherstellbaren Probleme sichtbar.",
+      "recentActionsTitle": "Kürzlich gelöst",
+      "recentActionsSubtitle": "Jeder Reparaturversuch wird lokal protokolliert, damit das Personal sehen kann, was versucht wurde und was erfolgreich war.",
+      "noRecentActions": "Es wurden noch keine Wiederherstellungsaktionen aufgezeichnet."
+    },
+    "issues": {
+      "invalidOrders": {
+        "title": "{{count}} ungültige lokale Bestellungen",
+        "summary": "Diesen lokalen Bestellungen fehlen Menüdaten oder Cache-Verweise und sie können nicht sicher synchronisiert werden.",
+        "guidance": "Prüfen Sie zuerst die ausstehenden Bestellungen. Entfernen Sie nur die Zeilen, die nach der Prüfung weiterhin ungültig bleiben."
+      },
+      "syncBlocker": {
+        "title": "Blockierte Sync-Zeile für {{entityType}}",
+        "summary": "Eine Warteschlangenzeile wird durch {{blockerReason}} blockiert und braucht einen neuen Versuch oder eine manuelle Reparatur.",
+        "guidance": "Versuchen Sie zuerst die blockierte Sync-Zeile erneut. Wenn derselbe Blocker zurückkehrt, kontaktieren Sie den Operator mit dem Blocker-Grund und den Warteschlangendetails."
+      },
+      "parityMissingCredentials": {
+        "title": "Terminal-Zugangsdaten erfordern Aufmerksamkeit",
+        "summary": "Die Parity-Synchronisierung kann erst leerlaufen, wenn die Admin-URL und der POS-API-Schlüssel des Terminals konfiguriert sind.",
+        "guidance": "Öffnen Sie die Verbindungseinstellungen und prüfen Sie den Verbindungscode des Terminals, die Admin-URL und den POS-API-Schlüssel."
+      },
+      "parityProcessorStalled": {
+        "title": "Parity-Prozessor hängt",
+        "summary": "Der letzte Parity-Zyklus hat {{processed}} Elemente verarbeitet und {{remaining}} weiter in der Warteschlange gelassen.",
+        "guidance": "Führen Sie die Parity-Synchronisierung jetzt aus. Wenn derselbe Rückstau bleibt, prüfen Sie die Parity-Probleme auf Modulebene unten oder kontaktieren Sie den Operator."
+      },
+      "parityModuleFailed": {
+        "title": "Parity-Fehler in {{moduleLabel}}",
+        "summary": "{{count}} Parity-Einträge in {{moduleLabel}} sind fehlgeschlagen und müssen erneut versucht werden.",
+        "guidance": "Wiederholen Sie zuerst den Beispiel-Eintrag für einen engen Test oder das gesamte Parity-Modul, um die ganze Gruppe zu entblocken."
+      },
+      "parityModulePending": {
+        "title": "Parity-Rückstau in {{moduleLabel}}",
+        "summary": "{{count}} Parity-Einträge in {{moduleLabel}} sind noch ausstehend.",
+        "guidance": "Führen Sie jetzt die Parity-Synchronisierung aus oder wiederholen Sie das Modul, wenn der Rückstau auf einen weiteren Zyklus wartet."
+      },
+      "orderPaymentWaitingParent": {
+        "title": "Zahlung wartet auf übergeordnete Bestellung",
+        "summary": "Diese Zahlung wartet noch darauf, dass die zugehörige Bestellung vollständig synchronisiert wird.",
+        "guidance": "Geben Sie waiting-parent-Zahlungen frei, nachdem die Bestellung remote verfügbar ist, und führen Sie dann die Parity-Synchronisierung erneut aus."
+      },
+      "paymentAdjustmentWaitingParent": {
+        "title": "Anpassung wartet auf übergeordnete Zahlung",
+        "summary": "Diese Anpassung wartet noch darauf, dass die zugehörige Zahlung den Zustand applied erreicht.",
+        "guidance": "Geben Sie waiting-parent-Anpassungen frei, nachdem die übergeordnete Zahlung applied ist, und versuchen Sie die Synchronisierung erneut."
+      },
+      "paymentAdjustmentMissingCanonicalRemotePayment": {
+        "title": "Anpassung ohne kanonische Remote-Zahlung",
+        "summary": "Die übergeordnete Zahlung ist applied, aber ihre kanonische Remote-Payment-ID fehlt noch.",
+        "guidance": "Führen Sie die Reparatur für verwaiste Finanzzeilen aus. Wenn die Anpassung weiterhin nicht mit der Backend-Zahlung verknüpft werden kann, kontaktieren Sie den Operator."
+      },
+      "financialIntegrity": {
+        "title": "Problem mit finanzieller Integrität",
+        "summary": "Ein Zahlungs- oder Anpassungseintrag muss repariert werden, bevor die Synchronisierung abgeschlossen werden kann.",
+        "guidance": "Verwenden Sie die vorgeschlagene Wiederherstellungsaktion, wenn verfügbar. Wenn das Problem unverändert bleibt, kontaktieren Sie den Operator mit dem genauen Reason-Code."
+      },
+      "financialQueueFailed": {
+        "title": "Fehlgeschlagene Finanz-Sync-Zeile",
+        "summary": "Eine Finanz-Sync-Zeile ist mit {{lastError}} fehlgeschlagen.",
+        "guidance": "Verwenden Sie die zugeordnete Wiederherstellungsaktion, wenn sie verfügbar ist. Wenn derselbe Fehler nach dem erneuten Versuch zurückkehrt, kontaktieren Sie den Operator."
+      },
+      "contactOperatorFallback": {
+        "title": "Operator-Eingriff erforderlich",
+        "summary": "Ein Sync-Rückstau ist sichtbar, aber für diesen genauen Fehler ist noch keine geführte Lösung hinterlegt.",
+        "guidance": "Kontaktieren Sie den Operator und fügen Sie das Diagnostik-Bundle bei, damit der nächste Vorfall einer geführten Lösung zugeordnet werden kann."
+      }
+    }
   }
 }

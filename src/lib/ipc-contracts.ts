@@ -200,6 +200,28 @@ export interface SyncFinancialQueueItemsResponse {
   items: SyncFinancialQueueItem[];
 }
 
+export interface SyncFinancialIntegrityIssue {
+  entityType: string;
+  entityId: string;
+  orderId?: string | null;
+  orderNumber?: string | null;
+  paymentId?: string | null;
+  adjustmentId?: string | null;
+  queueId?: number | null;
+  queueStatus?: string | null;
+  reasonCode: string;
+  suggestedFix: string;
+  syncState?: string | null;
+  parentSyncState?: string | null;
+  lastError?: string | null;
+  details?: string | null;
+}
+
+export interface SyncFinancialIntegrityResponse {
+  valid: boolean;
+  issues: SyncFinancialIntegrityIssue[];
+}
+
 export interface UnsettledPaymentBlocker {
   orderId: string;
   orderNumber: string;
@@ -565,7 +587,9 @@ export interface DiagnosticsOpenExportDirResponse {
 export interface DiagnosticsTerminalContext {
   terminalId: string | null;
   branchId: string | null;
+  branchName?: string | null;
   organizationId: string | null;
+  organizationName?: string | null;
   terminalType?: string | null;
   parentTerminalId?: string | null;
   ownerTerminalId?: string | null;
@@ -646,6 +670,7 @@ export interface RecoveryActionRequest {
   zReportId: string | null;
   shiftId: string | null;
   reportDate: string | null;
+  params?: Record<string, unknown>;
 }
 
 export interface RecoveryActionResult {
