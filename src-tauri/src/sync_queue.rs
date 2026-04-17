@@ -349,6 +349,44 @@ fn resolve_request_terminal_id(conn: &Connection, payload: &Value) -> Option<Str
     }
 }
 
+fn retry_failed_terminal_context_items(conn: &Connection) -> Result<RetryItemsResult, String> {
+    if resolve_request_terminal_id(conn, &Value::Object(Map::new())).is_none() {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    let retried = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 attempts = 0,
+                 error_message = NULL,
+                 next_retry_at = NULL,
+                 last_attempt = NULL,
+                 retry_delay_ms = ?1
+             WHERE status = 'failed'
+               AND error_message IS NOT NULL
+               AND (
+                 lower(error_message) LIKE '%missing terminal_id%'
+                 OR lower(error_message) LIKE '%missing terminal id%'
+                 OR lower(error_message) LIKE '%missing_terminal_id%'
+                 OR lower(error_message) LIKE '%terminal_id context%'
+               )",
+            params![DEFAULT_INITIAL_RETRY_DELAY_MS],
+        )
+        .map_err(|e| format!("sync_queue retry_failed_terminal_context_items: {e}"))?;
+
+    if retried > 0 {
+        info!(
+            retried = retried,
+            "Requeued historical parity items that failed due to missing terminal identity context"
+        );
+    }
+
+    Ok(RetryItemsResult {
+        retried: retried as i64,
+    })
+}
+
 pub fn enqueue_payload_item(
     conn: &Connection,
     table_name: &str,
@@ -1460,6 +1498,7 @@ pub async fn process_queue(
     {
         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
         let _ = check_age_warnings(&db);
+        let _ = retry_failed_terminal_context_items(&db)?;
     }
 
     let client = reqwest::Client::new();
@@ -2416,5 +2455,66 @@ mod tests {
         );
 
         clear_terminal_identity();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_retries_failed_missing_terminal_context_items_after_fix() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        crate::storage::set_credential("terminal_id", "terminal-test")
+            .expect("seed terminal credential");
+        crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
+            .expect("store terminal id");
+        let queue_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-1",
+            json!({ "name": "Ada Lovelace" }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 3,
+                 error_message = ?2
+             WHERE id = ?1",
+            params![
+                queue_id,
+                r#"HTTP 401: {"success":false,"error":"Missing terminal_id","code":"missing_terminal_id"}"#
+            ],
+        )
+        .expect("seed failed terminal context error");
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) =
+            spawn_mock_http_server(vec![MockResponse::json(200, r#"{"success":true}"#)]).await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+
+        let request = requests.recv().await.expect("captured parity request");
+        assert_eq!(
+            request.headers.get("x-terminal-id").map(String::as_str),
+            Some("terminal-test")
+        );
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(remaining, 0);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
     }
 }

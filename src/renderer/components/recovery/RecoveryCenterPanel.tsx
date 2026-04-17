@@ -22,6 +22,8 @@ import {
   type RecoveryIssue,
   type RecoveryRouteTarget,
 } from '../../../lib';
+import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
+import { getErrorMessage } from '../../utils/privileged-actions';
 
 interface RecoveryCenterPanelProps {
   issues: RecoveryIssue[];
@@ -290,6 +292,8 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
 }) => {
   const { t } = useTranslation();
   const bridge = getBridge();
+  const { runWithPrivilegedConfirmation, confirmationModal } =
+    usePrivilegedActionConfirmation();
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [confirmingAction, setConfirmingAction] = useState<{
     issue: RecoveryIssue;
@@ -330,9 +334,18 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     const actionKey = `${issue.id}:${action.id}`;
     setBusyActionId(actionKey);
     try {
-      const result = await bridge.recovery.executeAction(
-        buildActionRequest(issue, action),
-      );
+      const request = buildActionRequest(issue, action);
+      const result = await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: () => bridge.recovery.executeAction(request),
+        title: t('recovery.confirmations.cashDrawerControl.title', {
+          defaultValue: 'Confirm recovery action',
+        }),
+        subtitle: t('recovery.confirmations.cashDrawerControl.subtitle', {
+          defaultValue:
+            'Enter the cashier or manager PIN to run this recovery action.',
+        }),
+      });
 
       toast.success(
         result.message ||
@@ -373,12 +386,13 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     } catch (error) {
       console.error('[RecoveryCenter] action failed', error);
       toast.error(
-        error instanceof Error && error.message
-          ? error.message
-          : t('recovery.messages.actionFailed', {
-              action: t(action.labelKey, { defaultValue: action.id }),
-              defaultValue: 'Action failed. Review the issue details and try again.',
-            }),
+        getErrorMessage(
+          error,
+          t('recovery.messages.actionFailed', {
+            action: t(action.labelKey, { defaultValue: action.id }),
+            defaultValue: 'Action failed. Review the issue details and try again.',
+          }),
+        ),
       );
     } finally {
       setBusyActionId(null);
@@ -446,6 +460,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
 
   return (
     <>
+      {confirmationModal}
       <section className="rounded-[28px] border border-slate-200/80 bg-white/92 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]">
         <div className="flex flex-col gap-5">
           <div className="flex flex-wrap items-start justify-between gap-4">
