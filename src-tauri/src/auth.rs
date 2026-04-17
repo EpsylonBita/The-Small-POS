@@ -84,10 +84,8 @@ impl StaffSession {
 
     /// Convert to the JSON shape the React frontend expects.
     fn to_user_json(&self) -> Value {
-        let branch_id =
-            storage::get_credential("branch_id").unwrap_or_else(|| "default-branch".into());
-        let terminal_id =
-            storage::get_credential("terminal_id").unwrap_or_else(|| "default-terminal".into());
+        let branch_id = storage::get_credential("branch_id").unwrap_or_default();
+        let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
 
         serde_json::json!({
             "staffId": self.staff_id,

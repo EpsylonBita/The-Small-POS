@@ -180,12 +180,6 @@ pub async fn modules_fetch_from_admin(
             if !organization_id.trim().is_empty() {
                 let _ = storage::set_credential("organization_id", &organization_id);
             }
-            if let Some(server_terminal_id) = payload.get("terminal_id").and_then(|v| v.as_str()) {
-                let trimmed = server_terminal_id.trim();
-                if !trimmed.is_empty() {
-                    let _ = storage::set_credential("terminal_id", trimmed);
-                }
-            }
             let api_timestamp = payload
                 .get("timestamp")
                 .and_then(|v| v.as_str())

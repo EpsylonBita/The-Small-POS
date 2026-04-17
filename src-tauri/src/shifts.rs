@@ -82,15 +82,36 @@ fn resolve_shift_business_day_context(
 pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
+    let normalize_runtime_identity = |value: String| -> Option<String> {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "default-branch" | "default-terminal" | "default-organization" | "default-org"
+        ) {
+            return None;
+        }
+        Some(trimmed)
+    };
+
     let staff_id = str_field(payload, "staffId")
         .or_else(|| str_field(payload, "staff_id"))
         .ok_or("Missing staffId")?;
-    let branch_id = str_field(payload, "branchId")
-        .or_else(|| str_field(payload, "branch_id"))
-        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
-    let terminal_id = str_field(payload, "terminalId")
-        .or_else(|| str_field(payload, "terminal_id"))
-        .unwrap_or_else(|| storage::get_credential("terminal_id").unwrap_or_default());
+    let branch_id = normalize_runtime_identity(
+        str_field(payload, "branchId")
+            .or_else(|| str_field(payload, "branch_id"))
+            .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default()),
+    )
+    .ok_or("Missing branchId")?;
+    let terminal_id = normalize_runtime_identity(
+        str_field(payload, "terminalId")
+            .or_else(|| str_field(payload, "terminal_id"))
+            .unwrap_or_else(|| storage::get_credential("terminal_id").unwrap_or_default()),
+    )
+    .ok_or("Missing terminalId")?;
     let role_type = str_field(payload, "roleType")
         .or_else(|| str_field(payload, "role_type"))
         .unwrap_or_else(|| "cashier".to_string());

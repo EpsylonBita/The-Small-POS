@@ -177,15 +177,28 @@ async function enrichSessionUserWithOrganization(userData: any): Promise<any> {
     return userData;
   }
 
-  const organizationId = await resolveSessionOrganizationId(userData);
-  if (!organizationId) {
-    return userData;
-  }
+  const cachedIdentity = await refreshTerminalCredentialCache().catch(() => getCachedTerminalCredentials());
+  const terminalId =
+    normalizeSessionIdentityValue(userData.terminalId) ??
+    normalizeSessionIdentityValue(cachedIdentity.terminalId);
+  const branchId =
+    normalizeSessionIdentityValue(userData.branchId) ??
+    normalizeSessionIdentityValue(cachedIdentity.branchId);
+  const organizationId =
+    (await resolveSessionOrganizationId(userData)) ??
+    normalizeSessionIdentityValue(userData.organizationId) ??
+    normalizeSessionIdentityValue(cachedIdentity.organizationId);
 
-  updateTerminalCredentialCache({ organizationId });
+  updateTerminalCredentialCache({
+    terminalId: terminalId ?? '',
+    branchId: branchId ?? '',
+    organizationId: organizationId ?? '',
+  });
   return {
     ...userData,
-    organizationId,
+    terminalId: terminalId ?? userData.terminalId ?? '',
+    branchId: branchId ?? userData.branchId ?? '',
+    organizationId: organizationId ?? userData.organizationId,
   };
 }
 
@@ -317,6 +330,9 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 
       // Clear all local storage
       localStorage.removeItem("pos-user");
+      localStorage.removeItem("staff");
+      localStorage.removeItem("activeShift");
+      localStorage.removeItem("last_known_terminal_id");
       localStorage.removeItem("terminal_id");
       localStorage.removeItem("branch_id");
       localStorage.removeItem("organization_id");
@@ -934,8 +950,8 @@ function AppContent() {
                   databaseStaffId: enrichedUser.databaseStaffId,
                   name: enrichedUser.staffName,
                   role: enrichedUser.role?.name || 'staff',
-                  branchId: enrichedUser.branchId || 'default-branch',
-                  terminalId: enrichedUser.terminalId || 'default-terminal',
+                  branchId: normalizeSessionIdentityValue(enrichedUser.branchId) || '',
+                  terminalId: normalizeSessionIdentityValue(enrichedUser.terminalId) || '',
                   organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
                 });
                 try {
@@ -983,8 +999,8 @@ function AppContent() {
                 databaseStaffId: enrichedUser.databaseStaffId,
                 name: enrichedUser.staffName,
                 role: enrichedUser.role?.name || 'staff',
-                branchId: enrichedUser.branchId || 'default-branch',
-                terminalId: enrichedUser.terminalId || 'default-terminal',
+                branchId: normalizeSessionIdentityValue(enrichedUser.branchId) || '',
+                terminalId: normalizeSessionIdentityValue(enrichedUser.terminalId) || '',
                 organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
               });
               try {
@@ -1069,8 +1085,8 @@ function AppContent() {
           databaseStaffId: enrichedUser.databaseStaffId,
           name: enrichedUser.staffName,
           role: enrichedUser.role?.name || 'staff',
-          branchId: enrichedUser.branchId || 'default-branch',
-          terminalId: enrichedUser.terminalId || 'default-terminal',
+          branchId: normalizeSessionIdentityValue(enrichedUser.branchId) || '',
+          terminalId: normalizeSessionIdentityValue(enrichedUser.terminalId) || '',
           organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
         });
 

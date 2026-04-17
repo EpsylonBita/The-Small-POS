@@ -2378,6 +2378,7 @@ mod tests {
     async fn process_queue_marks_items_failed_when_terminal_context_is_missing() {
         clear_terminal_identity();
         let conn = test_connection();
+        crate::storage::set_credential("terminal_id", "").expect("blank terminal credential");
         let queue_id = enqueue_test_item(
             &conn,
             "customers",

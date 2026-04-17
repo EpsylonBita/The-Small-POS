@@ -962,6 +962,20 @@ fn clear_terminal_api_key(db: Option<&db::DbState>) {
     }
 }
 
+fn clear_terminal_identity(db: Option<&db::DbState>) {
+    let _ = storage::delete_credential("terminal_id");
+    if let Some(db_state) = db {
+        if let Ok(conn) = db_state.conn.lock() {
+            let _ = conn.execute(
+                "DELETE FROM local_settings
+                 WHERE setting_category = 'terminal'
+                   AND setting_key = 'terminal_id'",
+                [],
+            );
+        }
+    }
+}
+
 pub(crate) fn handle_invalid_terminal_credentials(
     db: Option<&db::DbState>,
     app: &tauri::AppHandle,
@@ -982,6 +996,12 @@ pub(crate) fn handle_invalid_terminal_credentials(
         "Terminal access revoked; clearing stored API key and forcing onboarding reset without deleting local data"
     );
     clear_terminal_api_key(db);
+    if matches!(
+        auth_code.as_deref(),
+        Some("terminal_not_found" | "terminal_identity_mismatch")
+    ) {
+        clear_terminal_identity(db);
+    }
     let _ = app.emit(
         "app_reset",
         serde_json::json!({

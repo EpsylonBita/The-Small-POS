@@ -1678,7 +1678,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const finishPinVerification = async (
     branchId: string,
-    terminalId: string | undefined,
+    terminalId: string,
     staffRole: StaffShiftRole,
   ) => {
     const eligibility = await loadCheckInEligibility(branchId, terminalId);
@@ -1729,6 +1729,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       if (!branchId || (typeof branchId === 'string' && branchId.trim() === '')) {
         console.error('[StaffShiftModal] Cannot check in: branchId is not configured');
         setError(t('modals.staffShift.errors.noBranchConfigured', 'Branch not configured. Please contact admin.'));
+        setEnteredPin('');
+        return;
+      }
+      if (!terminalId || (typeof terminalId === 'string' && !terminalId.trim())) {
+        console.error('[StaffShiftModal] Cannot check in: terminalId is not configured');
+        setError(t('modals.staffShift.errors.noTerminalConfigured', 'Terminal not configured. Please contact admin.'));
         setEnteredPin('');
         return;
       }
@@ -1880,8 +1886,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     try {
       // Resolve terminal + branch from TerminalConfig first (avoid stale 'local-branch')
-      let resolvedTerminalId = staff.terminalId;
-      let resolvedBranchId = staff.branchId;
+      let resolvedTerminalId: string | undefined = staff.terminalId;
+      let resolvedBranchId: string | undefined = staff.branchId;
       let resolvedOrganizationId = normalizeContextId(staff.organizationId);
       try { resolvedTerminalId = (await bridge.terminalConfig.getTerminalId()) || resolvedTerminalId; } catch { }
       try { resolvedBranchId = (await bridge.terminalConfig.getBranchId()) || resolvedBranchId; } catch { }
@@ -1898,6 +1904,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       if (!resolvedOrganizationId) {
         resolvedOrganizationId = normalizeContextId(getSetting?.('terminal', 'organization_id'));
       }
+      resolvedTerminalId = normalizeContextId(resolvedTerminalId);
+      resolvedBranchId = normalizeContextId(resolvedBranchId) || '';
 
       // Cashiers must manually count and enter opening amount - no automatic comparison with previous day
       // Validate that cashiers have entered a valid opening cash amount
@@ -1925,6 +1933,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             return;
           }
         }
+      }
+
+      if (!resolvedBranchId) {
+        setError(t('modals.staffShift.errors.noBranchConfigured', 'Branch not configured. Please contact admin.'));
+        setLoading(false);
+        return;
+      }
+      if (!resolvedTerminalId) {
+        setError(t('modals.staffShift.errors.noTerminalConfigured', 'Terminal not configured. Please contact admin.'));
+        setLoading(false);
+        return;
       }
 
       // Determine the opening/starting amount based on role type

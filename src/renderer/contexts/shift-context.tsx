@@ -49,6 +49,47 @@ function normalizeContextValue(value: unknown): string | null {
   return trimmed;
 }
 
+function normalizeStoredStaff(value: unknown): StaffData | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as Partial<StaffData>;
+  const staffId = normalizeContextValue(candidate.staffId);
+  const name = typeof candidate.name === 'string' ? candidate.name.trim() : '';
+  const role = typeof candidate.role === 'string' ? candidate.role.trim() : '';
+  const branchId = normalizeContextValue(candidate.branchId);
+  const terminalId = normalizeContextValue(candidate.terminalId);
+  const organizationId = normalizeContextValue(candidate.organizationId);
+
+  if (!staffId || !name || !role || !branchId || !terminalId) {
+    return null;
+  }
+
+  return {
+    staffId,
+    databaseStaffId: candidate.databaseStaffId ?? null,
+    name,
+    role,
+    branchId,
+    terminalId,
+    organizationId: organizationId ?? undefined,
+  };
+}
+
+function normalizeStoredShift(value: unknown): StaffShift | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as StaffShift;
+  if (candidate.status !== 'active') {
+    return null;
+  }
+  if (!normalizeContextValue(candidate.branch_id) || !normalizeContextValue(candidate.terminal_id)) {
+    return null;
+  }
+  return candidate;
+}
+
 export function ShiftProvider({ children }: { children: ReactNode }) {
   const bridge = getBridge();
   const [staff, setStaffState] = useState<StaffData | null>(null);
@@ -59,10 +100,15 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     const storedStaff = localStorage.getItem('staff');
     if (storedStaff) {
       try {
-        const parsedStaff = JSON.parse(storedStaff);
-        setStaffState(parsedStaff);
+        const parsedStaff = normalizeStoredStaff(JSON.parse(storedStaff));
+        if (parsedStaff) {
+          setStaffState(parsedStaff);
+        } else {
+          localStorage.removeItem('staff');
+        }
       } catch (error) {
         console.error('Failed to parse stored staff data:', error);
+        localStorage.removeItem('staff');
       }
     }
   }, []);
@@ -76,11 +122,12 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         try { branchId = (await bridge.terminalConfig.getSetting('terminal', 'branch_id')) as string | null; } catch { }
       }
       if (!branchId) {
-        branchId = staff?.branchId
+        branchId = normalizeContextValue(staff?.branchId)
           || (() => { try { return JSON.parse(localStorage.getItem('staff') || 'null')?.branchId || null } catch { return null } })()
           || (() => { try { return JSON.parse(localStorage.getItem('pos-user') || 'null')?.branchId || null } catch { return null } })()
           || null;
       }
+      branchId = normalizeContextValue(branchId);
 
       // Resolve terminalId with multiple fallbacks
       let terminalId: string | null = null;
@@ -89,11 +136,12 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         try { terminalId = (await bridge.terminalConfig.getSetting('terminal', 'terminal_id')) as string | null; } catch { }
       }
       if (!terminalId) {
-        terminalId = staff?.terminalId
+        terminalId = normalizeContextValue(staff?.terminalId)
           || (() => { try { return JSON.parse(localStorage.getItem('staff') || 'null')?.terminalId || null } catch { return null } })()
           || (() => { try { return JSON.parse(localStorage.getItem('pos-user') || 'null')?.terminalId || null } catch { return null } })()
           || null;
       }
+      terminalId = normalizeContextValue(terminalId);
 
       // Resolve organizationId with multiple fallbacks
       let organizationId: string | null = null;
@@ -102,10 +150,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         try { organizationId = (await bridge.terminalConfig.getSetting('terminal', 'organization_id')) as string | null; } catch { }
       }
       if (!organizationId) {
-        organizationId = staff?.organizationId
+        organizationId = normalizeContextValue(staff?.organizationId)
           || (() => { try { return JSON.parse(localStorage.getItem('staff') || 'null')?.organizationId || null } catch { return null } })()
           || null;
       }
+      organizationId = normalizeContextValue(organizationId);
 
       if (!branchId || !terminalId) {
         console.warn('[ShiftContext] attemptRestoreByTerminal: missing branch/terminal', { branchId, terminalId });
@@ -164,7 +213,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     try {
       const storedShift = localStorage.getItem('activeShift');
       if (storedShift) {
-        const parsed = JSON.parse(storedShift);
+        const parsed = normalizeStoredShift(JSON.parse(storedShift));
         if (parsed && parsed.status === 'active') {
           setActiveShift(parsed);
           // If staff not present, derive minimal staff from stored shift so UI can operate
@@ -211,6 +260,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
               }
             }
           })();
+        }
+        if (!parsed) {
+          localStorage.removeItem('activeShift');
         }
       } else {
         // Nothing stored, try to restore by terminal when app starts

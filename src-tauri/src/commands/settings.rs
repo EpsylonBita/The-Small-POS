@@ -278,6 +278,51 @@ fn read_runtime_setting(db: &db::DbState, category: &str, key: &str) -> Option<S
     db::get_setting(&conn, category, key)
 }
 
+fn normalize_terminal_identity(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let normalized = trimmed.to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "default-terminal" | "default" | "terminal-001"
+        ) {
+            return None;
+        }
+
+        Some(trimmed.to_string())
+    })
+}
+
+fn resolve_managed_terminal_identity(
+    terminal_type: Option<&str>,
+    pos_operating_mode: Option<&str>,
+    owner_terminal_id: Option<&str>,
+    source_terminal_id: Option<&str>,
+) -> Option<String> {
+    let owner = normalize_terminal_identity(owner_terminal_id.map(|value| value.to_string()));
+    let source = normalize_terminal_identity(source_terminal_id.map(|value| value.to_string()));
+
+    let owner = owner?;
+    let source = source?;
+    if owner != source {
+        return None;
+    }
+
+    let terminal_type = terminal_type.unwrap_or("").trim().to_ascii_lowercase();
+    let pos_operating_mode = pos_operating_mode.unwrap_or("").trim().to_ascii_lowercase();
+    if matches!(terminal_type.as_str(), "main" | "primary")
+        || matches!(pos_operating_mode.as_str(), "main_isolated" | "main")
+    {
+        return Some(owner);
+    }
+
+    None
+}
+
 pub(crate) fn build_terminal_runtime_config(db: &db::DbState) -> Value {
     let terminal_id = storage::get_credential("terminal_id")
         .or_else(|| read_runtime_setting(db, "terminal", "terminal_id"));
@@ -438,9 +483,10 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
             "Stored ghost_mode_feature_enabled from admin settings"
         );
     }
-    if let Some(terminal_type) = extract_terminal_type_from_terminal_settings_response(&resp) {
+    let terminal_type = extract_terminal_type_from_terminal_settings_response(&resp);
+    if let Some(terminal_type) = terminal_type.as_deref() {
         if let Ok(conn) = db.conn.lock() {
-            let _ = db::set_setting(&conn, "terminal", "terminal_type", &terminal_type);
+            let _ = db::set_setting(&conn, "terminal", "terminal_type", terminal_type);
         }
         tracing::info!(terminal_type = %terminal_type, "Stored terminal_type from admin settings");
     }
@@ -455,14 +501,13 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
             "Stored parent_terminal_id from admin settings"
         );
     }
-    if let Some(owner_terminal_id) =
-        extract_owner_terminal_id_from_terminal_settings_response(&resp)
-    {
+    let owner_terminal_id = extract_owner_terminal_id_from_terminal_settings_response(&resp);
+    if let Some(owner_terminal_id) = owner_terminal_id.as_deref() {
         if let Ok(conn) = db.conn.lock() {
-            let _ = db::set_setting(&conn, "terminal", "owner_terminal_id", &owner_terminal_id);
+            let _ = db::set_setting(&conn, "terminal", "owner_terminal_id", owner_terminal_id);
         }
         tracing::info!(
-            owner_terminal_id = %crate::mask_terminal_id(&owner_terminal_id),
+            owner_terminal_id = %crate::mask_terminal_id(owner_terminal_id),
             "Stored owner_terminal_id from admin settings"
         );
     }
@@ -479,14 +524,13 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         }
         tracing::info!("Stored owner_terminal_db_id from admin settings");
     }
-    if let Some(source_terminal_id) =
-        extract_source_terminal_id_from_terminal_settings_response(&resp)
-    {
+    let source_terminal_id = extract_source_terminal_id_from_terminal_settings_response(&resp);
+    if let Some(source_terminal_id) = source_terminal_id.as_deref() {
         if let Ok(conn) = db.conn.lock() {
-            let _ = db::set_setting(&conn, "terminal", "source_terminal_id", &source_terminal_id);
+            let _ = db::set_setting(&conn, "terminal", "source_terminal_id", source_terminal_id);
         }
         tracing::info!(
-            source_terminal_id = %crate::mask_terminal_id(&source_terminal_id),
+            source_terminal_id = %crate::mask_terminal_id(source_terminal_id),
             "Stored source_terminal_id from admin settings"
         );
     }
@@ -503,15 +547,34 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         }
         tracing::info!("Stored source_terminal_db_id from admin settings");
     }
-    if let Some(pos_operating_mode) =
-        extract_pos_operating_mode_from_terminal_settings_response(&resp)
-    {
+    let pos_operating_mode = extract_pos_operating_mode_from_terminal_settings_response(&resp);
+    if let Some(pos_operating_mode) = pos_operating_mode.as_deref() {
         if let Ok(conn) = db.conn.lock() {
-            let _ = db::set_setting(&conn, "terminal", "pos_operating_mode", &pos_operating_mode);
+            let _ = db::set_setting(&conn, "terminal", "pos_operating_mode", pos_operating_mode);
         }
         tracing::info!(
             pos_operating_mode = %pos_operating_mode,
             "Stored pos_operating_mode from admin settings"
+        );
+    }
+    if let Some(canonical_terminal_id) = resolve_managed_terminal_identity(
+        terminal_type.as_deref(),
+        pos_operating_mode.as_deref(),
+        owner_terminal_id.as_deref(),
+        source_terminal_id.as_deref(),
+    ) {
+        let _ = storage::set_credential("terminal_id", canonical_terminal_id.trim());
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(
+                &conn,
+                "terminal",
+                "terminal_id",
+                canonical_terminal_id.trim(),
+            );
+        }
+        tracing::info!(
+            terminal_id = %crate::mask_terminal_id(&canonical_terminal_id),
+            "Canonicalized terminal_id from managed terminal settings"
         );
     }
     if let Some(enabled_features) = extract_enabled_features_from_terminal_settings_response(&resp)
