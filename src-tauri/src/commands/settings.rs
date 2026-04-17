@@ -842,6 +842,21 @@ pub async fn settings_get_admin_url(db: tauri::State<'_, db::DbState>) -> Result
     )
 }
 
+#[tauri::command]
+pub async fn settings_get_pos_api_key(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
+    let api_key = storage::get_credential("pos_api_key")
+        .or_else(|| crate::read_local_setting(&db, "terminal", "pos_api_key"))
+        .or_else(|| crate::read_local_setting(&db, "terminal", "api_key"))
+        .map(|raw| crate::api::extract_api_key_from_connection_string(&raw).unwrap_or(raw))
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty());
+
+    Ok(match api_key {
+        Some(api_key) => serde_json::Value::String(api_key),
+        None => serde_json::Value::Null,
+    })
+}
+
 /// Returns all settings merged: local_settings DB + terminal credential store.
 /// The StaffShiftModal uses this to look up `terminal.branch_id`.
 #[tauri::command]

@@ -2654,11 +2654,12 @@ pub async fn order_update_type(
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
     let mut emitted_status: Option<String> = None;
     if order_type == "pickup" {
-        let acting_terminal_id = db::get_setting(&conn, "terminal", "terminal_id")
+        // Keyring-first; plaintext `local_settings` is backward-compat fallback.
+        let acting_terminal_id = storage::get_credential("terminal_id")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .or_else(|| {
-                storage::get_credential("terminal_id")
+                db::get_setting(&conn, "terminal", "terminal_id")
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty())
             });
@@ -2819,15 +2820,17 @@ pub async fn order_process_retry_queue(
 ) -> Result<serde_json::Value, String> {
     let (admin_url, api_key) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let admin_url = db::get_setting(&conn, "terminal", "admin_dashboard_url")
-            .or_else(|| db::get_setting(&conn, "terminal", "admin_url"))
-            .or_else(|| storage::get_credential("admin_dashboard_url"))
+        // Keyring-first; plaintext `local_settings` entries are backward-compat
+        // fallback for installs that haven't yet been hydrated to the keyring.
+        let admin_url = storage::get_credential("admin_dashboard_url")
             .or_else(|| storage::get_credential("admin_url"))
+            .or_else(|| db::get_setting(&conn, "terminal", "admin_dashboard_url"))
+            .or_else(|| db::get_setting(&conn, "terminal", "admin_url"))
             .ok_or("Missing admin dashboard URL for retry processing")?;
-        let api_key = db::get_setting(&conn, "terminal", "pos_api_key")
-            .or_else(|| db::get_setting(&conn, "terminal", "api_key"))
-            .or_else(|| storage::get_credential("pos_api_key"))
+        let api_key = storage::get_credential("pos_api_key")
             .or_else(|| storage::get_credential("api_key"))
+            .or_else(|| db::get_setting(&conn, "terminal", "pos_api_key"))
+            .or_else(|| db::get_setting(&conn, "terminal", "api_key"))
             .ok_or("Missing POS API key for retry processing")?;
         (admin_url, api_key)
     };
@@ -3887,18 +3890,19 @@ mod transition_tests {
         assert!((total_amount - 19.0).abs() < 0.001);
         assert_eq!(sync_status, "pending");
 
-        let (queue_count, payload_text): (i64, String) = conn
+        let (queue_count, payload_text): (i64, Option<String>) = conn
             .query_row(
-                "SELECT COUNT(*), MIN(payload)
-                 FROM sync_queue
-                 WHERE entity_type = 'order'
-                   AND entity_id = 'order-convert'",
+                "SELECT COUNT(*), MIN(data)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'order-convert'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
 
         assert_eq!(queue_count, 1);
+        let payload_text = payload_text.expect("queued parity payload");
         assert!(payload_text.contains("\"customerId\":\"customer-1\""));
         assert!(payload_text.contains("\"orderType\":\"delivery\""));
     }

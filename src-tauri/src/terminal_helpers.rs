@@ -624,6 +624,147 @@ pub(crate) fn read_local_setting(db: &db::DbState, category: &str, key: &str) ->
     db::get_setting(&conn, category, key)
 }
 
+fn normalized_keyring_credential(credential_key: &str) -> Option<String> {
+    let value = storage::get_credential(credential_key)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = if credential_key == "admin_dashboard_url" {
+        api::normalize_admin_url(trimmed)
+    } else {
+        trimmed.to_string()
+    };
+
+    if normalized.trim().is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn keyring_matches_expected_value(credential_key: &str, expected_value: &str) -> bool {
+    normalized_keyring_credential(credential_key).as_deref() == Some(expected_value)
+}
+
+fn local_terminal_setting_is_purge_safe(setting_key: &str, raw_value: &str) -> bool {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    match setting_key {
+        "terminal_id" => {
+            if trimmed == "terminal-001" {
+                return false;
+            }
+            keyring_matches_expected_value("terminal_id", trimmed)
+        }
+        "pos_api_key" => {
+            let expected_api_key = api::extract_api_key_from_connection_string(trimmed)
+                .unwrap_or_else(|| trimmed.to_string());
+            if expected_api_key.trim().is_empty()
+                || !keyring_matches_expected_value("pos_api_key", expected_api_key.trim())
+            {
+                return false;
+            }
+
+            if let Some(decoded_tid) = api::extract_terminal_id_from_connection_string(trimmed)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                if decoded_tid == "terminal-001"
+                    || !keyring_matches_expected_value("terminal_id", &decoded_tid)
+                {
+                    return false;
+                }
+            }
+
+            if let Some(decoded_url) = api::extract_admin_url_from_connection_string(trimmed)
+                .map(|value| api::normalize_admin_url(&value))
+                .filter(|value| !value.is_empty())
+            {
+                if !keyring_matches_expected_value("admin_dashboard_url", &decoded_url) {
+                    return false;
+                }
+            }
+
+            true
+        }
+        "admin_dashboard_url" | "admin_url" => {
+            let normalized = api::normalize_admin_url(trimmed);
+            !normalized.is_empty()
+                && keyring_matches_expected_value("admin_dashboard_url", &normalized)
+        }
+        _ => keyring_matches_expected_value(setting_key, trimmed),
+    }
+}
+
+/// Delete plaintext credential rows from `local_settings` once the OS keyring
+/// holds an equivalent value. Runs after `hydrate_terminal_credentials_from_local_settings`
+/// to retire the legacy plaintext fallback — the OS keyring (DPAPI-backed on
+/// Windows via the `keyring` crate) becomes the sole source of truth.
+///
+/// Safety: we only delete a row if `storage::get_credential` returns a
+/// non-empty value for that key. If a hydration failed (e.g., keyring write
+/// error), the plaintext row is preserved so the next boot can retry.
+///
+/// `terminal_id` has an extra guard: we never purge if the value is the
+/// generic placeholder `"terminal-001"` that `hydrate` explicitly ignores,
+/// so we match that skip here too.
+pub(crate) fn purge_hydrated_terminal_credentials_from_local_settings(db: &db::DbState) {
+    // Credential keys that map 1:1 between `local_settings` (category='terminal')
+    // and the OS keyring. Mirrors the `mappings` in
+    // `hydrate_terminal_credentials_from_local_settings`.
+    const CREDENTIAL_KEYS: &[&str] = &[
+        "terminal_id",
+        "pos_api_key",
+        "admin_dashboard_url",
+        "branch_id",
+        "organization_id",
+        "business_type",
+        "supabase_url",
+        "supabase_anon_key",
+        "ghost_mode_feature_enabled",
+        // legacy alias kept in sync by the hydrate function
+        "admin_url",
+    ];
+
+    let conn = match db.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    for key in CREDENTIAL_KEYS {
+        let local_value = match db::get_setting(&conn, "terminal", key) {
+            Some(v) => v,
+            None => continue,
+        };
+        if !local_terminal_setting_is_purge_safe(key, &local_value) {
+            continue;
+        }
+        match db::delete_setting(&conn, "terminal", key) {
+            Ok(rows) if rows > 0 => {
+                tracing::info!(
+                    target: "credentials.purge",
+                    key = %key,
+                    "Deleted plaintext credential from local_settings (keyring is authoritative)"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "credentials.purge",
+                    key = %key,
+                    error = %e,
+                    "Failed to delete plaintext credential row"
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn hydrate_terminal_credentials_from_local_settings(db: &db::DbState) {
     // Keep keyring credentials aligned with local_settings values used by Electron
     // compatibility paths.
@@ -784,6 +925,7 @@ pub(crate) fn mask_terminal_id(terminal_id: &str) -> String {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use serial_test::serial;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -800,6 +942,43 @@ mod tests {
             conn: Mutex::new(conn),
             db_path: PathBuf::from(":memory:"),
         }
+    }
+
+    const TEST_CREDENTIAL_KEYS: &[&str] = &[
+        "terminal_id",
+        "pos_api_key",
+        "admin_dashboard_url",
+        "admin_url",
+        "branch_id",
+        "organization_id",
+        "business_type",
+        "supabase_url",
+        "supabase_anon_key",
+        "ghost_mode_feature_enabled",
+    ];
+
+    struct CredentialCleanupGuard;
+
+    impl Drop for CredentialCleanupGuard {
+        fn drop(&mut self) {
+            clear_test_credentials();
+        }
+    }
+
+    fn clear_test_credentials() {
+        for key in TEST_CREDENTIAL_KEYS {
+            let _ = storage::delete_credential(key);
+        }
+    }
+
+    fn credential_guard() -> CredentialCleanupGuard {
+        clear_test_credentials();
+        CredentialCleanupGuard
+    }
+
+    fn set_terminal_setting(db: &db::DbState, key: &str, value: &str) {
+        let conn = db.conn.lock().expect("lock db");
+        db::set_setting(&conn, "terminal", key, value).expect("store terminal setting");
     }
 
     #[test]
@@ -1004,6 +1183,110 @@ mod tests {
         assert_eq!(
             terminal_access_reset_reason("Terminal identity mismatch (HTTP 403)"),
             "invalid_terminal_credentials"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn hydrate_connection_string_populates_decoded_and_derived_credentials() {
+        let _guard = credential_guard();
+        let db = test_db();
+        let connection_string =
+            r#"{"key":"decoded-api-key","tid":"terminal-9","url":"admin.example.com/api"}"#;
+
+        set_terminal_setting(&db, "pos_api_key", connection_string);
+        hydrate_terminal_credentials_from_local_settings(&db);
+
+        assert_eq!(
+            storage::get_credential("pos_api_key").as_deref(),
+            Some("decoded-api-key")
+        );
+        assert_eq!(
+            storage::get_credential("terminal_id").as_deref(),
+            Some("terminal-9")
+        );
+        assert_eq!(
+            storage::get_credential("admin_dashboard_url").as_deref(),
+            Some("https://admin.example.com")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn purge_keeps_plaintext_connection_string_until_companion_credentials_exist() {
+        let _guard = credential_guard();
+        let db = test_db();
+        let connection_string =
+            r#"{"key":"decoded-api-key","tid":"terminal-9","url":"admin.example.com/api"}"#;
+
+        set_terminal_setting(&db, "pos_api_key", connection_string);
+        storage::set_credential("pos_api_key", "decoded-api-key").expect("seed api key");
+
+        purge_hydrated_terminal_credentials_from_local_settings(&db);
+
+        let conn = db.conn.lock().expect("lock db");
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "pos_api_key").as_deref(),
+            Some(connection_string)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn purge_drops_plaintext_connection_string_after_companion_credentials_exist() {
+        let _guard = credential_guard();
+        let db = test_db();
+        let connection_string =
+            r#"{"key":"decoded-api-key","tid":"terminal-9","url":"admin.example.com/api"}"#;
+
+        set_terminal_setting(&db, "pos_api_key", connection_string);
+        storage::set_credential("pos_api_key", "decoded-api-key").expect("seed api key");
+        storage::set_credential("terminal_id", "terminal-9").expect("seed terminal id");
+        storage::set_credential("admin_dashboard_url", "https://admin.example.com")
+            .expect("seed admin url");
+
+        purge_hydrated_terminal_credentials_from_local_settings(&db);
+
+        let conn = db.conn.lock().expect("lock db");
+        assert!(
+            db::get_setting(&conn, "terminal", "pos_api_key").is_none(),
+            "plaintext connection-string fallback should be removed once decoded credentials are durable"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn purge_legacy_admin_url_uses_admin_dashboard_alias() {
+        let _guard = credential_guard();
+        let db = test_db();
+
+        set_terminal_setting(&db, "admin_url", "admin.example.com/api/");
+        storage::set_credential("admin_dashboard_url", "https://admin.example.com")
+            .expect("seed admin dashboard url");
+
+        purge_hydrated_terminal_credentials_from_local_settings(&db);
+
+        let conn = db.conn.lock().expect("lock db");
+        assert!(
+            db::get_setting(&conn, "terminal", "admin_url").is_none(),
+            "legacy admin_url row should purge once the normalized admin_dashboard_url credential exists"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn purge_keeps_legacy_admin_url_when_dashboard_alias_is_missing() {
+        let _guard = credential_guard();
+        let db = test_db();
+
+        set_terminal_setting(&db, "admin_url", "admin.example.com/api/");
+
+        purge_hydrated_terminal_credentials_from_local_settings(&db);
+
+        let conn = db.conn.lock().expect("lock db");
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "admin_url").as_deref(),
+            Some("admin.example.com/api/")
         );
     }
 }

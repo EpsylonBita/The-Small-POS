@@ -10,7 +10,7 @@
 use crate::ecr::protocol::*;
 use crate::ecr::transport::EcrTransport;
 use chrono::Utc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
 // Protocol constants
@@ -33,6 +33,19 @@ const CMD_CANCEL_RECEIPT: u8 = 0x39;
 const CMD_X_REPORT: u8 = 0x6E;
 const CMD_Z_REPORT: u8 = 0x6F;
 const CMD_GET_STATUS_FISCAL: u8 = 0x4A;
+/// Datecs-style "read date & time" command. Returns the device RTC as an
+/// ASCII string, typically `DD-MM-YY HH:MM:SS` or `YYYY-MM-DD HH:MM:SS`.
+/// Not all vendors support this — probing is best-effort, and NAK / unparseable
+/// responses are treated as "unknown" rather than errors.
+const CMD_GET_DATE_TIME: u8 = 0x3E;
+
+/// Drift threshold (minutes) above which we log at `error!` level. Catches
+/// wrong-day / wrong-year / wrong-timezone configurations. Drifts inside this
+/// window but above `CLOCK_DRIFT_WARN_MINUTES` log at `warn!`.
+const CLOCK_DRIFT_ERROR_MINUTES: i64 = 60;
+/// Soft-alarm threshold (minutes). Drifts in the range
+/// `CLOCK_DRIFT_WARN_MINUTES..CLOCK_DRIFT_ERROR_MINUTES` are logged as warnings.
+const CLOCK_DRIFT_WARN_MINUTES: i64 = 5;
 
 const FISCAL_TIMEOUT_MS: u64 = 15000;
 
@@ -150,6 +163,90 @@ impl GenericEscPosFiscal {
     fn format_amount(cents: i64) -> String {
         format!("{}.{:02}", cents / 100, (cents % 100).unsigned_abs())
     }
+
+    /// Best-effort probe of the device RTC via `CMD_GET_DATE_TIME`. Returns
+    /// `None` if the device rejects the command, returns malformed data, or the
+    /// response cannot be parsed in any known format. Never propagates errors —
+    /// this method is safe to call from `initialize()` without affecting the
+    /// success of device setup on printers that don't support the command.
+    fn probe_device_time(&mut self) -> Option<chrono::NaiveDateTime> {
+        let (_cmd, data) = match self.send_command(CMD_GET_DATE_TIME, &[]) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(
+                    "Fiscal device rejected CMD_GET_DATE_TIME (0x3E); skipping clock-drift check: {e}"
+                );
+                return None;
+            }
+        };
+        parse_device_time(&data)
+    }
+
+    /// Compare the device RTC to the POS local clock and log any drift.
+    /// Uses `Local::now().naive_local()` so that a correctly-configured Greek
+    /// device (RTC in Europe/Athens) matches the POS Windows clock without
+    /// triggering a spurious "2-3 hour drift" from a UTC-vs-local mismatch.
+    ///
+    /// Never panics, never returns an error. If the device doesn't report a
+    /// parseable time, the check is silently skipped.
+    fn check_clock_drift(&mut self) {
+        let device_time = match self.probe_device_time() {
+            Some(t) => t,
+            None => return,
+        };
+        let pos_local = chrono::Local::now().naive_local();
+        let drift_seconds = (pos_local - device_time).num_seconds();
+        let drift_minutes_abs = drift_seconds.abs() / 60;
+
+        if drift_minutes_abs >= CLOCK_DRIFT_ERROR_MINUTES {
+            tracing::error!(
+                target: "ecr.clock_drift",
+                drift_seconds = drift_seconds,
+                drift_minutes_abs = drift_minutes_abs,
+                device_time = %device_time,
+                pos_local_time = %pos_local,
+                "Fiscal device clock drift exceeds {CLOCK_DRIFT_ERROR_MINUTES} min \
+                 \u{2014} operator should correct either the POS or the device RTC before taking sales"
+            );
+        } else if drift_minutes_abs >= CLOCK_DRIFT_WARN_MINUTES {
+            tracing::warn!(
+                target: "ecr.clock_drift",
+                drift_seconds = drift_seconds,
+                drift_minutes_abs = drift_minutes_abs,
+                device_time = %device_time,
+                pos_local_time = %pos_local,
+                "Fiscal device clock drift above {CLOCK_DRIFT_WARN_MINUTES} min (informational)"
+            );
+        } else {
+            debug!(
+                target: "ecr.clock_drift",
+                drift_seconds = drift_seconds,
+                "Fiscal device clock drift within tolerance"
+            );
+        }
+    }
+}
+
+/// Parse the ASCII date/time response returned by `CMD_GET_DATE_TIME`. Accepts
+/// the two common fiscal-printer formats: `DD-MM-YY HH:MM:SS` (Datecs default)
+/// and `YYYY-MM-DD HH:MM:SS` (newer variants). Returns `None` for anything else.
+fn parse_device_time(data: &[u8]) -> Option<chrono::NaiveDateTime> {
+    let text = String::from_utf8_lossy(data);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Try formats in order of likelihood.
+    for fmt in [
+        "%d-%m-%y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%d/%m/%y %H:%M:%S",
+    ] {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Some(dt);
+        }
+    }
+    None
 }
 
 impl EcrProtocol for GenericEscPosFiscal {
@@ -165,6 +262,10 @@ impl EcrProtocol for GenericEscPosFiscal {
         let (status, _data) = self.send_command(CMD_STATUS, &[])?;
         debug!("Fiscal device status byte: 0x{status:02X}");
         self.initialized = true;
+        // Best-effort device-clock drift check. Does not fail init if the
+        // device doesn't support CMD_GET_DATE_TIME. Logs at error / warn / debug
+        // depending on magnitude; see `ecr.clock_drift` target.
+        self.check_clock_drift();
         info!("Generic fiscal protocol initialized");
         Ok(())
     }
@@ -207,14 +308,30 @@ impl EcrProtocol for GenericEscPosFiscal {
                     }
                     let (cmd, _) = self.send_command(CMD_SELL_ITEM, item_data.as_bytes())?;
                     if cmd == NAK {
-                        // Cancel receipt and return error
-                        let _ = self.send_command(CMD_CANCEL_RECEIPT, &[]);
+                        // Cancel receipt and return error. If the cancel itself fails, the
+                        // device is left in receipt-open state — surface that via logs so the
+                        // operator can reset the device instead of every subsequent sale NAK'ing.
+                        if let Err(cancel_err) = self.send_command(CMD_CANCEL_RECEIPT, &[]) {
+                            error!(
+                                "Cancel after item NAK failed (device may be stuck in receipt-open state): {cancel_err}"
+                            );
+                        }
                         return Err(format!("Device rejected item: {}", item.description));
                     }
                 }
 
-                // 3. Subtotal
-                let _ = self.send_command(CMD_SUBTOTAL, &[]);
+                // 3. Subtotal — check response like the item/payment steps. Previously the
+                // response was discarded, so a NAK would silently proceed into payments and the
+                // device would fail there for the wrong-looking reason.
+                let (cmd, _) = self.send_command(CMD_SUBTOTAL, &[])?;
+                if cmd == NAK {
+                    if let Err(cancel_err) = self.send_command(CMD_CANCEL_RECEIPT, &[]) {
+                        error!(
+                            "Cancel after subtotal NAK failed (device may be stuck in receipt-open state): {cancel_err}"
+                        );
+                    }
+                    return Err("Device rejected subtotal".into());
+                }
 
                 // 4. Payments
                 for payment in &fiscal.payments {
@@ -227,7 +344,11 @@ impl EcrProtocol for GenericEscPosFiscal {
                     let pay_data = format!("{}\t{}", pay_type, Self::format_amount(payment.amount));
                     let (cmd, _) = self.send_command(CMD_PAYMENT, pay_data.as_bytes())?;
                     if cmd == NAK {
-                        let _ = self.send_command(CMD_CANCEL_RECEIPT, &[]);
+                        if let Err(cancel_err) = self.send_command(CMD_CANCEL_RECEIPT, &[]) {
+                            error!(
+                                "Cancel after payment NAK failed (device may be stuck in receipt-open state): {cancel_err}"
+                            );
+                        }
                         return Err("Device rejected payment".into());
                     }
                 }
@@ -395,12 +516,12 @@ impl EcrProtocol for GenericEscPosFiscal {
 mod tests {
     use super::*;
     use crate::ecr::transport::{EcrTransport, TransportState};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     /// Mock transport that records sent data and returns canned responses.
     struct MockTransport {
         connected: bool,
-        sent: Mutex<Vec<Vec<u8>>>,
+        sent: Arc<Mutex<Vec<Vec<u8>>>>,
         responses: Mutex<Vec<Vec<u8>>>,
     }
 
@@ -408,9 +529,15 @@ mod tests {
         fn new(responses: Vec<Vec<u8>>) -> Self {
             Self {
                 connected: false,
-                sent: Mutex::new(Vec::new()),
+                sent: Arc::new(Mutex::new(Vec::new())),
                 responses: Mutex::new(responses),
             }
+        }
+
+        /// Return a shared handle to the sent-frames log so a test can inspect
+        /// what was sent after the transport is moved into a `Box<dyn EcrTransport>`.
+        fn sent_handle(&self) -> Arc<Mutex<Vec<Vec<u8>>>> {
+            Arc::clone(&self.sent)
         }
     }
 
@@ -448,6 +575,287 @@ mod tests {
         fn description(&self) -> String {
             "Mock".into()
         }
+    }
+
+    /// Build a minimal STX..ETX response frame with the given cmd byte and data payload.
+    /// `parse_response` does not validate the LRC, so a placeholder zero byte is fine.
+    fn framed(cmd_byte: u8, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(7 + data.len());
+        out.push(STX);
+        out.push(0x20); // len placeholder — parse_response does not validate
+        out.push(0x20); // seq placeholder
+        out.push(cmd_byte);
+        out.extend_from_slice(data);
+        out.push(0x05); // postamble
+        out.push(0x00); // LRC placeholder
+        out.push(ETX);
+        out
+    }
+
+    /// Build a minimal `TransactionRequest` of type FiscalReceipt with one item and one payment.
+    /// Amount is 250 cents (€2.50 cash) unless caller wants otherwise.
+    fn sample_fiscal_request() -> TransactionRequest {
+        let fiscal_data = FiscalReceiptData {
+            items: vec![FiscalLineItem {
+                description: "Coffee".into(),
+                quantity: 1.0,
+                unit_price: 250,
+                tax_code: "A".into(),
+                discount: None,
+            }],
+            payments: vec![FiscalPayment {
+                method: "cash".into(),
+                amount: 250,
+            }],
+            operator_id: Some("op-1".into()),
+            receipt_comment: None,
+        };
+        TransactionRequest {
+            transaction_id: "tx-test-1".into(),
+            transaction_type: TransactionType::FiscalReceipt,
+            amount: 250,
+            currency: "EUR".into(),
+            order_id: Some("order-1".into()),
+            tip_amount: None,
+            original_transaction_id: None,
+            fiscal_data: Some(fiscal_data),
+        }
+    }
+
+    /// Extract the cmd byte (at STX+3) from a sent frame produced by `build_frame`.
+    fn cmd_of(frame: &[u8]) -> u8 {
+        // Frames built by `build_frame` always begin with STX at index 0,
+        // followed by len (1), seq (2), and cmd (3).
+        frame[3]
+    }
+
+    #[test]
+    fn test_process_transaction_fiscal_receipt_happy_path() {
+        // open → ACK, item → ACK, subtotal → ACK, payment → ACK,
+        // close → framed(ACK, "12345") so the receipt-number parser extracts "12345".
+        let responses = vec![
+            vec![ACK],
+            vec![ACK],
+            vec![ACK],
+            vec![ACK],
+            framed(ACK, b"12345"),
+        ];
+        let transport = MockTransport::new(responses);
+        let sent = transport.sent_handle();
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+
+        let request = sample_fiscal_request();
+        let response = proto
+            .process_transaction(&request)
+            .expect("fiscal happy path should succeed");
+
+        assert_eq!(response.status, TransactionStatus::Approved);
+        assert_eq!(response.fiscal_receipt_number.as_deref(), Some("12345"));
+
+        // Expect one frame per command: open, item, subtotal, payment, close = 5.
+        let sent_frames = sent.lock().unwrap();
+        assert_eq!(
+            sent_frames.len(),
+            5,
+            "expected 5 sent frames, got {:?}",
+            sent_frames.len()
+        );
+        assert_eq!(cmd_of(&sent_frames[0]), CMD_OPEN_FISCAL_RECEIPT);
+        assert_eq!(cmd_of(&sent_frames[1]), CMD_SELL_ITEM);
+        assert_eq!(cmd_of(&sent_frames[2]), CMD_SUBTOTAL);
+        assert_eq!(cmd_of(&sent_frames[3]), CMD_PAYMENT);
+        assert_eq!(cmd_of(&sent_frames[4]), CMD_CLOSE_FISCAL_RECEIPT);
+    }
+
+    #[test]
+    fn test_process_transaction_item_nak_cancels_receipt() {
+        // open succeeds; item returns a FRAMED NAK (the `if cmd == NAK` branch);
+        // cancel succeeds. Expect: Err from process_transaction, and the last
+        // sent frame is a CMD_CANCEL_RECEIPT.
+        let responses = vec![
+            vec![ACK],        // open
+            framed(NAK, &[]), // item NAK
+            vec![ACK],        // cancel
+        ];
+        let transport = MockTransport::new(responses);
+        let sent = transport.sent_handle();
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+
+        let request = sample_fiscal_request();
+        let result = proto.process_transaction(&request);
+        assert!(result.is_err(), "item NAK should propagate as Err");
+
+        let sent_frames = sent.lock().unwrap();
+        // open + item + cancel
+        assert_eq!(sent_frames.len(), 3);
+        assert_eq!(cmd_of(&sent_frames[0]), CMD_OPEN_FISCAL_RECEIPT);
+        assert_eq!(cmd_of(&sent_frames[1]), CMD_SELL_ITEM);
+        assert_eq!(
+            cmd_of(&sent_frames[2]),
+            CMD_CANCEL_RECEIPT,
+            "after item NAK, device should be told to cancel the open receipt"
+        );
+    }
+
+    #[test]
+    fn test_process_transaction_subtotal_nak_cancels_receipt() {
+        // open, item succeed; subtotal returns framed NAK (the NEW branch the F1
+        // fix introduced — previously silently ignored). Expect cancel dispatched.
+        let responses = vec![
+            vec![ACK],        // open
+            vec![ACK],        // item
+            framed(NAK, &[]), // subtotal NAK
+            vec![ACK],        // cancel
+        ];
+        let transport = MockTransport::new(responses);
+        let sent = transport.sent_handle();
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+
+        let request = sample_fiscal_request();
+        let result = proto.process_transaction(&request);
+        assert!(result.is_err(), "subtotal NAK should propagate as Err");
+
+        let sent_frames = sent.lock().unwrap();
+        // open + item + subtotal + cancel
+        assert_eq!(sent_frames.len(), 4);
+        assert_eq!(cmd_of(&sent_frames[2]), CMD_SUBTOTAL);
+        assert_eq!(
+            cmd_of(&sent_frames[3]),
+            CMD_CANCEL_RECEIPT,
+            "after subtotal NAK, device should be told to cancel the open receipt"
+        );
+    }
+
+    #[test]
+    fn test_process_transaction_payment_nak_cancels_receipt() {
+        // open, item, subtotal succeed; payment returns framed NAK.
+        let responses = vec![
+            vec![ACK],        // open
+            vec![ACK],        // item
+            vec![ACK],        // subtotal
+            framed(NAK, &[]), // payment NAK
+            vec![ACK],        // cancel
+        ];
+        let transport = MockTransport::new(responses);
+        let sent = transport.sent_handle();
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+
+        let request = sample_fiscal_request();
+        let result = proto.process_transaction(&request);
+        assert!(result.is_err(), "payment NAK should propagate as Err");
+
+        let sent_frames = sent.lock().unwrap();
+        // open + item + subtotal + payment + cancel
+        assert_eq!(sent_frames.len(), 5);
+        assert_eq!(cmd_of(&sent_frames[3]), CMD_PAYMENT);
+        assert_eq!(
+            cmd_of(&sent_frames[4]),
+            CMD_CANCEL_RECEIPT,
+            "after payment NAK, device should be told to cancel the open receipt"
+        );
+    }
+
+    #[test]
+    fn test_parse_device_time_accepts_dd_mm_yy() {
+        // Datecs default format: "DD-MM-YY HH:MM:SS".
+        let parsed = parse_device_time(b"31-12-25 10:30:00");
+        let dt = parsed.expect("dd-mm-yy should parse");
+        assert_eq!(dt.date().to_string(), "2025-12-31");
+        assert_eq!(dt.time().to_string(), "10:30:00");
+    }
+
+    #[test]
+    fn test_parse_device_time_accepts_yyyy_mm_dd() {
+        // Newer fiscal firmware variant: "YYYY-MM-DD HH:MM:SS".
+        let parsed = parse_device_time(b"2025-12-31 10:30:00");
+        let dt = parsed.expect("yyyy-mm-dd should parse");
+        assert_eq!(dt.date().to_string(), "2025-12-31");
+        assert_eq!(dt.time().to_string(), "10:30:00");
+    }
+
+    #[test]
+    fn test_parse_device_time_trims_whitespace() {
+        // Devices sometimes pad responses with trailing whitespace or null bytes.
+        let parsed = parse_device_time(b"  31-12-25 10:30:00  ");
+        assert!(parsed.is_some());
+    }
+
+    #[test]
+    fn test_parse_device_time_returns_none_on_garbage() {
+        assert!(parse_device_time(b"").is_none(), "empty should be None");
+        assert!(
+            parse_device_time(b"not a date").is_none(),
+            "garbage should be None"
+        );
+        assert!(
+            parse_device_time(b"31-13-25 10:30:00").is_none(),
+            "invalid month should be None"
+        );
+    }
+
+    #[test]
+    fn test_probe_device_time_returns_none_on_nak() {
+        // Single-byte [NAK] is treated by parse_response as Err, which
+        // probe_device_time must swallow rather than propagate.
+        let responses = vec![vec![NAK]];
+        let transport = MockTransport::new(responses);
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+        let result = proto.probe_device_time();
+        assert!(
+            result.is_none(),
+            "NAK response must map to None, not an error"
+        );
+    }
+
+    #[test]
+    fn test_probe_device_time_returns_some_on_framed_datetime() {
+        // Framed response carrying an ASCII "DD-MM-YY HH:MM:SS" date string.
+        let responses = vec![framed(ACK, b"31-12-25 10:30:00")];
+        let transport = MockTransport::new(responses);
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+        let result = proto.probe_device_time();
+        let dt = result.expect("parseable datetime should return Some");
+        assert_eq!(dt.date().to_string(), "2025-12-31");
+    }
+
+    #[test]
+    fn test_check_clock_drift_does_not_panic_on_unsupported_device() {
+        // Ensure check_clock_drift handles all failure modes silently: NAK,
+        // malformed data, empty response. This is the contract — initialize()
+        // must never fail just because the device doesn't support 0x3E.
+        let responses = vec![vec![NAK]];
+        let transport = MockTransport::new(responses);
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+        proto.check_clock_drift(); // expect no panic, no error
+    }
+
+    #[test]
+    fn test_process_transaction_cancel_failure_still_returns_err() {
+        // open succeeds; item NAKs; the cancel response is malformed (single
+        // unknown byte), which makes parse_response return Err. The fix at
+        // `generic_fiscal.rs:211` must log the cancel error and still
+        // propagate the original item-NAK error to the caller.
+        let responses = vec![
+            vec![ACK],        // open
+            framed(NAK, &[]), // item NAK
+            vec![0xFF],       // cancel — parse_response rejects as Err
+        ];
+        let transport = MockTransport::new(responses);
+        let sent = transport.sent_handle();
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+
+        let request = sample_fiscal_request();
+        let result = proto.process_transaction(&request);
+        assert!(
+            result.is_err(),
+            "item-NAK error must still propagate even when cancel itself fails"
+        );
+
+        let sent_frames = sent.lock().unwrap();
+        // Cancel was still dispatched (transport recorded the frame) even though
+        // its response was rejected by parse_response.
+        assert_eq!(sent_frames.len(), 3);
+        assert_eq!(cmd_of(&sent_frames[2]), CMD_CANCEL_RECEIPT);
     }
 
     #[test]

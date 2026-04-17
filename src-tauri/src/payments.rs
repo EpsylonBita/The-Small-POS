@@ -1889,10 +1889,10 @@ mod tests {
             .unwrap();
         assert_eq!(status, "paid");
 
-        // Verify sync_queue entry
+        // Verify parity_sync_queue entry
         let sq_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'payment'",
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name = 'payments'",
                 [],
                 |row| row.get(0),
             )
@@ -2260,14 +2260,12 @@ mod tests {
 
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "UPDATE sync_queue
-             SET status = 'synced',
-                 synced_at = datetime('now')
-             WHERE entity_type = 'payment'
-               AND entity_id = ?1",
+            "DELETE FROM parity_sync_queue
+             WHERE table_name = 'payments'
+               AND record_id = ?1",
             params![payment_id.clone()],
         )
-        .expect("mark payment sync row synced");
+        .expect("clear healthy payment parity row");
         conn.execute(
             "UPDATE order_payments
              SET sync_status = 'synced',
@@ -2316,10 +2314,10 @@ mod tests {
 
         let (queue_status, payload): (String, String) = conn
             .query_row(
-                "SELECT status, payload
-                 FROM sync_queue
-                 WHERE entity_type = 'payment'
-                   AND entity_id = ?1",
+                "SELECT status, data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = ?1",
                 params![payment_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -2385,11 +2383,10 @@ mod tests {
 
         let (queue_status, payload): (String, String) = conn
             .query_row(
-                "SELECT status, payload
-                 FROM sync_queue
-                 WHERE entity_type = 'order'
-                   AND entity_id = 'ord-method-fallback'
-                 ORDER BY id DESC
+                "SELECT status, data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'ord-method-fallback'
                  LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -2444,13 +2441,13 @@ mod tests {
 
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "UPDATE sync_queue
+            "UPDATE parity_sync_queue
              SET status = 'failed',
-                 retry_count = 5,
-                 last_error = 'Internal server error',
-                 synced_at = NULL
-             WHERE entity_type = 'payment'
-               AND entity_id = ?1",
+                 attempts = 5,
+                 error_message = 'Internal server error',
+                 next_retry_at = datetime('now', '+10 minutes')
+             WHERE table_name = 'payments'
+               AND record_id = ?1",
             params![payment_id.clone()],
         )
         .expect("mark queue row failed");
@@ -2475,10 +2472,10 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let (queue_status, retry_count, last_error): (String, i64, Option<String>) = conn
             .query_row(
-                "SELECT status, retry_count, last_error
-                 FROM sync_queue
-                 WHERE entity_type = 'payment'
-                   AND entity_id = ?1",
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = ?1",
                 params![payment_id.clone()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -2544,16 +2541,12 @@ mod tests {
 
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "UPDATE sync_queue
-             SET status = 'synced',
-                 retry_count = 0,
-                 last_error = NULL,
-                 synced_at = datetime('now')
-             WHERE entity_type = 'payment'
-               AND entity_id = ?1",
+            "DELETE FROM parity_sync_queue
+             WHERE table_name = 'payments'
+               AND record_id = ?1",
             params![payment_id.clone()],
         )
-        .expect("mark queue row synced");
+        .expect("clear healthy payment parity row");
         conn.execute(
             "UPDATE order_payments
              SET sync_status = 'synced',
@@ -2573,18 +2566,17 @@ mod tests {
         assert_eq!(result["data"]["paymentMethod"], "cash");
 
         let conn = db.conn.lock().unwrap();
-        let (queue_status, retry_count): (String, i64) = conn
+        let queue_count: i64 = conn
             .query_row(
-                "SELECT status, retry_count
-                 FROM sync_queue
-                 WHERE entity_type = 'payment'
-                   AND entity_id = ?1",
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = ?1",
                 params![payment_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
-            .expect("query unchanged queue row");
-        assert_eq!(queue_status, "synced");
-        assert_eq!(retry_count, 0);
+            .expect("query unchanged parity queue rows");
+        assert_eq!(queue_count, 0);
     }
 
     #[test]
@@ -2639,15 +2631,30 @@ mod tests {
             .unwrap();
         assert_eq!(pay_status, "voided");
 
-        // Check 2 sync entries (insert + void)
-        let sq_count: i64 = conn
+        // The original payment parity row remains and the void adds an
+        // adjustment parity row rather than a second payment queue item.
+        let payment_queue_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'payment'",
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = ?1",
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payment_queue_count, 1);
+
+        let adjustment_queue_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payment_adjustments'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(sq_count, 2);
+        assert_eq!(adjustment_queue_count, 1);
     }
 
     #[test]

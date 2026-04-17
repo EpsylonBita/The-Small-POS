@@ -346,16 +346,20 @@ fn has_fresh_privileged_grant_at(
 }
 
 fn resolve_current_terminal_id(db: &db::DbState) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    if let Some(terminal_id) = db::get_setting(&conn, "terminal", "terminal_id")
+    // Keyring-first: the OS credential store is authoritative for terminal_id
+    // (DPAPI-backed on Windows via the `keyring` crate). Plaintext
+    // `local_settings` is read only as a backward-compat fallback for installs
+    // that haven't yet been hydrated to the keyring. The purge step after
+    // hydration removes the plaintext row once it's confirmed in the keyring.
+    if let Some(terminal_id) = storage::get_credential("terminal_id")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     {
         return Ok(terminal_id);
     }
-    drop(conn);
 
-    storage::get_credential("terminal_id")
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    db::get_setting(&conn, "terminal", "terminal_id")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or("Current terminal is not configured in local storage".to_string())
@@ -1010,6 +1014,11 @@ mod tests {
     fn set_terminal_id(db_state: &db::DbState, terminal_id: &str) {
         let conn = db_state.conn.lock().expect("db lock");
         db::set_setting(&conn, "terminal", "terminal_id", terminal_id).expect("store terminal id");
+        // Also seed the OS keyring so `resolve_current_terminal_id` (which is
+        // keyring-first in production) returns the expected value. Tests that
+        // call this helper must be `#[serial_test::serial]` because the
+        // keyring is a process-global resource.
+        let _ = storage::set_credential("terminal_id", terminal_id);
     }
 
     fn insert_active_shift(db_state: &db::DbState, terminal_id: &str, role_type: &str) {
@@ -1336,6 +1345,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn privileged_grants_are_scope_isolated() {
         let db_state = test_db_state();
         let auth = AuthState::new();
@@ -1418,6 +1428,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn cash_drawer_control_accepts_cashier_shift() {
         let db_state = test_db_state();
         let auth = AuthState::new();
@@ -1442,6 +1453,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn cash_drawer_control_accepts_manager_shift() {
         let db_state = test_db_state();
         let auth = AuthState::new();
@@ -1466,6 +1478,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn cash_drawer_control_rejects_non_cashier_shift() {
         let db_state = test_db_state();
         let auth = AuthState::new();

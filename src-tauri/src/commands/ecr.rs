@@ -160,6 +160,27 @@ fn normalize_address_token(value: &str) -> Option<String> {
     Some(trimmed.to_ascii_lowercase())
 }
 
+fn normalize_mac_address(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let hex_only: String = trimmed.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+
+    if hex_only.len() == 12
+        && hex_only.len()
+            == trimmed
+                .chars()
+                .filter(|c| !matches!(c, ':' | '-' | '.' | ' '))
+                .count()
+    {
+        return Some(hex_only.to_ascii_lowercase());
+    }
+
+    None
+}
+
 fn connection_detail_string(
     connection_details: &serde_json::Value,
     keys: &[&str],
@@ -449,7 +470,9 @@ fn discovery_identity(entry: &serde_json::Value) -> String {
             &connection_details,
             &["address", "macAddress", "mac_address"],
         )
-        .and_then(|value| normalize_address_token(&value)),
+        .and_then(|value| {
+            normalize_mac_address(&value).or_else(|| normalize_address_token(&value))
+        }),
         _ => None,
     }
     .or_else(|| value_str(entry, &["name"]).and_then(|value| normalize_lookup_token(&value)))
@@ -2107,65 +2130,77 @@ pub async fn ecr_fiscal_print(
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_required_order_id(arg0)?;
 
-    // Find default cash register
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let device = match db::ecr_get_default_device(&conn, Some("cash_register")) {
-        Some(d) => d,
-        None => {
-            // No cash register configured — skip silently
+    // Phase 1 — load device + order + payments under the DB lock.
+    //
+    // The inner block holds `db.conn` only for the duration of these fast
+    // queries and drops it before the (potentially multi-second) device I/O
+    // in Phase 3. Previously the lock was held across the entire function,
+    // which froze every other SQLite write in the POS for the duration of
+    // each fiscal print.
+    let (device, order, payments) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+        let device = match db::ecr_get_default_device(&conn, Some("cash_register")) {
+            Some(d) => d,
+            None => {
+                // No cash register configured — skip silently
+                return Ok(serde_json::json!({ "success": true, "skipped": true }));
+            }
+        };
+
+        // Check `enabled` before loading the order to avoid a spurious
+        // "Order not found" on a disabled terminal.
+        let enabled = device
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .or_else(|| {
+                device
+                    .get("enabled")
+                    .and_then(|v| v.as_i64())
+                    .map(|i| i != 0)
+            })
+            .unwrap_or(true);
+        if !enabled {
             return Ok(serde_json::json!({ "success": true, "skipped": true }));
         }
+
+        let order_json_str: Option<String> = conn
+            .prepare("SELECT data FROM orders WHERE id = ?1")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row(rusqlite::params![order_id], |row| row.get(0))
+                    .ok()
+            });
+        let order: serde_json::Value = match order_json_str {
+            Some(s) => serde_json::from_str(&s).unwrap_or(serde_json::json!({})),
+            None => return Err(format!("Order {order_id} not found")),
+        };
+
+        let payments: Vec<serde_json::Value> = conn
+            .prepare("SELECT data FROM order_payments WHERE order_id = ?1")
+            .ok()
+            .map(|mut stmt| {
+                stmt.query_map(rusqlite::params![order_id], |row| {
+                    let s: String = row.get(0)?;
+                    Ok(serde_json::from_str::<serde_json::Value>(&s).unwrap_or_default())
+                })
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
+        (device, order, payments)
+        // MutexGuard drops here; DB lock released.
     };
 
+    // Phase 2 — derive config + build fiscal data (no DB access).
     let device_id = device
         .get("id")
         .and_then(|v| v.as_str())
         .ok_or("Device has no id")?
         .to_string();
 
-    let enabled = device
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .or_else(|| {
-            device
-                .get("enabled")
-                .and_then(|v| v.as_i64())
-                .map(|i| i != 0)
-        })
-        .unwrap_or(true);
-    if !enabled {
-        return Ok(serde_json::json!({ "success": true, "skipped": true }));
-    }
-
-    // Load order from DB
-    let order_json_str: Option<String> = conn
-        .prepare("SELECT data FROM orders WHERE id = ?1")
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_row(rusqlite::params![order_id], |row| row.get(0))
-                .ok()
-        });
-    let order: serde_json::Value = match order_json_str {
-        Some(s) => serde_json::from_str(&s).unwrap_or(serde_json::json!({})),
-        None => return Err(format!("Order {order_id} not found")),
-    };
-
-    // Load payments
-    let payments: Vec<serde_json::Value> = conn
-        .prepare("SELECT data FROM order_payments WHERE order_id = ?1")
-        .ok()
-        .map(|mut stmt| {
-            stmt.query_map(rusqlite::params![order_id], |row| {
-                let s: String = row.get(0)?;
-                Ok(serde_json::from_str::<serde_json::Value>(&s).unwrap_or_default())
-            })
-            .ok()
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
-        })
-        .unwrap_or_default();
-
-    // Parse tax rates from device config
     let tax_rates_json = device
         .get("taxRates")
         .cloned()
@@ -2182,7 +2217,6 @@ pub async fn ecr_fiscal_print(
         .and_then(|v| v.as_str())
         .unwrap_or("register_prints");
 
-    // Build fiscal data
     let fiscal_data =
         ecr::fiscal::build_fiscal_data(&order, &payments, &tax_rates, operator_id.as_deref())?;
 
@@ -2193,18 +2227,34 @@ pub async fn ecr_fiscal_print(
         }));
     }
 
+    // Phase 3 — dispatch to the fiscal device. NO DB lock held; this call
+    // can block for seconds on slow serial/TCP printers.
     match print_mode {
         "pos_sends_receipt" => {
-            // Format ESC/POS receipt and send raw
+            // Enable CP737 (Greek) encoding when the device is configured for it.
+            // Previously this was hardcoded to `false`, which sent UTF-8 multi-byte
+            // Greek characters raw to the printer and produced mojibake on Greek-
+            // market deployments. escpos::encode_cp737 passes ASCII through unchanged,
+            // so opting in is safe for Greek content and lossless for ASCII.
+            let greek_mode = device
+                .get("greekMode")
+                .and_then(|v| v.as_bool())
+                .or_else(|| {
+                    device
+                        .get("greekMode")
+                        .and_then(|v| v.as_i64())
+                        .map(|i| i != 0)
+                })
+                .unwrap_or(false);
             let escpos_bytes = ecr::fiscal::format_fiscal_receipt_escpos(
                 &fiscal_data,
                 crate::escpos::PaperWidth::Mm80,
-                false,
+                greek_mode,
             );
             mgr.send_raw(&device_id, &escpos_bytes)?;
         }
         _ => {
-            // register_prints mode: send structured fiscal receipt via protocol
+            // register_prints mode: send structured fiscal receipt via protocol.
             let tx_id = format!("fiscal-{}", uuid::Uuid::new_v4());
             let started = chrono::Utc::now().to_rfc3339();
             let request = ecr::protocol::TransactionRequest {
@@ -2217,41 +2267,83 @@ pub async fn ecr_fiscal_print(
                 original_transaction_id: None,
                 fiscal_data: Some(fiscal_data),
             };
-            match mgr.process_transaction(&device_id, &request) {
+
+            let device_result = mgr.process_transaction(&device_id, &request);
+
+            // Phase 4 — persist result. Re-acquire DB lock; these writes are fast.
+            //
+            // TODO(F4c): fiscal_receipt_number currently lands only in the local
+            // `ecr_transactions` table and is never enqueued to sync_queue, so
+            // the admin-dashboard / AADE path never learns it. Needs team
+            // decision: if backend reconciliation requires the number, add a
+            // sync_queue enqueue here in the same SQLite transaction as the
+            // INSERT. See planning/claude/deep-dive-ecr-aade-fiscal.md.
+            match device_result {
                 Ok(resp) => {
-                    let _ = db::ecr_insert_transaction(
-                        &conn,
-                        &serde_json::json!({
-                            "id": resp.transaction_id,
-                            "deviceId": device_id,
-                            "orderId": order_id,
-                            "transactionType": "fiscal_receipt",
-                            "amount": request.amount,
-                            "currency": "EUR",
-                            "status": format!("{:?}", resp.status).to_lowercase(),
-                            "fiscalReceiptNumber": resp.fiscal_receipt_number,
-                            "startedAt": resp.started_at,
-                            "completedAt": resp.completed_at,
-                            "rawResponse": resp.raw_response,
-                        }),
-                    );
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    let insert_payload = serde_json::json!({
+                        "id": resp.transaction_id,
+                        "deviceId": device_id,
+                        "orderId": order_id,
+                        "transactionType": "fiscal_receipt",
+                        "amount": request.amount,
+                        "currency": "EUR",
+                        "status": format!("{:?}", resp.status).to_lowercase(),
+                        "fiscalReceiptNumber": resp.fiscal_receipt_number,
+                        "startedAt": resp.started_at,
+                        "completedAt": resp.completed_at,
+                        "rawResponse": resp.raw_response,
+                    });
+                    if let Err(insert_err) = db::ecr_insert_transaction(&conn, &insert_payload) {
+                        // The device has ALREADY committed the fiscal receipt to its
+                        // hardware fiscal memory. The local DB write failed — this is
+                        // a reconciliation event. Log loudly so the diagnostics export
+                        // captures it and an operator can manually reconcile. Surface
+                        // the orphan flag to the caller so the UI can show a warning
+                        // instead of silently treating the situation as normal success.
+                        let fiscal_num =
+                            resp.fiscal_receipt_number.as_deref().unwrap_or("<unknown>");
+                        tracing::error!(
+                            target: "ecr.orphaned_receipt",
+                            order_id = %order_id,
+                            device_id = %device_id,
+                            transaction_id = %resp.transaction_id,
+                            fiscal_receipt_number = %fiscal_num,
+                            error = %insert_err,
+                            "Fiscal receipt committed at device but local DB INSERT failed \u{2014} manual reconciliation required"
+                        );
+                        return Ok(serde_json::json!({
+                            "success": true,
+                            "orphanedLocally": true,
+                            "fiscalReceiptNumber": fiscal_num,
+                            "message": "Fiscal receipt issued by device but local DB write failed \u{2014} see ecr.orphaned_receipt logs for reconciliation"
+                        }));
+                    }
                 }
                 Err(e) => {
-                    let _ = db::ecr_insert_transaction(
-                        &conn,
-                        &serde_json::json!({
-                            "id": tx_id,
-                            "deviceId": device_id,
-                            "orderId": order_id,
-                            "transactionType": "fiscal_receipt",
-                            "amount": 0,
-                            "currency": "EUR",
-                            "status": "error",
-                            "errorMessage": e,
-                            "startedAt": started,
-                            "completedAt": chrono::Utc::now().to_rfc3339(),
-                        }),
-                    );
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    let insert_payload = serde_json::json!({
+                        "id": tx_id,
+                        "deviceId": device_id,
+                        "orderId": order_id,
+                        "transactionType": "fiscal_receipt",
+                        "amount": 0,
+                        "currency": "EUR",
+                        "status": "error",
+                        "errorMessage": e,
+                        "startedAt": started,
+                        "completedAt": chrono::Utc::now().to_rfc3339(),
+                    });
+                    if let Err(insert_err) = db::ecr_insert_transaction(&conn, &insert_payload) {
+                        tracing::warn!(
+                            target: "ecr",
+                            order_id = %order_id,
+                            device_id = %device_id,
+                            transaction_id = %tx_id,
+                            error = %insert_err,
+                            "Failed to record fiscal error transaction"
+                        );
+                    }
                     tracing::warn!("Fiscal print failed for order {order_id}: {e}");
                     return Ok(serde_json::json!({
                         "success": false,
@@ -2455,6 +2547,29 @@ mod discovery_tests {
             extract_mac_from_instance_id("BTHENUM\\DEV_AABBCCDDEEFF\\8&1234"),
             Some("AA:BB:CC:DD:EE:FF".to_string())
         );
+    }
+
+    #[test]
+    fn normalize_mac_address_collapses_common_formats() {
+        assert_eq!(
+            normalize_mac_address("AA:BB:CC:DD:EE:FF"),
+            Some("aabbccddeeff".to_string())
+        );
+        assert_eq!(
+            normalize_mac_address("AABBCCDDEEFF"),
+            Some("aabbccddeeff".to_string())
+        );
+        assert_eq!(
+            normalize_mac_address("aa-bb-cc-dd-ee-ff"),
+            Some("aabbccddeeff".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_mac_address_rejects_non_mac_inputs() {
+        assert_eq!(normalize_mac_address("192.168.1.80:10009"), None);
+        assert_eq!(normalize_mac_address(""), None);
+        assert_eq!(normalize_mac_address("not-a-mac"), None);
     }
 
     #[cfg(target_os = "windows")]

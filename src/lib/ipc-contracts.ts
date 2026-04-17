@@ -451,6 +451,58 @@ export interface DiagnosticsSyncStatusSummary {
   financialStats?: Record<string, unknown>;
 }
 
+export interface DiagnosticsParityQueueStatus {
+  total: number;
+  pending: number;
+  failed: number;
+  conflicts: number;
+  oldestItemAge?: number | null;
+}
+
+export interface DiagnosticsFinancialQueueBucket {
+  pending: number;
+  failed: number;
+}
+
+export interface DiagnosticsFinancialQueueStatus {
+  driver_earnings: DiagnosticsFinancialQueueBucket;
+  staff_payments: DiagnosticsFinancialQueueBucket;
+  shift_expenses: DiagnosticsFinancialQueueBucket;
+  payments?: DiagnosticsFinancialQueueBucket;
+  pendingPaymentItems?: number;
+  failedPaymentItems?: number;
+  totalPending?: number;
+  totalFailed?: number;
+}
+
+export interface DiagnosticsCredentialState {
+  hasAdminUrl: boolean;
+  hasApiKey: boolean;
+}
+
+export type DiagnosticsParitySyncStatus =
+  | 'idle'
+  | 'started'
+  | 'completed'
+  | 'skipped_missing_credentials'
+  | 'failed';
+
+export interface DiagnosticsLastParitySync {
+  status: DiagnosticsParitySyncStatus;
+  trigger?: string;
+  startedAt: string;
+  finishedAt?: string | null;
+  processed: number;
+  failed: number;
+  conflicts: number;
+  remaining: number;
+  error?: string | null;
+  reason?: string | null;
+  legacySyncTriggered: boolean;
+  credentialState?: DiagnosticsCredentialState;
+  queueStatus?: DiagnosticsParityQueueStatus | null;
+}
+
 export interface DiagnosticsSystemHealth {
   schemaVersion: number;
   syncBacklog: Record<string, Record<string, number>>;
@@ -479,6 +531,10 @@ export interface DiagnosticsSystemHealth {
     count: number;
     details: DiagnosticsInvalidOrder[];
   };
+  parityQueueStatus?: DiagnosticsParityQueueStatus | null;
+  financialQueueStatus?: DiagnosticsFinancialQueueStatus | null;
+  lastParitySync?: DiagnosticsLastParitySync | null;
+  credentialState?: DiagnosticsCredentialState | null;
   isOnline: boolean;
   lastSyncTime: string | null;
 }

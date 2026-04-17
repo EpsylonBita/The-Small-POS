@@ -20,13 +20,23 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
   const [showDriverModal, setShowDriverModal] = useState(false);
   const [cancelNotes, setCancelNotes] = useState('');
 
-  // Mock drivers data
-  const mockDrivers = [
-    { id: "1", name: "Alex Rodriguez", phone: "555-0101", status: "available" },
-    { id: "2", name: "Maria Garcia", phone: "555-0102", status: "busy" },
-    { id: "3", name: "David Kim", phone: "555-0103", status: "available" },
-    { id: "4", name: "Lisa Chen", phone: "555-0104", status: "offline" }
-  ];
+  // Mock drivers data — dev-only fixture. Gated behind `import.meta.env.DEV`
+  // so production bundles ship an empty array; Vite's dead-code elimination
+  // removes the static entries entirely in the release build. Previously
+  // this array was unconditionally present in production, which risked
+  // surfacing placeholder drivers in customer-facing UIs.
+  //
+  // The `(import.meta as any).env` cast mirrors the pattern used elsewhere
+  // in this repo (src/config/environment.ts, src/shared/supabase-config.ts)
+  // — this project doesn't ship `vite/client` type references yet.
+  const mockDrivers = (import.meta as any).env?.DEV
+    ? [
+        { id: "1", name: "Alex Rodriguez", phone: "555-0101", status: "available" },
+        { id: "2", name: "Maria Garcia", phone: "555-0102", status: "busy" },
+        { id: "3", name: "David Kim", phone: "555-0103", status: "available" },
+        { id: "4", name: "Lisa Chen", phone: "555-0104", status: "offline" },
+      ]
+    : [];
 
   const handleAction = useCallback((action: string, notes?: string) => {
     

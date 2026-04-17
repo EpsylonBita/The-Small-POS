@@ -1886,7 +1886,7 @@ pub(crate) fn ensure_staff_payments_table(conn: &Connection) -> Result<(), Strin
     if !has_updated_at {
         conn.execute(
             "ALTER TABLE staff_payments
-             ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))",
+             ADD COLUMN updated_at TEXT",
             [],
         )
         .map_err(|e| format!("add staff_payments.updated_at: {e}"))?;
@@ -4305,6 +4305,19 @@ mod tests {
     #[test]
     fn test_non_financial_shift_ignores_cash_amounts_on_open_and_close() {
         let db = test_db();
+
+        open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cashier-bootstrap",
+                "staffName": "Cashier Bootstrap",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "cashier",
+                "openingCash": 100.0,
+            }),
+        )
+        .expect("open bootstrap cashier shift");
 
         let open_result = open_shift(
             &db,

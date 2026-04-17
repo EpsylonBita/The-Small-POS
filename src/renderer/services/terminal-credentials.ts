@@ -94,6 +94,19 @@ async function invokeSettingByKey(key: string): Promise<string> {
   }
 }
 
+async function invokePosApiKey(): Promise<string> {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+
+  try {
+    const value = await getBridge().settings.getPosApiKey()
+    return normalizeCredentialValue(value)
+  } catch {
+    return ''
+  }
+}
+
 type SpecializedTerminalLookup =
   | 'terminal-config:get-terminal-id'
   | 'terminal-config:get-branch-id'
@@ -143,6 +156,9 @@ export async function refreshTerminalCredentialCache(): Promise<TerminalCredenti
   if (!resolved.organizationId) {
     resolved.organizationId = await invokeSettingByKey('organization_id')
   }
+  if (!resolved.apiKey) {
+    resolved.apiKey = await invokePosApiKey()
+  }
 
   if (resolved.terminalId || resolved.apiKey || resolved.organizationId || resolved.branchId) {
     updateTerminalCredentialCache(resolved)
@@ -152,7 +168,7 @@ export async function refreshTerminalCredentialCache(): Promise<TerminalCredenti
 
 export async function getResolvedTerminalCredentials(): Promise<TerminalCredentialState> {
   const cached = getCachedTerminalCredentials()
-  if (cached.terminalId && cached.organizationId && cached.branchId) {
+  if (cached.terminalId && cached.apiKey && cached.organizationId && cached.branchId) {
     return cached
   }
   return refreshTerminalCredentialCache()

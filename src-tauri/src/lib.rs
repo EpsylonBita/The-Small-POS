@@ -37,6 +37,7 @@ mod hardware_manager;
 mod loyalty;
 mod menu;
 mod order_ownership;
+mod panic_hook;
 mod payment_integrity;
 mod payments;
 mod print;
@@ -142,8 +143,9 @@ pub(crate) use terminal_helpers::{
     extract_ghost_mode_feature_from_terminal_settings_response,
     extract_org_id_from_terminal_settings_response, handle_invalid_terminal_credentials,
     hydrate_terminal_credentials_from_local_settings, is_sensitive_terminal_setting,
-    is_terminal_auth_failure, mask_terminal_id, read_local_setting, scrub_sensitive_local_settings,
-    terminal_access_reset_reason,
+    is_terminal_auth_failure, mask_terminal_id,
+    purge_hydrated_terminal_credentials_from_local_settings, read_local_setting,
+    scrub_sensitive_local_settings, terminal_access_reset_reason,
 };
 
 pub(crate) async fn maybe_lazy_warm_menu_cache(
@@ -448,6 +450,10 @@ pub fn run() {
     // We leak it intentionally since the app runs until process exit.
     std::mem::forget(_guard);
 
+    // Install panic hook now that tracing is ready. Any panic before this point
+    // still falls through to Rust's default stderr hook.
+    panic_hook::install();
+
     info!("Starting The Small POS v{}", env!("CARGO_PKG_VERSION"));
 
     tauri::Builder::default()
@@ -473,7 +479,12 @@ pub fn run() {
                 error!("Failed to initialize database: {e}");
                 format!("Failed to initialize database: {e}")
             })?;
+            // Migrate credentials from legacy plaintext `local_settings` rows
+            // into the OS keyring, then purge the plaintext rows that have
+            // been successfully migrated. Hydrate must run before purge so a
+            // keyring-only failure doesn't wipe the plaintext fallback.
             hydrate_terminal_credentials_from_local_settings(&db_state);
+            purge_hydrated_terminal_credentials_from_local_settings(&db_state);
             let caller_id_manager = Arc::new(callerid::CallerIdManager::new());
             app.manage(db_state);
 
@@ -793,6 +804,7 @@ pub fn run() {
             commands::settings::settings_get_language,
             commands::settings::settings_set_language,
             commands::settings::update_settings,
+            commands::settings::settings_get_pos_api_key,
             // Terminal config
             commands::settings::terminal_config_get_settings,
             commands::settings::terminal_config_get_setting,

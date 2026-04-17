@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { Toaster, toast } from "react-hot-toast";
 import { AlertTriangle } from "lucide-react";
@@ -15,6 +15,10 @@ import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { ScreenCaptureControlRequestModal } from "./components/ScreenCaptureControlRequestModal";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
+import ConnectionSettingsModal from "./components/modals/ConnectionSettingsModal";
+import SyncRecoveryModal, {
+  type SyncRecoveryOpenContext,
+} from "./components/recovery/SyncRecoveryModal";
 
 import { ActivityTracker } from "./services/ActivityTracker";
 import { screenCaptureHandler } from "./services/ScreenCaptureHandler";
@@ -41,7 +45,10 @@ import { subscribeToAdminOrderDeletedEvents } from "./services/OrderDeleteRealti
 import { DesktopRealtimeManager } from "./services/RealtimeManager";
 import {
   emitParityQueueStatus,
+  PARITY_QUEUE_STATUS_EVENT,
+  PARITY_SYNC_STATUS_EVENT,
   REALTIME_STATUS_EVENT,
+  type ParitySyncSnapshot,
   runParitySyncCycle,
 } from "./services/ParitySyncCoordinator";
 import { useOrderStore } from "./hooks/useOrderStore";
@@ -57,6 +64,10 @@ const INVALID_SESSION_IDENTITY_VALUES = new Set([
 const STARTUP_IPC_TIMEOUT_MS = 4000;
 const STARTUP_CONFIG_SYNC_TIMEOUT_MS = 2500;
 const CONFIGURED_TERMINAL_HINT_KEY = 'pos-terminal-configured';
+const PARITY_QUEUE_REFRESH_INTERVAL_MS = 15_000;
+const PARITY_SYNC_RETRY_INTERVAL_MS = 30_000;
+
+type ConnectionSettingsSection = 'recovery' | null;
 
 function normalizeSessionIdentityValue(value: unknown): string | undefined {
   if (typeof value !== 'string') {
@@ -533,10 +544,58 @@ function AppContent() {
   const bridge = getBridge();
   const [user, setUser] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [showConnectionSettings, setShowConnectionSettings] = useState(false);
+  const [connectionSettingsInitialSection, setConnectionSettingsInitialSection] =
+    useState<ConnectionSettingsSection>(null);
+  const [showSyncRecoveryModal, setShowSyncRecoveryModal] = useState(false);
+  const [syncRecoveryContext, setSyncRecoveryContext] =
+    useState<SyncRecoveryOpenContext | null>(null);
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
   const windowState = useWindowState();
   const silentRefreshOrders = useOrderStore((state) => state.silentRefresh);
+  const parityQueueStatusRef = useRef<{
+    pending: number;
+    failed: number;
+    conflicts: number;
+    total: number;
+  }>({
+    pending: 0,
+    failed: 0,
+    conflicts: 0,
+    total: 0,
+  });
+  const paritySyncSnapshotRef = useRef<ParitySyncSnapshot | null>(null);
+
+  const openConnectionSettings = useCallback(
+    (section: ConnectionSettingsSection = null) => {
+      bridge.terminalConfig.refresh().catch(() => {
+        // Ignore refresh errors and still open recovery/settings.
+      });
+      setShowSyncRecoveryModal(false);
+      setSyncRecoveryContext(null);
+      setConnectionSettingsInitialSection(section);
+      setShowConnectionSettings(true);
+    },
+    [bridge.terminalConfig],
+  );
+
+  const closeConnectionSettings = useCallback(() => {
+    setShowConnectionSettings(false);
+    setConnectionSettingsInitialSection(null);
+  }, []);
+
+  const openSyncRecovery = useCallback((context?: SyncRecoveryOpenContext | null) => {
+    setShowConnectionSettings(false);
+    setConnectionSettingsInitialSection(null);
+    setSyncRecoveryContext(context ?? null);
+    setShowSyncRecoveryModal(true);
+  }, []);
+
+  const closeSyncRecoveryModal = useCallback(() => {
+    setShowSyncRecoveryModal(false);
+    setSyncRecoveryContext(null);
+  }, []);
 
   // Auto-check for updates on app startup
   useEffect(() => {
@@ -652,9 +711,9 @@ function AppContent() {
       await emitParityQueueStatus();
     };
 
-    const syncNow = async () => {
+    const syncNow = async (trigger: 'startup' | 'scheduled_retry' | 'online' | 'realtime') => {
       try {
-        await runParitySyncCycle();
+        await runParitySyncCycle({ trigger });
       } catch (error) {
         if (!disposed) {
           console.warn('[App] Parity sync cycle failed:', error);
@@ -662,15 +721,70 @@ function AppContent() {
       }
     };
 
+    const handleParityQueueStatus = (status: {
+      pending?: number;
+      failed?: number;
+      conflicts?: number;
+      total?: number;
+    } | null) => {
+      parityQueueStatusRef.current = {
+        pending:
+          typeof status?.pending === 'number' && Number.isFinite(status.pending)
+            ? status.pending
+            : 0,
+        failed:
+          typeof status?.failed === 'number' && Number.isFinite(status.failed)
+            ? status.failed
+            : 0,
+        conflicts:
+          typeof status?.conflicts === 'number' && Number.isFinite(status.conflicts)
+            ? status.conflicts
+            : 0,
+        total:
+          typeof status?.total === 'number' && Number.isFinite(status.total)
+            ? status.total
+            : 0,
+      };
+    };
+
+    const handleParitySyncStatus = (snapshot: ParitySyncSnapshot | null) => {
+      paritySyncSnapshotRef.current = snapshot;
+    };
+
+    const shouldRetryParitySync = () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        return false;
+      }
+
+      const queueStatus = parityQueueStatusRef.current;
+      if (queueStatus.pending > 0 || queueStatus.failed > 0) {
+        return true;
+      }
+
+      const lastSnapshot = paritySyncSnapshotRef.current;
+      return (
+        lastSnapshot?.status === 'failed' ||
+        lastSnapshot?.status === 'skipped_missing_credentials'
+      );
+    };
+
+    onEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
+    onEvent(PARITY_SYNC_STATUS_EVENT, handleParitySyncStatus);
     void refreshParityQueueStatus();
-    void syncNow();
+    void syncNow('startup');
 
     const intervalId = window.setInterval(() => {
       void refreshParityQueueStatus();
-    }, 15000);
+    }, PARITY_QUEUE_REFRESH_INTERVAL_MS);
+
+    const retryIntervalId = window.setInterval(() => {
+      if (shouldRetryParitySync()) {
+        void syncNow('scheduled_retry');
+      }
+    }, PARITY_SYNC_RETRY_INTERVAL_MS);
 
     const handleOnline = () => {
-      void syncNow();
+      void syncNow('online');
     };
 
     window.addEventListener('online', handleOnline);
@@ -678,7 +792,10 @@ function AppContent() {
     return () => {
       disposed = true;
       window.clearInterval(intervalId);
+      window.clearInterval(retryIntervalId);
       window.removeEventListener('online', handleOnline);
+      offEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
+      offEvent(PARITY_SYNC_STATUS_EVENT, handleParitySyncStatus);
     };
   }, [user]);
 
@@ -723,7 +840,7 @@ function AppContent() {
             emitCompatEvent('modules:refresh-needed', payload.new || payload.old || payload);
           },
           onFullSyncNeeded: () => {
-            void runParitySyncCycle()
+            void runParitySyncCycle({ trigger: 'realtime' })
               .then(() => silentRefreshOrders().catch(() => {}))
               .catch((error) => {
                 console.warn('[App] Full realtime sync failed:', error);
@@ -1033,17 +1150,55 @@ function AppContent() {
 
             {/* Sync Status Indicator - Heart Icon in Top-Left (after navbar) */}
             <div className="fixed top-12 left-20 z-40">
-              <SyncStatusIndicator />
+              <SyncStatusIndicator onOpenRecovery={openSyncRecovery} />
             </div>
 
 
 
             <Routes>
-              <Route path="/" element={<RefactoredMainLayout onLogout={handleLogout} />} />
-              <Route path="/dashboard" element={<RefactoredMainLayout onLogout={handleLogout} />} />
+              <Route
+                path="/"
+                element={
+                  <RefactoredMainLayout
+                    onLogout={handleLogout}
+                    onOpenConnectionSettings={openConnectionSettings}
+                  />
+                }
+              />
+              <Route
+                path="/dashboard"
+                element={
+                  <RefactoredMainLayout
+                    onLogout={handleLogout}
+                    onOpenConnectionSettings={openConnectionSettings}
+                  />
+                }
+              />
               <Route path="/new-order" element={<NewOrderPage />} />
-              <Route path="*" element={<RefactoredMainLayout onLogout={handleLogout} />} />
+              <Route
+                path="*"
+                element={
+                  <RefactoredMainLayout
+                    onLogout={handleLogout}
+                    onOpenConnectionSettings={openConnectionSettings}
+                  />
+                }
+              />
             </Routes>
+
+            <ConnectionSettingsModal
+              isOpen={showConnectionSettings}
+              initialSection={connectionSettingsInitialSection}
+              onClose={closeConnectionSettings}
+            />
+
+            <SyncRecoveryModal
+              isOpen={showSyncRecoveryModal}
+              initialContext={syncRecoveryContext}
+              onClose={closeSyncRecoveryModal}
+              onOpenConnectionSettings={() => openConnectionSettings()}
+              onOpenSnapshots={() => openConnectionSettings('recovery')}
+            />
 
             <ScreenCaptureControlRequestModal />
 

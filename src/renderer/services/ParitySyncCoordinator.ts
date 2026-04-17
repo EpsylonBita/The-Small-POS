@@ -1,22 +1,81 @@
 import { environment } from '../../config/environment';
 import { emitCompatEvent, getBridge } from '../../lib';
 import { getSyncQueueBridge } from './SyncQueueBridge';
-import { getCachedTerminalCredentials } from './terminal-credentials';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from './terminal-credentials';
 import type { QueueStatus, SyncResult } from '../../../../shared/pos/sync-queue-types';
 
 export const PARITY_QUEUE_STATUS_EVENT = 'parity-queue:status';
+export const PARITY_SYNC_STATUS_EVENT = 'parity-sync:status';
 export const REALTIME_STATUS_EVENT = 'realtime:status';
 
 type RuntimeConfigLike = Record<string, unknown> | null;
+export type ParitySyncTrigger =
+  | 'startup'
+  | 'scheduled_retry'
+  | 'online'
+  | 'manual'
+  | 'realtime'
+  | 'unknown';
+
+export interface ParitySyncCredentialState {
+  hasAdminUrl: boolean;
+  hasApiKey: boolean;
+}
+
+export type ParitySyncStatus =
+  | 'idle'
+  | 'started'
+  | 'completed'
+  | 'skipped_missing_credentials'
+  | 'failed';
+
+export interface ParitySyncSnapshot {
+  status: ParitySyncStatus;
+  trigger: ParitySyncTrigger;
+  startedAt: string;
+  finishedAt: string | null;
+  processed: number;
+  failed: number;
+  conflicts: number;
+  remaining: number;
+  error: string | null;
+  reason: string | null;
+  legacySyncTriggered: boolean;
+  credentialState: ParitySyncCredentialState;
+  queueStatus: QueueStatus | null;
+}
 
 export interface ParitySyncCycleResult {
   config: RuntimeConfigLike;
   queueStatus: QueueStatus | null;
   paritySyncResult: SyncResult | null;
   legacySyncTriggered: boolean;
+  credentialState: ParitySyncCredentialState;
+  paritySyncStatus: ParitySyncSnapshot;
 }
 
 let inFlightSync: Promise<ParitySyncCycleResult> | null = null;
+let lastParitySyncSnapshot: ParitySyncSnapshot = {
+  status: 'idle',
+  trigger: 'unknown',
+  startedAt: new Date(0).toISOString(),
+  finishedAt: null,
+  processed: 0,
+  failed: 0,
+  conflicts: 0,
+  remaining: 0,
+  error: null,
+  reason: null,
+  legacySyncTriggered: false,
+  credentialState: {
+    hasAdminUrl: false,
+    hasApiKey: false,
+  },
+  queueStatus: null,
+};
 
 function getAdvisoryCachePaths(config: RuntimeConfigLike): string[] {
   const terminalId = readString(config, 'terminal_id', 'terminalId');
@@ -134,8 +193,10 @@ async function resolveParitySyncCredentials(config: RuntimeConfigLike): Promise<
   adminUrl: string;
   apiKey: string;
 }> {
-  const bridge = getBridge();
   const cachedCredentials = getCachedTerminalCredentials();
+  const resolvedCredentials = cachedCredentials.apiKey
+    ? cachedCredentials
+    : await refreshTerminalCredentialCache().catch(() => cachedCredentials);
 
   const adminUrl =
     readString(config, 'admin_dashboard_url', 'admin_url') ||
@@ -144,19 +205,8 @@ async function resolveParitySyncCredentials(config: RuntimeConfigLike): Promise<
       : '') ||
     environment.ADMIN_DASHBOARD_URL;
 
-  const apiKeyCandidates = await Promise.allSettled([
-    bridge.terminalConfig.getSetting('terminal', 'pos_api_key'),
-    bridge.terminalConfig.getSetting('terminal', 'api_key'),
-  ]);
-
   const apiKey =
-    apiKeyCandidates
-      .map((candidate) =>
-        candidate.status === 'fulfilled' && typeof candidate.value === 'string'
-          ? candidate.value.trim()
-          : '',
-      )
-      .find(Boolean) ||
+    resolvedCredentials.apiKey ||
     readString(config, 'pos_api_key', 'api_key') ||
     cachedCredentials.apiKey;
 
@@ -164,6 +214,49 @@ async function resolveParitySyncCredentials(config: RuntimeConfigLike): Promise<
     adminUrl: adminUrl.trim(),
     apiKey: apiKey.trim(),
   };
+}
+
+function createCredentialState(adminUrl: string, apiKey: string): ParitySyncCredentialState {
+  return {
+    hasAdminUrl: Boolean(adminUrl.trim()),
+    hasApiKey: Boolean(apiKey.trim()),
+  };
+}
+
+function describeMissingCredentials(credentialState: ParitySyncCredentialState): string | null {
+  const missing: string[] = [];
+  if (!credentialState.hasAdminUrl) {
+    missing.push('Admin URL');
+  }
+  if (!credentialState.hasApiKey) {
+    missing.push('POS API key');
+  }
+  return missing.length > 0
+    ? `${missing.join(' and ')} missing for parity sync.`
+    : null;
+}
+
+async function persistParitySyncSnapshot(snapshot: ParitySyncSnapshot): Promise<void> {
+  try {
+    await getBridge().settings.updateLocal({
+      settingType: 'diagnostics',
+      settings: {
+        last_parity_sync: JSON.stringify(snapshot),
+      },
+    });
+  } catch (error) {
+    console.warn('[ParitySyncCoordinator] Failed to persist parity sync snapshot:', error);
+  }
+}
+
+async function publishParitySyncSnapshot(snapshot: ParitySyncSnapshot): Promise<void> {
+  lastParitySyncSnapshot = snapshot;
+  emitCompatEvent(PARITY_SYNC_STATUS_EVENT, snapshot);
+  await persistParitySyncSnapshot(snapshot);
+}
+
+export function getLastParitySyncSnapshot(): ParitySyncSnapshot {
+  return lastParitySyncSnapshot;
 }
 
 export async function emitParityQueueStatus(queueStatus?: QueueStatus | null): Promise<QueueStatus | null> {
@@ -175,6 +268,7 @@ export async function emitParityQueueStatus(queueStatus?: QueueStatus | null): P
 export async function runParitySyncCycle(options?: {
   forceLegacySync?: boolean;
   syncTerminalConfig?: boolean;
+  trigger?: ParitySyncTrigger;
 }): Promise<ParitySyncCycleResult> {
   if (!inFlightSync) {
     inFlightSync = (async () => {
@@ -182,6 +276,8 @@ export async function runParitySyncCycle(options?: {
       const syncQueue = getSyncQueueBridge();
       const shouldSyncTerminalConfig = options?.syncTerminalConfig !== false;
       const requestedLegacySync = options?.forceLegacySync;
+      const trigger = options?.trigger ?? 'unknown';
+      const startedAt = new Date().toISOString();
 
       if (shouldSyncTerminalConfig) {
         try {
@@ -193,14 +289,42 @@ export async function runParitySyncCycle(options?: {
 
       const config = await getRuntimeConfig();
       const { adminUrl, apiKey } = await resolveParitySyncCredentials(config);
+      const credentialState = createCredentialState(adminUrl, apiKey);
+      const initialSnapshot: ParitySyncSnapshot = {
+        status: 'started',
+        trigger,
+        startedAt,
+        finishedAt: null,
+        processed: 0,
+        failed: 0,
+        conflicts: 0,
+        remaining: lastParitySyncSnapshot.queueStatus?.total ?? 0,
+        error: null,
+        reason: null,
+        legacySyncTriggered: false,
+        credentialState,
+        queueStatus: lastParitySyncSnapshot.queueStatus,
+      };
+      await publishParitySyncSnapshot(initialSnapshot);
 
       let paritySyncResult: SyncResult | null = null;
+      let paritySyncError: string | null = null;
+      let paritySyncReason: string | null = null;
+      let paritySyncStatus: ParitySyncStatus = 'completed';
+
       if (adminUrl && apiKey) {
         try {
           paritySyncResult = await syncQueue.processQueue(adminUrl, apiKey);
         } catch (error) {
+          paritySyncStatus = 'failed';
+          paritySyncError =
+            error instanceof Error ? error.message : 'Unknown parity sync failure';
           console.warn('[ParitySyncCoordinator] Parity queue sync failed:', error);
         }
+      } else {
+        paritySyncStatus = 'skipped_missing_credentials';
+        paritySyncReason = describeMissingCredentials(credentialState);
+        console.warn('[ParitySyncCoordinator] Parity queue sync skipped:', paritySyncReason);
       }
 
       try {
@@ -227,10 +351,34 @@ export async function runParitySyncCycle(options?: {
       }
 
       if (shouldForceLegacySync) {
-        await bridge.sync.force();
+        try {
+          await bridge.sync.force();
+        } catch (error) {
+          paritySyncStatus = 'failed';
+          paritySyncError =
+            paritySyncError ??
+            (error instanceof Error ? error.message : 'Legacy sync force failed');
+          console.warn('[ParitySyncCoordinator] Legacy sync force failed:', error);
+        }
       }
 
       const queueStatus = await emitParityQueueStatus();
+      const completedSnapshot: ParitySyncSnapshot = {
+        status: paritySyncStatus,
+        trigger,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        processed: paritySyncResult?.processed ?? 0,
+        failed: paritySyncResult?.failed ?? 0,
+        conflicts: paritySyncResult?.conflicts ?? 0,
+        remaining: queueStatus?.total ?? 0,
+        error: paritySyncError,
+        reason: paritySyncReason,
+        legacySyncTriggered: shouldForceLegacySync,
+        credentialState,
+        queueStatus,
+      };
+      await publishParitySyncSnapshot(completedSnapshot);
 
       if (config) {
         emitCompatEvent('terminal-config-updated', config);
@@ -241,6 +389,8 @@ export async function runParitySyncCycle(options?: {
         queueStatus,
         paritySyncResult,
         legacySyncTriggered: shouldForceLegacySync,
+        credentialState,
+        paritySyncStatus: completedSnapshot,
       };
     })().finally(() => {
       inFlightSync = null;

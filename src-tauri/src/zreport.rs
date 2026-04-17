@@ -5539,6 +5539,22 @@ mod tests {
                 params![format!("pay-{order_id}"), order_id, total_amount],
             )
             .unwrap();
+
+            if order_type == "delivery" {
+                conn.execute(
+                    "INSERT INTO driver_earnings (
+                        id, driver_id, staff_shift_id, order_id, branch_id,
+                        delivery_fee, tip_amount, total_earning, payment_method,
+                        cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+                     ) VALUES (
+                        ?1, 'driver-1', 'driver-zr', ?2, 'branch-1',
+                        0.0, 0.0, ?3, 'cash',
+                        ?3, 0.0, ?3, 0, '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z'
+                     )",
+                    params![format!("earning-{order_id}"), order_id, total_amount],
+                )
+                .unwrap();
+            }
         }
         drop(conn);
 
@@ -6416,6 +6432,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining_active_shifts, 1, "next-day shift must remain");
+        drop(conn);
 
         let status = get_end_of_day_status(
             &db,

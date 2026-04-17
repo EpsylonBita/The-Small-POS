@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.3.62"
+version = "1.3.65"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -72,6 +72,12 @@ zeroize = "1"
 thiserror = "2"
 anyhow = "1"
 webbrowser = "1.0"
+
+[dev-dependencies]
+# Test-level serialization for tests that touch process-global state (OS keyring
+# via storage::set_credential, etc.). Prevents flaky failures caused by parallel
+# test threads racing on the same global resource.
+serial_test = "3"
 
 [profile.dev]
 incremental = true

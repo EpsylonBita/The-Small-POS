@@ -17,6 +17,7 @@ import {
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
+import type { SyncRecoveryOpenContext } from './recovery/SyncRecoveryModal';
 import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useFeatures } from '../hooks/useFeatures';
 import { useShift } from '../contexts/shift-context';
@@ -29,15 +30,19 @@ import {
   getBridge,
   offEvent,
   onEvent,
+  type DiagnosticsCredentialState,
+  type DiagnosticsFinancialQueueStatus,
+  type DiagnosticsLastParitySync,
   type DiagnosticsSystemHealth,
   type DiagnosticsExportOptions,
 } from '../../lib';
 import {
   PARITY_QUEUE_STATUS_EVENT,
+  PARITY_SYNC_STATUS_EVENT,
   REALTIME_STATUS_EVENT,
+  type ParitySyncSnapshot,
   runParitySyncCycle,
 } from '../services/ParitySyncCoordinator';
-import { getSyncQueueBridge } from '../services/SyncQueueBridge';
 import type { QueueStatus } from '../../../../shared/pos/sync-queue-types';
 import type { SubscriptionConnectionStatus } from '../services/RealtimeManager';
 
@@ -68,11 +73,13 @@ interface ParityQueueSnapshot {
   failed: number;
   conflicts: number;
   total: number;
+  oldestItemAge: number | null;
 }
 
 interface SyncStatusIndicatorProps {
   className?: string;
   showDetails?: boolean;
+  onOpenRecovery?: (context: SyncRecoveryOpenContext) => void;
 }
 
 type QueueFailureClassification =
@@ -110,14 +117,14 @@ interface SyncHealthPresentation {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const defaultFinancialStats = {
+const createDefaultFinancialStats = (): DiagnosticsFinancialQueueStatus => ({
   driver_earnings: { pending: 0, failed: 0 },
   staff_payments: { pending: 0, failed: 0 },
   shift_expenses: { pending: 0, failed: 0 },
-};
+});
 
-const normalizeFinancialStats = (stats: any) => {
-  if (!stats || typeof stats !== 'object') return defaultFinancialStats;
+const normalizeFinancialStats = (stats: any): DiagnosticsFinancialQueueStatus => {
+  if (!stats || typeof stats !== 'object') return createDefaultFinancialStats();
   return {
     driver_earnings: {
       pending: coerceNumber(stats.driver_earnings?.pending, 0),
@@ -284,7 +291,62 @@ const normalizeParityQueueStatus = (status: QueueStatus | null | undefined): Par
   failed: coerceNumber(status?.failed, 0),
   conflicts: coerceNumber(status?.conflicts, 0),
   total: coerceNumber(status?.total, 0),
+  oldestItemAge:
+    typeof status?.oldestItemAge === 'number'
+      ? status.oldestItemAge
+      : typeof (status as any)?.oldest_item_age === 'number'
+        ? (status as any).oldest_item_age
+        : null,
 });
+
+const normalizeCredentialState = (value: any): DiagnosticsCredentialState | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  return {
+    hasAdminUrl: !!value.hasAdminUrl,
+    hasApiKey: !!value.hasApiKey,
+  };
+};
+
+const normalizeLastParitySync = (
+  value: DiagnosticsLastParitySync | ParitySyncSnapshot | null | undefined,
+): DiagnosticsLastParitySync | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const finishedAt = toDateString(value.finishedAt);
+  const startedAt =
+    toDateString(value.startedAt) ?? finishedAt ?? new Date(0).toISOString();
+  const queueStatus =
+    value.queueStatus && typeof value.queueStatus === 'object'
+      ? normalizeParityQueueStatus(value.queueStatus as QueueStatus)
+      : null;
+
+  return {
+    status:
+      value.status === 'started' ||
+      value.status === 'completed' ||
+      value.status === 'skipped_missing_credentials' ||
+      value.status === 'failed'
+        ? value.status
+        : 'idle',
+    trigger: typeof value.trigger === 'string' ? value.trigger : 'unknown',
+    startedAt,
+    finishedAt,
+    processed: coerceNumber(value.processed, 0),
+    failed: coerceNumber(value.failed, 0),
+    conflicts: coerceNumber(value.conflicts, 0),
+    remaining: coerceNumber(value.remaining, queueStatus?.total ?? 0),
+    error: typeof value.error === 'string' ? value.error : null,
+    reason: typeof value.reason === 'string' ? value.reason : null,
+    legacySyncTriggered: !!value.legacySyncTriggered,
+    credentialState: normalizeCredentialState(value.credentialState) ?? undefined,
+    queueStatus,
+  };
+};
 
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -410,6 +472,7 @@ const getSyncHealthPresentation = (
 export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   className = '',
   showDetails = false,
+  onOpenRecovery,
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
@@ -433,10 +496,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     failedPaymentItems: 0,
     lastQueueFailure: null,
   }));
-  const [financialStats, setFinancialStats] = useState(defaultFinancialStats);
+  const [financialStats, setFinancialStats] = useState<DiagnosticsFinancialQueueStatus>(() =>
+    createDefaultFinancialStats(),
+  );
   const [parityQueueStatus, setParityQueueStatus] = useState<ParityQueueSnapshot>(() =>
     normalizeParityQueueStatus(null),
   );
+  const [lastParitySync, setLastParitySync] =
+    useState<DiagnosticsLastParitySync | null>(null);
   const [realtimeStatus, setRealtimeStatus] =
     useState<SubscriptionConnectionStatus>('disconnected');
 
@@ -468,44 +535,18 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   const loadFinancialStats = useCallback(async () => {
     try {
-      const queueItems = await getSyncQueueBridge().listItems({
-        limit: 500,
-        moduleType: 'financial',
-      });
-      const stats = {
-        driver_earnings: { pending: 0, failed: 0 },
-        staff_payments: { pending: 0, failed: 0 },
-        shift_expenses: { pending: 0, failed: 0 },
-      };
-      for (const item of queueItems) {
-        const bucket =
-          item.tableName === 'driver_earnings'
-            ? stats.driver_earnings
-            : item.tableName === 'staff_payments'
-              ? stats.staff_payments
-              : item.tableName === 'shift_expenses'
-                ? stats.shift_expenses
-                : null;
-        if (!bucket) {
-          continue;
-        }
-        if (item.status === 'failed' || item.status === 'conflict') {
-          bucket.failed += 1;
-        } else {
-          bucket.pending += 1;
-        }
-      }
+      const stats = await bridge.sync.getFinancialStats();
       setFinancialStats(normalizeFinancialStats(stats));
     } catch (err) {
       console.error('Failed to load financial stats:', err);
     }
-  }, []);
+  }, [bridge.sync]);
 
   const loadSyncStatus = useCallback(async () => {
     try {
       const status = await bridge.sync.getStatus();
       setSyncStatus(normalizeStatus(status));
-      await loadFinancialStats();
+      setFinancialStats(normalizeFinancialStats((status as any)?.financialStats));
     } catch (error) {
       console.error('Failed to load sync status:', error);
     }
@@ -526,16 +567,25 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
     const handleSyncStatusUpdate = async (status: any) => {
       setSyncStatus(normalizeStatus(status));
-      await loadFinancialStats();
+      setFinancialStats(normalizeFinancialStats(status?.financialStats));
     };
 
     const handleNetworkStatus = ({ isOnline }: { isOnline: boolean }) => {
       setSyncStatus((prev) => ({ ...prev, isOnline }));
     };
 
+    const handleParitySyncStatus = (snapshot: ParitySyncSnapshot | null) => {
+      const normalized = normalizeLastParitySync(snapshot);
+      setLastParitySync(normalized);
+      if (normalized?.queueStatus) {
+        setParityQueueStatus(normalizeParityQueueStatus(normalized.queueStatus as QueueStatus));
+      }
+    };
+
     onEvent('sync:status', handleSyncStatusUpdate);
     onEvent('network:status', handleNetworkStatus);
     onEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
+    onEvent(PARITY_SYNC_STATUS_EVENT, handleParitySyncStatus);
     onEvent(REALTIME_STATUS_EVENT, handleRealtimeStatus);
 
     const handleMenuRefreshed = () => {
@@ -551,6 +601,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       offEvent('sync:status', handleSyncStatusUpdate);
       offEvent('network:status', handleNetworkStatus);
       offEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
+      offEvent(PARITY_SYNC_STATUS_EVENT, handleParitySyncStatus);
       offEvent(REALTIME_STATUS_EVENT, handleRealtimeStatus);
       window.removeEventListener(
         'menu-sync:refreshed',
@@ -566,6 +617,17 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     try {
       const data = await bridge.diagnostics.getSystemHealth();
       setSystemHealth(data);
+      setFinancialStats(
+        normalizeFinancialStats(
+          data.financialQueueStatus ?? data.syncStatusSummary?.financialStats,
+        ),
+      );
+      setParityQueueStatus(
+        normalizeParityQueueStatus(
+          (data.parityQueueStatus ?? data.lastParitySync?.queueStatus) as QueueStatus | null,
+        ),
+      );
+      setLastParitySync(normalizeLastParitySync(data.lastParitySync));
       systemLoaded.current = true;
     } catch (err) {
       console.error('Failed to load system health:', err);
@@ -584,6 +646,23 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         payload?.data && payload?.success ? payload.data : payload;
       if (candidate && typeof candidate === 'object') {
         setSystemHealth(candidate as DiagnosticsSystemHealth);
+        setFinancialStats(
+          normalizeFinancialStats(
+            (candidate as DiagnosticsSystemHealth).financialQueueStatus ??
+              (candidate as DiagnosticsSystemHealth).syncStatusSummary?.financialStats,
+          ),
+        );
+        setParityQueueStatus(
+          normalizeParityQueueStatus(
+            ((candidate as DiagnosticsSystemHealth).parityQueueStatus ??
+              (candidate as DiagnosticsSystemHealth).lastParitySync?.queueStatus) as
+              | QueueStatus
+              | null,
+          ),
+        );
+        setLastParitySync(
+          normalizeLastParitySync((candidate as DiagnosticsSystemHealth).lastParitySync),
+        );
       }
     };
     onEvent('database-health-update', handleHealthUpdate);
@@ -734,20 +813,164 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           })
     : syncHealthPresentation.detail;
 
+  const effectiveLastParitySync = useMemo(
+    () => lastParitySync ?? normalizeLastParitySync(systemHealth?.lastParitySync),
+    [lastParitySync, systemHealth?.lastParitySync],
+  );
+
+  const effectiveCredentialState = useMemo(
+    () =>
+      effectiveLastParitySync?.credentialState ??
+      normalizeCredentialState(systemHealth?.credentialState),
+    [effectiveLastParitySync?.credentialState, systemHealth?.credentialState],
+  );
+
+  const missingCredentialLabels = useMemo(() => {
+    if (!effectiveCredentialState) {
+      return [] as string[];
+    }
+
+    const missing: string[] = [];
+    if (!effectiveCredentialState.hasAdminUrl) {
+      missing.push(
+        t('sync.dashboard.missingAdminUrl', { defaultValue: 'Admin URL' }),
+      );
+    }
+    if (!effectiveCredentialState.hasApiKey) {
+      missing.push(
+        t('sync.dashboard.missingApiKey', { defaultValue: 'POS API key' }),
+      );
+    }
+    return missing;
+  }, [effectiveCredentialState, t]);
+
+  const parityProcessorSummary = useMemo(() => {
+    if (missingCredentialLabels.length > 0) {
+      return {
+        value: t('sync.dashboard.parityCredentialsMissing', {
+          defaultValue: 'Credentials missing',
+        }),
+        detail: t('sync.dashboard.parityCredentialsMissingDetail', {
+          defaultValue:
+            '{{items}} must be configured before the parity queue can drain.',
+          items: missingCredentialLabels.join(', '),
+        }),
+        accentClassName: 'text-red-600 dark:text-red-300',
+      };
+    }
+
+    if (!effectiveLastParitySync) {
+      return {
+        value: t('sync.dashboard.parityNoAttempts', {
+          defaultValue: 'No parity attempt recorded',
+        }),
+        detail: t('sync.dashboard.parityNoAttemptsDetail', {
+          defaultValue:
+            'The parity processor has not reported a startup or retry cycle yet.',
+        }),
+        accentClassName: 'text-slate-700 dark:text-slate-200',
+      };
+    }
+
+    if (effectiveLastParitySync.status === 'started') {
+      return {
+        value: t('sync.dashboard.parityRunning', {
+          defaultValue: 'Running now',
+        }),
+        detail: t('sync.dashboard.parityRunningDetail', {
+          defaultValue: 'The terminal is currently draining the parity queue.',
+        }),
+        accentClassName: 'text-amber-600 dark:text-amber-300',
+      };
+    }
+
+    if (effectiveLastParitySync.status === 'failed') {
+      return {
+        value: t('sync.dashboard.parityFailed', {
+          defaultValue: 'Last parity sync failed',
+        }),
+        detail:
+          effectiveLastParitySync.error ||
+          effectiveLastParitySync.reason ||
+          t('sync.dashboard.parityFailedDetail', {
+            defaultValue: 'The last parity sync attempt ended with an error.',
+          }),
+        accentClassName: 'text-red-600 dark:text-red-300',
+      };
+    }
+
+    if (effectiveLastParitySync.status === 'skipped_missing_credentials') {
+      return {
+        value: t('sync.dashboard.paritySkipped', {
+          defaultValue: 'Sync skipped',
+        }),
+        detail:
+          effectiveLastParitySync.reason ||
+          t('sync.dashboard.paritySkippedDetail', {
+            defaultValue:
+              'Parity sync could not start because terminal credentials are incomplete.',
+          }),
+        accentClassName: 'text-red-600 dark:text-red-300',
+      };
+    }
+
+    return {
+      value: t('sync.dashboard.parityCompleted', {
+        defaultValue: 'Last parity sync completed',
+      }),
+      detail: t('sync.dashboard.parityCompletedDetail', {
+        defaultValue: 'Processed {{processed}} item(s); {{remaining}} remaining.',
+        processed: effectiveLastParitySync.processed,
+        remaining: effectiveLastParitySync.remaining,
+      }),
+      accentClassName:
+        effectiveLastParitySync.remaining > 0
+          ? 'text-amber-600 dark:text-amber-300'
+          : 'text-emerald-600 dark:text-emerald-300',
+    };
+  }, [effectiveLastParitySync, missingCredentialLabels, t]);
+
   // --- Actions ---
 
   const handleForceSync = async () => {
     try {
       setSyncStatus((prev) => ({ ...prev, syncInProgress: true }));
-      await runParitySyncCycle();
-      toast.success(t('sync.messages.syncComplete') || 'Sync completed');
-      setTimeout(async () => {
-        await loadSyncStatus();
-        if (systemLoaded.current) await loadSystemHealth();
-      }, 2000);
+      const result = await runParitySyncCycle({ trigger: 'manual' });
+      const parityResult = normalizeLastParitySync(result.paritySyncStatus);
+      setLastParitySync(parityResult);
+
+      if (parityResult?.status === 'failed') {
+        toast.error(
+          parityResult.error ||
+            parityResult.reason ||
+            (t('sync.messages.syncFailed') || 'Sync failed'),
+        );
+      } else if (parityResult?.status === 'skipped_missing_credentials') {
+        toast.error(
+          parityResult.reason ||
+            t('sync.dashboard.paritySkippedDetail', {
+              defaultValue:
+                'Parity sync could not start because terminal credentials are incomplete.',
+            }),
+        );
+      } else {
+        toast.success(
+          t('sync.dashboard.parityCompletedDetail', {
+            defaultValue: 'Processed {{processed}} item(s); {{remaining}} remaining.',
+            processed: parityResult?.processed ?? 0,
+            remaining: parityResult?.remaining ?? result.queueStatus?.total ?? 0,
+          }),
+        );
+      }
+
+      await loadSyncStatus();
+      if (systemLoaded.current) {
+        await loadSystemHealth();
+      }
     } catch (error) {
       console.error('Failed to force sync:', error);
       toast.error(t('sync.messages.syncFailed') || 'Sync failed');
+    } finally {
       setSyncStatus((prev) => ({ ...prev, syncInProgress: false }));
     }
   };
@@ -781,7 +1004,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   };
 
   const handleOpenRecovery = () => {
-    window.dispatchEvent(new CustomEvent('pos:open-recovery'));
+    setShowFinancialPanel(false);
+    setShowDetailPanel(false);
+    onOpenRecovery?.({
+      systemHealth,
+      lastParitySync: effectiveLastParitySync ?? null,
+    });
   };
 
   const handleRemoveInvalidOrders = async () => {
@@ -1045,6 +1273,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             detail: t('sync.dashboard.statusSummarySubtitle'),
             accentClassName: syncHealthPresentation.textClassName,
           })}
+          {renderStatusTile({
+            label: t('sync.dashboard.parityProcessorTitle', {
+              defaultValue: 'Parity processor',
+            }),
+            value: parityProcessorSummary.value,
+            detail: parityProcessorSummary.detail,
+            accentClassName: parityProcessorSummary.accentClassName,
+          })}
           <HealthSupportEntryPoint
             context={healthSupportContext}
             onExportDiagnostics={handleExport}
@@ -1060,7 +1296,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             className="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.08] inline-flex items-center gap-2"
           >
             <Database className="h-4 w-4" />
-            {t('sync.dashboard.openRecovery', { defaultValue: 'Open Local Recovery' })}
+            {t('sync.dashboard.openRecovery', { defaultValue: 'Open Recovery Center' })}
           </button>
         </div>
       </div>

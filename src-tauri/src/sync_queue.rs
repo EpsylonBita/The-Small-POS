@@ -323,13 +323,15 @@ fn infer_organization_id(conn: &Connection, payload: &Value) -> String {
 }
 
 fn resolve_runtime_context(conn: &Connection, payload: &Value) -> (String, String, String) {
+    // Keyring-first after the inline payload: OS credential store is
+    // authoritative; plaintext `local_settings` is backward-compat fallback.
     let terminal_id = string_field(payload, &["terminalId", "terminal_id"])
-        .or_else(|| db::get_setting(conn, "terminal", "terminal_id"))
         .or_else(|| storage::get_credential("terminal_id"))
+        .or_else(|| db::get_setting(conn, "terminal", "terminal_id"))
         .unwrap_or_default();
     let branch_id = string_field(payload, &["branchId", "branch_id"])
-        .or_else(|| db::get_setting(conn, "terminal", "branch_id"))
         .or_else(|| storage::get_credential("branch_id"))
+        .or_else(|| db::get_setting(conn, "terminal", "branch_id"))
         .unwrap_or_default();
     let organization_id = infer_organization_id(conn, payload);
 

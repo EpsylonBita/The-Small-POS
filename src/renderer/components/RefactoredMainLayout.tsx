@@ -10,7 +10,6 @@ import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { useModules, useModuleAccess, getModuleAccessStatic } from '../contexts/module-context';
 import ZReportModal from './modals/ZReportModal';
-import ConnectionSettingsModal from './modals/ConnectionSettingsModal';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 import { ShiftManager, ShiftManagerRef } from './ShiftManager';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
@@ -147,6 +146,7 @@ const CustomerAppView = () => <ComingSoonView moduleName="Mobile App" />;
 interface RefactoredMainLayoutProps {
   className?: string;
   onLogout?: () => void;
+  onOpenConnectionSettings?: (section?: 'recovery' | null) => void;
 }
 
 const PENDING_POST_LOGIN_INTENT_KEY = 'PendingPostLoginIntent';
@@ -175,16 +175,17 @@ function consumePendingPostLoginIntent(): string | null {
   }
 }
 
-export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className = '', onLogout }) => {
+export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
+  className = '',
+  onLogout,
+  onOpenConnectionSettings,
+}) => {
   const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { enabledModules, lockedModules } = useModules();
   const [currentView, setCurrentView] = React.useState<string>('dashboard');
   const [showZReport, setShowZReport] = React.useState(false);
-  const [showConnectionSettings, setShowConnectionSettings] = React.useState(false);
-  const [connectionSettingsInitialSection, setConnectionSettingsInitialSection] =
-    React.useState<'recovery' | null>(null);
   const [isOffline, setIsOffline] = React.useState(
     typeof navigator !== 'undefined' ? !navigator.onLine : false,
   );
@@ -260,18 +261,6 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
       setCurrentView(pendingView);
     }
   }, [currentView, isShiftActive]);
-
-  useEffect(() => {
-    const handler = () => {
-      setConnectionSettingsInitialSection('recovery');
-      setShowConnectionSettings(true);
-    };
-
-    window.addEventListener('pos:open-recovery', handler as EventListener);
-    return () => {
-      window.removeEventListener('pos:open-recovery', handler as EventListener);
-    };
-  }, []);
 
   useEffect(() => {
     const handleNetworkState = () => {
@@ -446,11 +435,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
           isZReportOpen={showZReport}
           hasPendingLocalSubmit={isPendingLocalSubmit}
           onOpenSettings={() => {
-            bridge.terminalConfig.refresh().catch(() => {
-              // Ignore refresh errors and continue to settings modal.
-            });
-            setConnectionSettingsInitialSection(null)
-            setShowConnectionSettings(true)
+            onOpenConnectionSettings?.(null);
           }}
         />
 
@@ -584,16 +569,6 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
           date={defaultZReportDate}
           lockDate={!!pendingReportDate}
         />
-      {/* Connection Settings Modal */}
-      <ConnectionSettingsModal
-        isOpen={showConnectionSettings}
-        initialSection={connectionSettingsInitialSection}
-        onClose={() => {
-          setShowConnectionSettings(false);
-          setConnectionSettingsInitialSection(null);
-        }}
-      />
-
 
       {/* Shift Manager - Auto-prompts check-in and handles checkout */}
       <ShiftManager ref={shiftManagerRef} suppressAutoCheckin={isPendingLocalSubmit} />

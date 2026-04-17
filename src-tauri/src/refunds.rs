@@ -937,10 +937,10 @@ mod tests {
             .unwrap();
         assert_eq!(status, "completed");
 
-        // sync_queue should have an adjustment entry
+        // parity_sync_queue should have an adjustment entry
         let sq_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'payment_adjustment'",
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name = 'payment_adjustments'",
                 [],
                 |row| row.get(0),
             )
@@ -963,10 +963,9 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let payload: String = conn
             .query_row(
-                "SELECT payload
-                 FROM sync_queue
-                 WHERE entity_type = 'payment_adjustment'
-                 ORDER BY id DESC
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payment_adjustments'
                  LIMIT 1",
                 [],
                 |row| row.get(0),
@@ -1080,19 +1079,20 @@ mod tests {
             .unwrap();
         assert_eq!(status, "voided");
 
-        // sync_queue should have both payment void + adjustment entries
+        // This fixture seeds the payment directly, so the void only adds the
+        // adjustment parity row.
         let sq_payment: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'payment' AND operation = 'void'",
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name = 'payments'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(sq_payment, 1);
+        assert_eq!(sq_payment, 0);
 
         let sq_adj: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'payment_adjustment'",
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name = 'payment_adjustments'",
                 [],
                 |row| row.get(0),
             )
@@ -1191,15 +1191,16 @@ mod tests {
             .unwrap();
         assert_eq!(sync_state, "waiting_parent");
 
-        // sync_queue should have deferred status
+        // parity queue rows still enter as pending; the adjustment itself stays
+        // marked waiting_parent until the parent payment syncs.
         let sq_status: String = conn
             .query_row(
-                "SELECT status FROM sync_queue WHERE entity_type = 'payment_adjustment'",
+                "SELECT status FROM parity_sync_queue WHERE table_name = 'payment_adjustments'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(sq_status, "deferred");
+        assert_eq!(sq_status, "pending");
     }
 
     #[test]
@@ -1421,10 +1422,10 @@ mod tests {
 
         let queued_payload: String = conn
             .query_row(
-                "SELECT payload
-                 FROM sync_queue
-                 WHERE entity_type = 'payment_adjustment'
-                   AND entity_id IN (
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payment_adjustments'
+                   AND record_id IN (
                      SELECT id FROM payment_adjustments WHERE payment_id = 'pay-adjustment-staff'
                    )",
                 [],
@@ -1496,10 +1497,10 @@ mod tests {
 
         let queued_payload: String = conn
             .query_row(
-                "SELECT payload
-                 FROM sync_queue
-                 WHERE entity_type = 'payment_adjustment'
-                   AND entity_id IN (
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payment_adjustments'
+                   AND record_id IN (
                      SELECT id FROM payment_adjustments WHERE payment_id = 'pay-void-adjustment-staff'
                    )",
                 [],
@@ -1537,10 +1538,10 @@ mod tests {
 
         let queued_payload: String = conn
             .query_row(
-                "SELECT payload
-                 FROM sync_queue
-                 WHERE entity_type = 'payment_adjustment'
-                   AND entity_id IN (
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payment_adjustments'
+                   AND record_id IN (
                      SELECT id FROM payment_adjustments WHERE payment_id = ?1
                    )",
                 params![pay_id],

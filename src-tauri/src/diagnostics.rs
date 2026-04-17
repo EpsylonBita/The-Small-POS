@@ -137,6 +137,10 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
     let sync_blocker_details = crate::sync::get_sync_blocker_details(db, 10).unwrap_or_default();
     let terminal_context = get_terminal_context(db);
     let sync_status_summary = get_sync_status_summary(db).unwrap_or_else(|_| json!({}));
+    let parity_queue_status = get_parity_queue_status(db).unwrap_or(Value::Null);
+    let financial_queue_status = get_financial_queue_status(db).unwrap_or(Value::Null);
+    let last_parity_sync = get_last_parity_sync(db);
+    let credential_state = get_credential_state(db);
 
     Ok(json!({
         "schemaVersion": schema_version,
@@ -150,6 +154,11 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         "lastZReport": last_zreport,
         "pendingOrders": pending_orders,
         "dbSizeBytes": db_size,
+        "panicCount": crate::panic_hook::crash_count(),
+        "parityQueueStatus": parity_queue_status,
+        "financialQueueStatus": financial_queue_status,
+        "lastParitySync": last_parity_sync,
+        "credentialState": credential_state,
         "invalidOrders": {
             "count": invalid_orders_count,
             "details": invalid_orders
@@ -322,7 +331,70 @@ fn build_diagnostics_sync_state() -> crate::sync::SyncState {
 
 fn get_sync_status_summary(db: &DbState) -> Result<Value, String> {
     let sync_state = build_diagnostics_sync_state();
-    crate::sync::get_sync_status(db, &sync_state)
+    let mut summary = crate::sync::get_sync_status(db, &sync_state)?;
+    if let Some(obj) = summary.as_object_mut() {
+        obj.insert("parityQueueStatus".into(), get_parity_queue_status(db)?);
+        obj.insert(
+            "financialQueueStatus".into(),
+            get_financial_queue_status(db)?,
+        );
+        obj.insert("lastParitySync".into(), get_last_parity_sync(db));
+        obj.insert("credentialState".into(), get_credential_state(db));
+    }
+    Ok(summary)
+}
+
+fn get_parity_queue_status(db: &DbState) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    serde_json::to_value(crate::sync_queue::get_status(&conn)?)
+        .map_err(|e| format!("serialize parity queue status: {e}"))
+}
+
+fn get_financial_queue_status(db: &DbState) -> Result<Value, String> {
+    crate::sync::get_financial_stats(db)
+}
+
+fn get_last_parity_sync(db: &DbState) -> Value {
+    read_local_setting_json(db, "diagnostics", "last_parity_sync").unwrap_or(Value::Null)
+}
+
+fn value_is_present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(raw) => !raw.trim().is_empty(),
+        Value::Bool(flag) => *flag,
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        Value::Number(_) => true,
+    }
+}
+
+fn has_local_setting_value(db: &DbState, category: &str, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        read_local_setting_json(db, category, key)
+            .map(|value| value_is_present(&value))
+            .unwrap_or(false)
+    })
+}
+
+fn has_stored_credential(keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        crate::storage::get_credential(key)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+fn get_credential_state(db: &DbState) -> Value {
+    let has_admin_url = has_stored_credential(&["admin_dashboard_url"])
+        || has_local_setting_value(db, "terminal", &["admin_dashboard_url", "admin_url"]);
+    let has_api_key = has_stored_credential(&["pos_api_key"])
+        || has_local_setting_value(db, "terminal", &["pos_api_key", "api_key"]);
+
+    json!({
+        "hasAdminUrl": has_admin_url,
+        "hasApiKey": has_api_key,
+    })
 }
 
 fn get_terminal_settings_snapshot(conn: &rusqlite::Connection) -> Value {
@@ -499,6 +571,18 @@ pub fn export_diagnostics_with_options(
         crate::zreport::get_closeout_readiness_snapshot(db, &json!({}))?,
         export_options.redact_sensitive,
     );
+    let parity_queue_status = redact_value_for_export(
+        get_parity_queue_status(db).unwrap_or(Value::Null),
+        export_options.redact_sensitive,
+    );
+    let financial_queue_status = redact_value_for_export(
+        get_financial_queue_status(db).unwrap_or(Value::Null),
+        export_options.redact_sensitive,
+    );
+    let last_parity_sync =
+        redact_value_for_export(get_last_parity_sync(db), export_options.redact_sensitive);
+    let credential_state =
+        redact_value_for_export(get_credential_state(db), export_options.redact_sensitive);
     let sync_blocker_details = redact_value_for_export(
         get_sync_blocker_details_json(crate::sync::get_sync_blocker_details(db, 25)?),
         export_options.redact_sensitive,
@@ -542,6 +626,30 @@ pub fn export_diagnostics_with_options(
         &zip_options,
         "terminal_settings_snapshot.json",
         &terminal_settings_snapshot,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "parity_queue_status.json",
+        &parity_queue_status,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "financial_queue_status.json",
+        &financial_queue_status,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "last_parity_sync.json",
+        &last_parity_sync,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "credential_state.json",
+        &credential_state,
     )?;
 
     // 3. Queue/backlog snapshots
@@ -633,6 +741,10 @@ fn redact_sensitive_fields(value: Value) -> Value {
 
 fn should_redact_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase();
+    let non_secret_presence_markers = ["hasapikey", "hasadminurl"];
+    if non_secret_presence_markers.contains(&normalized.as_str()) {
+        return false;
+    }
     let sensitive_markers = [
         "api_key",
         "apikey",
@@ -835,6 +947,10 @@ mod tests {
         assert!(health.get("terminalContext").is_some());
         assert!(health.get("syncStatusSummary").is_some());
         assert!(health.get("printerStatus").is_some());
+        assert!(health.get("parityQueueStatus").is_some());
+        assert!(health.get("financialQueueStatus").is_some());
+        assert!(health.get("lastParitySync").is_some());
+        assert!(health.get("credentialState").is_some());
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1007,6 +1123,10 @@ mod tests {
         assert!(entry_names.contains(&"sync_status.json".to_string()));
         assert!(entry_names.contains(&"closeout_readiness.json".to_string()));
         assert!(entry_names.contains(&"terminal_settings_snapshot.json".to_string()));
+        assert!(entry_names.contains(&"parity_queue_status.json".to_string()));
+        assert!(entry_names.contains(&"financial_queue_status.json".to_string()));
+        assert!(entry_names.contains(&"last_parity_sync.json".to_string()));
+        assert!(entry_names.contains(&"credential_state.json".to_string()));
 
         let terminal_context = read_zip_json(&mut archive, "terminal_context.json");
         assert_eq!(terminal_context["terminalId"], json!("terminal-d80762ac"));
@@ -1028,6 +1148,17 @@ mod tests {
             terminal_settings["terminal"]["api_key"],
             json!("[REDACTED]")
         );
+
+        let credential_state = read_zip_json(&mut archive, "credential_state.json");
+        assert_eq!(credential_state["hasAdminUrl"], json!(true));
+        assert_eq!(credential_state["hasApiKey"], json!(true));
+
+        let system_health = read_zip_json(&mut archive, "system_health.json");
+        assert_eq!(system_health["credentialState"]["hasAdminUrl"], json!(true));
+        assert_eq!(system_health["credentialState"]["hasApiKey"], json!(true));
+        assert!(system_health.get("parityQueueStatus").is_some());
+        assert!(system_health.get("financialQueueStatus").is_some());
+        assert!(system_health.get("lastParitySync").is_some());
 
         let blocker_details = read_zip_json(&mut archive, "sync_blocker_details.json");
         let first_blocker = blocker_details

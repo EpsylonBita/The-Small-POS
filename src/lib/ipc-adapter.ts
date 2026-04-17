@@ -1236,6 +1236,7 @@ export interface PlatformBridge {
     getLanguage(): Promise<string>;
     setLanguage(lang: string): Promise<IpcResult>;
     getAdminUrl(): Promise<string | null>;
+    getPosApiKey(): Promise<string | null>;
     clearConnection(): Promise<IpcResult>;
     updateTerminalCredentials(
       payload: UpdateTerminalCredentialsPayload,
@@ -1943,6 +1944,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "settings:get-language": "settings.getLanguage",
   "settings:set-language": "settings.setLanguage",
   "settings:get-admin-url": "settings.getAdminUrl",
+  "settings:get-pos-api-key": "settings.getPosApiKey",
   "settings:clear-connection": "settings.clearConnection",
   "settings:update-terminal-credentials": "settings.updateTerminalCredentials",
   "settings:is-configured": "settings.isConfigured",
@@ -2527,6 +2529,7 @@ export class TauriBridge implements PlatformBridge {
     getLanguage: () => this.inv("settings:get-language"),
     setLanguage: (l: string) => this.inv("settings:set-language", l),
     getAdminUrl: () => this.inv("settings:get-admin-url"),
+    getPosApiKey: () => this.inv("settings:get-pos-api-key"),
     clearConnection: () => this.inv("settings:clear-connection"),
     updateTerminalCredentials: (p: UpdateTerminalCredentialsPayload) =>
       this.inv("settings:update-terminal-credentials", p),

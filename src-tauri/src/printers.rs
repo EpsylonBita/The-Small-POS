@@ -397,10 +397,13 @@ fn ensure_capabilities_object(connection: &mut Map<String, Value>) -> &mut Map<S
     if needs_init {
         connection.insert("capabilities".to_string(), serde_json::json!({}));
     }
+    // SAFETY: if `needs_init` was true, the insert above makes `capabilities` an
+    // Object; if it was false, `capabilities` was already Some(Value::Object(_))
+    // per the `matches!` check. Either branch guarantees `as_object_mut()` is Some.
     connection
         .get_mut("capabilities")
         .and_then(Value::as_object_mut)
-        .expect("capabilities object should exist")
+        .expect("capabilities object should exist (guarded above)")
 }
 
 fn default_capabilities_value() -> Value {
@@ -1224,8 +1227,13 @@ pub fn print_raw_to_windows(
     }
 
     // Prepare DOC_INFO_1A with RAW data type
-    let c_doc_name = CString::new(doc_name).unwrap_or_else(|_| CString::new("POS Print").unwrap());
-    let c_datatype = CString::new("RAW").unwrap();
+    // SAFETY: the inner/final `expect` calls are on static ASCII literals that
+    // contain no interior null bytes, so `CString::new` cannot fail. Documented
+    // as `.expect(...)` rather than `.unwrap()` so the intent is explicit.
+    let c_doc_name = CString::new(doc_name).unwrap_or_else(|_| {
+        CString::new("POS Print").expect("static literal \"POS Print\" has no null bytes")
+    });
+    let c_datatype = CString::new("RAW").expect("static literal \"RAW\" has no null bytes");
 
     let doc_info = DOC_INFO_1A {
         pDocName: c_doc_name.as_ptr(),

@@ -474,6 +474,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       localStorage.setItem('admin_dashboard_url', normalizedAdminDashboardUrl)
       updateTerminalCredentialCache({
         terminalId: runtimeConfig?.terminal_id || nextTerminalId,
+        apiKey: nextApiKey,
         branchId:
           runtimeConfig?.branch_id ||
           (await bridge.terminalConfig.getBranchId().catch(() => '')),
