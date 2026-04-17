@@ -6160,6 +6160,8 @@ mod tests {
     fn test_repair_retryable_z_report_business_dates_requeues_failed_rows() {
         let db = test_db();
         seed_closed_shift(&db);
+        let expected_report_date =
+            report_date_for_business_window("2026-04-01T22:44:47.248Z", "2026-04-01T23:38:24.403Z");
 
         let generated = generate_z_report_for_date(
             &db,
@@ -6191,11 +6193,11 @@ mod tests {
             "2026-04-01T22:44:47.248Z",
             "2026-04-01T23:38:24.403Z",
         );
-        canonicalize_report_json_report_date(&mut report_json, "2026-04-01");
+        canonicalize_report_json_report_date(&mut report_json, "2026-03-31");
 
         conn.execute(
             "UPDATE z_reports
-             SET report_date = '2026-04-01',
+             SET report_date = '2026-03-31',
                  report_json = ?2,
                  sync_state = 'failed',
                  sync_retry_count = 5,
@@ -6208,7 +6210,7 @@ mod tests {
         let poisoned_payload = serde_json::json!({
             "terminal_id": "term-1",
             "branch_id": "branch-1",
-            "report_date": "2026-04-01",
+            "report_date": "2026-03-31",
             "report_data": report_json,
         });
         conn.execute(
@@ -6269,7 +6271,7 @@ mod tests {
             )
             .expect("load repaired queue row");
 
-        assert_eq!(report_date, "2026-04-02");
+        assert_eq!(report_date, expected_report_date);
         assert_eq!(sync_state, "pending");
         assert_eq!(sync_retry_count, 0);
         assert!(sync_last_error.is_none());
@@ -6280,9 +6282,9 @@ mod tests {
 
         let repaired_report_json: Value =
             serde_json::from_str(&repaired_report_json).expect("repaired report_json should parse");
-        assert_eq!(repaired_report_json["date"], "2026-04-02");
-        assert_eq!(repaired_report_json["reportDate"], "2026-04-02");
-        assert_eq!(repaired_report_json["report_date"], "2026-04-02");
+        assert_eq!(repaired_report_json["date"], expected_report_date);
+        assert_eq!(repaired_report_json["reportDate"], expected_report_date);
+        assert_eq!(repaired_report_json["report_date"], expected_report_date);
         assert_eq!(
             repaired_report_json["periodStart"],
             "2026-04-01T22:44:47.248Z"
@@ -6294,10 +6296,13 @@ mod tests {
 
         let repaired_queue_payload: Value =
             serde_json::from_str(&queue_payload).expect("repaired queue payload should parse");
-        assert_eq!(repaired_queue_payload["report_date"], "2026-04-02");
+        assert_eq!(repaired_queue_payload["report_date"], expected_report_date);
         assert_eq!(repaired_queue_payload["terminal_id"], "term-1");
         assert_eq!(repaired_queue_payload["branch_id"], "branch-1");
-        assert_eq!(repaired_queue_payload["report_data"]["date"], "2026-04-02");
+        assert_eq!(
+            repaired_queue_payload["report_data"]["date"],
+            expected_report_date
+        );
         assert_eq!(
             repaired_queue_payload["report_data"]["periodStart"],
             "2026-04-01T22:44:47.248Z"

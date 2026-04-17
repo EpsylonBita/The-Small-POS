@@ -16846,6 +16846,10 @@ mod tests {
     #[test]
     fn test_run_recurring_sync_recovery_repairs_retryable_z_report_business_dates() {
         let db = test_db();
+        let expected_report_date = crate::business_day::report_date_for_business_window(
+            "2026-04-01T22:44:47.248Z",
+            "2026-04-01T23:38:24.403Z",
+        );
         let conn = db.conn.lock().unwrap();
 
         conn.execute(
@@ -16879,7 +16883,7 @@ mod tests {
                 payments_breakdown_json, report_json, sync_state, sync_last_error, sync_retry_count,
                 created_at, updated_at
              ) VALUES (
-                'zr-business-date-repair', 'shift-z-report-repair', 'branch-1', 'term-1', '2026-04-01', '2026-04-01T23:40:00Z',
+                'zr-business-date-repair', 'shift-z-report-repair', 'branch-1', 'term-1', '2026-03-31', '2026-04-01T23:40:00Z',
                 12, 12, 1, 12, 0,
                 0, 0, 0, 0,
                 0, 0, 0, 0, 0,
@@ -16901,7 +16905,7 @@ mod tests {
             params![serde_json::json!({
                 "terminal_id": "term-1",
                 "branch_id": "branch-1",
-                "report_date": "2026-04-01",
+                "report_date": "2026-03-31",
                 "report_data": poisoned_report_json,
             })
             .to_string()],
@@ -16938,7 +16942,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report_date, "2026-04-02");
+        assert_eq!(report_date, expected_report_date);
         assert_eq!(sync_state, "pending");
         assert!(sync_last_error.is_none());
         assert_eq!(queue_status, "pending");
@@ -16947,8 +16951,8 @@ mod tests {
 
         let queue_payload: Value =
             serde_json::from_str(&queue_payload).expect("queue payload should parse");
-        assert_eq!(queue_payload["report_date"], "2026-04-02");
-        assert_eq!(queue_payload["report_data"]["date"], "2026-04-02");
+        assert_eq!(queue_payload["report_date"], expected_report_date);
+        assert_eq!(queue_payload["report_data"]["date"], expected_report_date);
         assert_eq!(
             queue_payload["report_data"]["periodStart"],
             "2026-04-01T22:44:47.248Z"

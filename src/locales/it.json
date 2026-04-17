@@ -5001,8 +5001,8 @@
       },
       "parityProcessorStalled": {
         "title": "Il processore parity è bloccato",
-        "summary": "L'ultimo ciclo parity ha elaborato {{processed}} elementi e ne ha lasciati ancora {{remaining}} in coda.",
-        "guidance": "Esegui ora la sincronizzazione parity. Se lo stesso backlog rimane, controlla i problemi parity a livello di modulo qui sotto o contatta l'operatore."
+        "summary": "L'ultimo ciclo parity ha elaborato {{processed}} elementi e ne ha lasciati ancora {{remaining}} in coda. Blocco attuale: {{reason}}.",
+        "guidance": "Esegui ora la sincronizzazione parity. Se lo stesso backlog rimane, controlla i problemi parity a livello di modulo qui sotto o contatta l'operatore. Ultimo errore parity: {{reason}}."
       },
       "parityModuleFailed": {
         "title": "Errori parity in {{moduleLabel}}",

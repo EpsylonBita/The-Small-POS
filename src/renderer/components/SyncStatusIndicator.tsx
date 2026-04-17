@@ -18,7 +18,10 @@ import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
 import type { SyncRecoveryOpenContext } from './recovery/SyncRecoveryModal';
-import { buildSyncRecoveryIssues } from './recovery/sync-recovery-issues';
+import {
+  buildSyncRecoveryIssues,
+  getRepresentativeParityFailureReason,
+} from './recovery/sync-recovery-issues';
 import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useFeatures } from '../hooks/useFeatures';
 import { useShift } from '../contexts/shift-context';
@@ -860,6 +863,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     () => lastParitySync ?? normalizeLastParitySync(systemHealth?.lastParitySync),
     [lastParitySync, systemHealth?.lastParitySync],
   );
+  const representativeParityFailureReason = useMemo(
+    () =>
+      getRepresentativeParityFailureReason(
+        effectiveLastParitySync ?? null,
+        recoveryParityItems,
+      ),
+    [effectiveLastParitySync, recoveryParityItems],
+  );
 
   const effectiveCredentialState = useMemo(
     () =>
@@ -933,8 +944,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           defaultValue: 'Last parity sync failed',
         }),
         detail:
-          effectiveLastParitySync.error ||
-          effectiveLastParitySync.reason ||
+          representativeParityFailureReason ||
           t('sync.dashboard.parityFailedDetail', {
             defaultValue: 'The last parity sync attempt ended with an error.',
           }),
@@ -971,7 +981,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           ? 'text-amber-600 dark:text-amber-300'
           : 'text-emerald-600 dark:text-emerald-300',
     };
-  }, [effectiveLastParitySync, missingCredentialLabels, t]);
+  }, [
+    effectiveLastParitySync,
+    missingCredentialLabels,
+    representativeParityFailureReason,
+    t,
+  ]);
 
   // --- Actions ---
 

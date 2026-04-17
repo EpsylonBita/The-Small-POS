@@ -165,6 +165,7 @@ struct RequestSpec {
     endpoint: String,
     method: Method,
     body: Option<String>,
+    terminal_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +337,16 @@ fn resolve_runtime_context(conn: &Connection, payload: &Value) -> (String, Strin
     let organization_id = infer_organization_id(conn, payload);
 
     (terminal_id, branch_id, organization_id)
+}
+
+fn resolve_request_terminal_id(conn: &Connection, payload: &Value) -> Option<String> {
+    let (terminal_id, _, _) = resolve_runtime_context(conn, payload);
+    let trimmed = terminal_id.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 pub fn enqueue_payload_item(
@@ -897,15 +908,25 @@ pub fn check_age_warnings(conn: &Connection) -> Result<Vec<String>, String> {
 fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPreparation, String> {
     let payload =
         serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Object(Map::new()));
+    let terminal_id = match resolve_request_terminal_id(conn, &payload) {
+        Some(value) => value,
+        None => {
+            return Ok(RequestPreparation::Failed {
+                reason: "Parity sync request is missing terminal_id context".to_string(),
+            })
+        }
+    };
 
     match item.table_name.as_str() {
-        "orders" => prepare_order_request(conn, item, &payload),
-        "payments" => prepare_payment_request(conn, item, &payload),
-        "payment_adjustments" => prepare_adjustment_request(conn, item, &payload),
-        "driver_earnings" | "driver_earning" | "shift_expenses" | "staff_payments" => {
-            prepare_financial_request(conn, item, &payload)
+        "orders" => prepare_order_request(conn, item, &payload, terminal_id.as_str()),
+        "payments" => prepare_payment_request(conn, item, &payload, terminal_id.as_str()),
+        "payment_adjustments" => {
+            prepare_adjustment_request(conn, item, &payload, terminal_id.as_str())
         }
-        "housekeeping_tasks" => prepare_housekeeping_request(item, &payload),
+        "driver_earnings" | "driver_earning" | "shift_expenses" | "staff_payments" => {
+            prepare_financial_request(conn, item, &payload, terminal_id.as_str())
+        }
+        "housekeeping_tasks" => prepare_housekeeping_request(item, &payload, terminal_id.as_str()),
         _ => Ok(RequestPreparation::Ready(RequestSpec {
             endpoint: resolve_endpoint(item),
             method: resolve_http_method(item),
@@ -914,6 +935,7 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             } else {
                 Some(item.data.clone())
             },
+            terminal_id,
         })),
     }
 }
@@ -922,12 +944,14 @@ fn prepare_order_request(
     conn: &Connection,
     item: &SyncQueueItem,
     payload: &Value,
+    terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
     if item.operation == "INSERT" {
         return Ok(RequestPreparation::Ready(RequestSpec {
             endpoint: "/api/pos/orders".to_string(),
             method: Method::POST,
             body: Some(item.data.clone()),
+            terminal_id: terminal_id.to_string(),
         }));
     }
 
@@ -1024,6 +1048,7 @@ fn prepare_order_request(
         endpoint: "/api/pos/orders".to_string(),
         method: Method::PATCH,
         body: Some(Value::Object(body).to_string()),
+        terminal_id: terminal_id.to_string(),
     }))
 }
 
@@ -1031,6 +1056,7 @@ fn prepare_payment_request(
     conn: &Connection,
     item: &SyncQueueItem,
     payload: &Value,
+    terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
     let local_order_id = string_field(payload, &["orderId", "order_id"]).unwrap_or_default();
     if local_order_id.is_empty() {
@@ -1077,7 +1103,6 @@ fn prepare_payment_request(
     }
     let payment_method = string_field(payload, &["method", "paymentMethod", "payment_method"])
         .unwrap_or_else(|| "other".to_string());
-    let (terminal_id, _, _) = resolve_runtime_context(conn, payload);
 
     let mut body = serde_json::json!({
         "order_id": remote_order_id,
@@ -1121,6 +1146,7 @@ fn prepare_payment_request(
         endpoint: "/api/pos/payments".to_string(),
         method: Method::POST,
         body: Some(body.to_string()),
+        terminal_id: terminal_id.to_string(),
     }))
 }
 
@@ -1128,6 +1154,7 @@ fn prepare_adjustment_request(
     conn: &Connection,
     item: &SyncQueueItem,
     payload: &Value,
+    terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
     let payment_id = string_field(payload, &["paymentId", "payment_id"]).unwrap_or_default();
     if payment_id.is_empty() {
@@ -1173,7 +1200,7 @@ fn prepare_adjustment_request(
         });
     }
 
-    let (terminal_id, branch_id, _) = resolve_runtime_context(conn, payload);
+    let (_, branch_id, _) = resolve_runtime_context(conn, payload);
     let adjustment_type =
         string_field(payload, &["adjustmentType", "adjustment_type"]).unwrap_or_default();
     let order_id_for_sync =
@@ -1195,7 +1222,7 @@ fn prepare_adjustment_request(
         string_field(payload, &["reason"]).as_deref(),
         string_field(payload, &["staffId", "staff_id"]).as_deref(),
         string_field(payload, &["staffShiftId", "staff_shift_id"]).as_deref(),
-        terminal_id.as_str(),
+        terminal_id,
         branch_id.as_str(),
         idempotency_key.as_str(),
         string_field(payload, &["refundMethod", "refund_method"]).as_deref(),
@@ -1217,6 +1244,7 @@ fn prepare_adjustment_request(
         endpoint: "/api/pos/payments/adjustments/sync".to_string(),
         method: Method::POST,
         body: Some(body.to_string()),
+        terminal_id: terminal_id.to_string(),
     }))
 }
 
@@ -1240,8 +1268,9 @@ fn prepare_financial_request(
     conn: &Connection,
     item: &SyncQueueItem,
     payload: &Value,
+    terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
-    let (terminal_id, branch_id, _) = resolve_runtime_context(conn, payload);
+    let (_, branch_id, _) = resolve_runtime_context(conn, payload);
     let body = serde_json::json!({
         "terminal_id": terminal_id,
         "branch_id": branch_id,
@@ -1258,12 +1287,14 @@ fn prepare_financial_request(
         endpoint: "/api/pos/financial/sync".to_string(),
         method: Method::POST,
         body: Some(body.to_string()),
+        terminal_id: terminal_id.to_string(),
     }))
 }
 
 fn prepare_housekeeping_request(
     item: &SyncQueueItem,
     payload: &Value,
+    terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
     let endpoint = if payload.get("status").is_some() {
         "/api/pos/housekeeping".to_string()
@@ -1275,6 +1306,7 @@ fn prepare_housekeeping_request(
         endpoint,
         method: Method::PATCH,
         body: Some(item.data.clone()),
+        terminal_id: terminal_id.to_string(),
     }))
 }
 
@@ -1489,6 +1521,7 @@ pub async fn process_queue(
         let mut request = client
             .request(request_spec.method.clone(), &url)
             .header("x-pos-api-key", api_key)
+            .header("x-terminal-id", request_spec.terminal_id.as_str())
             .header("Content-Type", "application/json");
 
         if let Some(body) = request_spec.body.as_ref() {
@@ -1510,8 +1543,14 @@ pub async fn process_queue(
                     mark_success(&db, &item.id)?;
                     processed += 1;
                 } else if status == 409 {
-                    let server_record =
-                        fetch_server_record(&client, api_base_url, api_key, &item).await;
+                    let server_record = fetch_server_record(
+                        &client,
+                        api_base_url,
+                        api_key,
+                        request_spec.terminal_id.as_str(),
+                        &item,
+                    )
+                    .await;
                     let server_version =
                         derive_server_version(server_record.as_ref(), &response_body, item.version);
                     let is_monetary = is_monetary_item(&item);
@@ -1775,6 +1814,7 @@ async fn fetch_server_record(
     client: &reqwest::Client,
     api_base_url: &str,
     api_key: &str,
+    terminal_id: &str,
     item: &SyncQueueItem,
 ) -> Option<Value> {
     let endpoint = format!(
@@ -1787,6 +1827,7 @@ async fn fetch_server_record(
     let response = client
         .get(&endpoint)
         .header("x-pos-api-key", api_key)
+        .header("x-terminal-id", terminal_id)
         .header("Content-Type", "application/json")
         .send()
         .await
@@ -1844,6 +1885,16 @@ use rusqlite::OptionalExtension;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+
+    fn clear_terminal_identity() {
+        let _ = crate::storage::delete_credential("terminal_id");
+    }
 
     fn queue_item(
         table_name: &str,
@@ -1870,6 +1921,176 @@ mod tests {
             version: 1,
             status: "pending".to_string(),
         }
+    }
+
+    #[derive(Debug)]
+    struct CapturedRequest {
+        request_line: String,
+        headers: HashMap<String, String>,
+        body: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockResponse {
+        status_code: u16,
+        body: String,
+    }
+
+    impl MockResponse {
+        fn json(status_code: u16, body: impl Into<String>) -> Self {
+            Self {
+                status_code,
+                body: body.into(),
+            }
+        }
+    }
+
+    fn test_connection() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        create_tables(&conn).expect("create sync queue tables");
+        conn
+    }
+
+    fn enqueue_test_item(
+        conn: &Connection,
+        table_name: &str,
+        operation: &str,
+        record_id: &str,
+        data: Value,
+    ) -> String {
+        enqueue(
+            conn,
+            &EnqueueInput {
+                table_name: table_name.to_string(),
+                record_id: record_id.to_string(),
+                operation: operation.to_string(),
+                data: data.to_string(),
+                organization_id: "org-1".to_string(),
+                priority: None,
+                module_type: Some("customers".to_string()),
+                conflict_strategy: Some("manual".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue test item")
+    }
+
+    async fn spawn_mock_http_server(
+        responses: Vec<MockResponse>,
+    ) -> (
+        String,
+        mpsc::UnboundedReceiver<CapturedRequest>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let address = listener.local_addr().expect("mock server address");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let captured = read_http_request(&mut stream).await;
+                tx.send(captured).expect("send captured request");
+                write_http_response(&mut stream, &response)
+                    .await
+                    .expect("write mock response");
+            }
+        });
+
+        (format!("http://{}", address), rx, handle)
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> CapturedRequest {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let mut header_end = None;
+        let mut content_length = 0_usize;
+
+        loop {
+            let read = stream.read(&mut chunk).await.expect("read request");
+            assert!(read > 0, "request closed before mock server read completed");
+            buffer.extend_from_slice(&chunk[..read]);
+
+            if header_end.is_none() {
+                header_end = find_bytes(&buffer, b"\r\n\r\n");
+                if let Some(index) = header_end {
+                    let headers_text = String::from_utf8_lossy(&buffer[..index + 4]).to_string();
+                    content_length = parse_content_length(&headers_text);
+                }
+            }
+
+            if let Some(index) = header_end {
+                let total_length = index + 4 + content_length;
+                if buffer.len() >= total_length {
+                    let request_text =
+                        String::from_utf8(buffer[..total_length].to_vec()).expect("utf8 request");
+                    return parse_request_text(&request_text);
+                }
+            }
+        }
+    }
+
+    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    fn parse_content_length(headers_text: &str) -> usize {
+        headers_text
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    fn parse_request_text(request_text: &str) -> CapturedRequest {
+        let mut sections = request_text.splitn(2, "\r\n\r\n");
+        let header_block = sections.next().unwrap_or_default();
+        let body = sections.next().unwrap_or_default().to_string();
+        let mut header_lines = header_block.lines();
+        let request_line = header_lines.next().unwrap_or_default().to_string();
+        let headers = header_lines
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            })
+            .collect::<HashMap<_, _>>();
+
+        CapturedRequest {
+            request_line,
+            headers,
+            body,
+        }
+    }
+
+    async fn write_http_response(
+        stream: &mut tokio::net::TcpStream,
+        response: &MockResponse,
+    ) -> Result<(), std::io::Error> {
+        let reason = match response.status_code {
+            200 => "OK",
+            401 => "Unauthorized",
+            409 => "Conflict",
+            _ => "OK",
+        };
+        let response_text = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.status_code,
+            reason,
+            response.body.len(),
+            response.body
+        );
+        stream.write_all(response_text.as_bytes()).await?;
+        stream.flush().await
     }
 
     #[test]
@@ -2050,5 +2271,149 @@ mod tests {
             resolve_endpoint(&product_item),
             "/api/pos/products/product-1"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_sends_terminal_id_header_on_parity_requests() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        crate::storage::set_credential("terminal_id", "terminal-test")
+            .expect("seed terminal credential");
+        crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
+            .expect("store terminal id");
+        let queue_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-1",
+            json!({ "name": "Ada Lovelace" }),
+        );
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) =
+            spawn_mock_http_server(vec![MockResponse::json(200, r#"{"success":true}"#)]).await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+
+        let request = requests.recv().await.expect("captured parity request");
+        assert_eq!(request.request_line, "POST /api/pos/customers HTTP/1.1");
+        assert_eq!(
+            request.headers.get("x-terminal-id").map(String::as_str),
+            Some("terminal-test")
+        );
+        assert_eq!(
+            request.headers.get("x-pos-api-key").map(String::as_str),
+            Some("api-key")
+        );
+        assert!(
+            request.body.contains("\"name\":\"Ada Lovelace\""),
+            "request body should preserve the queued payload"
+        );
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(remaining, 0);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    async fn fetch_server_record_sends_terminal_id_header() {
+        let item = queue_item(
+            "customers",
+            "UPDATE",
+            "cust-1",
+            json!({ "name": "Ada Lovelace" }),
+        );
+        let client = reqwest::Client::new();
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            200,
+            r#"{"data":{"id":"cust-remote-1"}}"#,
+        )])
+        .await;
+
+        let server_record =
+            fetch_server_record(&client, &base_url, "api-key", "terminal-test", &item).await;
+
+        assert_eq!(
+            server_record
+                .as_ref()
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str),
+            Some("cust-remote-1")
+        );
+
+        let request = requests.recv().await.expect("captured fetch request");
+        assert_eq!(
+            request.request_line,
+            "GET /api/pos/sync/customers/cust-1 HTTP/1.1"
+        );
+        assert_eq!(
+            request.headers.get("x-terminal-id").map(String::as_str),
+            Some("terminal-test")
+        );
+        assert_eq!(
+            request.headers.get("x-pos-api-key").map(String::as_str),
+            Some("api-key")
+        );
+
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_marks_items_failed_when_terminal_context_is_missing() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        let queue_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-1",
+            json!({ "name": "Ada Lovelace" }),
+        );
+        let conn = std::sync::Mutex::new(conn);
+
+        let result = process_queue(&conn, "http://127.0.0.1:9", "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 1);
+        assert!(result.errors.iter().any(|error| {
+            error
+                .error
+                .contains("Parity sync request is missing terminal_id context")
+        }));
+
+        let (status, error_message): (String, Option<String>) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, error_message FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read failed queue item");
+        assert_eq!(status, "failed");
+        assert_eq!(
+            error_message.as_deref(),
+            Some("Parity sync request is missing terminal_id context")
+        );
+
+        clear_terminal_identity();
     }
 }

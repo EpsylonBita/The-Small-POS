@@ -1250,7 +1250,10 @@ mod tests {
             json!("95e63e0b-5b3a-48f8-9c96-fb9f041a0255")
         );
         assert_eq!(terminal_context["branchName"], json!("Kifisia Branch"));
-        assert_eq!(terminal_context["organizationName"], json!("The Small Group"));
+        assert_eq!(
+            terminal_context["organizationName"],
+            json!("The Small Group")
+        );
 
         let terminal_settings = read_zip_json(&mut archive, "terminal_settings_snapshot.json");
         assert_eq!(

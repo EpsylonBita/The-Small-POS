@@ -5001,8 +5001,8 @@
       },
       "parityProcessorStalled": {
         "title": "Parity processor stalled",
-        "summary": "The last parity cycle processed {{processed}} items and still left {{remaining}} queued.",
-        "guidance": "Run parity sync now. If the same backlog remains, inspect the module-level parity issues below or contact operator."
+        "summary": "The last parity cycle processed {{processed}} items and still left {{remaining}} queued. Current blocker: {{reason}}.",
+        "guidance": "Run parity sync now. If the same backlog remains, inspect the module-level parity issues below or contact operator. Latest parity error: {{reason}}."
       },
       "parityModuleFailed": {
         "title": "{{moduleLabel}} parity failures",

@@ -5147,8 +5147,8 @@
       },
       "parityProcessorStalled": {
         "title": "Ο επεξεργαστής parity έχει κολλήσει",
-        "summary": "Ο τελευταίος κύκλος parity επεξεργάστηκε {{processed}} στοιχεία και άφησε ακόμη {{remaining}} στην ουρά.",
-        "guidance": "Εκτελέστε συγχρονισμό parity τώρα. Αν το ίδιο backlog παραμείνει, ελέγξτε τα parity ζητήματα ανά ενότητα παρακάτω ή επικοινωνήστε με operator."
+        "summary": "Ο τελευταίος κύκλος parity επεξεργάστηκε {{processed}} στοιχεία και άφησε ακόμη {{remaining}} στην ουρά. Τρέχον μπλοκάρισμα: {{reason}}.",
+        "guidance": "Εκτελέστε συγχρονισμό parity τώρα. Αν το ίδιο backlog παραμείνει, ελέγξτε τα parity ζητήματα ανά ενότητα παρακάτω ή επικοινωνήστε με operator. Τελευταίο σφάλμα parity: {{reason}}."
       },
       "parityModuleFailed": {
         "title": "Αποτυχίες parity στην ενότητα {{moduleLabel}}",

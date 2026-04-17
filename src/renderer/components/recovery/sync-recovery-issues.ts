@@ -147,6 +147,28 @@ const actionableSyncBacklogTotal = (
 const describeModule = (moduleType?: string | null) =>
   MODULE_LABELS[moduleType || ''] ?? moduleType ?? 'Unknown module';
 
+const isGenericParityFailureReason = (value?: string | null): boolean => {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === 'legacy sync force failed';
+};
+
+export const getRepresentativeParityFailureReason = (
+  lastParitySync?: DiagnosticsLastParitySync | null,
+  parityItems: SyncQueueItem[] = [],
+): string | null => {
+  const parityItemReason =
+    parityItems.find(
+      (item) => item.status === 'failed' && typeof item.errorMessage === 'string' && item.errorMessage.trim(),
+    )?.errorMessage?.trim() ?? null;
+  const lastCycleReason = lastParitySync?.error?.trim() || lastParitySync?.reason?.trim() || null;
+
+  if (parityItemReason && (!lastCycleReason || isGenericParityFailureReason(lastCycleReason))) {
+    return parityItemReason;
+  }
+
+  return lastCycleReason || parityItemReason;
+};
+
 const pushIssue = (issues: RecoveryIssue[], issue: RecoveryIssue | null) => {
   if (!issue) return;
   if (issues.some((existing) => existing.id === issue.id)) {
@@ -248,6 +270,7 @@ const buildMissingCredentialIssue = (
 
 const buildParityProcessorIssue = (
   systemHealth: DiagnosticsSystemHealth,
+  parityItems: SyncQueueItem[],
   lastParitySync?: DiagnosticsLastParitySync | null,
 ): RecoveryIssue | null => {
   const parityQueueStatus = systemHealth.parityQueueStatus;
@@ -264,6 +287,9 @@ const buildParityProcessorIssue = (
   if (!zeroProgress && lastParitySync?.status !== 'failed') {
     return null;
   }
+
+  const representativeReason = getRepresentativeParityFailureReason(lastParitySync, parityItems);
+  const effectiveReason = representativeReason ?? 'Unknown parity failure';
 
   return {
     id: 'parity-processor-stalled',
@@ -282,7 +308,7 @@ const buildParityProcessorIssue = (
       failed: parityQueueStatus?.failed ?? 0,
       pending: parityQueueStatus?.pending ?? 0,
       finishedAt: lastParitySync?.finishedAt ?? null,
-      reason: lastParitySync?.reason ?? lastParitySync?.error ?? null,
+      reason: effectiveReason,
     },
   };
 };
@@ -565,7 +591,7 @@ export function buildSyncRecoveryIssues({
   const issues: RecoveryIssue[] = [];
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   pushIssue(issues, buildInvalidOrdersIssue(systemHealth));
-  pushIssue(issues, buildParityProcessorIssue(systemHealth, lastParitySync));
+  pushIssue(issues, buildParityProcessorIssue(systemHealth, parityItems, lastParitySync));
 
   for (const issue of buildSyncBlockerIssues(systemHealth)) {
     pushIssue(issues, issue);

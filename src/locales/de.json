@@ -5001,8 +5001,8 @@
       },
       "parityProcessorStalled": {
         "title": "Parity-Prozessor hängt",
-        "summary": "Der letzte Parity-Zyklus hat {{processed}} Elemente verarbeitet und {{remaining}} weiter in der Warteschlange gelassen.",
-        "guidance": "Führen Sie die Parity-Synchronisierung jetzt aus. Wenn derselbe Rückstau bleibt, prüfen Sie die Parity-Probleme auf Modulebene unten oder kontaktieren Sie den Operator."
+        "summary": "Der letzte Parity-Zyklus hat {{processed}} Elemente verarbeitet und {{remaining}} weiter in der Warteschlange gelassen. Aktueller Blocker: {{reason}}.",
+        "guidance": "Führen Sie die Parity-Synchronisierung jetzt aus. Wenn derselbe Rückstau bleibt, prüfen Sie die Parity-Probleme auf Modulebene unten oder kontaktieren Sie den Operator. Letzter Parity-Fehler: {{reason}}."
       },
       "parityModuleFailed": {
         "title": "Parity-Fehler in {{moduleLabel}}",
