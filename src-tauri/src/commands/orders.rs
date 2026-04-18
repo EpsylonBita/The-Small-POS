@@ -1904,11 +1904,9 @@ pub async fn order_save_from_remote(
     let items_json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
 
     let order_number = value_str(&order_data, &["order_number", "orderNumber"]);
-    let display_order_number = value_str(
-        &order_data,
-        &["display_order_number", "displayOrderNumber"],
-    )
-    .or_else(|| order_number.clone());
+    let display_order_number =
+        value_str(&order_data, &["display_order_number", "displayOrderNumber"])
+            .or_else(|| order_number.clone());
     let customer_name = value_str(&order_data, &["customer_name", "customerName"]);
     let customer_phone = value_str(&order_data, &["customer_phone", "customerPhone"]);
     let customer_email = value_str(&order_data, &["customer_email", "customerEmail"]);

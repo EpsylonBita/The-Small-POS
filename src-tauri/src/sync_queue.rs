@@ -1500,7 +1500,8 @@ fn is_retryable_legacy_order_insert_error(error: &str) -> bool {
     let stale_schema_cache_error = lower.contains("schema cache")
         && lower.contains("orders")
         && lower.contains("could not find the '");
-    let duplicate_canonical_number_error = lower.contains("duplicate key value violates unique constraint")
+    let duplicate_canonical_number_error = lower
+        .contains("duplicate key value violates unique constraint")
         && lower.contains("uq_orders_order_number");
 
     legacy_shape_error
