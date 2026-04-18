@@ -5790,54 +5790,131 @@ pub(crate) struct StaleLocalPaymentConflictResolution {
     pub outstanding_before: f64,
 }
 
+#[derive(Debug, Clone)]
+struct LocalPaymentTotalConflictContext {
+    order_id: String,
+    amount: f64,
+    sync_status: String,
+    sync_state: String,
+    remote_payment_id: Option<String>,
+    adjustment_count: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaymentTotalConflictServerHint {
+    order_total: f64,
+    existing_completed: f64,
+    payment_amount: f64,
+}
+
+fn load_local_payment_total_conflict_context(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<Option<LocalPaymentTotalConflictContext>, String> {
+    conn.query_row(
+        "SELECT
+             order_id,
+             amount,
+             COALESCE(sync_status, ''),
+             COALESCE(sync_state, ''),
+             NULLIF(TRIM(COALESCE(remote_payment_id, '')), ''),
+             (
+                 SELECT COUNT(*)
+                 FROM payment_adjustments
+                 WHERE payment_id = op.id
+             )
+         FROM order_payments op
+         WHERE op.id = ?1
+           AND op.status = 'completed'
+         LIMIT 1",
+        params![payment_id],
+        |row| {
+            Ok(LocalPaymentTotalConflictContext {
+                order_id: row.get(0)?,
+                amount: row.get(1)?,
+                sync_status: row.get(2)?,
+                sync_state: row.get(3)?,
+                remote_payment_id: row.get(4)?,
+                adjustment_count: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("load stale payment conflict context: {e}"))
+}
+
+fn can_auto_void_local_payment_total_conflict(context: &LocalPaymentTotalConflictContext) -> bool {
+    context.adjustment_count == 0
+        && context.remote_payment_id.is_none()
+        && !(context.sync_status.eq_ignore_ascii_case("synced")
+            && context.sync_state.eq_ignore_ascii_case("applied"))
+}
+
+fn void_stale_local_payment_total_conflict(
+    conn: &Connection,
+    payment_id: &str,
+    order_id: &str,
+    void_reason: &str,
+    resolved_at: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE order_payments
+         SET status = 'voided',
+             voided_at = ?1,
+             void_reason = ?2,
+             sync_status = 'synced',
+             sync_state = 'applied',
+             sync_retry_count = 0,
+             sync_last_error = NULL,
+             sync_next_retry_at = NULL,
+             updated_at = ?1
+         WHERE id = ?3
+           AND status = 'completed'
+           AND NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NULL",
+        params![resolved_at, void_reason, payment_id],
+    )
+    .map_err(|e| format!("void stale local overpay payment row: {e}"))?;
+
+    mark_payment_queue_row_synced(conn, payment_id, resolved_at)?;
+    recompute_local_order_payment_snapshot(conn, order_id, resolved_at)?;
+    Ok(())
+}
+
+fn extract_payment_total_conflict_metric(error: &str, metric: &str) -> Option<f64> {
+    let error_lower = error.to_ascii_lowercase();
+    let metric_lower = metric.to_ascii_lowercase();
+    let start = error_lower.find(&metric_lower)? + metric_lower.len();
+    let suffix = error.get(start..)?.trim_start();
+    let numeric: String = suffix
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-'))
+        .collect();
+
+    if numeric.is_empty() {
+        return None;
+    }
+
+    numeric.parse::<f64>().ok()
+}
+
+fn parse_payment_total_conflict_server_hint(error: &str) -> Option<PaymentTotalConflictServerHint> {
+    Some(PaymentTotalConflictServerHint {
+        order_total: extract_payment_total_conflict_metric(error, "order total:")?,
+        existing_completed: extract_payment_total_conflict_metric(error, "existing completed:")?,
+        payment_amount: extract_payment_total_conflict_metric(error, "payment:")?,
+    })
+}
+
 pub(crate) fn resolve_stale_local_payment_total_conflict_with_conn(
     conn: &Connection,
     payment_id: &str,
     resolved_at: &str,
 ) -> Result<Option<StaleLocalPaymentConflictResolution>, String> {
-    let payment_context: Option<(String, f64, String, String, Option<String>, i64)> = conn
-        .query_row(
-            "SELECT
-                 order_id,
-                 amount,
-                 COALESCE(sync_status, ''),
-                 COALESCE(sync_state, ''),
-                 NULLIF(TRIM(COALESCE(remote_payment_id, '')), ''),
-                 (
-                     SELECT COUNT(*)
-                     FROM payment_adjustments
-                     WHERE payment_id = op.id
-                 )
-             FROM order_payments op
-             WHERE op.id = ?1
-               AND op.status = 'completed'
-             LIMIT 1",
-            params![payment_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|e| format!("load stale payment conflict context: {e}"))?;
-
-    let Some((order_id, amount, sync_status, sync_state, remote_payment_id, adjustment_count)) =
-        payment_context
-    else {
+    let Some(payment_context) = load_local_payment_total_conflict_context(conn, payment_id)? else {
         return Ok(None);
     };
 
-    if adjustment_count > 0
-        || remote_payment_id.is_some()
-        || (sync_status.eq_ignore_ascii_case("synced")
-            && sync_state.eq_ignore_ascii_case("applied"))
-    {
+    if !can_auto_void_local_payment_total_conflict(&payment_context) {
         return Ok(None);
     }
 
@@ -5846,7 +5923,7 @@ pub(crate) fn resolve_stale_local_payment_total_conflict_with_conn(
             "SELECT COALESCE(total_amount, 0)
              FROM orders
              WHERE id = ?1",
-            params![order_id.as_str()],
+            params![payment_context.order_id.as_str()],
             |row| row.get(0),
         )
         .map_err(|e| format!("load stale payment conflict order total: {e}"))?;
@@ -5874,14 +5951,14 @@ pub(crate) fn resolve_stale_local_payment_total_conflict_with_conn(
              WHERE op.order_id = ?1
                AND op.id != ?2
                AND op.status = 'completed'",
-            params![order_id.as_str(), payment_id],
+            params![payment_context.order_id.as_str(), payment_id],
             |row| row.get(0),
         )
         .unwrap_or(0.0);
 
     let outstanding_before = (order_total - other_net_paid).max(0.0);
-    let exceeds_order_total = amount > order_total + 0.01;
-    let exceeds_outstanding = amount > outstanding_before + 0.01;
+    let exceeds_order_total = payment_context.amount > order_total + 0.01;
+    let exceeds_outstanding = payment_context.amount > outstanding_before + 0.01;
     if !exceeds_order_total && !exceeds_outstanding {
         return Ok(None);
     }
@@ -5890,30 +5967,76 @@ pub(crate) fn resolve_stale_local_payment_total_conflict_with_conn(
         "Auto-voided stale unsynced local payment after order total changed; no canonical remote payment found (order total {order_total:.2}, outstanding {outstanding_before:.2})"
     );
 
-    conn.execute(
-        "UPDATE order_payments
-         SET status = 'voided',
-             voided_at = ?1,
-             void_reason = ?2,
-             sync_status = 'synced',
-             sync_state = 'applied',
-             sync_retry_count = 0,
-             sync_last_error = NULL,
-             sync_next_retry_at = NULL,
-             updated_at = ?1
-         WHERE id = ?3
-           AND status = 'completed'
-           AND NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NULL",
-        params![resolved_at, void_reason, payment_id],
-    )
-    .map_err(|e| format!("void stale local overpay payment row: {e}"))?;
-
-    mark_payment_queue_row_synced(conn, payment_id, resolved_at)?;
-    recompute_local_order_payment_snapshot(conn, &order_id, resolved_at)?;
+    void_stale_local_payment_total_conflict(
+        conn,
+        payment_id,
+        payment_context.order_id.as_str(),
+        &void_reason,
+        resolved_at,
+    )?;
 
     Ok(Some(StaleLocalPaymentConflictResolution {
-        order_id,
-        amount,
+        order_id: payment_context.order_id,
+        amount: payment_context.amount,
+        outstanding_before,
+    }))
+}
+
+pub(crate) fn resolve_payment_total_conflict_with_server_hint_with_conn(
+    conn: &Connection,
+    payment_id: &str,
+    error_message: &str,
+    resolved_at: &str,
+) -> Result<Option<StaleLocalPaymentConflictResolution>, String> {
+    if let Some(resolution) =
+        resolve_stale_local_payment_total_conflict_with_conn(conn, payment_id, resolved_at)?
+    {
+        return Ok(Some(resolution));
+    }
+
+    if !is_payment_total_conflict_error(error_message) {
+        return Ok(None);
+    }
+
+    let Some(server_hint) = parse_payment_total_conflict_server_hint(error_message) else {
+        return Ok(None);
+    };
+
+    if server_hint.existing_completed + 0.01 < server_hint.order_total {
+        return Ok(None);
+    }
+
+    let Some(payment_context) = load_local_payment_total_conflict_context(conn, payment_id)? else {
+        return Ok(None);
+    };
+
+    if !can_auto_void_local_payment_total_conflict(&payment_context) {
+        return Ok(None);
+    }
+
+    if (payment_context.amount - server_hint.payment_amount).abs() > 0.02 {
+        return Ok(None);
+    }
+
+    let outstanding_before = (server_hint.order_total - server_hint.existing_completed).max(0.0);
+    let void_reason = format!(
+        "Auto-voided stale unsynced local payment after admin confirmed the order was already fully paid (server total {:.2}, existing completed {:.2}, rejected payment {:.2})",
+        server_hint.order_total,
+        server_hint.existing_completed,
+        server_hint.payment_amount
+    );
+
+    void_stale_local_payment_total_conflict(
+        conn,
+        payment_id,
+        payment_context.order_id.as_str(),
+        &void_reason,
+        resolved_at,
+    )?;
+
+    Ok(Some(StaleLocalPaymentConflictResolution {
+        order_id: payment_context.order_id,
+        amount: payment_context.amount,
         outstanding_before,
     }))
 }
@@ -14829,6 +14952,99 @@ mod tests {
             .unwrap();
         assert_eq!(other_status, "completed");
         assert_eq!(other_remote_id.as_deref(), Some("remote-pay-other"));
+    }
+
+    #[test]
+    fn test_resolve_payment_total_conflict_with_server_hint_with_conn_voids_when_local_order_snapshot_is_stale(
+    ) {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, payment_status, payment_method,
+                payment_transaction_id, sync_status, created_at, updated_at
+            ) VALUES (
+                'ord-payment-server-hint', 'remote-payment-server-hint', '[]', 9.5, 'completed',
+                'paid', 'cash', 'pay-server-valid', 'synced', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-server-valid', 'ord-payment-server-hint', 'cash', 4.79, 'EUR', 'completed',
+                'remote-pay-server-valid', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-server-stale', 'ord-payment-server-hint', 'cash', 0.55, 'EUR', 'completed',
+                'failed', 'failed', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let resolved_at = "2026-04-18T04:20:00Z";
+        {
+            let conn = db.conn.lock().unwrap();
+            let without_server_hint = resolve_stale_local_payment_total_conflict_with_conn(
+                &conn,
+                "pay-server-stale",
+                resolved_at,
+            )
+            .expect("run stale local-only conflict resolver");
+            assert!(without_server_hint.is_none());
+        }
+
+        let resolution = {
+            let conn = db.conn.lock().unwrap();
+            resolve_payment_total_conflict_with_server_hint_with_conn(
+                &conn,
+                "pay-server-stale",
+                "HTTP 422: {\"success\":false,\"error\":\"Payment exceeds order total\",\"details\":\"Order total: 4.79, tip: 0, existing completed: 4.79, payment: 0.55\"}",
+                resolved_at,
+            )
+            .expect("resolve payment total conflict using server hint")
+        };
+
+        let resolution = resolution.expect("server hint should resolve stale payment");
+        assert_eq!(resolution.order_id, "ord-payment-server-hint");
+        assert!((resolution.amount - 0.55).abs() < 0.001);
+        assert!(resolution.outstanding_before.abs() < 0.001);
+
+        let conn = db.conn.lock().unwrap();
+        let (status, sync_status, sync_state, void_reason): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state, void_reason
+                 FROM order_payments
+                 WHERE id = 'pay-server-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "voided");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(sync_state, "applied");
+        assert!(void_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("already fully paid"));
+
     }
 
     #[test]

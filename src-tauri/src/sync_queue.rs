@@ -1733,9 +1733,10 @@ fn resolve_failed_payment_total_conflict_items_limited(
             continue;
         }
 
-        if sync::resolve_stale_local_payment_total_conflict_with_conn(
+        if sync::resolve_payment_total_conflict_with_server_hint_with_conn(
             conn,
             payment_id.as_str(),
+            error_message.as_str(),
             resolved_at.as_str(),
         )?
         .is_some()
@@ -3327,9 +3328,10 @@ pub async fn process_queue(
                     let resolved_at = Utc::now().to_rfc3339();
                     if item.table_name == "payments"
                         && is_payment_total_conflict_error(&error_message)
-                        && sync::resolve_stale_local_payment_total_conflict_with_conn(
+                        && sync::resolve_payment_total_conflict_with_server_hint_with_conn(
                             &db,
                             item.record_id.as_str(),
+                            error_message.as_str(),
                             resolved_at.as_str(),
                         )?
                         .is_some()
@@ -4836,7 +4838,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_failed_payment_total_conflict_items_limited_voids_stale_overpay_rows() {
+    fn resolve_failed_payment_total_conflict_items_limited_voids_stale_overpay_rows_using_server_hint(
+    ) {
         let conn = test_connection();
         seed_terminal_context(&conn);
 
@@ -4845,7 +4848,7 @@ mod tests {
                 id, items, total_amount, status, payment_status, payment_method,
                 payment_transaction_id, sync_status, created_at, updated_at
              ) VALUES (
-                'ord-payment-stale', '[]', 4.79, 'completed', 'paid', 'cash',
+                'ord-payment-stale', '[]', 9.50, 'completed', 'paid', 'cash',
                 'pay-valid', 'synced', datetime('now'), datetime('now')
              )",
             [],
