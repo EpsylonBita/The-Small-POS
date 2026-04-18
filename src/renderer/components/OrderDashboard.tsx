@@ -62,6 +62,7 @@ import type {
   UnsettledPaymentBlocker,
 } from "../../lib/ipc-contracts";
 import type { DeliveryBoundaryValidationResponse } from "../../shared/types/delivery-validation";
+import { normalizePosOrderItems } from "../../shared/utils/pos-order-items";
 import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
@@ -2466,66 +2467,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             customerInfo?.phone ||
             existingCustomer?.phone ||
             "",
-          items:
-            orderData.items?.map((item: any) => ({
-              id: item.id || item.menuItemId || item.menu_item_id,
-              menu_item_id: item.menuItemId || item.menu_item_id || item.id,
-              // Preserve menuItemId for sync service mapping (camelCase)
-              menuItemId: item.menuItemId || item.menu_item_id || item.id,
-              // Preserve category_id for analytics (if available from menu item spread)
-              category_id: item.category_id || null,
-              // Preserve categoryName for receipt printing and order display
-              categoryName: item.categoryName || null,
-              name: item.name || item.title || item.menu_item_name || "Item",
-              quantity: item.quantity || 1,
-              // unitPrice = price per item with customizations (without quantity multiplication)
-              // totalPrice = total price for this line (unitPrice * quantity)
-              price: item.unitPrice || item.price || 0,
-              unit_price: item.unitPrice || item.price || 0,
-              unitPrice: item.unitPrice || item.price || 0,
-              original_unit_price:
-                item.originalUnitPrice ||
-                item.original_unit_price ||
-                item.unitPrice ||
-                item.price ||
-                0,
-              originalUnitPrice:
-                item.originalUnitPrice ||
-                item.original_unit_price ||
-                item.unitPrice ||
-                item.price ||
-                0,
-              is_price_overridden:
-                item.isPriceOverridden === true ||
-                item.is_price_overridden === true ||
-                Math.abs(
-                  (item.unitPrice || item.price || 0) -
-                    (item.originalUnitPrice ||
-                      item.original_unit_price ||
-                      item.unitPrice ||
-                      item.price ||
-                      0),
-                ) > 0.0001,
-              isPriceOverridden:
-                item.isPriceOverridden === true ||
-                item.is_price_overridden === true ||
-                Math.abs(
-                  (item.unitPrice || item.price || 0) -
-                    (item.originalUnitPrice ||
-                      item.original_unit_price ||
-                      item.unitPrice ||
-                      item.price ||
-                      0),
-                ) > 0.0001,
-              totalPrice:
-                item.totalPrice ||
-                (item.unitPrice || item.price || 0) * (item.quantity || 1),
-              total_price:
-                item.totalPrice ||
-                (item.unitPrice || item.price || 0) * (item.quantity || 1),
-              customizations: item.customizations || null,
-              notes: item.notes || item.special_instructions || null,
-            })) || [],
+          items: normalizePosOrderItems(orderData.items || []),
           total_amount: total,
           subtotal: subtotal,
           discount_amount: totalDiscountAmount,
@@ -2722,7 +2664,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const normalizeEditOrderItems = useCallback(
       (items: any[]): OrderItem[] =>
-        items.map((item: any, index: number) => {
+        normalizePosOrderItems(items).map((item: any, index: number) => {
           const quantity = Math.max(0, Number(item.quantity || 0));
           const unitPrice = Number(
             item.unit_price ?? item.unitPrice ?? item.price ?? 0,
@@ -2741,7 +2683,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 item.menuItemId ||
                 `item-${index}`,
             ),
-            menu_item_id: item.menu_item_id || item.menuItemId || item.id,
+            menu_item_id: item.menu_item_id ?? item.menuItemId ?? null,
+            menuItemId: item.menuItemId ?? item.menu_item_id ?? null,
+            is_manual: item.is_manual === true,
             name: item.name || "Item",
             quantity,
             price: unitPrice,
@@ -2754,7 +2698,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               Math.abs(unitPrice - originalUnitPrice) > 0.0001,
             notes: item.notes || "",
             customizations: item.customizations || null,
-            categoryName: item.categoryName || null,
+            categoryName: item.categoryName || item.category_name || null,
           } as OrderItem;
         }),
       [],

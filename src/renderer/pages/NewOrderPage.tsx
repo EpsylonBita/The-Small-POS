@@ -27,6 +27,10 @@ import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
+import {
+  hasValidSyncedPosMenuItemId,
+  normalizePosOrderItems,
+} from '../../shared/utils/pos-order-items';
 import { AlertTriangle } from 'lucide-react';
 import { getBridge } from '../../lib';
 
@@ -475,40 +479,10 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         });
       }
 
-      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-      const normalizedItems = (orderData.items || []).map((item: any) => {
-        const rawMenuItemId = item.menuItemId || item.menu_item_id || item.id || null;
-        const normalizedMenuItemId =
-          typeof rawMenuItemId === 'string' && uuidRegex.test(rawMenuItemId.trim())
-            ? rawMenuItemId.trim()
-            : null;
-        const isManualItem =
-          item?.is_manual === true ||
-          String(rawMenuItemId || '').trim().toLowerCase() === 'manual';
-
-        return {
-          menu_item_id: isManualItem ? null : normalizedMenuItemId,
-          name: item.name || item.menu_item_name || null,
-          quantity: item.quantity,
-          unit_price: item.unitPrice || item.price,
-          price: item.price,
-          customizations: item.customizations || item.selectedIngredients || null,
-          notes: item.notes || item.special_instructions || null,
-          is_manual: isManualItem,
-          vat_category_code: item.vatCategoryCode || item.vat_category_code || (isManualItem ? 'gr_standard_24' : null),
-          price_includes_vat: item.priceIncludesVat ?? item.price_includes_vat ?? true,
-          tax_exemption_reason: item.taxExemptionReason || item.tax_exemption_reason || null,
-          fiscal_document_profile:
-            item.fiscalDocumentProfile || item.fiscal_document_profile || (isManualItem ? 'manual_item' : null),
-        };
-      });
-      const invalidItems = normalizedItems.filter((item: any) => {
-        if (item?.is_manual === true) {
-          return false;
-        }
-        const id = typeof item.menu_item_id === 'string' ? item.menu_item_id.trim() : '';
-        return !uuidRegex.test(id);
-      });
+      const normalizedItems = normalizePosOrderItems(orderData.items || []);
+      const invalidItems = normalizedItems.filter(
+        (item: any) => !hasValidSyncedPosMenuItemId(item),
+      );
       if (invalidItems.length > 0) {
         toast.error(
           t(

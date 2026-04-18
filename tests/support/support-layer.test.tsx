@@ -48,6 +48,10 @@ import {
   resolveTerminalAuthPausePresentation,
   resolveTerminalResetPresentation,
 } from '../../src/renderer/utils/terminal-lifecycle';
+import {
+  hasValidSyncedPosMenuItemId,
+  normalizePosOrderItems,
+} from '../../src/shared/utils/pos-order-items';
 import type {
   HealthSupportContext,
   PrinterSupportContext,
@@ -272,6 +276,52 @@ test('retrieval falls back to english for unsupported locales', () => {
 
   assert.equal(explanation.title, 'Terminal is offline');
   assert.equal(explanation.usedFallback, true);
+});
+
+test('normalizePosOrderItems canonicalizes manual open-price lines', () => {
+  const [manualItem] = normalizePosOrderItems([
+    {
+      id: 'manual-line-1',
+      menuItemId: 'manual',
+      is_manual: true,
+      name: 'Open Price Coffee',
+      quantity: 2,
+      unitPrice: 3.5,
+      totalPrice: 7,
+      notes: 'No sugar',
+      categoryName: 'Manual',
+    },
+  ]);
+
+  assert.equal(manualItem.id, 'manual-line-1');
+  assert.equal(manualItem.menu_item_id, null);
+  assert.equal(manualItem.menuItemId, null);
+  assert.equal(manualItem.is_manual, true);
+  assert.equal(manualItem.name, 'Open Price Coffee');
+  assert.equal(manualItem.quantity, 2);
+  assert.equal(manualItem.unit_price, 3.5);
+  assert.equal(manualItem.total_price, 7);
+  assert.equal(manualItem.notes, 'No sugar');
+  assert.equal(manualItem.vat_category_code, 'gr_standard_24');
+  assert.equal(manualItem.price_includes_vat, true);
+  assert.equal(manualItem.fiscal_document_profile, 'manual_item');
+  assert.equal(hasValidSyncedPosMenuItemId(manualItem), true);
+});
+
+test('normalizePosOrderItems keeps invalid non-manual ids detectable', () => {
+  const [invalidItem] = normalizePosOrderItems([
+    {
+      id: 'not-a-menu-uuid',
+      menuItemId: 'not-a-menu-uuid',
+      name: 'Broken Item',
+      quantity: 1,
+      price: 4.2,
+    },
+  ]);
+
+  assert.equal(invalidItem.menu_item_id, 'not-a-menu-uuid');
+  assert.equal(invalidItem.is_manual, false);
+  assert.equal(hasValidSyncedPosMenuItemId(invalidItem), false);
 });
 
 test('parity recovery prefers actionable order errors over dependency wait reasons', () => {

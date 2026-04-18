@@ -44,6 +44,7 @@ import { getBridge, isBrowser } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
 import type { CatalogOfferEvaluationResult, MatchedCatalogOffer, OfferEvaluationCartItem } from '../../../../../shared/types/catalog-offer';
 import type { CartItem as MenuCartItem } from '../menu/MenuCart';
+import { normalizePosOrderItem, normalizePosOrderItems } from '../../../shared/utils/pos-order-items';
 
 type MenuModalCartItem = MenuCartItem & {
   menuItemId?: string;
@@ -599,24 +600,33 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
         // If we have initialCartItems, use them
         if (initialCartItems && initialCartItems.length > 0) {
-          const transformedItems = initialCartItems.map((item, index) => ({
-            id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-            menuItemId: item.menu_item_id || item.menuItemId || item.id,
-            name: item.name || 'Unknown Item',
-            price: item.unit_price || item.price || 0,
-            quantity: item.quantity || 1,
-            customizations: transformCustomizations(item.customizations),
-            notes: item.notes || '',
-            totalPrice: item.total_price || item.totalPrice || ((item.unit_price || item.price || 0) * (item.quantity || 1)),
-            basePrice: item.unit_price || item.price || 0,
-            unitPrice: item.unit_price || item.price || 0,
-            originalUnitPrice: item.original_unit_price || item.originalUnitPrice || item.unit_price || item.price || 0,
-            isPriceOverridden:
-              item.is_price_overridden === true ||
-              item.isPriceOverridden === true ||
-              ((item.original_unit_price || item.originalUnitPrice || item.unit_price || item.price || 0) !==
-                (item.unit_price || item.price || 0)),
-          }));
+          const transformedItems = initialCartItems.map((item, index) => {
+            const normalizedItem = normalizePosOrderItem(item);
+            return {
+              id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+              menuItemId: normalizedItem.menuItemId ?? undefined,
+              name: normalizedItem.name || 'Unknown Item',
+              price: normalizedItem.unit_price || normalizedItem.price || 0,
+              quantity: normalizedItem.quantity || 1,
+              customizations: transformCustomizations(normalizedItem.customizations),
+              notes: normalizedItem.notes || '',
+              totalPrice: normalizedItem.total_price || normalizedItem.totalPrice || ((normalizedItem.unit_price || normalizedItem.price || 0) * (normalizedItem.quantity || 1)),
+              basePrice: normalizedItem.unit_price || normalizedItem.price || 0,
+              unitPrice: normalizedItem.unit_price || normalizedItem.price || 0,
+              originalUnitPrice:
+                normalizedItem.original_unit_price ||
+                normalizedItem.originalUnitPrice ||
+                normalizedItem.unit_price ||
+                normalizedItem.price ||
+                0,
+              isPriceOverridden:
+                normalizedItem.is_price_overridden === true ||
+                normalizedItem.isPriceOverridden === true,
+              is_manual: normalizedItem.is_manual === true,
+              categoryName: normalizedItem.categoryName || normalizedItem.category_name || undefined,
+              category_id: normalizedItem.category_id || normalizedItem.categoryId || null,
+            };
+          });
           setCartItems(transformedItems);
         }
         // Otherwise fetch from backend if we have an orderId
@@ -626,24 +636,31 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             const fetchedItems = await fetchOrderItems(editOrderId, editSupabaseId);
             if (fetchedItems.length > 0) {
               const transformedItems = fetchedItems.map((item, index) => {
+                const normalizedItem = normalizePosOrderItem(item);
                 const transformedCustomizations = transformCustomizations(item.customizations);
                 return {
                   id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-                  menuItemId: item.menu_item_id || item.menuItemId || item.id,
-                  name: item.name || 'Unknown Item',
-                  price: item.unit_price || item.price || 0,
-                  quantity: item.quantity || 1,
+                  menuItemId: normalizedItem.menuItemId ?? undefined,
+                  name: normalizedItem.name || 'Unknown Item',
+                  price: normalizedItem.unit_price || normalizedItem.price || 0,
+                  quantity: normalizedItem.quantity || 1,
                   customizations: transformedCustomizations,
-                  notes: item.notes || '',
-                  totalPrice: item.total_price || item.totalPrice || ((item.unit_price || item.price || 0) * (item.quantity || 1)),
-                  basePrice: item.unit_price || item.price || 0,
-                  unitPrice: item.unit_price || item.price || 0,
-                  originalUnitPrice: item.original_unit_price || item.originalUnitPrice || item.unit_price || item.price || 0,
+                  notes: normalizedItem.notes || '',
+                  totalPrice: normalizedItem.total_price || normalizedItem.totalPrice || ((normalizedItem.unit_price || normalizedItem.price || 0) * (normalizedItem.quantity || 1)),
+                  basePrice: normalizedItem.unit_price || normalizedItem.price || 0,
+                  unitPrice: normalizedItem.unit_price || normalizedItem.price || 0,
+                  originalUnitPrice:
+                    normalizedItem.original_unit_price ||
+                    normalizedItem.originalUnitPrice ||
+                    normalizedItem.unit_price ||
+                    normalizedItem.price ||
+                    0,
                   isPriceOverridden:
-                    item.is_price_overridden === true ||
-                    item.isPriceOverridden === true ||
-                    ((item.original_unit_price || item.originalUnitPrice || item.unit_price || item.price || 0) !==
-                      (item.unit_price || item.price || 0)),
+                    normalizedItem.is_price_overridden === true ||
+                    normalizedItem.isPriceOverridden === true,
+                  is_manual: normalizedItem.is_manual === true,
+                  categoryName: normalizedItem.categoryName || normalizedItem.category_name || undefined,
+                  category_id: normalizedItem.category_id || normalizedItem.categoryId || null,
                 };
               });
               setCartItems(transformedItems);
@@ -1284,24 +1301,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         const total = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
         await onEditComplete({
           orderId: editOrderId,
-          items: cartItems.map(item => ({
-            id: item.menuItemId || item.id,
-            menu_item_id: item.menuItemId || item.id,
-            name: item.name,
-            quantity: item.quantity,
-            unit_price: item.unitPrice || item.price,
-            total_price: item.totalPrice,
-            original_unit_price: item.originalUnitPrice ?? item.unitPrice ?? item.price,
-            is_price_overridden:
-              item.isPriceOverridden === true ||
-              Math.abs(
-                (item.unitPrice || item.price || 0) -
-                  (item.originalUnitPrice ?? item.unitPrice ?? item.price ?? 0)
-              ) > 0.0001,
-            notes: item.notes,
-            customizations: item.customizations,
-            categoryName: item.categoryName // Include category name for display in orders
-          })),
+          items: normalizePosOrderItems(cartItems),
           total,
           orderType,
           notes: ''

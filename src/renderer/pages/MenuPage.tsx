@@ -16,6 +16,7 @@ import { POSError } from '../../shared/utils/error-handler';
 import { useRealTimeMenuSync } from '../hooks/useRealTimeMenuSync';
 import { useFeaturedItems } from '../hooks/useFeaturedItems';
 import { getMenuItemPrice, type OrderType } from '../../shared/services/PricingService';
+import { normalizePosOrderItems } from '../../shared/utils/pos-order-items';
 import { Utensils } from 'lucide-react';
 import { getBridge } from '../../lib';
 
@@ -419,16 +420,7 @@ const MenuPage: React.FC = () => {
       const finalTotal = Number((subtotal + taxAmount + deliveryFee).toFixed(2));
 
       const orderData = {
-        items: cartItems.map(item => ({
-          id: item.id,
-          menu_item_id: item.menuItemId,
-          name: item.name,
-          quantity: item.quantity,
-          price: item.totalPrice || item.price,
-          unit_price: item.basePrice || item.price,
-          notes: item.notes,
-          customizations: item.customizations || []
-        })),
+        items: normalizePosOrderItems(cartItems as any[]),
         // Pass all financial fields explicitly so backend doesn't need to derive them
         total_amount: finalTotal,
         subtotal: subtotal,

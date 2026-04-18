@@ -9168,6 +9168,17 @@ fn validate_menu_items_against_cache(db: &DbState, items: &Value) -> Result<(), 
     let mut invalid_ids = Vec::new();
 
     for item in items.as_array().unwrap_or(&vec![]) {
+        let is_manual = item
+            .get("is_manual")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || item
+                .get("isManual")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        if is_manual {
+            continue;
+        }
         // Only check the primary menu_item_id fields, not "id" fallback
         let menu_item_id = str_any(item, &["menu_item_id", "menuItemId"]);
         if let Some(id) = menu_item_id {
@@ -13853,6 +13864,19 @@ mod tests {
         .unwrap();
     }
 
+    fn cache_menu_section(db: &DbState, cache_key: &str, items: Value) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO menu_cache (cache_key, data, updated_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(cache_key) DO UPDATE SET
+               data = excluded.data,
+               updated_at = excluded.updated_at",
+            params![cache_key, items.to_string()],
+        )
+        .unwrap();
+    }
+
     fn insert_queue_failure_row(
         db: &DbState,
         entity_id: &str,
@@ -13920,6 +13944,49 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn validate_menu_items_against_cache_skips_explicit_manual_items_only() {
+        let db = test_db();
+        cache_menu_section(
+            &db,
+            "subcategories",
+            serde_json::json!([
+                { "id": "11111111-1111-4111-8111-111111111111", "name": "Synced Item" }
+            ]),
+        );
+
+        let valid_items = serde_json::json!([
+            {
+                "menu_item_id": "11111111-1111-4111-8111-111111111111",
+                "name": "Synced Item"
+            },
+            {
+                "menu_item_id": "manual",
+                "is_manual": true,
+                "name": "Open Price Espresso"
+            },
+            {
+                "menu_item_id": null,
+                "is_manual": true,
+                "name": "Open Price Cake"
+            }
+        ]);
+
+        assert!(validate_menu_items_against_cache(&db, &valid_items).is_ok());
+
+        let invalid_items = serde_json::json!([
+            {
+                "menu_item_id": "manual",
+                "name": "Bare legacy sentinel"
+            }
+        ]);
+
+        assert_eq!(
+            validate_menu_items_against_cache(&db, &invalid_items).unwrap_err(),
+            vec!["manual".to_string()]
+        );
     }
 
     fn update_order_status(db: &DbState, order_id: &str, status: &str, sync_status: &str) {

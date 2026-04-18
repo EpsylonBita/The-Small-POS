@@ -4,6 +4,10 @@ import { mapStatusForSupabase, mapStatusForPOS } from '../shared/types/order-sta
 import { environment, getApiUrl } from '../config/environment';
 import { debugLogger } from '../shared/utils/debug-logger';
 import { ErrorFactory } from '../shared/utils/error-handler';
+import {
+  hasValidSyncedPosMenuItemId,
+  normalizePosOrderItems,
+} from '../shared/utils/pos-order-items';
 import { isBrowser } from '../lib/platform-detect';
 import { getBridge } from '../lib';
 import {
@@ -663,14 +667,17 @@ export class OrderService {
           `req-${Date.now()}-${Math.random().toString(16).slice(2)}`)
 
       const rawItems = orderData.items || []
-      const hasInvalidMenuItem = rawItems.some((item: any) => {
-        const menuItemId = item?.menu_item_id || item?.menuItemId || item?.id
-        const isManualItem =
-          item?.is_manual === true || String(menuItemId || '').trim().toLowerCase() === 'manual'
-        if (isManualItem) {
-          return false
+      const normalizedItems = normalizePosOrderItems(rawItems)
+      const hasInvalidMenuItem = normalizedItems.some((item: any) => {
+        if (!hasValidSyncedPosMenuItemId(item)) {
+          return true
         }
-        return !menuItemId || !uuidRegex.test(String(menuItemId))
+        const menuItemId = item?.menu_item_id
+        return (
+          typeof menuItemId === 'string' &&
+          menuItemId.trim().length > 0 &&
+          !uuidRegex.test(menuItemId.trim())
+        )
       })
       if (hasInvalidMenuItem) {
         throw ErrorFactory.validation(
@@ -822,7 +829,7 @@ export class OrderService {
         customerName: (orderData as any).customerName ?? orderData.customer_name,
         customerPhone: orderData.customerPhone ?? orderData.customer_phone,
         customerEmail: (orderData as any).customerEmail ?? orderData.customer_email,
-        items: rawItems,
+        items: normalizedItems,
         totalAmount: (orderData.totalAmount ?? orderData.total_amount) as number,
         clientRequestId: requestId,
         client_request_id: requestId,
@@ -979,53 +986,12 @@ export class OrderService {
         // Required fields
         branch_id: branchId || orderDataAny.branch_id,
         organization_id: organizationId || orderDataAny.organization_id,
-        items: (orderData.items || []).map((item: any) => {
-          const rawMenuItemId = item.menu_item_id || item.menuItemId || item.id || null
-          const isManualItem =
-            item?.is_manual === true || String(rawMenuItemId || '').trim().toLowerCase() === 'manual'
-          const categoryName =
-            item.category_name ||
-            item.categoryName ||
-            item.category?.name ||
-            item.menu_item?.category_name ||
-            item.menu_item?.categoryName ||
-            null;
-          const subcategoryName =
-            item.subcategory_name ||
-            item.subcategoryName ||
-            item.sub_category_name ||
-            item.subCategoryName ||
-            item.menu_item_name ||
-            item.menuItemName ||
-            item.name ||
-            null;
-          const explicitCategoryPath =
-            typeof item.category_path === 'string'
-              ? item.category_path.trim()
-              : typeof item.categoryPath === 'string'
-                ? item.categoryPath.trim()
-                : '';
-          const normalizedCategory = typeof categoryName === 'string' ? categoryName.trim() : '';
-          const normalizedSubcategory = typeof subcategoryName === 'string' ? subcategoryName.trim() : '';
-          const categoryPath =
-            explicitCategoryPath ||
-            (
-              normalizedCategory && normalizedSubcategory
-                ? (
-                    normalizedCategory.toLowerCase() === normalizedSubcategory.toLowerCase()
-                      ? normalizedCategory
-                      : `${normalizedCategory} > ${normalizedSubcategory}`
-                  )
-                : (normalizedCategory || normalizedSubcategory || null)
-            );
-
+        items: normalizedItems.map((item: any) => {
           return {
             menu_item_id:
-              isManualItem
-                ? null
-                : (typeof rawMenuItemId === 'string' && uuidRegex.test(rawMenuItemId.trim())
-                    ? rawMenuItemId.trim()
-                    : rawMenuItemId),
+              typeof item.menu_item_id === 'string' && uuidRegex.test(item.menu_item_id.trim())
+                ? item.menu_item_id.trim()
+                : item.menu_item_id,
             quantity: item.quantity || 1,
             unit_price: item.unitPrice || item.unit_price || item.price || 0,
             total_price:
@@ -1062,11 +1028,11 @@ export class OrderService {
                 return acc;
               }, {})
               : (item.customizations || null),
-            category_name: normalizedCategory || null,
-            subcategory_name: normalizedSubcategory || null,
-            category_path: typeof categoryPath === 'string' ? categoryPath : null,
-            name: normalizedSubcategory || null,
-            menu_item_name: normalizedSubcategory || null,
+            category_name: item.category_name || item.categoryName || null,
+            subcategory_name: item.subcategory_name || item.subcategoryName || item.name || null,
+            category_path: item.category_path || item.categoryPath || null,
+            name: item.name || item.menu_item_name || null,
+            menu_item_name: item.menu_item_name || item.name || null,
             notes:
               (typeof item.notes === 'string' && item.notes.trim()) ||
               null,
@@ -1076,6 +1042,17 @@ export class OrderService {
               null,
             instructions:
               (typeof item.instructions === 'string' && item.instructions.trim()) ||
+              null,
+            is_manual: item.is_manual === true,
+            vat_category_code: item.vat_category_code || item.vatCategoryCode || null,
+            price_includes_vat: item.price_includes_vat ?? item.priceIncludesVat ?? true,
+            tax_exemption_reason:
+              (typeof item.tax_exemption_reason === 'string' && item.tax_exemption_reason.trim()) ||
+              (typeof item.taxExemptionReason === 'string' && item.taxExemptionReason.trim()) ||
+              null,
+            fiscal_document_profile:
+              (typeof item.fiscal_document_profile === 'string' && item.fiscal_document_profile.trim()) ||
+              (typeof item.fiscalDocumentProfile === 'string' && item.fiscalDocumentProfile.trim()) ||
               null
           };
         }),
