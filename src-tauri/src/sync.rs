@@ -7854,6 +7854,32 @@ async fn reconcile_remote_payments_for_local_order_with_context(
         Vec::new()
     };
 
+    if !payments.is_empty() {
+        match resolve_remote_order_for_local_order(db, admin_url, api_key, local_order_id).await {
+            Ok(Some((_resolved_remote_order_id, resolved_remote_order_context))) => {
+                remote_order_context = resolved_remote_order_context;
+                if let Some(remote_order) = remote_order_context.as_ref() {
+                    let synced_at = Utc::now().to_rfc3339();
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    sync_remote_order_snapshot_into_local(
+                        &conn,
+                        local_order_id,
+                        remote_order,
+                        &synced_at,
+                    )?;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    order_id = %local_order_id,
+                    error = %error,
+                    "Remote order snapshot refresh failed after direct payment recovery"
+                );
+            }
+        }
+    }
+
     if payments.is_empty() {
         let Some((resolved_remote_order_id, resolved_remote_order_context)) =
             resolve_remote_order_for_local_order(db, admin_url, api_key, local_order_id).await?
@@ -14429,7 +14455,7 @@ mod tests {
         assert_eq!(supabase_id.as_deref(), Some("remote-order-repair-100"));
         assert_eq!(total_amount, 6.0);
         assert_eq!(payment_status, "paid");
-        assert_eq!(payment_method, "split");
+        assert_eq!(payment_method, "cash");
         assert_eq!(payment_count, 1);
     }
 
@@ -15390,20 +15416,6 @@ mod tests {
 
         let (mock_url, server_handle) = spawn_json_sequence_server(vec![
             (
-                "/api/pos/orders?limit=25&search=remote-order-refresh".to_string(),
-                serde_json::json!({
-                    "orders": [{
-                        "id": "remote-order-refresh",
-                        "order_number": "ORD-REFRESH-1",
-                        "total_amount": 9.7,
-                        "payment_status": "paid",
-                        "payment_method": "cash",
-                        "updated_at": "2026-04-16T09:39:05Z",
-                    }]
-                })
-                .to_string(),
-            ),
-            (
                 "/api/pos/payments?limit=200&order_id=remote-order-refresh".to_string(),
                 serde_json::json!({
                     "payments": [{
@@ -15413,6 +15425,20 @@ mod tests {
                         "payment_method": "cash",
                         "created_at": "2026-04-16T09:00:00Z",
                         "updated_at": "2026-04-16T09:00:00Z",
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "/api/pos/orders?limit=25&search=remote-order-refresh".to_string(),
+                serde_json::json!({
+                    "orders": [{
+                        "id": "remote-order-refresh",
+                        "order_number": "ORD-REFRESH-1",
+                        "total_amount": 9.7,
+                        "payment_status": "paid",
+                        "payment_method": "cash",
+                        "updated_at": "2026-04-16T09:39:05Z",
                     }]
                 })
                 .to_string(),
@@ -15510,20 +15536,6 @@ mod tests {
 
         let (mock_url, server_handle) = spawn_json_sequence_server(vec![
             (
-                "/api/pos/orders?limit=25&search=remote-order-mirror-only".to_string(),
-                serde_json::json!({
-                    "orders": [{
-                        "id": "remote-order-mirror-only",
-                        "order_number": "ORD-MIRROR-1",
-                        "total_amount": 15.0,
-                        "payment_status": "partially_paid",
-                        "payment_method": "split",
-                        "updated_at": "2026-04-16T09:39:05Z",
-                    }]
-                })
-                .to_string(),
-            ),
-            (
                 "/api/pos/payments?limit=200&order_id=remote-order-mirror-only".to_string(),
                 serde_json::json!({
                     "payments": [{
@@ -15533,6 +15545,20 @@ mod tests {
                         "payment_method": "cash",
                         "created_at": "2026-04-16T09:00:00Z",
                         "updated_at": "2026-04-16T09:00:00Z",
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "/api/pos/orders?limit=25&search=remote-order-mirror-only".to_string(),
+                serde_json::json!({
+                    "orders": [{
+                        "id": "remote-order-mirror-only",
+                        "order_number": "ORD-MIRROR-1",
+                        "total_amount": 15.0,
+                        "payment_status": "partially_paid",
+                        "payment_method": "split",
+                        "updated_at": "2026-04-16T09:39:05Z",
                     }]
                 })
                 .to_string(),
