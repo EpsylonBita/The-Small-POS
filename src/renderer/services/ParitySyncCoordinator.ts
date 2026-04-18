@@ -380,10 +380,6 @@ export async function runParitySyncCycle(options?: {
       };
       await publishParitySyncSnapshot(completedSnapshot);
 
-      if (config) {
-        emitCompatEvent('terminal-config-updated', config);
-      }
-
       return {
         config,
         queueStatus,

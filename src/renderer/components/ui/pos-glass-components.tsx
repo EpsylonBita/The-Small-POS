@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import ReactDOM from 'react-dom'
 import { cn } from '../../utils/cn'
 import { useI18n } from '../../contexts/i18n-context'
 import { useBlockerRegistration } from '../../hooks/useBlockerRegistration'
@@ -313,7 +314,7 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
     }
   }, [isOpen, onClose])
 
-  if (!isOpen) return null
+  if (!isOpen || typeof document === 'undefined') return null
 
   const sizeClasses = {
     sm: 'max-w-lg', // Increased from md
@@ -323,8 +324,8 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
     full: 'max-w-[96vw] max-h-[92vh]' // Slightly larger
   }
 
-  return (
-    <>
+  const modalContent = (
+    <div className="liquid-glass-modal-viewport">
       <div
         className="liquid-glass-modal-backdrop"
         onClick={closeOnBackdrop ? onClose : undefined}
@@ -355,8 +356,10 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
         )}
         {children}
       </div>
-    </>
+    </div>
   )
+
+  return ReactDOM.createPortal(modalContent, document.body)
 }
 
 /**
@@ -747,7 +750,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   }, [mounted, isClosing, closeOnEscape, handleClose, initialFocusRef])
 
   // Early return if not mounted
-  if (!mounted) return null
+  if (!mounted || typeof document === 'undefined') return null
 
   // Size classes mapping - Larger modals for better UX
   const sizeClasses = {
@@ -760,8 +763,8 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
   const showDefaultHeader = !header && !!title;
 
-  return (
-    <>
+  const modalContent = (
+    <div className="liquid-glass-modal-viewport">
       {/* Backdrop */}
       <div
         ref={backdropRef}
@@ -817,8 +820,10 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
           </div>
         )}
       </div>
-    </>
+    </div>
   )
+
+  return ReactDOM.createPortal(modalContent, document.body)
 }
 
 LiquidGlassModal.displayName = 'LiquidGlassModal'

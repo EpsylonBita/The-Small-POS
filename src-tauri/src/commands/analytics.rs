@@ -767,10 +767,10 @@ pub async fn driver_get_active(
             let staff_id: String = row.get(1)?;
             let staff_name: Option<String> = row.get(2)?;
             let active_count: i64 = row.get(5)?;
-            let status = if active_count < 3 {
-                "available"
-            } else {
+            let status = if active_count > 0 {
                 "busy"
+            } else {
+                "available"
             };
             Ok(serde_json::json!({
                 // Fields matching the frontend Driver interface
@@ -779,6 +779,8 @@ pub async fn driver_get_active(
                 "phone": "",
                 "status": status,
                 "current_orders": active_count,
+                "assignable": true,
+                "availabilityReason": "active",
                 // Backward-compatible fields
                 "shiftId": row.get::<_, String>(0)?,
                 "staffId": &staff_id,

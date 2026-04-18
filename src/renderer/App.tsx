@@ -976,7 +976,6 @@ function AppContent() {
             } catch (error) {
               console.warn('[App] Failed to refresh terminal config after realtime update:', error);
             }
-            emitCompatEvent('terminal-config-updated', payload.new || payload.old || payload);
           },
           onModuleChange: (payload) => {
             emitCompatEvent('modules:refresh-needed', payload.new || payload.old || payload);

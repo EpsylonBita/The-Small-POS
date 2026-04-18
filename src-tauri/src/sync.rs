@@ -15044,7 +15044,6 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("already fully paid"));
-
     }
 
     #[test]

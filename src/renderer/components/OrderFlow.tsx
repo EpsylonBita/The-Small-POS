@@ -36,6 +36,7 @@ import { getBridge, offEvent, onEvent } from '../../lib';
 import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
+import { resolveActiveCashierShift } from '../utils/active-cashier';
 
 
 interface OrderFlowProps {
@@ -773,14 +774,18 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         staff_id: selectedOrderType === 'delivery' ? undefined : (staff?.staffId || null)
       };
 
-      // Ensure a cashier shift is active before allowing order creation
       try {
         const resolvedBranchId = effectiveBranchId || await bridge.terminalConfig.getBranchId();
         const resolvedTerminalId = staff?.terminalId || await bridge.terminalConfig.getTerminalId();
-        if (!resolvedBranchId || !resolvedTerminalId) {
+        if (!resolvedTerminalId) {
           throw new Error('Missing branch or terminal id');
         }
-        const activeCashier = await bridge.shifts.getActiveCashierByTerminal(resolvedBranchId, resolvedTerminalId);
+        const activeCashier = await resolveActiveCashierShift({
+          branchId: resolvedBranchId,
+          terminalId: resolvedTerminalId,
+          activeShift,
+          logContext: 'OrderFlow',
+        });
         if (!activeCashier) {
           toast.error(t('orderFlow.noActiveCashierShift') || 'Cannot create orders until a cashier opens the day.');
           setIsProcessingOrder(false);

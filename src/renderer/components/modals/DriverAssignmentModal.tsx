@@ -10,6 +10,8 @@ interface Driver {
   phone?: string;
   status: 'available' | 'busy' | 'offline';
   current_orders?: number;
+  assignable?: boolean;
+  availabilityReason?: 'active' | 'missing_shift' | 'inactive';
 }
 
 interface DriverAssignmentModalProps {
@@ -68,6 +70,8 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
         phone: d.phone || '',
         status: d.status || 'available',
         current_orders: d.current_orders ?? d.currentOrders ?? 0,
+        assignable: d.assignable ?? true,
+        availabilityReason: d.availabilityReason ?? d.availability_reason ?? 'active',
       }));
 
       const normalized = mapped.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
@@ -81,14 +85,14 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
   };
 
   const handleDriverSelect = (driver: Driver) => {
-    if (driver.status === 'available' && (driver.current_orders || 0) < 3) {
+    if (driver.assignable !== false) {
       onDriverAssign(driver);
       toast.success(t('modals.driverAssignment.assignedTo', { name: driver.name }));
       onClose();
-    } else if (driver.status !== 'available') {
+    } else if (driver.availabilityReason === 'missing_shift' || driver.status !== 'available') {
       toast.error(t('modals.driverAssignment.notAvailable', { name: driver.name }));
     } else {
-      toast.error(t('modals.driverAssignment.tooManyOrders', { name: driver.name }));
+      toast.error(t('modals.driverAssignment.notAvailable', { name: driver.name }));
     }
   };
 
@@ -130,7 +134,7 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
       {!isLoading && drivers.length > 0 && (
         <div className="space-y-3 mb-6">
           {drivers.map((driver) => {
-            const isDisabled = driver.status !== 'available' || (driver.current_orders || 0) >= 3;
+            const isDisabled = driver.assignable === false;
             return (
               <button
                 key={driver.id}

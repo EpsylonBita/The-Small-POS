@@ -1515,6 +1515,111 @@ fn is_payment_total_conflict_error(error: &str) -> bool {
         || (lower.contains("http 422") && lower.contains("existing completed"))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PaymentTotalConflictServerHint {
+    order_total: f64,
+    existing_completed: f64,
+    payment_amount: f64,
+}
+
+fn extract_payment_total_conflict_metric(error: &str, metric: &str) -> Option<f64> {
+    let error_lower = error.to_ascii_lowercase();
+    let metric_lower = metric.to_ascii_lowercase();
+    let start = error_lower.find(&metric_lower)? + metric_lower.len();
+    let suffix = error.get(start..)?.trim_start();
+    let numeric: String = suffix
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-'))
+        .collect();
+
+    if numeric.is_empty() {
+        return None;
+    }
+
+    numeric.parse::<f64>().ok()
+}
+
+fn parse_payment_total_conflict_server_hint(error: &str) -> Option<PaymentTotalConflictServerHint> {
+    Some(PaymentTotalConflictServerHint {
+        order_total: extract_payment_total_conflict_metric(error, "order total:")?,
+        existing_completed: extract_payment_total_conflict_metric(error, "existing completed:")?,
+        payment_amount: extract_payment_total_conflict_metric(error, "payment:")?,
+    })
+}
+
+fn extract_payment_payload_amount(payload: &Value) -> Option<f64> {
+    payload
+        .get("amount")
+        .or_else(|| payload.get("paymentAmount"))
+        .and_then(Value::as_f64)
+}
+
+fn extract_payment_payload_order_id(payload: &Value) -> Option<String> {
+    payload
+        .get("orderId")
+        .or_else(|| payload.get("order_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn resolve_payment_total_conflict_parity_row_with_conn(
+    conn: &Connection,
+    queue_id: &str,
+    payment_id: &str,
+    payload_raw: &str,
+    error_message: &str,
+    resolved_at: &str,
+) -> Result<bool, String> {
+    if !is_payment_total_conflict_error(error_message) {
+        return Ok(false);
+    }
+
+    if sync::resolve_payment_total_conflict_with_server_hint_with_conn(
+        conn,
+        payment_id,
+        error_message,
+        resolved_at,
+    )?
+    .is_some()
+    {
+        mark_success(conn, queue_id)?;
+        return Ok(true);
+    }
+
+    let Some(server_hint) = parse_payment_total_conflict_server_hint(error_message) else {
+        return Ok(false);
+    };
+
+    if server_hint.existing_completed + 0.01 < server_hint.order_total {
+        return Ok(false);
+    }
+
+    let payload =
+        serde_json::from_str::<Value>(payload_raw).unwrap_or_else(|_| Value::Object(Map::new()));
+    let Some(payload_amount) = extract_payment_payload_amount(&payload) else {
+        return Ok(false);
+    };
+
+    if (payload_amount - server_hint.payment_amount).abs() > 0.02 {
+        return Ok(false);
+    }
+
+    let order_id = extract_payment_payload_order_id(&payload);
+    mark_success(conn, queue_id)?;
+    info!(
+        queue_id = %queue_id,
+        payment_id = %payment_id,
+        order_id = order_id.as_deref().unwrap_or(""),
+        payload_amount = payload_amount,
+        order_total = server_hint.order_total,
+        existing_completed = server_hint.existing_completed,
+        "Resolved stale parity payment conflict from admin-confirmed fully paid order state"
+    );
+    Ok(true)
+}
+
 fn is_customer_address_not_found_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("http 404") && lower.contains("address not found")
@@ -1704,7 +1809,7 @@ fn resolve_failed_payment_total_conflict_items_limited(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, record_id, error_message
+            "SELECT id, record_id, data, error_message
              FROM parity_sync_queue
              WHERE table_name = 'payments'
                AND operation = 'INSERT'
@@ -1716,8 +1821,10 @@ fn resolve_failed_payment_total_conflict_items_limited(
             format!("sync_queue resolve_failed_payment_total_conflict_items prepare: {e}")
         })?;
 
-    let candidates: Vec<(String, String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+    let candidates: Vec<(String, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
         .map_err(|e| format!("sync_queue resolve_failed_payment_total_conflict_items query: {e}"))?
         .filter_map(|row| row.ok())
         .collect();
@@ -1725,23 +1832,18 @@ fn resolve_failed_payment_total_conflict_items_limited(
     let mut resolved = 0_i64;
     let resolved_at = Utc::now().to_rfc3339();
 
-    for (queue_id, payment_id, error_message) in candidates {
+    for (queue_id, payment_id, payload_raw, error_message) in candidates {
         if resolved as usize >= limit {
             break;
         }
-        if !is_payment_total_conflict_error(&error_message) {
-            continue;
-        }
-
-        if sync::resolve_payment_total_conflict_with_server_hint_with_conn(
+        if resolve_payment_total_conflict_parity_row_with_conn(
             conn,
+            queue_id.as_str(),
             payment_id.as_str(),
+            payload_raw.as_str(),
             error_message.as_str(),
             resolved_at.as_str(),
-        )?
-        .is_some()
-        {
-            mark_success(conn, queue_id.as_str())?;
+        )? {
             resolved += 1;
         }
     }
@@ -3327,16 +3429,15 @@ pub async fn process_queue(
                     let error_message = format!("HTTP {status}: {response_body}");
                     let resolved_at = Utc::now().to_rfc3339();
                     if item.table_name == "payments"
-                        && is_payment_total_conflict_error(&error_message)
-                        && sync::resolve_payment_total_conflict_with_server_hint_with_conn(
+                        && resolve_payment_total_conflict_parity_row_with_conn(
                             &db,
+                            item.id.as_str(),
                             item.record_id.as_str(),
+                            item.data.as_str(),
                             error_message.as_str(),
                             resolved_at.as_str(),
                         )?
-                        .is_some()
                     {
-                        mark_success(&db, &item.id)?;
                         processed += 1;
                         continue;
                     }
@@ -5467,5 +5568,63 @@ mod tests {
 
         clear_terminal_identity();
         server.await.expect("mock server task");
+    }
+
+    #[test]
+    fn resolve_payment_total_conflict_parity_row_with_conn_marks_success_when_local_payment_row_is_missing(
+    ) {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status, error_message
+             ) VALUES (
+                'queue-payment-missing-local', 'payments', 'pay-missing-local', 'INSERT',
+                ?1, 'org-1', datetime('now'), 1, 1000, 0, 'financial', 'manual', 1, 'failed', ?2
+             )",
+            params![
+                json!({
+                    "amount": 0.55,
+                    "method": "cash",
+                    "orderId": "ord-paid-remote"
+                })
+                .to_string(),
+                "HTTP 422: {\"success\":false,\"error\":\"Payment exceeds order total\",\"details\":\"Order total: 4.79, tip: 0, existing completed: 4.79, payment: 0.55\"}"
+            ],
+        )
+        .expect("insert failed parity payment row");
+
+        let resolved = resolve_payment_total_conflict_parity_row_with_conn(
+            &conn,
+            "queue-payment-missing-local",
+            "pay-missing-local",
+            &json!({
+                "amount": 0.55,
+                "method": "cash",
+                "orderId": "ord-paid-remote"
+            })
+            .to_string(),
+            "HTTP 422: {\"success\":false,\"error\":\"Payment exceeds order total\",\"details\":\"Order total: 4.79, tip: 0, existing completed: 4.79, payment: 0.55\"}",
+            "2026-04-18T09:00:00Z",
+        )
+        .expect("resolve missing-local parity payment row");
+
+        assert!(
+            resolved,
+            "server-confirmed stale parity payment should resolve"
+        );
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'queue-payment-missing-local'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count parity rows");
+        assert_eq!(
+            remaining, 0,
+            "resolved row should be deleted from parity queue"
+        );
     }
 }

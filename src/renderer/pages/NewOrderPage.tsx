@@ -26,6 +26,7 @@ import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
+import { resolveActiveCashierShift } from '../utils/active-cashier';
 import { AlertTriangle } from 'lucide-react';
 import { getBridge } from '../../lib';
 
@@ -524,7 +525,12 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         return false;
       }
 
-      const activeCashier = await bridge.shifts.getActiveCashierByTerminal(resolvedBranchId, resolvedTerminalId);
+      const activeCashier = await resolveActiveCashierShift({
+        branchId: resolvedBranchId,
+        terminalId: resolvedTerminalId,
+        activeShift,
+        logContext: 'NewOrderPage',
+      });
       if (!activeCashier) {
         toast.error(t('orderFlow.noActiveCashierShift', 'Cannot create orders until a cashier opens the day.'));
         return false;

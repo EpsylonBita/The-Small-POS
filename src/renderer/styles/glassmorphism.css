@@ -411,18 +411,25 @@
   animation: modalEnter 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+.liquid-glass-modal-viewport {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
 .pos-glass-modal-backdrop,
 .liquid-glass-modal-backdrop {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  position: absolute;
+  inset: 0;
   background: rgba(0, 0, 0, 0.4);
   /* Reduced blur for less blurry effect - only blur the background, not the modal */
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
-  z-index: 999;
+  z-index: 0;
   transition: backdrop-filter 300ms cubic-bezier(0.4, 0, 0.2, 1), background 300ms cubic-bezier(0.4, 0, 0.2, 1);
   animation: backdropEnter 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -432,11 +439,8 @@
 }
 
 .liquid-glass-modal-shell {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 1000;
+  position: relative;
+  z-index: 1;
   max-width: 95vw;
   max-height: 92vh;
   width: 100%;

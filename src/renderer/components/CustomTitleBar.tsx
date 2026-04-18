@@ -334,7 +334,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
 
   return (
     <div
-      className={`flex items-center justify-between h-8 select-none fixed top-0 left-0 right-0 z-[9999] transition-colors ${
+      className={`flex items-center justify-between h-8 select-none fixed top-0 left-0 right-0 z-30 transition-colors ${
         isDark
           ? 'bg-black border-b border-gray-900'
           : 'bg-white border-b border-gray-200'

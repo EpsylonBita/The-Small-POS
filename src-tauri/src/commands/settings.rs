@@ -1,6 +1,7 @@
 use chrono::Utc;
 use rusqlite::params;
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
 use tauri::Emitter;
 use zeroize::Zeroizing;
 
@@ -18,6 +19,7 @@ use crate::terminal_helpers::{
 use crate::{api, auth, db, menu, reset, storage};
 
 const TERMINAL_RUNTIME_STALE_AFTER_MS: i64 = 15 * 60 * 1000;
+static LAST_TERMINAL_RUNTIME_EMIT_SIGNATURE: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
 
 #[derive(Debug, PartialEq)]
 struct SettingsSetPayload {
@@ -365,6 +367,37 @@ pub(crate) fn build_terminal_runtime_config(db: &db::DbState) -> Value {
     })
 }
 
+fn terminal_runtime_emit_signature(config: &Value) -> Value {
+    serde_json::json!({
+        "terminal_id": config.get("terminal_id").cloned().unwrap_or(Value::Null),
+        "branch_id": config.get("branch_id").cloned().unwrap_or(Value::Null),
+        "organization_id": config.get("organization_id").cloned().unwrap_or(Value::Null),
+        "admin_dashboard_url": config.get("admin_dashboard_url").cloned().unwrap_or(Value::Null),
+        "business_type": config.get("business_type").cloned().unwrap_or(Value::Null),
+        "terminal_type": config.get("terminal_type").cloned().unwrap_or(Value::Null),
+        "parent_terminal_id": config.get("parent_terminal_id").cloned().unwrap_or(Value::Null),
+        "owner_terminal_id": config.get("owner_terminal_id").cloned().unwrap_or(Value::Null),
+        "owner_terminal_db_id": config.get("owner_terminal_db_id").cloned().unwrap_or(Value::Null),
+        "source_terminal_id": config.get("source_terminal_id").cloned().unwrap_or(Value::Null),
+        "source_terminal_db_id": config.get("source_terminal_db_id").cloned().unwrap_or(Value::Null),
+        "pos_operating_mode": config.get("pos_operating_mode").cloned().unwrap_or(Value::Null),
+        "enabled_features": config.get("enabled_features").cloned().unwrap_or_else(|| serde_json::json!({})),
+        "ghost_mode_feature_enabled": config.get("ghost_mode_feature_enabled").cloned().unwrap_or(Value::Null),
+        "sync_health": config.get("sync_health").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn should_emit_terminal_runtime_update(config: &Value) -> bool {
+    let signature = terminal_runtime_emit_signature(config);
+    let state = LAST_TERMINAL_RUNTIME_EMIT_SIGNATURE.get_or_init(|| Mutex::new(None));
+    let mut last_signature = state.lock().expect("lock terminal runtime emit signature");
+    if last_signature.as_ref() == Some(&signature) {
+        return false;
+    }
+    *last_signature = Some(signature);
+    true
+}
+
 fn emit_terminal_runtime_update(
     app: &tauri::AppHandle,
     db: &db::DbState,
@@ -372,6 +405,9 @@ fn emit_terminal_runtime_update(
     updated: Option<Vec<String>>,
 ) {
     let mut payload = build_terminal_runtime_config(db);
+    if !should_emit_terminal_runtime_update(&payload) {
+        return;
+    }
     if let Some(map) = payload.as_object_mut() {
         map.insert("source".to_string(), serde_json::json!(source));
         if let Some(updated_keys) = updated {
@@ -1470,7 +1506,8 @@ pub async fn terminal_config_refresh(
 mod dto_tests {
     use super::{
         parse_settings_set_payload, parse_settings_update_local_payload,
-        parse_terminal_config_get_setting_payload, SettingsSetPayload,
+        parse_terminal_config_get_setting_payload, terminal_runtime_emit_signature,
+        SettingsSetPayload,
     };
 
     #[test]
@@ -1618,6 +1655,35 @@ mod dto_tests {
                 Some("terminal".to_string()),
                 Some("organization_id".to_string())
             )
+        );
+    }
+
+    #[test]
+    fn terminal_runtime_emit_signature_ignores_last_config_sync_at() {
+        let config_a = serde_json::json!({
+            "terminal_id": "terminal-1",
+            "branch_id": "branch-1",
+            "organization_id": "org-1",
+            "admin_dashboard_url": "https://admin.example.com",
+            "business_type": "food",
+            "terminal_type": "main",
+            "parent_terminal_id": null,
+            "owner_terminal_id": "terminal-1",
+            "owner_terminal_db_id": "db-terminal-1",
+            "source_terminal_id": "terminal-1",
+            "source_terminal_db_id": "db-terminal-1",
+            "pos_operating_mode": "main_isolated",
+            "enabled_features": { "delivery": true },
+            "ghost_mode_feature_enabled": "false",
+            "sync_health": "polling",
+            "last_config_sync_at": "2026-04-18T08:00:00Z",
+        });
+        let mut config_b = config_a.clone();
+        config_b["last_config_sync_at"] = serde_json::json!("2026-04-18T08:00:30Z");
+
+        assert_eq!(
+            terminal_runtime_emit_signature(&config_a),
+            terminal_runtime_emit_signature(&config_b),
         );
     }
 }
