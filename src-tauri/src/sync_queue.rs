@@ -512,6 +512,77 @@ fn merge_customer_address_payload_from_cache(
     Value::Object(merged)
 }
 
+fn load_recent_order_address_fallback(conn: &Connection, customer_id: &str) -> Option<Value> {
+    conn.query_row(
+        "SELECT
+             delivery_address,
+             delivery_city,
+             delivery_postal_code,
+             delivery_floor,
+             delivery_notes,
+             name_on_ringer
+         FROM orders
+         WHERE customer_id = ?1
+           AND COALESCE(TRIM(delivery_address), '') != ''
+         ORDER BY COALESCE(updated_at, created_at, '') DESC
+         LIMIT 1",
+        params![customer_id],
+        |row| {
+            let street_address: Option<String> = row.get(0)?;
+            let city: Option<String> = row.get(1)?;
+            let postal_code: Option<String> = row.get(2)?;
+            let floor_number: Option<String> = row.get(3)?;
+            let notes: Option<String> = row.get(4)?;
+            let name_on_ringer: Option<String> = row.get(5)?;
+
+            Ok(serde_json::json!({
+                "street_address": street_address.clone(),
+                "street": street_address,
+                "city": city,
+                "postal_code": postal_code,
+                "floor_number": floor_number,
+                "notes": notes,
+                "delivery_notes": notes,
+                "name_on_ringer": name_on_ringer,
+            }))
+        },
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+fn merge_customer_address_payload_for_recreate(
+    conn: &Connection,
+    customer_id: &str,
+    address_id: &str,
+    payload: &Value,
+) -> Value {
+    let merged = merge_customer_address_payload_from_cache(conn, customer_id, address_id, payload);
+    if has_customer_address_street(&merged) {
+        return merged;
+    }
+
+    let Some(order_fallback) = load_recent_order_address_fallback(conn, customer_id) else {
+        return merged;
+    };
+
+    let mut hydrated = order_fallback.as_object().cloned().unwrap_or_default();
+    if let Some(merged_object) = merged.as_object() {
+        for (key, value) in merged_object {
+            if !value.is_null() {
+                hydrated.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    hydrated.insert(
+        "customer_id".to_string(),
+        Value::String(customer_id.to_string()),
+    );
+
+    Value::Object(hydrated)
+}
+
 fn has_customer_address_street(payload: &Value) -> bool {
     string_field(payload, &["street_address", "street", "address"]).is_some()
 }
@@ -1390,6 +1461,9 @@ fn build_order_insert_body(
         "coupon_discount_amount": coupon_discount_amount,
         "tip_amount": number_field_from_sources(&sources, &["tip_amount", "tipAmount"])
             .unwrap_or(0.0),
+        "country_code": string_field_from_sources(&sources, &["country_code", "countryCode"])
+            .map(|value| value.trim().to_ascii_uppercase()),
+        "pricing_mode": string_field_from_sources(&sources, &["pricing_mode", "pricingMode"]),
         "customer_id": customer_id,
         "customer_name": customer_name,
         "customer_phone": customer_phone,
@@ -1412,7 +1486,7 @@ fn build_order_insert_body(
     }))
 }
 
-fn is_legacy_order_insert_validation_error(error: &str) -> bool {
+fn is_retryable_legacy_order_insert_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     let legacy_shape_error = lower.contains("validation failed")
         && lower.contains("expected object, received array")
@@ -1423,8 +1497,11 @@ fn is_legacy_order_insert_validation_error(error: &str) -> bool {
     let missing_tip_error = lower.contains("validation failed")
         && lower.contains("tip_amount")
         && lower.contains("expected number, received null");
+    let stale_schema_cache_error = lower.contains("schema cache")
+        && lower.contains("orders")
+        && lower.contains("could not find the '");
 
-    legacy_shape_error || missing_tip_error
+    legacy_shape_error || missing_tip_error || stale_schema_cache_error
 }
 
 fn is_rate_limit_error(error: &str) -> bool {
@@ -1432,9 +1509,21 @@ fn is_rate_limit_error(error: &str) -> bool {
     lower.contains("http 429") || lower.contains("rate limit exceeded")
 }
 
+fn is_payment_total_conflict_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("payment exceeds order total")
+        || (lower.contains("http 422") && lower.contains("existing completed"))
+}
+
 fn is_customer_address_not_found_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("http 404") && lower.contains("address not found")
+}
+
+fn is_customer_address_missing_street_error(error: &str) -> bool {
+    error
+        .to_ascii_lowercase()
+        .contains("customer address recreate is missing street_address details")
 }
 
 fn requeue_failed_items(
@@ -1585,7 +1674,7 @@ fn retry_failed_legacy_order_insert_items_limited(
         if queue_ids.len() >= limit {
             break;
         }
-        if !is_legacy_order_insert_validation_error(&error_message) {
+        if !is_retryable_legacy_order_insert_error(&error_message) {
             continue;
         }
 
@@ -1603,6 +1692,67 @@ fn retry_failed_legacy_order_insert_items_limited(
         &queue_ids,
         "Requeued legacy order insert parity rows after canonical request auto-heal",
     )
+}
+
+fn resolve_failed_payment_total_conflict_items_limited(
+    conn: &Connection,
+    limit: usize,
+) -> Result<RetryItemsResult, String> {
+    if limit == 0 {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, record_id, error_message
+             FROM parity_sync_queue
+             WHERE table_name = 'payments'
+               AND operation = 'INSERT'
+               AND status = 'failed'
+               AND error_message IS NOT NULL
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| {
+            format!("sync_queue resolve_failed_payment_total_conflict_items prepare: {e}")
+        })?;
+
+    let candidates: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(|e| format!("sync_queue resolve_failed_payment_total_conflict_items query: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    let mut resolved = 0_i64;
+    let resolved_at = Utc::now().to_rfc3339();
+
+    for (queue_id, payment_id, error_message) in candidates {
+        if resolved as usize >= limit {
+            break;
+        }
+        if !is_payment_total_conflict_error(&error_message) {
+            continue;
+        }
+
+        if sync::resolve_stale_local_payment_total_conflict_with_conn(
+            conn,
+            payment_id.as_str(),
+            resolved_at.as_str(),
+        )?
+        .is_some()
+        {
+            mark_success(conn, queue_id.as_str())?;
+            resolved += 1;
+        }
+    }
+
+    if resolved > 0 {
+        info!(
+            retried = resolved,
+            "Resolved stale parity payment rows blocked by payment total conflicts"
+        );
+    }
+
+    Ok(RetryItemsResult { retried: resolved })
 }
 
 fn retry_failed_customer_address_not_found_items_limited(
@@ -1646,7 +1796,8 @@ fn retry_failed_customer_address_not_found_items_limited(
         if queue_ids.len() >= limit {
             break;
         }
-        if !is_customer_address_not_found_error(&error_message)
+        if !(is_customer_address_not_found_error(&error_message)
+            || is_customer_address_missing_street_error(&error_message))
             || !is_local_placeholder_id(record_id.as_str())
         {
             continue;
@@ -1664,7 +1815,7 @@ fn retry_failed_customer_address_not_found_items_limited(
             continue;
         };
 
-        let hydrated_payload = merge_customer_address_payload_from_cache(
+        let hydrated_payload = merge_customer_address_payload_for_recreate(
             conn,
             customer_id.as_str(),
             record_id.as_str(),
@@ -2406,12 +2557,21 @@ fn prepare_customer_address_request(
     let body = if method == Method::DELETE {
         None
     } else {
-        let mut request_payload = merge_customer_address_payload_from_cache(
-            conn,
-            customer_id.as_str(),
-            item.record_id.as_str(),
-            payload,
-        );
+        let mut request_payload = if should_create {
+            merge_customer_address_payload_for_recreate(
+                conn,
+                customer_id.as_str(),
+                item.record_id.as_str(),
+                payload,
+            )
+        } else {
+            merge_customer_address_payload_from_cache(
+                conn,
+                customer_id.as_str(),
+                item.record_id.as_str(),
+                payload,
+            )
+        };
 
         if should_create && !has_customer_address_street(&request_payload) {
             return Ok(RequestPreparation::Failed {
@@ -2989,6 +3149,11 @@ pub async fn process_queue(
         remaining_requeue_budget =
             remaining_requeue_budget.saturating_sub(legacy_order_retries.retried as usize);
 
+        let payment_conflict_resolutions =
+            resolve_failed_payment_total_conflict_items_limited(&db, remaining_requeue_budget)?;
+        remaining_requeue_budget =
+            remaining_requeue_budget.saturating_sub(payment_conflict_resolutions.retried as usize);
+
         let _ =
             retry_failed_customer_address_not_found_items_limited(&db, remaining_requeue_budget)?;
     }
@@ -3158,7 +3323,22 @@ pub async fn process_queue(
                 } else if status >= 400 && status < 500 {
                     // Client error (not retriable)
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    mark_failure(&db, &item.id, &format!("HTTP {status}: {response_body}"))?;
+                    let error_message = format!("HTTP {status}: {response_body}");
+                    let resolved_at = Utc::now().to_rfc3339();
+                    if item.table_name == "payments"
+                        && is_payment_total_conflict_error(&error_message)
+                        && sync::resolve_stale_local_payment_total_conflict_with_conn(
+                            &db,
+                            item.record_id.as_str(),
+                            resolved_at.as_str(),
+                        )?
+                        .is_some()
+                    {
+                        mark_success(&db, &item.id)?;
+                        processed += 1;
+                        continue;
+                    }
+                    mark_failure(&db, &item.id, &error_message)?;
                     // Force to failed status since client errors won't recover
                     db.execute(
                         "UPDATE parity_sync_queue SET status = 'failed' WHERE id = ?1",
@@ -3170,7 +3350,7 @@ pub async fn process_queue(
                         item_id: item.id.clone(),
                         table_name: item.table_name.clone(),
                         record_id: item.record_id.clone(),
-                        error: format!("HTTP {status}: {response_body}"),
+                        error: error_message,
                         http_status: Some(status),
                     });
                 } else {
@@ -3854,6 +4034,137 @@ mod tests {
     }
 
     #[test]
+    fn prepare_customer_address_request_recreates_placeholder_updates_from_recent_order_fallback() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        seed_customer_cache(
+            &conn,
+            "cust-order-fallback",
+            json!({
+                "id": "local-new",
+                "city": "Athens"
+            }),
+        );
+        conn.execute(
+            "INSERT INTO orders (
+                id, customer_id, items, total_amount, status, sync_status,
+                delivery_address, delivery_city, delivery_postal_code, delivery_floor,
+                delivery_notes, name_on_ringer, created_at, updated_at
+             ) VALUES (
+                'ord-address-fallback', 'cust-order-fallback', '[]', 12.5, 'completed', 'synced',
+                'Order Street 9', 'Athens', '11742', '2', 'Use side door', 'Papadopoulos',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed recent order address fallback");
+
+        let item = queue_item(
+            "customer_addresses",
+            "UPDATE",
+            "local-new",
+            json!({
+                "customer_id": "cust-order-fallback",
+                "city": "Athens"
+            }),
+        );
+
+        let request = match prepare_request(&conn, &item).expect("prepare request") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        assert_eq!(
+            request.endpoint,
+            "/api/pos/customers/cust-order-fallback/addresses"
+        );
+        assert_eq!(request.method, Method::POST);
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("street_address").and_then(Value::as_str),
+            Some("Order Street 9")
+        );
+        assert_eq!(body.get("city").and_then(Value::as_str), Some("Athens"));
+        assert_eq!(
+            body.get("postal_code").and_then(Value::as_str),
+            Some("11742")
+        );
+        assert_eq!(
+            body.get("name_on_ringer").and_then(Value::as_str),
+            Some("Papadopoulos")
+        );
+    }
+
+    #[test]
+    fn retry_failed_customer_address_missing_street_items_requeues_from_recent_order_fallback() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        seed_customer_cache(
+            &conn,
+            "cust-order-fallback",
+            json!({
+                "id": "local-new",
+                "city": "Athens"
+            }),
+        );
+        conn.execute(
+            "INSERT INTO orders (
+                id, customer_id, items, total_amount, status, sync_status,
+                delivery_address, delivery_city, delivery_postal_code, created_at, updated_at
+             ) VALUES (
+                'ord-address-fallback-2', 'cust-order-fallback', '[]', 8.4, 'completed', 'synced',
+                'Retry Street 5', 'Athens', '11743', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed order fallback");
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "customer_addresses",
+            "UPDATE",
+            "local-new",
+            json!({
+                "customer_id": "cust-order-fallback",
+                "city": "Athens"
+            }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 error_message = ?1
+             WHERE id = ?2",
+            params![
+                "Customer address recreate is missing street_address details",
+                queue_id.as_str()
+            ],
+        )
+        .expect("seed failed customer address recreate row");
+
+        let result = retry_failed_customer_address_not_found_items_limited(&conn, 1)
+            .expect("retry failed customer address rows");
+
+        assert_eq!(result.retried, 1);
+
+        let (status, payload): (String, String) = conn
+            .query_row(
+                "SELECT status, data FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load updated queue row");
+        assert_eq!(status, "pending");
+
+        let payload = serde_json::from_str::<Value>(&payload).expect("parse updated payload");
+        assert_eq!(
+            payload.get("street_address").and_then(Value::as_str),
+            Some("Retry Street 5")
+        );
+    }
+
+    #[test]
     fn apply_success_updates_customer_address_cache_with_remote_id() {
         let conn = test_connection();
         seed_customer_cache(
@@ -4402,6 +4713,63 @@ mod tests {
     }
 
     #[test]
+    fn retry_failed_legacy_order_insert_items_requeues_schema_cache_failures() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-schema-cache-1",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "delivery",
+                "paymentMethod": "cash",
+                "countryCode": "gr",
+                "pricingMode": "gross",
+                "totalAmount": 4.79,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 4.79,
+                    "name": "Crepe"
+                }]
+            }),
+        );
+
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 4,
+                 error_message = ?2
+             WHERE id = ?1",
+            params![
+                queue_id,
+                "HTTP 500: {\"success\":false,\"error\":\"Failed to create order\",\"details\":\"Failed to create order: Could not find the 'country_code' column of 'orders' in the schema cache\"}"
+            ],
+        )
+        .expect("seed schema cache validation failure");
+
+        let result = retry_failed_legacy_order_insert_items_limited(&conn, 1)
+            .expect("retry failed legacy order rows");
+        assert_eq!(result.retried, 1);
+
+        let retried_row: (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read retried queue row");
+        assert_eq!(retried_row.0, "pending");
+        assert_eq!(retried_row.1, 0);
+        assert_eq!(retried_row.2, None);
+    }
+
+    #[test]
     fn retry_failed_rate_limited_items_requeues_a_bounded_batch() {
         let conn = test_connection();
         seed_terminal_context(&conn);
@@ -4465,6 +4833,95 @@ mod tests {
 
         assert_eq!(pending_count, 2);
         assert_eq!(failed_count, 2);
+    }
+
+    #[test]
+    fn resolve_failed_payment_total_conflict_items_limited_voids_stale_overpay_rows() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, payment_status, payment_method,
+                payment_transaction_id, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-payment-stale', '[]', 4.79, 'completed', 'paid', 'cash',
+                'pay-valid', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-valid', 'ord-payment-stale', 'cash', 4.79, 'EUR', 'completed',
+                'remote-pay-valid', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed canonical payment");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-stale', 'ord-payment-stale', 'cash', 0.55, 'EUR', 'completed',
+                'failed', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed stale overpay");
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "payments",
+            "INSERT",
+            "pay-stale",
+            json!({
+                "paymentId": "pay-stale",
+                "orderId": "ord-payment-stale",
+                "amount": 0.55
+            }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 error_message = ?1
+             WHERE id = ?2",
+            params![
+                "HTTP 422: {\"success\":false,\"error\":\"Payment exceeds order total\",\"details\":\"Order total: 4.79, tip: 0, existing completed: 4.79, payment: 0.55\"}",
+                queue_id.as_str()
+            ],
+        )
+        .expect("seed failed payment total conflict");
+
+        let result = resolve_failed_payment_total_conflict_items_limited(&conn, 1)
+            .expect("resolve payment total conflicts");
+        assert_eq!(result.retried, 1);
+
+        let (status, sync_status, sync_state): (String, String, String) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = 'pay-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read stale payment row");
+        assert_eq!(status, "voided");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(sync_state, "applied");
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("count payment parity rows");
+        assert_eq!(remaining, 0);
     }
 
     #[test]
