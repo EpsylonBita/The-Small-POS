@@ -324,6 +324,55 @@ export class OrderService {
     });
   }
 
+  private async persistOrderForRetry(params: {
+    normalizedPayload: Record<string, unknown>;
+    requestId: string;
+  }): Promise<Order> {
+    const bridge = this.getBridge();
+    if (!bridge) {
+      throw ErrorFactory.system('Retry save requires native bridge access');
+    }
+
+    const resp: any = await bridge.orders.saveForRetry(params.normalizedPayload as any);
+    const orderId =
+      resp?.orderId ||
+      resp?.data?.orderId ||
+      resp?.order?.id;
+
+    if (!resp?.success || !orderId) {
+      const retryError = resp?.error || 'Retry save returned unexpected response';
+      throw ErrorFactory.system(typeof retryError === 'string' ? retryError : JSON.stringify(retryError));
+    }
+
+    try {
+      const createdResult: any = await bridge.orders.getById(orderId);
+      const created = createdResult?.data ?? createdResult;
+      if (created) {
+        return {
+          ...(created as Order),
+          savedForRetry: true as any,
+        };
+      }
+    } catch (error) {
+      debugLogger.warn('Retry save succeeded but follow-up local fetch failed', error, 'OrderService');
+    }
+
+    return {
+      id: orderId,
+      orderNumber: params.requestId,
+      status: 'pending',
+      items: [],
+      total_amount: 0,
+      totalAmount: 0,
+      orderType: 'pickup',
+      created_at: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      savedForRetry: true as any,
+    } as Order;
+  }
+
   // Fetch orders - prefer local (IPC) first, fallback to Admin API
   async fetchOrders(): Promise<Order[]> {
     try {
@@ -596,6 +645,7 @@ export class OrderService {
     let queuedFallbackContext:
       | {
           apiPayload: Record<string, unknown>;
+          normalizedPayload: Record<string, unknown>;
           requestId: string;
           orderType: string;
           paymentStatus: string;
@@ -767,6 +817,8 @@ export class OrderService {
         // Include customerId for backend address fallback resolution
         customerId: persistedCustomerId,
         customer_id: persistedCustomerId,
+        clientOrderId: requestId,
+        client_order_id: requestId,
         customerName: (orderData as any).customerName ?? orderData.customer_name,
         customerPhone: orderData.customerPhone ?? orderData.customer_phone,
         customerEmail: (orderData as any).customerEmail ?? orderData.customer_email,
@@ -1031,6 +1083,7 @@ export class OrderService {
         payment_method: orderData.payment_method || orderDataAny.paymentMethod || 'cash',
         payment_status: paymentStatus,
         total_amount: orderData.total_amount || orderDataAny.totalAmount || 0,
+        client_order_id: requestId,
         client_request_id: requestId,
         initialPayment: normalizedInitialPayment,
         initial_payment: normalizedInitialPayment,
@@ -1068,6 +1121,7 @@ export class OrderService {
 
       queuedFallbackContext = {
         apiPayload,
+        normalizedPayload: normalized,
         requestId,
         orderType,
         paymentStatus,
@@ -1087,9 +1141,9 @@ export class OrderService {
       }
 
       if (bridgeCreateError && !this.allowAdminApiFallback()) {
-        return await this.enqueueParityOrderCreate({
-          ...queuedFallbackContext,
-          orderData,
+        return await this.persistOrderForRetry({
+          normalizedPayload: queuedFallbackContext.normalizedPayload,
+          requestId,
         });
       }
 
@@ -1152,6 +1206,12 @@ export class OrderService {
     } catch (error) {
       if (queuedFallbackContext && this.shouldQueueOrderCreate(error)) {
         try {
+          if (!this.allowAdminApiFallback() && this.getBridge()) {
+            return await this.persistOrderForRetry({
+              normalizedPayload: queuedFallbackContext.normalizedPayload,
+              requestId: queuedFallbackContext.requestId,
+            });
+          }
           return await this.enqueueParityOrderCreate({
             ...queuedFallbackContext,
             orderData,

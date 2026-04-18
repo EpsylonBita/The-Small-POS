@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 44;
+const CURRENT_SCHEMA_VERSION: i32 = 45;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -276,6 +276,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 44 {
         migrate_v44(conn)?;
+    }
+    if current < 45 {
+        migrate_v45(conn)?;
     }
 
     Ok(())
@@ -2727,6 +2730,28 @@ fn migrate_v44(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("migration v44 schema_version: {e}"))?;
 
     info!("Applied migration v44 (parity_sync_queue, conflict_audit_log)");
+    Ok(())
+}
+
+/// Migration v45: Stable cashier-facing display order number in local SQLite.
+fn migrate_v45(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "display_order_number")? {
+        conn.execute_batch("ALTER TABLE orders ADD COLUMN display_order_number TEXT;")
+            .map_err(|e| format!("migration v45 add orders.display_order_number: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        UPDATE orders
+        SET display_order_number = COALESCE(NULLIF(TRIM(display_order_number), ''), order_number)
+        WHERE display_order_number IS NULL OR TRIM(display_order_number) = '';
+
+        INSERT INTO schema_version (version) VALUES (45);
+        ",
+    )
+    .map_err(|e| format!("migration v45 display_order_number backfill: {e}"))?;
+
+    info!("Applied migration v45 (orders.display_order_number)");
     Ok(())
 }
 

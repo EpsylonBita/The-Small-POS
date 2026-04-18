@@ -1015,6 +1015,11 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         .or_else(|| str_field(payload, "client_request_id"))
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
+    let client_order_id = str_field(payload, "clientOrderId")
+        .or_else(|| str_field(payload, "client_order_id"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| client_request_id.clone());
 
     // Idempotency guard: if this checkout request has already created an order,
     // return that existing order id instead of inserting a duplicate row.
@@ -1085,6 +1090,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     // Extract fields from payload with defaults
     let order_number = Some(next_order_number(&conn));
+    let display_order_number = order_number.clone();
     let customer_name =
         str_field(payload, "customerName").or_else(|| str_field(payload, "customer_name"));
     let customer_phone =
@@ -1259,7 +1265,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     conn.execute(
         "INSERT INTO orders (
-            id, order_number, customer_name, customer_phone, customer_email, customer_id,
+            id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
             items, total_amount, tax_amount, subtotal, status,
             order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
             delivery_floor, delivery_notes, name_on_ringer, special_instructions,
@@ -1268,18 +1274,19 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             discount_amount, tip_amount, version, terminal_id, branch_id, plugin, tax_rate,
             delivery_fee, client_request_id, is_ghost, ghost_source, ghost_metadata
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6,
-            ?7, ?8, ?9, ?10, ?11,
-            ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20,
-            ?21, ?22, ?23, 'pending', ?24, ?25,
-            ?26, ?27, ?28, ?29, ?30,
-            ?31, ?32, 1, ?33, ?34, ?35, ?36,
-            ?37, ?38, ?39, ?40, ?41
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+            ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17,
+            ?18, ?19, ?20, ?21,
+            ?22, ?23, ?24, 'pending', ?25, ?26,
+            ?27, ?28, ?29, ?30, ?31,
+            ?32, ?33, 1, ?34, ?35, ?36, ?37,
+            ?38, ?39, ?40, ?41, ?42
         )",
         params![
             &order_id,
             &order_number,
+            &display_order_number,
             &customer_name,
             &customer_phone,
             &customer_email,
@@ -1387,6 +1394,22 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         if let Some(ref num) = order_number {
             obj.insert("orderNumber".to_string(), Value::String(num.clone()));
             obj.insert("order_number".to_string(), Value::String(num.clone()));
+        }
+        if let Some(ref display_num) = display_order_number {
+            obj.insert(
+                "displayOrderNumber".to_string(),
+                Value::String(display_num.clone()),
+            );
+            obj.insert(
+                "display_order_number".to_string(),
+                Value::String(display_num.clone()),
+            );
+        }
+        if let Some(client_order_id) = client_order_id.as_ref() {
+            obj.entry("clientOrderId".to_string())
+                .or_insert_with(|| Value::String(client_order_id.clone()));
+            obj.entry("client_order_id".to_string())
+                .or_insert_with(|| Value::String(client_order_id.clone()));
         }
         if let Some(req_id) = client_request_id.as_ref() {
             obj.entry("clientRequestId".to_string())
@@ -1502,6 +1525,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         "order": {
             "id": &order_id,
             "orderNumber": &order_number,
+            "displayOrderNumber": &display_order_number,
             "status": &status,
             "orderType": &order_type,
             "totalAmount": total_amount,
@@ -1524,7 +1548,7 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, order_number, customer_name, customer_phone, customer_email, customer_id,
+            "SELECT id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
                     items, total_amount, tax_amount, subtotal, status,
                     cancellation_reason, order_type, table_number, delivery_address,
                     delivery_notes, name_on_ringer, special_instructions,
@@ -1545,12 +1569,12 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
     let rows = stmt
         .query_map([], |row| {
             // Parse items JSON
-            let items_str: String = row.get(6)?;
+            let items_str: String = row.get(7)?;
             let items: Value = serde_json::from_str(&items_str).unwrap_or_else(|e| {
                 warn!("JSON parse fallback (items): {e}");
                 Value::Array(vec![])
             });
-            let ghost_metadata_str: Option<String> = row.get(43)?;
+            let ghost_metadata_str: Option<String> = row.get(44)?;
             let ghost_metadata = ghost_metadata_str
                 .as_deref()
                 .map(|raw| {
@@ -1560,67 +1584,70 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     })
                 })
                 .unwrap_or(Value::Null);
-            let is_ghost = row.get::<_, Option<i64>>(41)?.unwrap_or(0) != 0;
+            let is_ghost = row.get::<_, Option<i64>>(42)?.unwrap_or(0) != 0;
 
             Ok(serde_json::json!({
                 "id": row.get::<_, Option<String>>(0)?,
                 "orderNumber": row.get::<_, Option<String>>(1)?,
-                "customerName": row.get::<_, Option<String>>(2)?,
-                "customerPhone": row.get::<_, Option<String>>(3)?,
-                "customerEmail": row.get::<_, Option<String>>(4)?,
-                "customerId": row.get::<_, Option<String>>(5)?,
-                "customer_id": row.get::<_, Option<String>>(5)?,
+                "order_number": row.get::<_, Option<String>>(1)?,
+                "displayOrderNumber": row.get::<_, Option<String>>(2)?,
+                "display_order_number": row.get::<_, Option<String>>(2)?,
+                "customerName": row.get::<_, Option<String>>(3)?,
+                "customerPhone": row.get::<_, Option<String>>(4)?,
+                "customerEmail": row.get::<_, Option<String>>(5)?,
+                "customerId": row.get::<_, Option<String>>(6)?,
+                "customer_id": row.get::<_, Option<String>>(6)?,
                 "items": items,
-                "totalAmount": row.get::<_, f64>(7)?,
-                "taxAmount": row.get::<_, Option<f64>>(8)?,
-                "subtotal": row.get::<_, Option<f64>>(9)?,
-                "status": row.get::<_, String>(10)?,
-                "cancellationReason": row.get::<_, Option<String>>(11)?,
-                "orderType": row.get::<_, Option<String>>(12)?,
-                "tableNumber": row.get::<_, Option<String>>(13)?,
-                "deliveryAddress": row.get::<_, Option<String>>(14)?,
-                "deliveryNotes": row.get::<_, Option<String>>(15)?,
-                "nameOnRinger": row.get::<_, Option<String>>(16)?,
-                "specialInstructions": row.get::<_, Option<String>>(17)?,
-                "createdAt": row.get::<_, Option<String>>(18)?,
-                "updatedAt": row.get::<_, Option<String>>(19)?,
-                "estimatedTime": row.get::<_, Option<i64>>(20)?,
-                "supabaseId": row.get::<_, Option<String>>(21)?,
-                "syncStatus": row.get::<_, String>(22)?,
-                "paymentStatus": row.get::<_, Option<String>>(23)?,
-                "paymentMethod": row.get::<_, Option<String>>(24)?,
-                "paymentTransactionId": row.get::<_, Option<String>>(25)?,
-                "staffShiftId": row.get::<_, Option<String>>(26)?,
-                "staffId": row.get::<_, Option<String>>(27)?,
-                "discountPercentage": row.get::<_, Option<f64>>(28)?,
-                "discountAmount": row.get::<_, Option<f64>>(29)?,
-                "tipAmount": row.get::<_, Option<f64>>(30)?,
-                "version": row.get::<_, Option<i64>>(31)?,
-                "updatedBy": row.get::<_, Option<String>>(32)?,
-                "lastSyncedAt": row.get::<_, Option<String>>(33)?,
-                "remoteVersion": row.get::<_, Option<i64>>(34)?,
-                "terminalId": row.get::<_, Option<String>>(35)?,
-                "branchId": row.get::<_, Option<String>>(36)?,
-                "plugin": row.get::<_, Option<String>>(37)?,
-                "externalPluginOrderId": row.get::<_, Option<String>>(38)?,
-                "taxRate": row.get::<_, Option<f64>>(39)?,
-                "deliveryFee": row.get::<_, Option<f64>>(40)?,
+                "totalAmount": row.get::<_, f64>(8)?,
+                "taxAmount": row.get::<_, Option<f64>>(9)?,
+                "subtotal": row.get::<_, Option<f64>>(10)?,
+                "status": row.get::<_, String>(11)?,
+                "cancellationReason": row.get::<_, Option<String>>(12)?,
+                "orderType": row.get::<_, Option<String>>(13)?,
+                "tableNumber": row.get::<_, Option<String>>(14)?,
+                "deliveryAddress": row.get::<_, Option<String>>(15)?,
+                "deliveryNotes": row.get::<_, Option<String>>(16)?,
+                "nameOnRinger": row.get::<_, Option<String>>(17)?,
+                "specialInstructions": row.get::<_, Option<String>>(18)?,
+                "createdAt": row.get::<_, Option<String>>(19)?,
+                "updatedAt": row.get::<_, Option<String>>(20)?,
+                "estimatedTime": row.get::<_, Option<i64>>(21)?,
+                "supabaseId": row.get::<_, Option<String>>(22)?,
+                "syncStatus": row.get::<_, String>(23)?,
+                "paymentStatus": row.get::<_, Option<String>>(24)?,
+                "paymentMethod": row.get::<_, Option<String>>(25)?,
+                "paymentTransactionId": row.get::<_, Option<String>>(26)?,
+                "staffShiftId": row.get::<_, Option<String>>(27)?,
+                "staffId": row.get::<_, Option<String>>(28)?,
+                "discountPercentage": row.get::<_, Option<f64>>(29)?,
+                "discountAmount": row.get::<_, Option<f64>>(30)?,
+                "tipAmount": row.get::<_, Option<f64>>(31)?,
+                "version": row.get::<_, Option<i64>>(32)?,
+                "updatedBy": row.get::<_, Option<String>>(33)?,
+                "lastSyncedAt": row.get::<_, Option<String>>(34)?,
+                "remoteVersion": row.get::<_, Option<i64>>(35)?,
+                "terminalId": row.get::<_, Option<String>>(36)?,
+                "branchId": row.get::<_, Option<String>>(37)?,
+                "plugin": row.get::<_, Option<String>>(38)?,
+                "externalPluginOrderId": row.get::<_, Option<String>>(39)?,
+                "taxRate": row.get::<_, Option<f64>>(40)?,
+                "deliveryFee": row.get::<_, Option<f64>>(41)?,
                 "is_ghost": is_ghost,
                 "isGhost": is_ghost,
-                "ghost_source": row.get::<_, Option<String>>(42)?,
-                "ghostSource": row.get::<_, Option<String>>(42)?,
+                "ghost_source": row.get::<_, Option<String>>(43)?,
+                "ghostSource": row.get::<_, Option<String>>(43)?,
                 "ghost_metadata": ghost_metadata,
                 "ghostMetadata": ghost_metadata,
-                "deliveryCity": row.get::<_, Option<String>>(44)?,
-                "delivery_city": row.get::<_, Option<String>>(44)?,
-                "deliveryPostalCode": row.get::<_, Option<String>>(45)?,
-                "delivery_postal_code": row.get::<_, Option<String>>(45)?,
-                "deliveryFloor": row.get::<_, Option<String>>(46)?,
-                "delivery_floor": row.get::<_, Option<String>>(46)?,
-                "driverId": row.get::<_, Option<String>>(47)?,
-                "driver_id": row.get::<_, Option<String>>(47)?,
-                "driverName": row.get::<_, Option<String>>(48)?,
-                "driver_name": row.get::<_, Option<String>>(48)?,
+                "deliveryCity": row.get::<_, Option<String>>(45)?,
+                "delivery_city": row.get::<_, Option<String>>(45)?,
+                "deliveryPostalCode": row.get::<_, Option<String>>(46)?,
+                "delivery_postal_code": row.get::<_, Option<String>>(46)?,
+                "deliveryFloor": row.get::<_, Option<String>>(47)?,
+                "delivery_floor": row.get::<_, Option<String>>(47)?,
+                "driverId": row.get::<_, Option<String>>(48)?,
+                "driver_id": row.get::<_, Option<String>>(48)?,
+                "driverName": row.get::<_, Option<String>>(49)?,
+                "driver_name": row.get::<_, Option<String>>(49)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -1640,7 +1667,7 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let result = conn.query_row(
-        "SELECT id, order_number, customer_name, customer_phone, customer_email, customer_id,
+        "SELECT id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
                 items, total_amount, tax_amount, subtotal, status,
                 cancellation_reason, order_type, table_number, delivery_address,
                 delivery_notes, name_on_ringer, special_instructions,
@@ -1655,12 +1682,12 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
         FROM orders WHERE id = ?1",
         params![id],
         |row| {
-            let items_str: String = row.get(6)?;
+            let items_str: String = row.get(7)?;
             let items: Value = serde_json::from_str(&items_str).unwrap_or_else(|e| {
                 warn!("JSON parse fallback (items): {e}");
                 Value::Array(vec![])
             });
-            let ghost_metadata_str: Option<String> = row.get(43)?;
+            let ghost_metadata_str: Option<String> = row.get(44)?;
             let ghost_metadata = ghost_metadata_str
                 .as_deref()
                 .map(|raw| {
@@ -1670,68 +1697,71 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                     })
                 })
                 .unwrap_or(Value::Null);
-            let is_ghost = row.get::<_, Option<i64>>(41)?.unwrap_or(0) != 0;
-            let ghost_source: Option<String> = row.get(42)?;
+            let is_ghost = row.get::<_, Option<i64>>(42)?.unwrap_or(0) != 0;
+            let ghost_source: Option<String> = row.get(43)?;
 
             Ok(serde_json::json!({
                 "id": row.get::<_, Option<String>>(0)?,
                 "orderNumber": row.get::<_, Option<String>>(1)?,
-                "customerName": row.get::<_, Option<String>>(2)?,
-                "customerPhone": row.get::<_, Option<String>>(3)?,
-                "customerEmail": row.get::<_, Option<String>>(4)?,
-                "customerId": row.get::<_, Option<String>>(5)?,
-                "customer_id": row.get::<_, Option<String>>(5)?,
+                "order_number": row.get::<_, Option<String>>(1)?,
+                "displayOrderNumber": row.get::<_, Option<String>>(2)?,
+                "display_order_number": row.get::<_, Option<String>>(2)?,
+                "customerName": row.get::<_, Option<String>>(3)?,
+                "customerPhone": row.get::<_, Option<String>>(4)?,
+                "customerEmail": row.get::<_, Option<String>>(5)?,
+                "customerId": row.get::<_, Option<String>>(6)?,
+                "customer_id": row.get::<_, Option<String>>(6)?,
                 "items": items,
-                "totalAmount": row.get::<_, f64>(7)?,
-                "taxAmount": row.get::<_, Option<f64>>(8)?,
-                "subtotal": row.get::<_, Option<f64>>(9)?,
-                "status": row.get::<_, String>(10)?,
-                "cancellationReason": row.get::<_, Option<String>>(11)?,
-                "orderType": row.get::<_, Option<String>>(12)?,
-                "tableNumber": row.get::<_, Option<String>>(13)?,
-                "deliveryAddress": row.get::<_, Option<String>>(14)?,
-                "deliveryNotes": row.get::<_, Option<String>>(15)?,
-                "nameOnRinger": row.get::<_, Option<String>>(16)?,
-                "specialInstructions": row.get::<_, Option<String>>(17)?,
-                "createdAt": row.get::<_, Option<String>>(18)?,
-                "updatedAt": row.get::<_, Option<String>>(19)?,
-                "estimatedTime": row.get::<_, Option<i64>>(20)?,
-                "supabaseId": row.get::<_, Option<String>>(21)?,
-                "syncStatus": row.get::<_, String>(22)?,
-                "paymentStatus": row.get::<_, Option<String>>(23)?,
-                "paymentMethod": row.get::<_, Option<String>>(24)?,
-                "paymentTransactionId": row.get::<_, Option<String>>(25)?,
-                "staffShiftId": row.get::<_, Option<String>>(26)?,
-                "staffId": row.get::<_, Option<String>>(27)?,
-                "discountPercentage": row.get::<_, Option<f64>>(28)?,
-                "discountAmount": row.get::<_, Option<f64>>(29)?,
-                "tipAmount": row.get::<_, Option<f64>>(30)?,
-                "version": row.get::<_, Option<i64>>(31)?,
-                "updatedBy": row.get::<_, Option<String>>(32)?,
-                "lastSyncedAt": row.get::<_, Option<String>>(33)?,
-                "remoteVersion": row.get::<_, Option<i64>>(34)?,
-                "terminalId": row.get::<_, Option<String>>(35)?,
-                "branchId": row.get::<_, Option<String>>(36)?,
-                "plugin": row.get::<_, Option<String>>(37)?,
-                "externalPluginOrderId": row.get::<_, Option<String>>(38)?,
-                "taxRate": row.get::<_, Option<f64>>(39)?,
-                "deliveryFee": row.get::<_, Option<f64>>(40)?,
+                "totalAmount": row.get::<_, f64>(8)?,
+                "taxAmount": row.get::<_, Option<f64>>(9)?,
+                "subtotal": row.get::<_, Option<f64>>(10)?,
+                "status": row.get::<_, String>(11)?,
+                "cancellationReason": row.get::<_, Option<String>>(12)?,
+                "orderType": row.get::<_, Option<String>>(13)?,
+                "tableNumber": row.get::<_, Option<String>>(14)?,
+                "deliveryAddress": row.get::<_, Option<String>>(15)?,
+                "deliveryNotes": row.get::<_, Option<String>>(16)?,
+                "nameOnRinger": row.get::<_, Option<String>>(17)?,
+                "specialInstructions": row.get::<_, Option<String>>(18)?,
+                "createdAt": row.get::<_, Option<String>>(19)?,
+                "updatedAt": row.get::<_, Option<String>>(20)?,
+                "estimatedTime": row.get::<_, Option<i64>>(21)?,
+                "supabaseId": row.get::<_, Option<String>>(22)?,
+                "syncStatus": row.get::<_, String>(23)?,
+                "paymentStatus": row.get::<_, Option<String>>(24)?,
+                "paymentMethod": row.get::<_, Option<String>>(25)?,
+                "paymentTransactionId": row.get::<_, Option<String>>(26)?,
+                "staffShiftId": row.get::<_, Option<String>>(27)?,
+                "staffId": row.get::<_, Option<String>>(28)?,
+                "discountPercentage": row.get::<_, Option<f64>>(29)?,
+                "discountAmount": row.get::<_, Option<f64>>(30)?,
+                "tipAmount": row.get::<_, Option<f64>>(31)?,
+                "version": row.get::<_, Option<i64>>(32)?,
+                "updatedBy": row.get::<_, Option<String>>(33)?,
+                "lastSyncedAt": row.get::<_, Option<String>>(34)?,
+                "remoteVersion": row.get::<_, Option<i64>>(35)?,
+                "terminalId": row.get::<_, Option<String>>(36)?,
+                "branchId": row.get::<_, Option<String>>(37)?,
+                "plugin": row.get::<_, Option<String>>(38)?,
+                "externalPluginOrderId": row.get::<_, Option<String>>(39)?,
+                "taxRate": row.get::<_, Option<f64>>(40)?,
+                "deliveryFee": row.get::<_, Option<f64>>(41)?,
                 "is_ghost": is_ghost,
                 "isGhost": is_ghost,
                 "ghost_source": ghost_source,
                 "ghostSource": ghost_source,
                 "ghost_metadata": ghost_metadata,
                 "ghostMetadata": ghost_metadata,
-                "deliveryCity": row.get::<_, Option<String>>(44)?,
-                "delivery_city": row.get::<_, Option<String>>(44)?,
-                "deliveryPostalCode": row.get::<_, Option<String>>(45)?,
-                "delivery_postal_code": row.get::<_, Option<String>>(45)?,
-                "deliveryFloor": row.get::<_, Option<String>>(46)?,
-                "delivery_floor": row.get::<_, Option<String>>(46)?,
-                "driverId": row.get::<_, Option<String>>(47)?,
-                "driver_id": row.get::<_, Option<String>>(47)?,
-                "driverName": row.get::<_, Option<String>>(48)?,
-                "driver_name": row.get::<_, Option<String>>(48)?,
+                "deliveryCity": row.get::<_, Option<String>>(45)?,
+                "delivery_city": row.get::<_, Option<String>>(45)?,
+                "deliveryPostalCode": row.get::<_, Option<String>>(46)?,
+                "delivery_postal_code": row.get::<_, Option<String>>(46)?,
+                "deliveryFloor": row.get::<_, Option<String>>(47)?,
+                "delivery_floor": row.get::<_, Option<String>>(47)?,
+                "driverId": row.get::<_, Option<String>>(48)?,
+                "driver_id": row.get::<_, Option<String>>(48)?,
+                "driverName": row.get::<_, Option<String>>(49)?,
+                "driver_name": row.get::<_, Option<String>>(49)?,
             }))
         },
     );
@@ -4865,6 +4895,11 @@ fn materialize_remote_order(
     };
 
     let order_number = str_any(remote_order, &["order_number", "orderNumber"]);
+    let display_order_number = str_any(
+        remote_order,
+        &["display_order_number", "displayOrderNumber"],
+    )
+    .or_else(|| order_number.clone());
     let customer_name = str_any(remote_order, &["customer_name", "customerName"]);
     let customer_phone = str_any(remote_order, &["customer_phone", "customerPhone"]);
     let customer_email = str_any(remote_order, &["customer_email", "customerEmail"]);
@@ -4950,7 +4985,7 @@ fn materialize_remote_order(
 
     conn.execute(
         "INSERT INTO orders (
-            id, order_number, customer_name, customer_phone, customer_email, customer_id,
+            id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
             items, total_amount, tax_amount, subtotal, status,
             order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
             delivery_floor, delivery_notes, name_on_ringer, special_instructions,
@@ -4960,20 +4995,21 @@ fn materialize_remote_order(
             tip_amount, version, terminal_id, branch_id, plugin, external_plugin_order_id,
             tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6,
-            ?7, ?8, ?9, ?10, ?11,
-            ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20,
-            ?21, ?22, ?23, ?24, 'synced',
-            ?25, ?26, ?27, ?28,
-            ?29, ?30, ?31, ?32, ?33,
-            ?34, ?35, ?36, ?37, ?38,
-            ?39, ?40, ?41, ?42,
-            ?43, ?44
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+            ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17,
+            ?18, ?19, ?20, ?21,
+            ?22, ?23, ?24, ?25, 'synced',
+            ?26, ?27, ?28, ?29,
+            ?30, ?31, ?32, ?33, ?34,
+            ?35, ?36, ?37, ?38, ?39,
+            ?40, ?41, ?42, ?43,
+            ?44, ?45
         )",
         params![
             local_id,
             order_number,
+            display_order_number,
             customer_name,
             customer_phone,
             customer_email,
@@ -7535,6 +7571,7 @@ fn sync_remote_order_snapshot_into_local(
         "UPDATE orders
          SET supabase_id = COALESCE(?1, supabase_id),
              order_number = COALESCE(?2, order_number),
+             display_order_number = COALESCE(NULLIF(TRIM(display_order_number), ''), COALESCE(?2, order_number)),
              items = COALESCE(?3, items),
              total_amount = COALESCE(?4, total_amount),
              tax_amount = COALESCE(?5, tax_amount),

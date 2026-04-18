@@ -175,6 +175,27 @@ export function getOrderNumber(order: { order_number?: string; orderNumber?: str
   return order.order_number || order.orderNumber || '';
 }
 
+export function getVisibleOrderNumber(
+  order:
+    | {
+        display_order_number?: string;
+        displayOrderNumber?: string;
+        order_number?: string;
+        orderNumber?: string;
+      }
+    | null
+    | undefined
+): string {
+  if (!order) return '';
+  return (
+    order.display_order_number ||
+    order.displayOrderNumber ||
+    order.order_number ||
+    order.orderNumber ||
+    ''
+  );
+}
+
 /**
  * Formats an order number for display (adds # prefix if not present).
  * 

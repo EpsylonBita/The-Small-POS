@@ -1904,6 +1904,11 @@ pub async fn order_save_from_remote(
     let items_json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
 
     let order_number = value_str(&order_data, &["order_number", "orderNumber"]);
+    let display_order_number = value_str(
+        &order_data,
+        &["display_order_number", "displayOrderNumber"],
+    )
+    .or_else(|| order_number.clone());
     let customer_name = value_str(&order_data, &["customer_name", "customerName"]);
     let customer_phone = value_str(&order_data, &["customer_phone", "customerPhone"]);
     let customer_email = value_str(&order_data, &["customer_email", "customerEmail"]);
@@ -2009,7 +2014,7 @@ pub async fn order_save_from_remote(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, customer_name, customer_phone, customer_email,
+                id, order_number, display_order_number, customer_name, customer_phone, customer_email,
                 items, total_amount, tax_amount, subtotal, status,
                 order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
                 delivery_floor, delivery_notes, name_on_ringer, special_instructions,
@@ -2019,20 +2024,21 @@ pub async fn order_save_from_remote(
                 tip_amount, version, terminal_id, branch_id, plugin, external_plugin_order_id,
                 tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5,
-                ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19,
-                ?20, ?21, ?22, ?23, 'synced',
-                ?24, ?25, ?26, ?27,
-                ?28, ?29, ?30, ?31, ?32,
-                ?33, ?34, ?35, ?36, ?37,
-                ?38, ?39, ?40, ?41,
-                ?42, ?43
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19, ?20,
+                ?21, ?22, ?23, ?24, 'synced',
+                ?25, ?26, ?27, ?28,
+                ?29, ?30, ?31, ?32, ?33,
+                ?34, ?35, ?36, ?37, ?38,
+                ?39, ?40, ?41, ?42,
+                ?43, ?44
             )",
             rusqlite::params![
                 local_id,
                 order_number,
+                display_order_number,
                 customer_name,
                 customer_phone,
                 customer_email,
@@ -2761,37 +2767,39 @@ pub async fn order_save_for_retry(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let mut payload = arg0.ok_or("Missing order payload")?;
-    let order_id = payload
-        .get("id")
+    let payload = arg0.ok_or("Missing order payload")?;
+    let mut resp = sync::create_order(&db, &payload)?;
+    let order_id = resp
+        .get("orderId")
         .and_then(|value| value.as_str())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("id".to_string(), Value::String(order_id.clone()));
-    }
+        .map(|value| value.to_string())
+        .or_else(|| {
+            resp.get("order")
+                .and_then(|value| value.get("id"))
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        })
+        .ok_or("Retry save did not return an orderId")?;
 
     let queue_length = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        crate::sync_queue::enqueue_payload_item(
-            &conn,
-            "orders",
-            &order_id,
-            "INSERT",
-            &payload,
-            Some(0),
-            Some("orders"),
-            Some("server-wins"),
-            Some(1),
-        )?;
         crate::sync_queue::get_length(&conn)?
     };
+    if let Some(obj) = resp.as_object_mut() {
+        obj.insert("queueLength".to_string(), serde_json::json!(queue_length));
+    }
     let _ = app.emit(
         "order_sync_conflict",
         serde_json::json!({ "queueLength": queue_length }),
     );
-    Ok(serde_json::json!({ "success": true, "queueLength": queue_length }))
+    Ok(serde_json::json!({
+        "success": true,
+        "orderId": order_id,
+        "queueLength": queue_length,
+        "data": {
+            "orderId": order_id
+        }
+    }))
 }
 
 #[tauri::command]

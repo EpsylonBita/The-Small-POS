@@ -13,6 +13,7 @@ import {
   normalizeOrderTypeForDisplay,
   resolveOrderDisplayTitle,
 } from '../../utils/orderDisplay';
+import { getVisibleOrderNumber } from '../../utils/orderNumberUtils';
 import { openExternalUrl } from '../../utils/electron-api';
 import {
   buildGoogleMapsDirectionsUrl,
@@ -80,8 +81,7 @@ export const OrderCard = memo<OrderCardProps>(({
 
   // Format the stable order number from the order itself
   const formatOrderNumber = () => {
-    // Use the order's stable order_number or orderNumber from the database
-    const orderNum = order.order_number || order.orderNumber;
+    const orderNum = getVisibleOrderNumber(order);
     if (orderNum) {
       // If it's already formatted like "POS-20251212-0001", extract the last part
       if (orderNum.includes('-')) {

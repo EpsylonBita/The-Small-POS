@@ -15,6 +15,7 @@ import {
 import type { PaymentIntegrityErrorPayload } from '../../lib/ipc-contracts';
 import { pollFiscalReceiptStatus } from '../services/fiscal-status';
 import { sortOrdersOldestFirst } from '../utils/order-sorting';
+import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 
 // Track self-created order IDs to suppress "new order received" toasts for own orders.
 // Since Rust no longer emits order_created for self-created orders, this is a safety net
@@ -1002,7 +1003,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         return {
           success: true,
           orderId: newOrder.id,
-          orderNumber: newOrder.orderNumber || newOrder.order_number,
+          orderNumber: getVisibleOrderNumber(newOrder) || newOrder.id,
           savedForRetry: Boolean((newOrder as any).savedForRetry),
         };
       } catch (error) {

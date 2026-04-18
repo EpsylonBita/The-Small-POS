@@ -159,22 +159,27 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [menuSearchQuery, setMenuSearchQuery] = useState('');
   const menuSearchRef = useRef<HTMLInputElement>(null);
   const offerValidationRequestIdRef = useRef(0);
+  const [combos, setCombos] = useState<MenuCombo[]>([]);
+  const [selectedCombo, setSelectedCombo] = useState<MenuCombo | null>(null);
+  const refocusMenuSearch = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.setTimeout(() => menuSearchRef.current?.focus(), 50);
+  }, []);
 
   // Capture keyboard input and redirect to search bar when typing printable characters
   useEffect(() => {
     if (!isOpen) return;
+    if (selectedMenuItem || selectedCombo || showPaymentModal) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.altKey || e.metaKey) return;
       if (e.key.length !== 1) return; // only printable characters
       const active = document.activeElement;
       if (active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') return;
-      // Don't capture if ingredient modal is open (it has its own search)
-      if (active?.closest('[role="dialog"]') && !active?.closest('.liquid-glass-modal-content')) return;
       menuSearchRef.current?.focus();
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen]);
+  }, [isOpen, selectedCombo, selectedMenuItem, showPaymentModal]);
 
   // Customer popover state (for pickup orders)
   const [showCustomerPopover, setShowCustomerPopover] = useState(false);
@@ -197,10 +202,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       ? (pickupCustomerName || selectedCustomer?.name || null)
       : (selectedCustomer?.name || null),
   });
-
-  // Combos state
-  const [combos, setCombos] = useState<MenuCombo[]>([]);
-  const [selectedCombo, setSelectedCombo] = useState<MenuCombo | null>(null);
 
   // Coupon state
   const [appliedCoupon, setAppliedCoupon] = useState<AppliedCoupon | null>(null);
@@ -1654,7 +1655,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               selectedCategory={selectedCategory}
               selectedSubcategory={selectedSubcategory}
               orderType={orderType}
-              onItemSelect={(item) => { setSelectedMenuItem(item); setMenuSearchQuery(''); setTimeout(() => menuSearchRef.current?.focus(), 50); }}
+              onItemSelect={(item) => { setSelectedMenuItem(item); setMenuSearchQuery(''); }}
               onQuickAdd={handleQuickAdd}
               topSellerIds={topSellerIds}
               featuredRankedIds={rankedTopSellerIds}
@@ -1720,6 +1721,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           onClose={() => {
             setSelectedMenuItem(null);
             setEditingCartItem(null); // Clear editing state when modal closes
+            refocusMenuSearch();
           }}
           onAddToCart={handleAddToCart}
           isCustomizable={selectedMenuItem.is_customizable || false}
@@ -1736,7 +1738,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           isOpen={!!selectedCombo}
           combo={selectedCombo}
           orderType={orderType}
-          onClose={() => setSelectedCombo(null)}
+          onClose={() => {
+            setSelectedCombo(null);
+            refocusMenuSearch();
+          }}
           onConfirm={handleComboChoiceConfirm}
         />
       )}

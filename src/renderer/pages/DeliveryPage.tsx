@@ -22,6 +22,7 @@ import {
   resolveStoreMapOrigin,
   type StoreMapOrigin,
 } from '../utils/delivery-routing';
+import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 import { openExternalUrl } from '../utils/electron-api';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import {
@@ -194,7 +195,7 @@ const mapOrderToDelivery = (order: Record<string, any>): Delivery | null => {
   return {
     id,
     orderId: id,
-    orderNumber: String(order.order_number || order.orderNumber || order.order_id || id),
+    orderNumber: String(getVisibleOrderNumber(order) || order.order_id || id),
     status: normalizeDeliveryStatus(order.status),
     customerName: order.customer_name || order.customerName || 'Customer',
     customerPhone: order.customer_phone || order.customerPhone,

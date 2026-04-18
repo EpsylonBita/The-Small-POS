@@ -88,7 +88,9 @@ export interface OrderPricing {
 export interface Order {
   id: string;
   order_number?: string;
+  display_order_number?: string;
   orderNumber: string; // Required for renderer compatibility
+  displayOrderNumber?: string;
   status: OrderStatus;
   cancellation_reason?: string; // snake_case for storage compatibility
   cancellationReason?: string; // Reason for cancellation
@@ -166,6 +168,7 @@ export interface Order {
   supabase_id?: string;
   sync_status?: SyncStatus;
   syncStatus?: SyncStatus; // For backward compatibility
+  savedForRetry?: boolean;
   version?: number; // For optimistic locking
   updatedBy?: string; // User who last updated
   lastSyncedAt?: string; // Last sync timestamp
@@ -214,6 +217,7 @@ export interface Order {
 export interface OrderRow {
   id: string;
   order_number?: string;
+  display_order_number?: string;
   customer_name?: string;
   customer_phone?: string;
   customer_email?: string;

@@ -574,6 +574,15 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const previousOverflowRef = React.useRef<string>('')
   const externalClosingRef = React.useRef<boolean>(false)
 
+  const isTopMostDialog = React.useCallback(() => {
+    if (!containerRef.current) {
+      return false
+    }
+
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+    return dialogs.length === 0 || dialogs[dialogs.length - 1] === containerRef.current
+  }, [])
+
   // Internal state for closing animation
   const [isClosing, setIsClosing] = React.useState(false)
   const [mounted, setMounted] = React.useState(false)
@@ -664,9 +673,10 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
       // Handle Escape key
       const handleEscape = (e: KeyboardEvent) => {
-        if (e.key === 'Escape' && closeOnEscape) {
-          handleClose()
-        }
+        if (e.key !== 'Escape' || !closeOnEscape || !isTopMostDialog()) return
+
+        e.preventDefault()
+        handleClose()
       }
 
       // Handle Tab key for focus trap on document
@@ -747,7 +757,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         previousActiveElementRef.current?.focus()
       }
     }
-  }, [mounted, isClosing, closeOnEscape, handleClose, initialFocusRef])
+  }, [mounted, isClosing, closeOnEscape, handleClose, initialFocusRef, isTopMostDialog])
 
   // Early return if not mounted
   if (!mounted || typeof document === 'undefined') return null

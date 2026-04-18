@@ -67,6 +67,7 @@ import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
 import { useKioskOrderAutoPrint } from "../hooks/useKioskOrderAutoPrint";
 import { openExternalUrl } from "../utils/electron-api";
+import { getVisibleOrderNumber } from "../utils/orderNumberUtils";
 import {
   buildSingleDeliveryRouteStop,
   createTerminalSettingGetter,
@@ -3187,7 +3188,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           setSplitPaymentData(null);
           setSinglePaymentCollectionData({
             orderId: order.id,
-            orderNumber: order.orderNumber || order.order_number,
+            orderNumber: getVisibleOrderNumber(order),
             targetStatus,
             method: resolvedMethod,
             blocker,

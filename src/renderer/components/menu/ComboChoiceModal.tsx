@@ -2,10 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
-import { X, Check, ChevronDown } from 'lucide-react';
+import { Check, ChevronDown } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import { menuService, MenuItem } from '../../services/MenuService';
 import type { MenuCombo, MenuComboItem } from '@shared/types/combo';
+import { LiquidGlassModal } from '../ui/pos-glass-components';
 
 interface ComboChoiceModalProps {
   isOpen: boolean;
@@ -143,33 +144,35 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
   if (!isOpen) return null;
 
   const comboName = language === 'el' && combo.name_el ? combo.name_el : combo.name_en;
+  const footer = (
+    <div className={`p-4 border-t ${
+      resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
+    }`}>
+      <button
+        onClick={handleConfirm}
+        disabled={!allChoicesFilled}
+        className={`w-full py-3 rounded-xl font-semibold transition-all ${
+          allChoicesFilled
+            ? 'bg-blue-600 text-white hover:bg-blue-700'
+            : 'bg-gray-400 text-gray-500 cursor-not-allowed'
+        }`}
+      >
+        {t('menu.combos.choice.addToCart', 'Add to Cart')}
+      </button>
+    </div>
+  );
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[1050]" onClick={onClose}>
-      <div
-        className={`relative w-full max-w-lg mx-4 rounded-2xl shadow-2xl overflow-hidden ${
-          resolvedTheme === 'dark' ? 'bg-gray-800' : 'bg-white'
-        }`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className={`flex items-center justify-between p-4 border-b ${
-          resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-        }`}>
-          <h2 className={`text-lg font-bold ${
-            resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-          }`}>
-            {comboName}
-          </h2>
-          <button onClick={onClose} className={`p-1 rounded-full ${
-            resolvedTheme === 'dark' ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'
-          }`}>
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="p-4 max-h-[60vh] overflow-y-auto space-y-3 scrollbar-hide">
+    <LiquidGlassModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={comboName}
+      size="sm"
+      className="max-w-lg"
+      contentClassName="p-4 max-h-[60vh] overflow-y-auto"
+      footer={footer}
+    >
+      <div className="space-y-3">
           {loading ? (
             <div className="flex items-center justify-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-2 border-blue-500 border-t-transparent" />
@@ -284,25 +287,7 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
               );
             })
           )}
-        </div>
-
-        {/* Footer */}
-        <div className={`p-4 border-t ${
-          resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-        }`}>
-          <button
-            onClick={handleConfirm}
-            disabled={!allChoicesFilled}
-            className={`w-full py-3 rounded-xl font-semibold transition-all ${
-              allChoicesFilled
-                ? 'bg-blue-600 text-white hover:bg-blue-700'
-                : 'bg-gray-400 text-gray-500 cursor-not-allowed'
-            }`}
-          >
-            {t('menu.combos.choice.addToCart', 'Add to Cart')}
-          </button>
-        </div>
       </div>
-    </div>
+    </LiquidGlassModal>
   );
 };

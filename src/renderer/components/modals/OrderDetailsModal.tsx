@@ -5,6 +5,7 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, Building, FileText, History, Banknote, Smartphone, Bell, Layers, Car, CheckCircle, RotateCcw, Split } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
+import { getVisibleOrderNumber } from '../../utils/orderNumberUtils';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { normalizeOrderTypeForDisplay, resolveOrderDisplayTitle } from '../../utils/orderDisplay';
 import RefundVoidModal from './RefundVoidModal';
@@ -425,7 +426,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const hasDriverAssignment = !!(displayOrder.driver_id || displayOrder.driverId || driverName);
   const isDelivered = status?.toLowerCase() === 'completed' || status?.toLowerCase() === 'delivered';
   const isDeliveryOrder = orderType?.toLowerCase() === 'delivery';
-  const displayOrderNumber = displayOrder.order_number || displayOrder.orderNumber || orderId;
+  const displayOrderNumber = getVisibleOrderNumber(displayOrder) || orderId;
   const createdDateTimeLabel = `${formatDate(createdAt)} ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}`;
   const primaryAddressLine = deliveryAddress.address || t('modals.orderDetails.noAddress', { defaultValue: 'No address' });
   const totalItemCount = items.reduce((sum: number, item: any) => sum + Number(item?.quantity || 1), 0);
