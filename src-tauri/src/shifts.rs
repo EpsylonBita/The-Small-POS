@@ -11,7 +11,7 @@
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, future::Future};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -71,6 +71,16 @@ pub(crate) fn resolve_shift_business_day_context(
     }
 }
 
+fn block_on_shift_close_repair_future<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+        Err(_) => tauri::async_runtime::block_on(future),
+    }
+}
+
 fn load_checkout_payment_blockers_with_auto_repair(
     db: &DbState,
     branch_id: &str,
@@ -99,7 +109,7 @@ fn load_checkout_payment_blockers_with_auto_repair(
         return Ok(initial_blockers);
     }
 
-    match tauri::async_runtime::block_on(crate::sync::repair_local_payment_mirrors_for_orders(
+    match block_on_shift_close_repair_future(crate::sync::repair_local_payment_mirrors_for_orders(
         db,
         &blocking_order_ids,
     )) {
@@ -3818,6 +3828,20 @@ mod tests {
     use serde_json::Value;
 
     const TEST_MANAGER_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[test]
+    fn test_shift_close_repair_bridge_reenters_tokio_runtime_without_panicking() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        let result =
+            runtime.block_on(async { block_on_shift_close_repair_future(async { 42usize }) });
+
+        assert_eq!(result, 42);
+    }
 
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");
