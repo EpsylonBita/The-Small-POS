@@ -40,12 +40,17 @@ import {
   resolveShiftEarnedTotal,
   resolveZReportPeriod,
 } from '../../src/renderer/utils/zReport';
+import {
+  buildSyncRecoveryIssues,
+  getRepresentativeParityFailureReason,
+} from '../../src/renderer/components/recovery/sync-recovery-issues';
 import type {
   HealthSupportContext,
   PrinterSupportContext,
 } from '../../src/renderer/support';
 import { HealthSupportEntryPoint } from '../../src/renderer/components/support/HealthSupportEntryPoint';
 import { PrinterSupportEntryPoint } from '../../src/renderer/components/support/PrinterSupportEntryPoint';
+import type { SyncQueueItem } from '../../../shared/pos/sync-queue-types';
 import i18n from '../../src/lib/i18n';
 
 const createCleanHealthContext = (): HealthSupportContext => ({
@@ -89,6 +94,27 @@ const createCleanPrinterContext = (): PrinterSupportContext => ({
   transportReachable: true,
   recentJobsFailed: 0,
   recentJobsTotal: 0,
+});
+
+const makeParityItem = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => ({
+  id: 'parity-1',
+  tableName: 'orders',
+  recordId: 'order-1',
+  operation: 'INSERT',
+  data: JSON.stringify({}),
+  organizationId: 'org-1',
+  createdAt: '2026-04-18T00:28:42.000Z',
+  attempts: 0,
+  lastAttempt: '2026-04-18T00:28:44.000Z',
+  errorMessage: null,
+  nextRetryAt: '2026-04-18T00:29:16.000Z',
+  retryDelayMs: 1000,
+  priority: 0,
+  moduleType: 'orders',
+  conflictStrategy: 'server-wins',
+  version: 1,
+  status: 'pending',
+  ...overrides,
 });
 
 test('buildHealthSupportContext aggregates diagnostics and financial counts', () => {
@@ -242,6 +268,83 @@ test('retrieval falls back to english for unsupported locales', () => {
 
   assert.equal(explanation.title, 'Terminal is offline');
   assert.equal(explanation.usedFallback, true);
+});
+
+test('parity recovery prefers actionable order errors over dependency wait reasons', () => {
+  const reason = getRepresentativeParityFailureReason(
+    {
+      status: 'completed',
+      processed: 0,
+      failed: 1,
+      conflicts: 0,
+      remaining: 3,
+      error: null,
+      reason: null,
+    } as never,
+    [
+      makeParityItem({
+        id: 'payment-waiting-parent',
+        tableName: 'payments',
+        moduleType: 'financial',
+        errorMessage: 'Waiting for parent order sync',
+      }),
+      makeParityItem({
+        id: 'order-http-500',
+        errorMessage: 'HTTP 500: {"success":false,"error":"Failed to create order"}',
+      }),
+    ],
+  );
+
+  assert.equal(reason, 'HTTP 500: {"success":false,"error":"Failed to create order"}');
+});
+
+test('parity recovery does not flag retry-scheduled backlog as stalled processor', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: {
+        pending: 3,
+        failed: 0,
+        conflicts: 0,
+        total: 3,
+      },
+      syncBacklog: undefined,
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: {
+        hasAdminUrl: true,
+        hasApiKey: true,
+      },
+    } as never,
+    lastParitySync: {
+      status: 'completed',
+      processed: 0,
+      failed: 1,
+      conflicts: 0,
+      remaining: 3,
+      error: null,
+      reason: null,
+      finishedAt: '2026-04-18T00:28:49.159Z',
+    } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'payment-waiting-parent',
+        tableName: 'payments',
+        moduleType: 'financial',
+        errorMessage: 'Waiting for parent order sync',
+        nextRetryAt: '2026-04-18T00:29:16.000Z',
+      }),
+      makeParityItem({
+        id: 'order-http-500',
+        errorMessage: 'HTTP 500: {"success":false,"error":"Failed to create order"}',
+        nextRetryAt: '2026-04-18T00:29:16.000Z',
+      }),
+    ],
+  });
+
+  assert.equal(
+    result.issues.some((issue) => issue.id === 'parity-processor-stalled'),
+    false,
+  );
 });
 
 test('health support entry point renders the open panel in english', async () => {

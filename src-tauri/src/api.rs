@@ -119,6 +119,21 @@ pub fn extract_terminal_id_from_connection_string(raw: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn extract_terminal_id_from_body(body: Option<&Value>) -> Option<String> {
+    let body = body?;
+    let resolved = match body {
+        Value::String(raw) => serde_json::from_str::<Value>(raw).ok()?,
+        other => other.clone(),
+    };
+
+    resolved
+        .get("terminal_id")
+        .or_else(|| resolved.get("terminalId"))
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 // ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
@@ -249,6 +264,12 @@ pub async fn fetch_from_admin(
 
     // Include terminal_id header — required by verifyPosAuth on the admin side
     let mut terminal_id = crate::storage::get_credential("terminal_id").unwrap_or_default();
+    if terminal_id.trim().is_empty() {
+        if let Some(body_terminal_id) = extract_terminal_id_from_body(body.as_ref()) {
+            terminal_id = body_terminal_id.clone();
+            let _ = crate::storage::set_credential("terminal_id", &body_terminal_id);
+        }
+    }
     if let Some(decoded_tid) = extract_terminal_id_from_connection_string(api_key) {
         let existing = terminal_id.trim();
         if existing.is_empty() || existing != decoded_tid {
@@ -322,4 +343,33 @@ pub async fn fetch_from_admin(
         return Ok(Value::Null);
     }
     serde_json::from_str(&body_text).map_err(|e| format!("Invalid JSON from admin dashboard: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_terminal_id_from_body_reads_object_payloads() {
+        assert_eq!(
+            extract_terminal_id_from_body(Some(&json!({ "terminal_id": "terminal-123" }))),
+            Some("terminal-123".to_string())
+        );
+        assert_eq!(
+            extract_terminal_id_from_body(Some(&json!({ "terminalId": "terminal-456" }))),
+            Some("terminal-456".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_terminal_id_from_body_reads_stringified_json_payloads() {
+        assert_eq!(
+            extract_terminal_id_from_body(Some(&Value::String(
+                r#"{"terminal_id":"terminal-789"}"#.to_string()
+            ))),
+            Some("terminal-789".to_string())
+        );
+        assert_eq!(extract_terminal_id_from_body(Some(&Value::Null)), None);
+    }
 }

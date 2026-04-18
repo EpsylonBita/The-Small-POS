@@ -22,6 +22,7 @@ use reqwest::Method;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -45,6 +46,18 @@ pub const MAX_RETRY_ATTEMPTS: i64 = 10;
 
 /// Age threshold in milliseconds for old-item warnings (24 hours).
 const AGE_WARNING_THRESHOLD_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Cap automatic failed-row recovery per cycle so backlog repair does not flood admin.
+const MAX_AUTO_REQUEUE_ITEMS_PER_CYCLE: usize = 3;
+
+/// Recovery lease for parity rows claimed as `processing`.
+const PROCESSING_LEASE_SECS: i64 = 120;
+
+/// Hard timeout for parity HTTP calls so abandoned requests do not pin rows.
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Default cooldown when the admin API responds with rate limiting.
+const DEFAULT_RATE_LIMIT_RETRY_SECS: i64 = 60;
 
 // ---------------------------------------------------------------------------
 // Data structures (mirror shared/pos/sync-queue-types.ts)
@@ -327,16 +340,23 @@ fn resolve_runtime_context(conn: &Connection, payload: &Value) -> (String, Strin
     // Keyring-first after the inline payload: OS credential store is
     // authoritative; plaintext `local_settings` is backward-compat fallback.
     let terminal_id = string_field(payload, &["terminalId", "terminal_id"])
-        .or_else(|| storage::get_credential("terminal_id"))
-        .or_else(|| db::get_setting(conn, "terminal", "terminal_id"))
+        .or_else(|| runtime_credential(conn, "terminal_id"))
         .unwrap_or_default();
     let branch_id = string_field(payload, &["branchId", "branch_id"])
-        .or_else(|| storage::get_credential("branch_id"))
-        .or_else(|| db::get_setting(conn, "terminal", "branch_id"))
+        .or_else(|| runtime_credential(conn, "branch_id"))
         .unwrap_or_default();
     let organization_id = infer_organization_id(conn, payload);
 
     (terminal_id, branch_id, organization_id)
+}
+
+fn runtime_credential(conn: &Connection, key: &str) -> Option<String> {
+    #[cfg(test)]
+    if db::get_setting(conn, "terminal", "__ignore_keyring").as_deref() == Some("1") {
+        return db::get_setting(conn, "terminal", key);
+    }
+
+    storage::get_credential(key).or_else(|| db::get_setting(conn, "terminal", key))
 }
 
 fn resolve_request_terminal_id(conn: &Connection, payload: &Value) -> Option<String> {
@@ -349,42 +369,928 @@ fn resolve_request_terminal_id(conn: &Connection, payload: &Value) -> Option<Str
     }
 }
 
-fn retry_failed_terminal_context_items(conn: &Connection) -> Result<RetryItemsResult, String> {
+fn nested_value<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = payload;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn string_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn number_from_value(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|candidate| candidate as f64))
+        .or_else(|| value.as_u64().map(|candidate| candidate as f64))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|candidate| candidate.trim().parse::<f64>().ok())
+        })
+}
+
+fn integer_from_value(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| {
+            value
+                .as_u64()
+                .and_then(|candidate| i64::try_from(candidate).ok())
+        })
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|candidate| candidate.trim().parse::<i64>().ok())
+        })
+        .or_else(|| number_from_value(value).map(|candidate| candidate.round() as i64))
+}
+
+fn bool_from_value(value: &Value) -> Option<bool> {
+    value
+        .as_bool()
+        .or_else(|| {
+            value.as_i64().and_then(|candidate| match candidate {
+                0 => Some(false),
+                1 => Some(true),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            value.as_str().and_then(|candidate| {
+                let normalized = candidate.trim().to_ascii_lowercase();
+                match normalized.as_str() {
+                    "true" | "1" | "yes" | "on" => Some(true),
+                    "false" | "0" | "no" | "off" => Some(false),
+                    _ => None,
+                }
+            })
+        })
+}
+
+fn jsonish_value(value: &Value) -> Value {
+    if let Some(raw) = value.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+            return parsed;
+        }
+    }
+    value.clone()
+}
+
+fn string_field_from_sources(sources: &[&Value], keys: &[&str]) -> Option<String> {
+    for source in sources {
+        if let Some(value) = string_field(source, keys) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn nested_string_field_from_sources(sources: &[&Value], paths: &[&[&str]]) -> Option<String> {
+    for source in sources {
+        for path in paths {
+            if let Some(value) = nested_value(source, path).and_then(string_from_value) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn number_field_from_sources(sources: &[&Value], keys: &[&str]) -> Option<f64> {
+    for source in sources {
+        for key in keys {
+            if let Some(value) = source.get(*key).and_then(number_from_value) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn integer_field_from_sources(sources: &[&Value], keys: &[&str]) -> Option<i64> {
+    for source in sources {
+        for key in keys {
+            if let Some(value) = source.get(*key).and_then(integer_from_value) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn bool_field_from_sources(sources: &[&Value], keys: &[&str]) -> Option<bool> {
+    for source in sources {
+        for key in keys {
+            if let Some(value) = source.get(*key).and_then(bool_from_value) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn json_field_from_sources(sources: &[&Value], keys: &[&str]) -> Option<Value> {
+    for source in sources {
+        for key in keys {
+            if let Some(value) = source.get(*key) {
+                if !value.is_null() {
+                    return Some(jsonish_value(value));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_json_array(value: &Value) -> Vec<Value> {
+    match jsonish_value(value) {
+        Value::Array(values) => values,
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_order_type_for_insert(raw_type: Option<&str>) -> String {
+    match raw_type
+        .map(|candidate| candidate.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "pickup".to_string())
+        .as_str()
+    {
+        "dine-in" | "dine_in" | "dinein" => "dine-in".to_string(),
+        "delivery" => "delivery".to_string(),
+        "drive-through" | "drive_through" | "drivethrough" => "drive-through".to_string(),
+        "takeaway" => "takeaway".to_string(),
+        "take-away" | "take_away" | "takeout" | "pickup" => "pickup".to_string(),
+        _ => "pickup".to_string(),
+    }
+}
+
+fn normalize_payment_status_for_insert(raw_status: Option<&str>) -> String {
+    match raw_status
+        .map(|candidate| candidate.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "pending".to_string())
+        .as_str()
+    {
+        "completed" | "paid" => "paid".to_string(),
+        "partially_paid" => "partially_paid".to_string(),
+        "refunded" => "refunded".to_string(),
+        "failed" => "failed".to_string(),
+        _ => "pending".to_string(),
+    }
+}
+
+fn normalize_payment_method_for_insert(raw_method: Option<&str>) -> String {
+    match raw_method
+        .map(|candidate| candidate.trim().to_ascii_lowercase())
+        .unwrap_or_default()
+        .as_str()
+    {
+        "" | "pending" => "cash".to_string(),
+        "cash" => "cash".to_string(),
+        "card" => "card".to_string(),
+        "digital_wallet" | "digital-wallet" | "wallet" => "digital_wallet".to_string(),
+        _ => "other".to_string(),
+    }
+}
+
+fn customization_key(value: &Value, index: usize) -> String {
+    string_from_value(&value["customizationId"])
+        .or_else(|| string_from_value(&value["optionId"]))
+        .or_else(|| string_from_value(&value["name"]))
+        .or_else(|| nested_value(value, &["ingredient", "id"]).and_then(string_from_value))
+        .or_else(|| nested_value(value, &["ingredient", "name"]).and_then(string_from_value))
+        .unwrap_or_else(|| format!("item-{index}"))
+}
+
+fn normalize_customizations_for_insert(value: Option<&Value>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+
+    match jsonish_value(value) {
+        Value::Null => Value::Null,
+        Value::Object(object) => Value::Object(object),
+        Value::Array(items) => {
+            let mut normalized = Map::new();
+            for (index, item) in items.into_iter().enumerate() {
+                normalized.insert(customization_key(&item, index), item);
+            }
+            Value::Object(normalized)
+        }
+        _ => Value::Null,
+    }
+}
+
+fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
+    let mut normalized = Vec::new();
+
+    for item in parse_json_array(raw_items) {
+        let menu_item_id = string_field(&item, &["menu_item_id", "menuItemId"])
+            .filter(|candidate| Uuid::parse_str(candidate).is_ok());
+        let name = string_field(&item, &["name", "menu_item_name", "menuItemName"]);
+        let quantity = number_field_from_sources(&[&item], &["quantity"])
+            .unwrap_or(1.0)
+            .max(1.0)
+            .round() as i64;
+        let raw_total = number_field_from_sources(&[&item], &["total_price", "totalPrice"])
+            .unwrap_or_default()
+            .max(0.0);
+        let unit_price = number_field_from_sources(&[&item], &["unit_price", "unitPrice", "price"])
+            .or_else(|| {
+                if raw_total > 0.0 && quantity > 0 {
+                    Some(raw_total / quantity as f64)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+            .max(0.0);
+        let total_price = if raw_total > 0.0 {
+            raw_total
+        } else {
+            (unit_price * quantity as f64).max(0.0)
+        };
+
+        normalized.push(serde_json::json!({
+            "menu_item_id": menu_item_id,
+            "quantity": quantity,
+            "unit_price": unit_price,
+            "total_price": total_price,
+            "name": name,
+            "notes": string_field(&item, &["notes", "specialInstructions", "special_instructions"]),
+            "customizations": normalize_customizations_for_insert(item.get("customizations")),
+        }));
+    }
+
+    normalized
+}
+
+fn load_local_order_insert_fallback(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Option<Value>, String> {
+    conn.query_row(
+        "SELECT
+            order_number,
+            customer_name,
+            customer_phone,
+            customer_email,
+            customer_id,
+            items,
+            total_amount,
+            tax_amount,
+            subtotal,
+            status,
+            order_type,
+            table_number,
+            delivery_address,
+            delivery_city,
+            delivery_postal_code,
+            delivery_floor,
+            delivery_notes,
+            name_on_ringer,
+            special_instructions,
+            estimated_time,
+            payment_status,
+            payment_method,
+            driver_id,
+            driver_name,
+            discount_percentage,
+            discount_amount,
+            tip_amount,
+            terminal_id,
+            branch_id,
+            tax_rate,
+            delivery_fee,
+            client_request_id,
+            is_ghost,
+            ghost_source,
+            ghost_metadata
+         FROM orders
+         WHERE id = ?1
+         LIMIT 1",
+        params![order_id],
+        |row| {
+            let mut object = Map::new();
+
+            let insert_string =
+                |object: &mut Map<String, Value>, key: &str, value: Option<String>| {
+                    if let Some(value) = value {
+                        object.insert(key.to_string(), Value::String(value));
+                    }
+                };
+            let insert_number = |object: &mut Map<String, Value>, key: &str, value: Option<f64>| {
+                if let Some(value) = value {
+                    object.insert(key.to_string(), serde_json::json!(value));
+                }
+            };
+            let insert_integer =
+                |object: &mut Map<String, Value>, key: &str, value: Option<i64>| {
+                    if let Some(value) = value {
+                        object.insert(key.to_string(), Value::from(value));
+                    }
+                };
+
+            insert_string(
+                &mut object,
+                "order_number",
+                row.get::<_, Option<String>>("order_number")?,
+            );
+            insert_string(
+                &mut object,
+                "customer_name",
+                row.get::<_, Option<String>>("customer_name")?,
+            );
+            insert_string(
+                &mut object,
+                "customer_phone",
+                row.get::<_, Option<String>>("customer_phone")?,
+            );
+            insert_string(
+                &mut object,
+                "customer_email",
+                row.get::<_, Option<String>>("customer_email")?,
+            );
+            insert_string(
+                &mut object,
+                "customer_id",
+                row.get::<_, Option<String>>("customer_id")?,
+            );
+            insert_number(
+                &mut object,
+                "total_amount",
+                row.get::<_, Option<f64>>("total_amount")?,
+            );
+            insert_number(
+                &mut object,
+                "tax_amount",
+                row.get::<_, Option<f64>>("tax_amount")?,
+            );
+            insert_number(
+                &mut object,
+                "subtotal",
+                row.get::<_, Option<f64>>("subtotal")?,
+            );
+            insert_string(
+                &mut object,
+                "status",
+                row.get::<_, Option<String>>("status")?,
+            );
+            insert_string(
+                &mut object,
+                "order_type",
+                row.get::<_, Option<String>>("order_type")?,
+            );
+            insert_integer(
+                &mut object,
+                "table_number",
+                row.get::<_, Option<i64>>("table_number")?,
+            );
+            insert_string(
+                &mut object,
+                "delivery_address",
+                row.get::<_, Option<String>>("delivery_address")?,
+            );
+            insert_string(
+                &mut object,
+                "delivery_city",
+                row.get::<_, Option<String>>("delivery_city")?,
+            );
+            insert_string(
+                &mut object,
+                "delivery_postal_code",
+                row.get::<_, Option<String>>("delivery_postal_code")?,
+            );
+            insert_string(
+                &mut object,
+                "delivery_floor",
+                row.get::<_, Option<String>>("delivery_floor")?,
+            );
+            insert_string(
+                &mut object,
+                "delivery_notes",
+                row.get::<_, Option<String>>("delivery_notes")?,
+            );
+            insert_string(
+                &mut object,
+                "name_on_ringer",
+                row.get::<_, Option<String>>("name_on_ringer")?,
+            );
+            insert_string(
+                &mut object,
+                "special_instructions",
+                row.get::<_, Option<String>>("special_instructions")?,
+            );
+            insert_integer(
+                &mut object,
+                "estimated_time",
+                row.get::<_, Option<i64>>("estimated_time")?,
+            );
+            insert_string(
+                &mut object,
+                "payment_status",
+                row.get::<_, Option<String>>("payment_status")?,
+            );
+            insert_string(
+                &mut object,
+                "payment_method",
+                row.get::<_, Option<String>>("payment_method")?,
+            );
+            insert_string(
+                &mut object,
+                "driver_id",
+                row.get::<_, Option<String>>("driver_id")?,
+            );
+            insert_string(
+                &mut object,
+                "driver_name",
+                row.get::<_, Option<String>>("driver_name")?,
+            );
+            insert_number(
+                &mut object,
+                "discount_percentage",
+                row.get::<_, Option<f64>>("discount_percentage")?,
+            );
+            insert_number(
+                &mut object,
+                "discount_amount",
+                row.get::<_, Option<f64>>("discount_amount")?,
+            );
+            insert_number(
+                &mut object,
+                "tip_amount",
+                row.get::<_, Option<f64>>("tip_amount")?,
+            );
+            insert_string(
+                &mut object,
+                "terminal_id",
+                row.get::<_, Option<String>>("terminal_id")?,
+            );
+            insert_string(
+                &mut object,
+                "branch_id",
+                row.get::<_, Option<String>>("branch_id")?,
+            );
+            insert_number(
+                &mut object,
+                "tax_rate",
+                row.get::<_, Option<f64>>("tax_rate")?,
+            );
+            insert_number(
+                &mut object,
+                "delivery_fee",
+                row.get::<_, Option<f64>>("delivery_fee")?,
+            );
+            insert_string(
+                &mut object,
+                "client_request_id",
+                row.get::<_, Option<String>>("client_request_id")?,
+            );
+            insert_string(
+                &mut object,
+                "ghost_source",
+                row.get::<_, Option<String>>("ghost_source")?,
+            );
+
+            if let Some(items_json) = row.get::<_, Option<String>>("items")? {
+                if let Ok(items) = serde_json::from_str::<Value>(&items_json) {
+                    object.insert("items".to_string(), items);
+                }
+            }
+
+            if let Some(is_ghost) = row.get::<_, Option<i64>>("is_ghost")? {
+                object.insert("is_ghost".to_string(), Value::Bool(is_ghost != 0));
+            }
+
+            if let Some(ghost_metadata) = row.get::<_, Option<String>>("ghost_metadata")? {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&ghost_metadata) {
+                    object.insert("ghost_metadata".to_string(), parsed);
+                }
+            }
+
+            Ok(Value::Object(object))
+        },
+    )
+    .optional()
+    .map_err(|e| format!("sync_queue load_local_order_insert_fallback: {e}"))
+}
+
+fn build_order_insert_body(
+    conn: &Connection,
+    record_id: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    let local_order = load_local_order_insert_fallback(conn, record_id)?;
+    let payload_root = payload.get("orderData").unwrap_or(payload);
+    let mut sources = vec![payload_root, payload];
+    if let Some(local_order) = local_order.as_ref() {
+        sources.push(local_order);
+    }
+
+    let (_, runtime_branch_id, _) = resolve_runtime_context(conn, payload);
+    let items_raw =
+        json_field_from_sources(&sources, &["items"]).unwrap_or_else(|| Value::Array(vec![]));
+    let items = normalize_order_insert_items(&items_raw);
+    if items.is_empty() {
+        return Err("Order insert payload is missing items".to_string());
+    }
+
+    let items_subtotal = items
+        .iter()
+        .map(|item| {
+            item.get("total_price")
+                .and_then(Value::as_f64)
+                .unwrap_or_default()
+        })
+        .sum::<f64>();
+    let subtotal = number_field_from_sources(&sources, &["subtotal"])
+        .unwrap_or(items_subtotal)
+        .max(0.0);
+    let tax_amount = number_field_from_sources(&sources, &["tax_amount", "taxAmount"])
+        .unwrap_or_default()
+        .max(0.0);
+    let delivery_fee = number_field_from_sources(&sources, &["delivery_fee", "deliveryFee"])
+        .unwrap_or_default()
+        .max(0.0);
+    let manual_discount_mode =
+        string_field_from_sources(&sources, &["manual_discount_mode", "manualDiscountMode"])
+            .filter(|mode| matches!(mode.as_str(), "percentage" | "fixed"));
+    let manual_discount_value =
+        number_field_from_sources(&sources, &["manual_discount_value", "manualDiscountValue"])
+            .map(|value| value.max(0.0));
+    let discount_percentage =
+        number_field_from_sources(&sources, &["discount_percentage", "discountPercentage"])
+            .or_else(|| {
+                if manual_discount_mode.as_deref() == Some("percentage") {
+                    manual_discount_value
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+            .max(0.0);
+    let discount_amount =
+        number_field_from_sources(&sources, &["discount_amount", "discountAmount"])
+            .or_else(|| {
+                if manual_discount_mode.as_deref() == Some("fixed") {
+                    manual_discount_value
+                } else if discount_percentage > 0.0 {
+                    Some((subtotal * (discount_percentage / 100.0)).max(0.0))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+            .max(0.0);
+    let coupon_discount_amount = number_field_from_sources(
+        &sources,
+        &["coupon_discount_amount", "couponDiscountAmount"],
+    )
+    .unwrap_or_default()
+    .max(0.0);
+
+    let total_amount =
+        number_field_from_sources(&sources, &["total_amount", "totalAmount", "total"])
+            .unwrap_or_else(|| {
+                (subtotal + tax_amount + delivery_fee - discount_amount - coupon_discount_amount)
+                    .max(0.0)
+            })
+            .max(0.0);
+
+    let branch_id = string_field_from_sources(&sources, &["branch_id", "branchId"])
+        .or_else(|| {
+            let trimmed = runtime_branch_id.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .filter(|candidate| Uuid::parse_str(candidate).is_ok())
+        .ok_or_else(|| "Order insert payload is missing valid branch_id".to_string())?;
+
+    let payment_method_raw =
+        string_field_from_sources(&sources, &["payment_method", "paymentMethod"])
+            .or_else(|| nested_string_field_from_sources(&sources, &[&["paymentData", "method"]]));
+    let payment_method = normalize_payment_method_for_insert(payment_method_raw.as_deref());
+    let payment_status = normalize_payment_status_for_insert(
+        string_field_from_sources(&sources, &["payment_status", "paymentStatus"]).as_deref(),
+    );
+    let order_type = normalize_order_type_for_insert(
+        string_field_from_sources(&sources, &["order_type", "orderType"]).as_deref(),
+    );
+
+    let customer_id = string_field_from_sources(&sources, &["customer_id", "customerId"])
+        .or_else(|| nested_string_field_from_sources(&sources, &[&["customer", "id"]]))
+        .filter(|candidate| Uuid::parse_str(candidate).is_ok());
+    let customer_name = string_field_from_sources(&sources, &["customer_name", "customerName"])
+        .or_else(|| {
+            nested_string_field_from_sources(
+                &sources,
+                &[&["customer", "name"], &["customer", "full_name"]],
+            )
+        });
+    let customer_phone = string_field_from_sources(&sources, &["customer_phone", "customerPhone"])
+        .or_else(|| {
+            nested_string_field_from_sources(
+                &sources,
+                &[&["customer", "phone_number"], &["customer", "phone"]],
+            )
+        });
+    let customer_email = string_field_from_sources(&sources, &["customer_email", "customerEmail"])
+        .or_else(|| nested_string_field_from_sources(&sources, &[&["customer", "email"]]));
+    let delivery_address =
+        string_field_from_sources(&sources, &["delivery_address", "deliveryAddress"]).or_else(
+            || {
+                nested_string_field_from_sources(
+                    &sources,
+                    &[
+                        &["address", "street_address"],
+                        &["address", "street"],
+                        &["address", "address"],
+                    ],
+                )
+            },
+        );
+    let delivery_city = string_field_from_sources(&sources, &["delivery_city", "deliveryCity"])
+        .or_else(|| nested_string_field_from_sources(&sources, &[&["address", "city"]]));
+    let delivery_postal_code =
+        string_field_from_sources(&sources, &["delivery_postal_code", "deliveryPostalCode"])
+            .or_else(|| {
+                nested_string_field_from_sources(
+                    &sources,
+                    &[
+                        &["address", "postal_code"],
+                        &["address", "postalCode"],
+                        &["address", "zip"],
+                    ],
+                )
+            });
+    let delivery_floor = string_field_from_sources(&sources, &["delivery_floor", "deliveryFloor"])
+        .or_else(|| {
+            nested_string_field_from_sources(
+                &sources,
+                &[&["address", "floor_number"], &["address", "floor"]],
+            )
+        });
+    let delivery_notes = string_field_from_sources(&sources, &["delivery_notes", "deliveryNotes"])
+        .or_else(|| {
+            nested_string_field_from_sources(
+                &sources,
+                &[&["address", "delivery_notes"], &["address", "notes"]],
+            )
+        });
+    let name_on_ringer = string_field_from_sources(&sources, &["name_on_ringer", "nameOnRinger"])
+        .or_else(|| {
+            nested_string_field_from_sources(
+                &sources,
+                &[&["address", "name_on_ringer"], &["address", "nameOnRinger"]],
+            )
+        });
+    let ghost_metadata = json_field_from_sources(&sources, &["ghost_metadata", "ghostMetadata"])
+        .and_then(|value| match value {
+            Value::Object(_) => Some(value),
+            _ => None,
+        });
+
+    Ok(serde_json::json!({
+        "client_order_id": string_field_from_sources(&sources, &["client_order_id", "clientOrderId"])
+            .unwrap_or_else(|| record_id.to_string()),
+        "branch_id": branch_id,
+        "items": items,
+        "order_type": order_type,
+        "payment_status": payment_status,
+        "payment_method": payment_method,
+        "total_amount": total_amount,
+        "subtotal": subtotal,
+        "tax_amount": tax_amount,
+        "tax_rate": number_field_from_sources(&sources, &["tax_rate", "taxRate"]),
+        "delivery_fee": delivery_fee,
+        "discount_percentage": discount_percentage,
+        "discount_amount": discount_amount,
+        "manual_discount_mode": manual_discount_mode,
+        "manual_discount_value": manual_discount_value,
+        "coupon_id": string_field_from_sources(&sources, &["coupon_id", "couponId"]),
+        "coupon_code": string_field_from_sources(&sources, &["coupon_code", "couponCode"]),
+        "coupon_discount_amount": coupon_discount_amount,
+        "tip_amount": number_field_from_sources(&sources, &["tip_amount", "tipAmount"]),
+        "customer_id": customer_id,
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "customer_email": customer_email,
+        "order_number": string_field_from_sources(&sources, &["order_number", "orderNumber"]),
+        "status": string_field_from_sources(&sources, &["status"])
+            .unwrap_or_else(|| "pending".to_string()),
+        "table_number": integer_field_from_sources(&sources, &["table_number", "tableNumber"]),
+        "delivery_address": delivery_address,
+        "delivery_city": delivery_city,
+        "delivery_postal_code": delivery_postal_code,
+        "delivery_floor": delivery_floor,
+        "delivery_notes": delivery_notes,
+        "name_on_ringer": name_on_ringer,
+        "notes": string_field_from_sources(&sources, &["notes", "orderNotes", "order_notes"])
+            .or_else(|| string_field_from_sources(&sources, &["special_instructions", "specialInstructions"])),
+        "is_ghost": bool_field_from_sources(&sources, &["is_ghost", "isGhost"]).unwrap_or(false),
+        "ghost_source": string_field_from_sources(&sources, &["ghost_source", "ghostSource"]),
+        "ghost_metadata": ghost_metadata,
+    }))
+}
+
+fn is_legacy_order_insert_validation_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("validation failed")
+        && lower.contains("expected object, received array")
+        && lower.contains("customizations")
+        && lower.contains("order_type")
+        && lower.contains("payment_method")
+        && lower.contains("total_amount")
+}
+
+fn is_rate_limit_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("http 429") || lower.contains("rate limit exceeded")
+}
+
+fn requeue_failed_items(
+    conn: &Connection,
+    queue_ids: &[String],
+    log_message: &str,
+) -> Result<RetryItemsResult, String> {
+    let mut retried = 0_i64;
+
+    for queue_id in queue_ids {
+        retried += conn
+            .execute(
+                "UPDATE parity_sync_queue
+                 SET status = 'pending',
+                     attempts = 0,
+                     error_message = NULL,
+                     next_retry_at = NULL,
+                     last_attempt = NULL,
+                     retry_delay_ms = ?1
+                 WHERE id = ?2",
+                params![DEFAULT_INITIAL_RETRY_DELAY_MS, queue_id],
+            )
+            .map_err(|e| format!("sync_queue requeue_failed_items update: {e}"))?
+            as i64;
+    }
+
+    if retried > 0 {
+        info!(retried = retried, "{log_message}");
+    }
+
+    Ok(RetryItemsResult { retried })
+}
+
+fn retry_failed_terminal_context_items_limited(
+    conn: &Connection,
+    limit: usize,
+) -> Result<RetryItemsResult, String> {
+    if limit == 0 {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
     if resolve_request_terminal_id(conn, &Value::Object(Map::new())).is_none() {
         return Ok(RetryItemsResult { retried: 0 });
     }
 
-    let retried = conn
-        .execute(
-            "UPDATE parity_sync_queue
-             SET status = 'pending',
-                 attempts = 0,
-                 error_message = NULL,
-                 next_retry_at = NULL,
-                 last_attempt = NULL,
-                 retry_delay_ms = ?1
+    let mut stmt = conn
+        .prepare(
+            "SELECT id
+             FROM parity_sync_queue
              WHERE status = 'failed'
                AND error_message IS NOT NULL
                AND (
-                 lower(error_message) LIKE '%missing terminal_id%'
-                 OR lower(error_message) LIKE '%missing terminal id%'
-                 OR lower(error_message) LIKE '%missing_terminal_id%'
-                 OR lower(error_message) LIKE '%terminal_id context%'
-               )",
-            params![DEFAULT_INITIAL_RETRY_DELAY_MS],
+                   lower(error_message) LIKE '%missing terminal_id%'
+                   OR lower(error_message) LIKE '%missing terminal id%'
+                   OR lower(error_message) LIKE '%missing_terminal_id%'
+                   OR lower(error_message) LIKE '%terminal_id context%'
+               )
+             ORDER BY created_at ASC
+             LIMIT ?1",
         )
-        .map_err(|e| format!("sync_queue retry_failed_terminal_context_items: {e}"))?;
+        .map_err(|e| format!("sync_queue retry_failed_terminal_context_items prepare: {e}"))?;
 
-    if retried > 0 {
-        info!(
-            retried = retried,
-            "Requeued historical parity items that failed due to missing terminal identity context"
-        );
+    let queue_ids: Vec<String> = stmt
+        .query_map(params![limit as i64], |row| row.get(0))
+        .map_err(|e| format!("sync_queue retry_failed_terminal_context_items query: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    requeue_failed_items(
+        conn,
+        &queue_ids,
+        "Requeued historical parity items that failed due to missing terminal identity context",
+    )
+}
+
+fn retry_failed_rate_limited_items_limited(
+    conn: &Connection,
+    limit: usize,
+) -> Result<RetryItemsResult, String> {
+    if limit == 0 {
+        return Ok(RetryItemsResult { retried: 0 });
     }
 
-    Ok(RetryItemsResult {
-        retried: retried as i64,
-    })
+    if resolve_request_terminal_id(conn, &Value::Object(Map::new())).is_none() {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, error_message
+             FROM parity_sync_queue
+             WHERE status = 'failed'
+               AND error_message IS NOT NULL
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| format!("sync_queue retry_failed_rate_limited_items prepare: {e}"))?;
+
+    let queue_ids: Vec<String> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("sync_queue retry_failed_rate_limited_items query: {e}"))?
+        .filter_map(|row| row.ok())
+        .filter(|(_, error_message)| is_rate_limit_error(error_message))
+        .take(limit)
+        .map(|(queue_id, _)| queue_id)
+        .collect();
+
+    requeue_failed_items(
+        conn,
+        &queue_ids,
+        "Requeued parity items that previously failed due to admin rate limiting",
+    )
+}
+
+fn retry_failed_legacy_order_insert_items_limited(
+    conn: &Connection,
+    limit: usize,
+) -> Result<RetryItemsResult, String> {
+    if limit == 0 {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    if resolve_request_terminal_id(conn, &Value::Object(Map::new())).is_none() {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, record_id, data, error_message
+             FROM parity_sync_queue
+             WHERE table_name = 'orders'
+               AND operation = 'INSERT'
+               AND status = 'failed'
+               AND error_message IS NOT NULL",
+        )
+        .map_err(|e| format!("sync_queue retry_failed_legacy_order_insert_items prepare: {e}"))?;
+    let candidates: Vec<(String, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(|e| format!("sync_queue retry_failed_legacy_order_insert_items query: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    let mut queue_ids = Vec::new();
+    for (queue_id, record_id, payload_raw, error_message) in candidates {
+        if queue_ids.len() >= limit {
+            break;
+        }
+        if !is_legacy_order_insert_validation_error(&error_message) {
+            continue;
+        }
+
+        let payload = serde_json::from_str::<Value>(&payload_raw)
+            .unwrap_or_else(|_| Value::Object(Map::new()));
+        if build_order_insert_body(conn, record_id.as_str(), &payload).is_err() {
+            continue;
+        }
+
+        queue_ids.push(queue_id);
+    }
+
+    requeue_failed_items(
+        conn,
+        &queue_ids,
+        "Requeued legacy order insert parity rows after canonical request auto-heal",
+    )
 }
 
 pub fn enqueue_payload_item(
@@ -475,15 +1381,67 @@ pub fn dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
         .map_err(|e| format!("sync_queue dequeue: {e}"))?;
 
     if let Some(ref item) = item {
-        // Mark as processing so it won't be dequeued again
+        // Mark as processing and stamp the claim time so abandoned rows can be recovered.
         conn.execute(
-            "UPDATE parity_sync_queue SET status = 'processing' WHERE id = ?1",
-            params![item.id],
+            "UPDATE parity_sync_queue
+             SET status = 'processing',
+                 last_attempt = ?1
+             WHERE id = ?2",
+            params![now, item.id],
         )
         .map_err(|e| format!("sync_queue mark processing: {e}"))?;
     }
 
     Ok(item)
+}
+
+fn recover_stale_processing_items(conn: &Connection) -> Result<i64, String> {
+    let lease_modifier = format!("-{} seconds", PROCESSING_LEASE_SECS);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, table_name, record_id
+             FROM parity_sync_queue
+             WHERE status = 'processing'
+               AND julianday(COALESCE(last_attempt, created_at))
+                   <= julianday('now', ?1)",
+        )
+        .map_err(|e| format!("sync_queue recover_stale_processing_items prepare: {e}"))?;
+
+    let stale_rows: Vec<(String, String, String)> = stmt
+        .query_map(params![lease_modifier.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| format!("sync_queue recover_stale_processing_items query: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    if stale_rows.is_empty() {
+        return Ok(0);
+    }
+
+    let recovered = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 next_retry_at = NULL
+             WHERE status = 'processing'
+               AND julianday(COALESCE(last_attempt, created_at))
+                   <= julianday('now', ?1)",
+            params![lease_modifier.as_str()],
+        )
+        .map_err(|e| format!("sync_queue recover_stale_processing_items update: {e}"))?
+        as i64;
+
+    for (_, table_name, record_id) in stale_rows.into_iter().take(5) {
+        warn!(
+            table_name = %table_name,
+            record_id = %record_id,
+            lease_secs = PROCESSING_LEASE_SECS,
+            "Recovered stale parity processing row"
+        );
+    }
+
+    Ok(recovered)
 }
 
 /// Peek at the next item without removing or marking it.
@@ -833,6 +1791,40 @@ pub fn mark_failure(conn: &Connection, item_id: &str, error_message: &str) -> Re
     Ok(())
 }
 
+pub fn mark_rate_limited(
+    conn: &Connection,
+    item_id: &str,
+    error_message: &str,
+    retry_after_secs: i64,
+) -> Result<(), String> {
+    let now = Utc::now();
+    let retry_after_secs = retry_after_secs.max(1);
+    let retry_delay_ms = (retry_after_secs * 1000)
+        .max(DEFAULT_INITIAL_RETRY_DELAY_MS)
+        .min(MAX_RETRY_DELAY_MS);
+    let next_retry = now + ChronoDuration::seconds(retry_after_secs);
+
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             last_attempt = ?1,
+             error_message = ?2,
+             retry_delay_ms = ?3,
+             next_retry_at = ?4
+         WHERE id = ?5",
+        params![
+            now.to_rfc3339(),
+            error_message,
+            retry_delay_ms,
+            next_retry.to_rfc3339(),
+            item_id,
+        ],
+    )
+    .map_err(|e| format!("sync_queue mark_rate_limited: {e}"))?;
+
+    Ok(())
+}
+
 pub fn mark_deferred(conn: &Connection, item_id: &str, reason: &str) -> Result<(), String> {
     let next_retry = Utc::now() + ChronoDuration::seconds(5);
     conn.execute(
@@ -985,10 +1977,15 @@ fn prepare_order_request(
     terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
     if item.operation == "INSERT" {
+        let body = match build_order_insert_body(conn, item.record_id.as_str(), payload) {
+            Ok(body) => body,
+            Err(reason) => return Ok(RequestPreparation::Failed { reason }),
+        };
+
         return Ok(RequestPreparation::Ready(RequestSpec {
             endpoint: "/api/pos/orders".to_string(),
             method: Method::POST,
-            body: Some(item.data.clone()),
+            body: Some(body.to_string()),
             terminal_id: terminal_id.to_string(),
         }));
     }
@@ -1498,10 +2495,26 @@ pub async fn process_queue(
     {
         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
         let _ = check_age_warnings(&db);
-        let _ = retry_failed_terminal_context_items(&db)?;
+        let _ = recover_stale_processing_items(&db)?;
+        let mut remaining_requeue_budget = MAX_AUTO_REQUEUE_ITEMS_PER_CYCLE;
+
+        let terminal_context_retries =
+            retry_failed_terminal_context_items_limited(&db, remaining_requeue_budget)?;
+        remaining_requeue_budget =
+            remaining_requeue_budget.saturating_sub(terminal_context_retries.retried as usize);
+
+        let rate_limited_retries =
+            retry_failed_rate_limited_items_limited(&db, remaining_requeue_budget)?;
+        remaining_requeue_budget =
+            remaining_requeue_budget.saturating_sub(rate_limited_retries.retried as usize);
+
+        let _ = retry_failed_legacy_order_insert_items_limited(&db, remaining_requeue_budget)?;
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("sync_queue client build: {e}"))?;
     let mut processed: i64 = 0;
     let mut failed: i64 = 0;
     let mut conflicts: i64 = 0;
@@ -1573,6 +2586,13 @@ pub async fn process_queue(
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 let is_success = resp.status().is_success();
+                let retry_after_secs = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse::<i64>().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(DEFAULT_RATE_LIMIT_RETRY_SECS);
                 let response_body = resp.text().await.unwrap_or_default();
                 let response_json = serde_json::from_str::<Value>(&response_body).ok();
                 if is_success {
@@ -1633,6 +2653,26 @@ pub async fn process_queue(
                         mark_success(&db, &item.id)?;
                         processed += 1;
                     }
+                } else if status == 429 {
+                    let error_message = format!("HTTP {status}: {response_body}");
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    mark_rate_limited(&db, &item.id, &error_message, retry_after_secs)?;
+                    failed += 1;
+                    errors.push(SyncError {
+                        item_id: item.id.clone(),
+                        table_name: item.table_name.clone(),
+                        record_id: item.record_id.clone(),
+                        error: error_message,
+                        http_status: Some(status),
+                    });
+                    warn!(
+                        item_id = %item.id,
+                        table_name = %item.table_name,
+                        record_id = %item.record_id,
+                        retry_after_secs = retry_after_secs,
+                        "Parity sync hit admin rate limiting; pausing the batch"
+                    );
+                    break;
                 } else if status >= 400 && status < 500 {
                     // Client error (not retriable)
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -1932,7 +2972,18 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn clear_terminal_identity() {
-        let _ = crate::storage::delete_credential("terminal_id");
+        // Tests must not mutate the shared OS keyring used by the live POS app.
+    }
+
+    const TEST_TERMINAL_ID: &str = "terminal-test";
+    const TEST_BRANCH_ID: &str = "11111111-1111-1111-1111-111111111111";
+    const TEST_MENU_ITEM_ID: &str = "22222222-2222-2222-2222-222222222222";
+
+    fn seed_terminal_context(conn: &Connection) {
+        crate::db::set_setting(conn, "terminal", "terminal_id", TEST_TERMINAL_ID)
+            .expect("store terminal id");
+        crate::db::set_setting(conn, "terminal", "branch_id", TEST_BRANCH_ID)
+            .expect("store branch id");
     }
 
     fn queue_item(
@@ -1988,6 +3039,8 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         crate::db::run_migrations_for_test(&conn);
         create_tables(&conn).expect("create sync queue tables");
+        crate::db::set_setting(&conn, "terminal", "__ignore_keyring", "1")
+            .expect("disable keyring reads for sync_queue tests");
         conn
     }
 
@@ -2312,13 +3365,509 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prepare_order_request_normalizes_legacy_insert_payloads() {
+        let conn = test_connection();
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-legacy-1",
+            json!({
+                "clientOrderId": "client-order-1",
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentData": {
+                    "method": "wallet"
+                },
+                "paymentStatus": "paid",
+                "total": 15.75,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 2,
+                    "price": 7.5,
+                    "name": "Club Sandwich",
+                    "notes": "No onions",
+                    "customizations": [
+                        {
+                            "customizationId": "extra-cheese",
+                            "name": "Extra Cheese"
+                        }
+                    ]
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        assert_eq!(request.endpoint, "/api/pos/orders");
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(request.terminal_id, TEST_TERMINAL_ID);
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("client_order_id").and_then(Value::as_str),
+            Some("client-order-1")
+        );
+        assert_eq!(
+            body.get("branch_id").and_then(Value::as_str),
+            Some(TEST_BRANCH_ID)
+        );
+        assert_eq!(
+            body.get("order_type").and_then(Value::as_str),
+            Some("pickup")
+        );
+        assert_eq!(
+            body.get("payment_method").and_then(Value::as_str),
+            Some("digital_wallet")
+        );
+        assert_eq!(
+            body.get("payment_status").and_then(Value::as_str),
+            Some("paid")
+        );
+        assert_eq!(
+            body.get("total_amount").and_then(Value::as_f64),
+            Some(15.75)
+        );
+
+        let items = body
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("items array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].get("menu_item_id").and_then(Value::as_str),
+            Some(TEST_MENU_ITEM_ID)
+        );
+        assert_eq!(items[0].get("quantity").and_then(Value::as_i64), Some(2));
+        assert_eq!(
+            items[0].get("unit_price").and_then(Value::as_f64),
+            Some(7.5)
+        );
+        assert_eq!(
+            items[0].get("total_price").and_then(Value::as_f64),
+            Some(15.0)
+        );
+        let customizations = items[0]
+            .get("customizations")
+            .and_then(Value::as_object)
+            .expect("customizations object");
+        assert_eq!(
+            customizations.get("extra-cheese"),
+            Some(&json!({
+                "customizationId": "extra-cheese",
+                "name": "Extra Cheese"
+            }))
+        );
+    }
+
+    #[test]
+    fn prepare_order_request_defaults_payment_method_and_recomputes_total_amount() {
+        let conn = test_connection();
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-legacy-2",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 2,
+                    "price": 6.5,
+                    "name": "Fries"
+                }],
+                "taxAmount": 1.2,
+                "deliveryFee": 0.5,
+                "discountAmount": 0.7
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("payment_method").and_then(Value::as_str),
+            Some("cash")
+        );
+        assert_eq!(body.get("subtotal").and_then(Value::as_f64), Some(13.0));
+        assert_eq!(body.get("tax_amount").and_then(Value::as_f64), Some(1.2));
+        assert_eq!(body.get("delivery_fee").and_then(Value::as_f64), Some(0.5));
+        assert_eq!(
+            body.get("discount_amount").and_then(Value::as_f64),
+            Some(0.7)
+        );
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(14.0));
+        assert_eq!(
+            body.get("client_order_id").and_then(Value::as_str),
+            Some("order-legacy-2")
+        );
+
+        let items = body
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("items array");
+        assert_eq!(items[0].get("customizations"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn prepare_order_request_uses_record_id_when_client_order_id_missing() {
+        let conn = test_connection();
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-legacy-3",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 8.0,
+                    "name": "Soup"
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(
+            body.get("client_order_id").and_then(Value::as_str),
+            Some("order-legacy-3")
+        );
+    }
+
+    #[test]
+    fn retry_failed_legacy_order_insert_items_requeues_known_validation_failures() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-legacy-4",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentData": {
+                    "method": "cash"
+                },
+                "total": 9.5,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 9.5,
+                    "name": "Burger",
+                    "customizations": [{
+                        "optionId": "well-done",
+                        "name": "Well Done"
+                    }]
+                }]
+            }),
+        );
+        let unrelated_queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-legacy-5",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 4.0,
+                    "name": "Tea"
+                }]
+            }),
+        );
+
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 3,
+                 error_message = ?2
+             WHERE id = ?1",
+            params![
+                queue_id,
+                r#"HTTP 400: {"success":false,"error":"Validation failed","details":[{"field":"items.0.customizations","message":"Expected object, received array"},{"field":"order_type","message":"Required"},{"field":"payment_method","message":"Required"},{"field":"total_amount","message":"Required"}]}"#
+            ],
+        )
+        .expect("seed failed legacy validation error");
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 2,
+                 error_message = ?2
+             WHERE id = ?1",
+            params![
+                unrelated_queue_id,
+                "HTTP 400: some other validation failure"
+            ],
+        )
+        .expect("seed unrelated failure");
+
+        let result = retry_failed_legacy_order_insert_items_limited(&conn, 1)
+            .expect("retry failed legacy order rows");
+        assert_eq!(result.retried, 1);
+
+        let retried_row: (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read retried queue row");
+        assert_eq!(retried_row.0, "pending");
+        assert_eq!(retried_row.1, 0);
+        assert_eq!(retried_row.2, None);
+
+        let unrelated_status: String = conn
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                params![unrelated_queue_id],
+                |row| row.get(0),
+            )
+            .expect("read unrelated queue row");
+        assert_eq!(unrelated_status, "failed");
+    }
+
+    #[test]
+    fn retry_failed_rate_limited_items_requeues_a_bounded_batch() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_ids: Vec<String> = (0..4)
+            .map(|index| {
+                enqueue_test_item(
+                    &conn,
+                    "orders",
+                    "INSERT",
+                    &format!("order-rate-limit-{index}"),
+                    json!({
+                        "branchId": TEST_BRANCH_ID,
+                        "orderType": "pickup",
+                        "paymentMethod": "cash",
+                        "totalAmount": 5.0 + index as f64,
+                        "items": [{
+                            "menuItemId": TEST_MENU_ITEM_ID,
+                            "quantity": 1,
+                            "price": 5.0 + index as f64,
+                            "name": format!("Item {index}"),
+                            "customizations": {}
+                        }]
+                    }),
+                )
+            })
+            .collect();
+
+        for queue_id in &queue_ids {
+            conn.execute(
+                "UPDATE parity_sync_queue
+                 SET status = 'failed',
+                     error_message = ?2
+                 WHERE id = ?1",
+                params![
+                    queue_id,
+                    r#"HTTP 429: {"success":false,"error":"Rate limit exceeded. Maximum 20 requests per 60 seconds."}"#
+                ],
+            )
+            .expect("seed rate-limited failure");
+        }
+
+        let result =
+            retry_failed_rate_limited_items_limited(&conn, 2).expect("requeue rate-limited rows");
+        assert_eq!(result.retried, 2);
+
+        let pending_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count pending rows");
+        let failed_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count failed rows");
+
+        assert_eq!(pending_count, 2);
+        assert_eq!(failed_count, 2);
+    }
+
+    #[test]
+    fn dequeue_marks_item_processing_and_records_last_attempt() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let item_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-processing-1",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentMethod": "cash",
+                "totalAmount": 5,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 5,
+                    "name": "Espresso"
+                }]
+            }),
+        );
+
+        let dequeued = dequeue(&conn).expect("dequeue item");
+        let item = dequeued.expect("expected queued item");
+        assert_eq!(item.id, item_id);
+
+        let (status, last_attempt): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, last_attempt
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![item_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query dequeued item");
+
+        assert_eq!(status, "processing");
+        assert!(last_attempt.is_some());
+    }
+
+    #[test]
+    fn recover_stale_processing_items_requeues_abandoned_rows() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let item_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-stale-processing-1",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentMethod": "cash",
+                "totalAmount": 5,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 5,
+                    "name": "Espresso"
+                }]
+            }),
+        );
+
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'processing',
+                 created_at = '2000-01-01T00:00:00Z',
+                 last_attempt = NULL
+             WHERE id = ?1",
+            params![item_id],
+        )
+        .expect("mark stale processing row");
+
+        let recovered =
+            recover_stale_processing_items(&conn).expect("recover stale processing rows");
+        assert_eq!(recovered, 1);
+
+        let (status, last_attempt): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, last_attempt
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![item_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query recovered row");
+
+        assert_eq!(status, "pending");
+        assert!(last_attempt.is_none());
+    }
+
+    async fn spawn_strict_order_insert_server() -> (
+        String,
+        mpsc::UnboundedReceiver<CapturedRequest>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind strict mock server");
+        let address = listener.local_addr().expect("strict mock server address");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let captured = read_http_request(&mut stream).await;
+            tx.send(CapturedRequest {
+                request_line: captured.request_line.clone(),
+                headers: captured.headers.clone(),
+                body: captured.body.clone(),
+            })
+            .expect("send captured request");
+
+            let response = match serde_json::from_str::<Value>(&captured.body) {
+                Ok(body)
+                    if captured.request_line == "POST /api/pos/orders HTTP/1.1"
+                        && body.get("branch_id").and_then(Value::as_str)
+                            == Some(TEST_BRANCH_ID)
+                        && body.get("order_type").and_then(Value::as_str).is_some()
+                        && body.get("payment_method").and_then(Value::as_str).is_some()
+                        && body.get("total_amount").and_then(Value::as_f64).is_some()
+                        && body
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .and_then(|items| items.first())
+                            .and_then(|item| item.get("customizations"))
+                            .and_then(Value::as_object)
+                            .is_some() =>
+                {
+                    MockResponse::json(200, r#"{"success":true,"data":{"id":"remote-order-1"}}"#)
+                }
+                _ => MockResponse::json(
+                    400,
+                    r#"{"success":false,"error":"Validation failed","details":[{"field":"items.0.customizations","message":"Expected object, received array"},{"field":"order_type","message":"Required"},{"field":"payment_method","message":"Required"},{"field":"total_amount","message":"Required"}]}"#,
+                ),
+            };
+
+            write_http_response(&mut stream, &response)
+                .await
+                .expect("write strict mock response");
+        });
+
+        (format!("http://{}", address), rx, handle)
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn process_queue_sends_terminal_id_header_on_parity_requests() {
         clear_terminal_identity();
         let conn = test_connection();
-        crate::storage::set_credential("terminal_id", "terminal-test")
-            .expect("seed terminal credential");
         crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
             .expect("store terminal id");
         let queue_id = enqueue_test_item(
@@ -2417,7 +3966,6 @@ mod tests {
     async fn process_queue_marks_items_failed_when_terminal_context_is_missing() {
         clear_terminal_identity();
         let conn = test_connection();
-        crate::storage::set_credential("terminal_id", "").expect("blank terminal credential");
         let queue_id = enqueue_test_item(
             &conn,
             "customers",
@@ -2462,8 +4010,6 @@ mod tests {
     async fn process_queue_retries_failed_missing_terminal_context_items_after_fix() {
         clear_terminal_identity();
         let conn = test_connection();
-        crate::storage::set_credential("terminal_id", "terminal-test")
-            .expect("seed terminal credential");
         crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
             .expect("store terminal id");
         let queue_id = enqueue_test_item(
@@ -2513,6 +4059,202 @@ mod tests {
             )
             .expect("read queue state");
         assert_eq!(remaining, 0);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_normalizes_legacy_order_insert_payloads_for_pos_orders() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-legacy-6",
+            json!({
+                "orderType": "pickup",
+                "paymentData": {
+                    "method": "wallet"
+                },
+                "total": 18.0,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 2,
+                    "price": 9.0,
+                    "name": "Pasta",
+                    "customizations": [{
+                        "ingredient": {
+                            "name": "Parmesan"
+                        },
+                        "amount": "extra"
+                    }]
+                }]
+            }),
+        );
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_strict_order_insert_server().await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+
+        let request = requests
+            .recv()
+            .await
+            .expect("captured order insert request");
+        assert_eq!(request.request_line, "POST /api/pos/orders HTTP/1.1");
+        assert_eq!(
+            request.headers.get("x-terminal-id").map(String::as_str),
+            Some(TEST_TERMINAL_ID)
+        );
+        let body = serde_json::from_str::<Value>(&request.body).expect("parse request body");
+        assert_eq!(
+            body.get("branch_id").and_then(Value::as_str),
+            Some(TEST_BRANCH_ID)
+        );
+        assert_eq!(
+            body.get("order_type").and_then(Value::as_str),
+            Some("pickup")
+        );
+        assert_eq!(
+            body.get("payment_method").and_then(Value::as_str),
+            Some("digital_wallet")
+        );
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(18.0));
+        assert!(
+            body.get("items")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("customizations"))
+                .and_then(Value::as_object)
+                .is_some(),
+            "strict server should receive object customizations"
+        );
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(remaining, 0);
+
+        clear_terminal_identity();
+        server.await.expect("strict mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_keeps_429_rows_pending_and_stops_the_batch() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let first_queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-rate-limited-1",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentMethod": "cash",
+                "totalAmount": 7.5,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 7.5,
+                    "name": "Americano",
+                    "customizations": {}
+                }]
+            }),
+        );
+        let second_queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-rate-limited-2",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentMethod": "cash",
+                "totalAmount": 8.0,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 8.0,
+                    "name": "Latte",
+                    "customizations": {}
+                }]
+            }),
+        );
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            429,
+            r#"{"success":false,"error":"Rate limit exceeded. Maximum 20 requests per 60 seconds."}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 1);
+
+        let request = requests
+            .recv()
+            .await
+            .expect("captured rate-limited request");
+        assert_eq!(request.request_line, "POST /api/pos/orders HTTP/1.1");
+
+        let first_row: (String, i64, Option<String>, Option<String>) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts, error_message, next_retry_at
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![first_queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read first row");
+        assert_eq!(first_row.0, "pending");
+        assert_eq!(first_row.1, 0);
+        assert!(
+            first_row
+                .2
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Rate limit exceeded"),
+            "first row should preserve the rate-limit error"
+        );
+        assert!(
+            first_row.3.is_some(),
+            "first row should have a retry schedule"
+        );
+
+        let second_status: String = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                params![second_queue_id],
+                |row| row.get(0),
+            )
+            .expect("read second row");
+        assert_eq!(second_status, "pending");
 
         clear_terminal_identity();
         server.await.expect("mock server task");

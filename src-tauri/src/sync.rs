@@ -2020,6 +2020,15 @@ fn read_terminal_setting_json(conn: &rusqlite::Connection, keys: &[&str]) -> Opt
     })
 }
 
+fn read_runtime_terminal_credential(conn: &rusqlite::Connection, key: &str) -> Option<String> {
+    #[cfg(test)]
+    if db::get_setting(conn, "terminal", "__ignore_keyring").as_deref() == Some("1") {
+        return read_terminal_setting(conn, &[key]);
+    }
+
+    storage::get_credential(key).or_else(|| read_terminal_setting(conn, &[key]))
+}
+
 fn resolve_heartbeat_platform() -> Option<&'static str> {
     match std::env::consts::OS {
         "windows" => Some("windows"),
@@ -2051,12 +2060,11 @@ fn build_terminal_heartbeat_payload(
         return None;
     }
 
-    let terminal_id = storage::get_credential("terminal_id").or_else(|| {
-        db.conn
-            .lock()
-            .ok()
-            .and_then(|conn| read_terminal_setting(&conn, &["terminal_id"]))
-    })?;
+    let terminal_id = db
+        .conn
+        .lock()
+        .ok()
+        .and_then(|conn| read_runtime_terminal_credential(&conn, "terminal_id"))?;
     let terminal_id = terminal_id.trim().to_string();
     if terminal_id.is_empty() {
         return None;
@@ -2087,8 +2095,7 @@ fn build_terminal_heartbeat_payload(
     let (branch_id, terminal_name, terminal_location, settings_hash, remote_view_capabilities) =
         match db.conn.lock() {
             Ok(conn) => (
-                storage::get_credential("branch_id")
-                    .or_else(|| read_terminal_setting(&conn, &["branch_id"])),
+                read_runtime_terminal_credential(&conn, "branch_id"),
                 read_terminal_setting(&conn, &["name", "display_name", "displayName"]),
                 read_terminal_setting(&conn, &["location", "display_location", "displayLocation"]),
                 read_terminal_setting(&conn, &["settings_hash"]).unwrap_or_default(),
@@ -7968,60 +7975,22 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     if !shift_items.is_empty() {
         match sync_shift_batch(&admin_url, &api_key, &terminal_id, &branch_id, &shift_items).await {
             Ok(shift_outcome) => {
-                let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                let now = Utc::now().to_rfc3339();
+                total_progress +=
+                    mark_synced_shift_items(db, &shift_items, &shift_outcome.synced_shift_ids)?;
 
-                // Mark successfully synced shifts
-                let synced_set: std::collections::HashSet<&str> = shift_outcome
-                    .synced_shift_ids
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect();
-                for item in &shift_items {
-                    let (id, _, entity_id, _, _, _, _, _, _, _, _) = item;
-                    if synced_set.contains(entity_id.as_str()) {
-                        let _ = conn.execute(
-                            "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
-                            params![now, id],
-                        );
-                        let _ = conn.execute(
-                            "UPDATE staff_shifts SET sync_status = 'synced', updated_at = ?1 WHERE id = ?2",
-                            params![now, entity_id],
-                        );
-                        // Inline-promote any deferred financial items for this shift
-                        promote_financials_for_shift(&conn, entity_id);
-                    }
+                if mark_failed_shift_items(db, &shift_items, &shift_outcome.failed_shift_ids)? {
+                    had_non_backpressure_failure = true;
                 }
-                total_progress += shift_outcome.synced_shift_ids.len();
 
-                // Mark per-event failures
-                if !shift_outcome.failed_shift_ids.is_empty() {
-                    let failed_set: std::collections::HashMap<&str, &str> = shift_outcome
-                        .failed_shift_ids
-                        .iter()
-                        .map(|(sid, msg)| (sid.as_str(), msg.as_str()))
-                        .collect();
-                    for item in &shift_items {
-                        let (_, _, entity_id, _, _, _, _, _, _, _, _) = item;
-                        if let Some(err_msg) = failed_set.get(entity_id.as_str()) {
-                            let single = [*item];
-                            let failure = mark_batch_failed(db, &single, err_msg)?;
-                            if !failure.backpressure_deferred {
-                                had_non_backpressure_failure = true;
-                            }
-                            // Emit recovery event for shift sync conflicts
-                            if err_msg.contains("unresolved active shift")
-                                || err_msg.contains("already has another active shift")
-                            {
-                                let _ = app.emit(
-                                    "recovery:shift-conflict",
-                                    serde_json::json!({
-                                        "shiftId": entity_id,
-                                        "errorMessage": *err_msg,
-                                    }),
-                                );
-                            }
-                        }
+                for (shift_id, err_msg) in &shift_outcome.failed_shift_ids {
+                    if is_shift_conflict_error(err_msg) {
+                        let _ = app.emit(
+                            "recovery:shift-conflict",
+                            serde_json::json!({
+                                "shiftId": shift_id,
+                                "errorMessage": err_msg,
+                            }),
+                        );
                     }
                 }
             }
@@ -8108,6 +8077,74 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     }
 
     Ok(total_progress)
+}
+
+fn mark_synced_shift_items(
+    db: &DbState,
+    shift_items: &[&SyncItem],
+    synced_shift_ids: &[String],
+) -> Result<usize, String> {
+    if synced_shift_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let synced_set: std::collections::HashSet<&str> = synced_shift_ids
+        .iter()
+        .map(|shift_id| shift_id.as_str())
+        .collect();
+
+    for item in shift_items {
+        let (id, _, entity_id, _, _, _, _, _, _, _, _) = item;
+        if synced_set.contains(entity_id.as_str()) {
+            let _ = conn.execute(
+                "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            );
+            let _ = conn.execute(
+                "UPDATE staff_shifts SET sync_status = 'synced', updated_at = ?1 WHERE id = ?2",
+                params![now, entity_id],
+            );
+            // Inline-promote any deferred financial items for this shift.
+            promote_financials_for_shift(&conn, entity_id);
+        }
+    }
+
+    Ok(synced_shift_ids.len())
+}
+
+fn mark_failed_shift_items(
+    db: &DbState,
+    shift_items: &[&SyncItem],
+    failed_shift_ids: &[(String, String)],
+) -> Result<bool, String> {
+    if failed_shift_ids.is_empty() {
+        return Ok(false);
+    }
+
+    let failed_set: std::collections::HashMap<&str, &str> = failed_shift_ids
+        .iter()
+        .map(|(shift_id, message)| (shift_id.as_str(), message.as_str()))
+        .collect();
+    let mut had_non_backpressure_failure = false;
+
+    for item in shift_items {
+        let (_, _, entity_id, _, _, _, _, _, _, _, _) = item;
+        if let Some(err_msg) = failed_set.get(entity_id.as_str()) {
+            let single = [*item];
+            let failure = mark_batch_failed(db, &single, err_msg)?;
+            if !failure.backpressure_deferred {
+                had_non_backpressure_failure = true;
+            }
+        }
+    }
+
+    Ok(had_non_backpressure_failure)
+}
+
+fn is_shift_conflict_error(error: &str) -> bool {
+    error.contains("unresolved active shift") || error.contains("already has another active shift")
 }
 
 fn claim_pending_sync_items(conn: &Connection, limit: usize) -> Result<Vec<SyncItem>, String> {
@@ -13121,6 +13158,8 @@ mod tests {
         )
         .expect("pragma setup");
         db::run_migrations_for_test(&conn);
+        db::set_setting(&conn, "terminal", "__ignore_keyring", "1")
+            .expect("disable keyring reads for sync tests");
         DbState {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
@@ -13524,8 +13563,6 @@ mod tests {
     #[serial_test::serial]
     fn build_terminal_heartbeat_payload_includes_identity_platform_and_sync_stats() {
         let db = test_db();
-        let _ = storage::set_credential("terminal_id", "terminal-heartbeat-1");
-        let _ = storage::set_credential("branch_id", "branch-heartbeat-1");
         set_terminal_setting(&db, "terminal_id", "terminal-heartbeat-1");
         set_terminal_setting(&db, "branch_id", "branch-heartbeat-1");
         set_terminal_setting(&db, "name", "Main Counter");
@@ -13716,8 +13753,6 @@ mod tests {
     #[serial_test::serial]
     fn terminal_heartbeat_sender_skips_offline_and_does_not_mutate_sync_queue_on_failure() {
         let db = test_db();
-        let _ = storage::set_credential("terminal_id", "terminal-heartbeat-2");
-        let _ = storage::set_credential("branch_id", "branch-heartbeat-2");
         set_terminal_setting(&db, "terminal_id", "terminal-heartbeat-2");
         set_terminal_setting(&db, "branch_id", "branch-heartbeat-2");
         insert_sync_queue_row(&db, "payment", "pending");
@@ -15257,6 +15292,69 @@ mod tests {
 
         let outcome = mark_batch_failed(&db, &item_ref, error).unwrap();
         assert!(!outcome.backpressure_deferred);
+
+        let conn = db.conn.lock().unwrap();
+        let (status, retry_count, next_retry_at, last_error): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, retry_count, next_retry_at, last_error
+                 FROM sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(status, "failed");
+        assert_eq!(retry_count, 1);
+        assert_eq!(next_retry_at, None);
+        assert_eq!(last_error.as_deref(), Some(error));
+    }
+
+    #[test]
+    fn test_mark_failed_shift_items_updates_in_progress_conflict_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-deadlock-regression', 'cashier-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries
+             ) VALUES (
+                 'shift', 'shift-deadlock-regression', 'insert', '{}', 'shift-deadlock-regression:open',
+                 'in_progress', 0, 5
+             )",
+            [],
+        )
+        .unwrap();
+        let queue_id = conn.last_insert_rowid();
+        drop(conn);
+
+        let item = load_sync_item(&db, queue_id);
+        let item_ref = [&item];
+        let error =
+            "Staff already has an unresolved active shift from 2026-03-25 (5690cbe0-a1d5-425f-b3c1-513c2451515c). Close or repair it before opening a new shift.";
+
+        let had_non_backpressure = mark_failed_shift_items(
+            &db,
+            &item_ref,
+            &[("shift-deadlock-regression".to_string(), error.to_string())],
+        )
+        .unwrap();
+
+        assert!(had_non_backpressure);
 
         let conn = db.conn.lock().unwrap();
         let (status, retry_count, next_retry_at, last_error): (

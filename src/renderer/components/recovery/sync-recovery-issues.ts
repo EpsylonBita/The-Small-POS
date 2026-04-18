@@ -152,14 +152,46 @@ const isGenericParityFailureReason = (value?: string | null): boolean => {
   return normalized === 'legacy sync force failed';
 };
 
+const isDependencyParityReason = (value?: string | null): boolean => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized.includes('waiting for parent order sync') ||
+    normalized.includes('waiting for parent payment sync') ||
+    normalized.includes('waiting for parent') ||
+    normalized.includes('parent order sync failed')
+  );
+};
+
+const scoreParityItemReason = (item: SyncQueueItem): number => {
+  const reason = item.errorMessage?.trim();
+  if (!reason) {
+    return -1;
+  }
+
+  if (item.status === 'failed' || item.status === 'conflict') {
+    return 4;
+  }
+
+  if (!isDependencyParityReason(reason)) {
+    return 3;
+  }
+
+  return 1;
+};
+
 export const getRepresentativeParityFailureReason = (
   lastParitySync?: DiagnosticsLastParitySync | null,
   parityItems: SyncQueueItem[] = [],
 ): string | null => {
   const parityItemReason =
-    parityItems.find(
-      (item) => item.status === 'failed' && typeof item.errorMessage === 'string' && item.errorMessage.trim(),
-    )?.errorMessage?.trim() ?? null;
+    parityItems
+      .filter((item) => typeof item.errorMessage === 'string' && item.errorMessage.trim())
+      .sort((left, right) => scoreParityItemReason(right) - scoreParityItemReason(left))[0]
+      ?.errorMessage?.trim() ?? null;
   const lastCycleReason = lastParitySync?.error?.trim() || lastParitySync?.reason?.trim() || null;
 
   if (parityItemReason && (!lastCycleReason || isGenericParityFailureReason(lastCycleReason))) {
@@ -284,7 +316,15 @@ const buildParityProcessorIssue = (
     (lastParitySync.processed ?? 0) === 0 &&
     (lastParitySync.remaining ?? 0) > 0;
 
-  if (!zeroProgress && lastParitySync?.status !== 'failed') {
+  const hasBlockedParityItems = parityItems.some((item) => {
+    if (item.status === 'failed' || item.status === 'conflict' || item.status === 'processing') {
+      return true;
+    }
+
+    return !item.nextRetryAt && typeof item.errorMessage === 'string' && item.errorMessage.trim().length > 0;
+  });
+
+  if ((!zeroProgress || !hasBlockedParityItems) && lastParitySync?.status !== 'failed') {
     return null;
   }
 
