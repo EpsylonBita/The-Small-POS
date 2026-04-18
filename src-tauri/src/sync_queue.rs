@@ -369,6 +369,307 @@ fn resolve_request_terminal_id(conn: &Connection, payload: &Value) -> Option<Str
     }
 }
 
+fn is_local_placeholder_id(record_id: &str) -> bool {
+    let normalized = record_id.trim().to_ascii_lowercase();
+    normalized == "local-new" || normalized.starts_with("local-")
+}
+
+fn read_local_json_array_setting(conn: &Connection, key: &str) -> Vec<Value> {
+    db::get_setting(conn, "local", key)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|parsed| parsed.as_array().cloned())
+        .unwrap_or_default()
+}
+
+fn write_local_json_array_setting(
+    conn: &Connection,
+    key: &str,
+    values: &[Value],
+) -> Result<(), String> {
+    db::set_setting(
+        conn,
+        "local",
+        key,
+        &Value::Array(values.to_vec()).to_string(),
+    )
+}
+
+fn customer_address_coordinates(value: &Value) -> Option<(f64, f64)> {
+    let lat = nested_value(value, &["coordinates", "lat"])
+        .and_then(number_from_value)
+        .or_else(|| value.get("latitude").and_then(number_from_value));
+    let lng = nested_value(value, &["coordinates", "lng"])
+        .and_then(number_from_value)
+        .or_else(|| value.get("longitude").and_then(number_from_value));
+
+    match (lat, lng) {
+        (Some(lat), Some(lng)) => Some((lat, lng)),
+        _ => None,
+    }
+}
+
+fn same_customer_address_coordinates(left: &Value, right: &Value) -> bool {
+    match (
+        customer_address_coordinates(left),
+        customer_address_coordinates(right),
+    ) {
+        (Some((left_lat, left_lng)), Some((right_lat, right_lng))) => {
+            (left_lat - right_lat).abs() < 0.000_001 && (left_lng - right_lng).abs() < 0.000_001
+        }
+        _ => false,
+    }
+}
+
+fn customer_address_cache_matches_payload(candidate: &Value, payload: &Value) -> bool {
+    if same_customer_address_coordinates(candidate, payload) {
+        return true;
+    }
+
+    let candidate_street = string_field(candidate, &["street_address", "street", "address"])
+        .map(|value| value.to_ascii_lowercase());
+    let payload_street = string_field(payload, &["street_address", "street", "address"])
+        .map(|value| value.to_ascii_lowercase());
+
+    if let (Some(candidate_street), Some(payload_street)) = (candidate_street, payload_street) {
+        if candidate_street == payload_street {
+            return true;
+        }
+    }
+
+    let candidate_formatted =
+        string_field(candidate, &["formatted_address"]).map(|value| value.to_ascii_lowercase());
+    let payload_formatted =
+        string_field(payload, &["formatted_address"]).map(|value| value.to_ascii_lowercase());
+
+    matches!(
+        (candidate_formatted, payload_formatted),
+        (Some(candidate_formatted), Some(payload_formatted)) if candidate_formatted == payload_formatted
+    )
+}
+
+fn find_cached_customer_address(
+    conn: &Connection,
+    customer_id: &str,
+    address_id: &str,
+    payload: &Value,
+) -> Option<Value> {
+    let cache = read_local_json_array_setting(conn, "customer_cache_v1");
+
+    cache
+        .into_iter()
+        .find(|customer| {
+            string_field(customer, &["id", "customerId"])
+                .is_some_and(|candidate| candidate == customer_id)
+        })
+        .and_then(|customer| customer.get("addresses").and_then(Value::as_array).cloned())
+        .and_then(|addresses| {
+            addresses
+                .iter()
+                .find(|address| {
+                    string_field(address, &["id", "addressId"])
+                        .is_some_and(|candidate| candidate == address_id)
+                })
+                .cloned()
+                .or_else(|| {
+                    if is_local_placeholder_id(address_id) {
+                        addresses
+                            .iter()
+                            .find(|address| {
+                                customer_address_cache_matches_payload(address, payload)
+                            })
+                            .cloned()
+                    } else {
+                        None
+                    }
+                })
+        })
+}
+
+fn merge_customer_address_payload_from_cache(
+    conn: &Connection,
+    customer_id: &str,
+    address_id: &str,
+    payload: &Value,
+) -> Value {
+    let Some(cached_address) = find_cached_customer_address(conn, customer_id, address_id, payload)
+    else {
+        return payload.clone();
+    };
+
+    let mut merged = cached_address.as_object().cloned().unwrap_or_default();
+    if let Some(payload_object) = payload.as_object() {
+        for (key, value) in payload_object {
+            if !value.is_null() {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    merged.insert(
+        "customer_id".to_string(),
+        Value::String(customer_id.to_string()),
+    );
+
+    Value::Object(merged)
+}
+
+fn has_customer_address_street(payload: &Value) -> bool {
+    string_field(payload, &["street_address", "street", "address"]).is_some()
+}
+
+fn normalize_customer_address_for_cache(mut address: Value) -> Value {
+    let now = Utc::now().to_rfc3339();
+    let street = string_field(&address, &["street_address", "street", "address"]);
+    let notes = address
+        .get("notes")
+        .cloned()
+        .or_else(|| address.get("delivery_notes").cloned())
+        .unwrap_or(Value::Null);
+    let coordinates = customer_address_coordinates(&address);
+
+    if let Some(obj) = address.as_object_mut() {
+        if let Some(street) = street.clone() {
+            obj.entry("street_address".to_string())
+                .or_insert_with(|| Value::String(street.clone()));
+            obj.entry("street".to_string())
+                .or_insert_with(|| Value::String(street));
+        }
+
+        obj.insert("notes".to_string(), notes.clone());
+        obj.insert("delivery_notes".to_string(), notes);
+
+        if !obj.contains_key("createdAt") {
+            let created_at = obj
+                .get("created_at")
+                .cloned()
+                .unwrap_or_else(|| Value::String(now.clone()));
+            obj.insert("createdAt".to_string(), created_at);
+        }
+        if !obj.contains_key("updatedAt") {
+            let updated_at = obj
+                .get("updated_at")
+                .cloned()
+                .unwrap_or_else(|| Value::String(now.clone()));
+            obj.insert("updatedAt".to_string(), updated_at);
+        }
+        if !obj.contains_key("version") {
+            obj.insert("version".to_string(), Value::from(1));
+        }
+        if let Some((lat, lng)) = coordinates {
+            obj.entry("latitude".to_string())
+                .or_insert(Value::from(lat));
+            obj.entry("longitude".to_string())
+                .or_insert(Value::from(lng));
+            obj.entry("coordinates".to_string())
+                .or_insert_with(|| serde_json::json!({ "lat": lat, "lng": lng }));
+        }
+    }
+
+    address
+}
+
+fn find_cached_customer_address_index(
+    addresses: &[Value],
+    item_record_id: &str,
+    remote_id: Option<&str>,
+    payload: &Value,
+) -> Option<usize> {
+    if let Some(remote_id) = remote_id {
+        if let Some(index) = addresses.iter().position(|address| {
+            string_field(address, &["id", "addressId"])
+                .is_some_and(|candidate| candidate == remote_id)
+        }) {
+            return Some(index);
+        }
+    }
+
+    if let Some(index) = addresses.iter().position(|address| {
+        string_field(address, &["id", "addressId"])
+            .is_some_and(|candidate| candidate == item_record_id)
+    }) {
+        return Some(index);
+    }
+
+    if is_local_placeholder_id(item_record_id) {
+        return addresses
+            .iter()
+            .position(|address| customer_address_cache_matches_payload(address, payload));
+    }
+
+    None
+}
+
+fn update_customer_address_cache_after_sync(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+) -> Result<(), String> {
+    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Null);
+    let response_address = response.and_then(|value| {
+        value
+            .get("address")
+            .cloned()
+            .or_else(|| value.get("data").cloned())
+    });
+    let customer_id = response_address
+        .as_ref()
+        .and_then(|address| string_field(address, &["customer_id", "customerId"]))
+        .or_else(|| extract_customer_id_from_sync_payload(item));
+
+    let Some(customer_id) = customer_id else {
+        return Ok(());
+    };
+
+    let mut customers = read_local_json_array_setting(conn, "customer_cache_v1");
+    let Some(customer) = customers.iter_mut().find(|entry| {
+        string_field(entry, &["id", "customerId"]).is_some_and(|candidate| candidate == customer_id)
+    }) else {
+        return Ok(());
+    };
+
+    let Some(customer_object) = customer.as_object_mut() else {
+        return Ok(());
+    };
+
+    let addresses_value = customer_object
+        .entry("addresses".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(addresses) = addresses_value.as_array_mut() else {
+        return Ok(());
+    };
+
+    if item.operation == "DELETE" {
+        addresses.retain(|address| {
+            !find_cached_customer_address_index(
+                std::slice::from_ref(address),
+                item.record_id.as_str(),
+                None,
+                &payload,
+            )
+            .is_some()
+        });
+    } else if let Some(response_address) = response_address {
+        let normalized_address = normalize_customer_address_for_cache(response_address);
+        let remote_id = string_field(&normalized_address, &["id", "addressId"]);
+        if let Some(index) = find_cached_customer_address_index(
+            addresses,
+            item.record_id.as_str(),
+            remote_id.as_deref(),
+            &payload,
+        ) {
+            addresses[index] = normalized_address;
+        } else {
+            addresses.push(normalized_address);
+        }
+    }
+
+    customer_object.insert(
+        "updatedAt".to_string(),
+        Value::String(Utc::now().to_rfc3339()),
+    );
+
+    write_local_json_array_setting(conn, "customer_cache_v1", &customers)
+}
+
 fn nested_value<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut current = payload;
     for key in path {
@@ -1131,6 +1432,11 @@ fn is_rate_limit_error(error: &str) -> bool {
     lower.contains("http 429") || lower.contains("rate limit exceeded")
 }
 
+fn is_customer_address_not_found_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("http 404") && lower.contains("address not found")
+}
+
 fn requeue_failed_items(
     conn: &Connection,
     queue_ids: &[String],
@@ -1296,6 +1602,94 @@ fn retry_failed_legacy_order_insert_items_limited(
         conn,
         &queue_ids,
         "Requeued legacy order insert parity rows after canonical request auto-heal",
+    )
+}
+
+fn retry_failed_customer_address_not_found_items_limited(
+    conn: &Connection,
+    limit: usize,
+) -> Result<RetryItemsResult, String> {
+    if limit == 0 {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    if resolve_request_terminal_id(conn, &Value::Object(Map::new())).is_none() {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, record_id, data, error_message
+             FROM parity_sync_queue
+             WHERE table_name = 'customer_addresses'
+               AND operation = 'UPDATE'
+               AND status = 'failed'
+               AND error_message IS NOT NULL
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| {
+            format!("sync_queue retry_failed_customer_address_not_found_items prepare: {e}")
+        })?;
+
+    let candidates: Vec<(String, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(|e| {
+            format!("sync_queue retry_failed_customer_address_not_found_items query: {e}")
+        })?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    let mut queue_ids = Vec::new();
+    for (queue_id, record_id, payload_raw, error_message) in candidates {
+        if queue_ids.len() >= limit {
+            break;
+        }
+        if !is_customer_address_not_found_error(&error_message)
+            || !is_local_placeholder_id(record_id.as_str())
+        {
+            continue;
+        }
+
+        let payload = serde_json::from_str::<Value>(&payload_raw)
+            .unwrap_or_else(|_| Value::Object(Map::new()));
+        let Some(customer_id) = payload
+            .get("customer_id")
+            .or_else(|| payload.get("customerId"))
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        let hydrated_payload = merge_customer_address_payload_from_cache(
+            conn,
+            customer_id.as_str(),
+            record_id.as_str(),
+            &payload,
+        );
+        if !has_customer_address_street(&hydrated_payload) {
+            continue;
+        }
+
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET data = ?1
+             WHERE id = ?2",
+            params![hydrated_payload.to_string(), queue_id.as_str()],
+        )
+        .map_err(|e| {
+            format!("sync_queue retry_failed_customer_address_not_found_items hydrate: {e}")
+        })?;
+        queue_ids.push(queue_id);
+    }
+
+    requeue_failed_items(
+        conn,
+        &queue_ids,
+        "Requeued stale customer address parity rows after cache-backed recreate auto-heal",
     )
 }
 
@@ -1963,6 +2357,9 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             prepare_financial_request(conn, item, &payload, terminal_id.as_str())
         }
         "housekeeping_tasks" => prepare_housekeeping_request(item, &payload, terminal_id.as_str()),
+        "customer_addresses" => {
+            prepare_customer_address_request(conn, item, &payload, terminal_id.as_str())
+        }
         _ => Ok(RequestPreparation::Ready(RequestSpec {
             endpoint: resolve_endpoint(item),
             method: resolve_http_method(item),
@@ -1974,6 +2371,76 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             terminal_id,
         })),
     }
+}
+
+fn prepare_customer_address_request(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    let Some(customer_id) = extract_customer_id_from_sync_payload(item) else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Customer address sync payload is missing customer_id".to_string(),
+        });
+    };
+
+    let should_create = item.operation == "INSERT"
+        || (item.operation == "UPDATE" && is_local_placeholder_id(item.record_id.as_str()));
+    let method = if item.operation == "DELETE" && !should_create {
+        Method::DELETE
+    } else if should_create {
+        Method::POST
+    } else {
+        Method::PATCH
+    };
+    let endpoint = if should_create {
+        format!("/api/pos/customers/{customer_id}/addresses")
+    } else {
+        format!(
+            "/api/pos/customers/{customer_id}/addresses/{}",
+            item.record_id
+        )
+    };
+
+    let body = if method == Method::DELETE {
+        None
+    } else {
+        let mut request_payload = merge_customer_address_payload_from_cache(
+            conn,
+            customer_id.as_str(),
+            item.record_id.as_str(),
+            payload,
+        );
+
+        if should_create && !has_customer_address_street(&request_payload) {
+            return Ok(RequestPreparation::Failed {
+                reason: "Customer address recreate is missing street_address details".to_string(),
+            });
+        }
+
+        if let Some(object) = request_payload.as_object_mut() {
+            object.insert(
+                "customer_id".to_string(),
+                Value::String(customer_id.clone()),
+            );
+            if should_create {
+                object.remove("id");
+                object.remove("addressId");
+                object.remove("version");
+                object.remove("expected_version");
+            }
+        }
+
+        Some(request_payload.to_string())
+    };
+
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint,
+        method,
+        body,
+        terminal_id: terminal_id.to_string(),
+    }))
 }
 
 fn prepare_order_request(
@@ -2457,6 +2924,9 @@ fn apply_success(
                 }
             }
         }
+        "customer_addresses" => {
+            update_customer_address_cache_after_sync(conn, item, response)?;
+        }
         "driver_earnings" | "driver_earning" => {
             if item.operation != "DELETE" {
                 let remote_id = response
@@ -2514,7 +2984,13 @@ pub async fn process_queue(
         remaining_requeue_budget =
             remaining_requeue_budget.saturating_sub(rate_limited_retries.retried as usize);
 
-        let _ = retry_failed_legacy_order_insert_items_limited(&db, remaining_requeue_budget)?;
+        let legacy_order_retries =
+            retry_failed_legacy_order_insert_items_limited(&db, remaining_requeue_budget)?;
+        remaining_requeue_budget =
+            remaining_requeue_budget.saturating_sub(legacy_order_retries.retried as usize);
+
+        let _ =
+            retry_failed_customer_address_not_found_items_limited(&db, remaining_requeue_budget)?;
     }
 
     let client = reqwest::Client::builder()
@@ -2992,6 +3468,23 @@ mod tests {
             .expect("store branch id");
     }
 
+    fn seed_customer_cache(conn: &Connection, customer_id: &str, address: Value) {
+        crate::db::set_setting(
+            conn,
+            "local",
+            "customer_cache_v1",
+            &json!([
+                {
+                    "id": customer_id,
+                    "name": "Test Customer",
+                    "addresses": [address]
+                }
+            ])
+            .to_string(),
+        )
+        .expect("seed customer cache");
+    }
+
     fn queue_item(
         table_name: &str,
         operation: &str,
@@ -3252,6 +3745,166 @@ mod tests {
             resolve_endpoint(&address_item),
             "/api/pos/sync/customer_addresses/addr-1"
         );
+    }
+
+    #[test]
+    fn prepare_customer_address_request_recreates_placeholder_updates_from_cache() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        seed_customer_cache(
+            &conn,
+            "cust-1",
+            json!({
+                "id": "local-new",
+                "street_address": "Main St 42",
+                "city": "Athens",
+                "coordinates": { "lat": 40.61, "lng": 22.95 }
+            }),
+        );
+
+        let item = queue_item(
+            "customer_addresses",
+            "UPDATE",
+            "local-new",
+            json!({
+                "customer_id": "cust-1",
+                "coordinates": { "lat": 40.61, "lng": 22.95 },
+                "latitude": 40.61,
+                "longitude": 22.95
+            }),
+        );
+
+        let request = match prepare_request(&conn, &item).expect("prepare request") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        assert_eq!(request.endpoint, "/api/pos/customers/cust-1/addresses");
+        assert_eq!(request.method, Method::POST);
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("street_address").and_then(Value::as_str),
+            Some("Main St 42")
+        );
+        assert_eq!(body.get("id"), None);
+        assert_eq!(
+            body.get("customer_id").and_then(Value::as_str),
+            Some("cust-1")
+        );
+    }
+
+    #[test]
+    fn retry_failed_customer_address_not_found_items_requeues_placeholder_updates() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        seed_customer_cache(
+            &conn,
+            "cust-1",
+            json!({
+                "id": "local-new",
+                "street_address": "Main St 42",
+                "city": "Athens",
+                "coordinates": { "lat": 40.61, "lng": 22.95 }
+            }),
+        );
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "customer_addresses",
+            "UPDATE",
+            "local-new",
+            json!({
+                "customer_id": "cust-1",
+                "coordinates": { "lat": 40.61, "lng": 22.95 }
+            }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 error_message = ?1
+             WHERE id = ?2",
+            params![
+                "HTTP 404: {\"success\":false,\"error\":\"Address not found\"}",
+                queue_id.as_str()
+            ],
+        )
+        .expect("seed failed customer address parity row");
+
+        let result = retry_failed_customer_address_not_found_items_limited(&conn, 1)
+            .expect("retry failed customer address rows");
+
+        assert_eq!(result.retried, 1);
+
+        let (status, payload): (String, String) = conn
+            .query_row(
+                "SELECT status, data FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load updated queue row");
+        assert_eq!(status, "pending");
+
+        let payload = serde_json::from_str::<Value>(&payload).expect("parse updated payload");
+        assert_eq!(
+            payload.get("street_address").and_then(Value::as_str),
+            Some("Main St 42")
+        );
+    }
+
+    #[test]
+    fn apply_success_updates_customer_address_cache_with_remote_id() {
+        let conn = test_connection();
+        seed_customer_cache(
+            &conn,
+            "cust-1",
+            json!({
+                "id": "local-new",
+                "street_address": "Main St 42",
+                "city": "Athens",
+                "coordinates": { "lat": 40.61, "lng": 22.95 }
+            }),
+        );
+
+        let item = queue_item(
+            "customer_addresses",
+            "UPDATE",
+            "local-new",
+            json!({
+                "customer_id": "cust-1",
+                "coordinates": { "lat": 40.61, "lng": 22.95 }
+            }),
+        );
+
+        apply_success(
+            &conn,
+            &item,
+            Some(&json!({
+                "address": {
+                    "id": "addr-remote-1",
+                    "customer_id": "cust-1",
+                    "street_address": "Main St 42",
+                    "city": "Athens",
+                    "coordinates": { "lat": 40.61, "lng": 22.95 },
+                    "version": 2
+                }
+            })),
+        )
+        .expect("apply customer address success");
+
+        let cache = crate::db::get_setting(&conn, "local", "customer_cache_v1")
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .expect("customer cache");
+        let address_id = cache
+            .get(0)
+            .and_then(|customer| customer.get("addresses"))
+            .and_then(Value::as_array)
+            .and_then(|addresses| addresses.first())
+            .and_then(|address| address.get("id"))
+            .and_then(Value::as_str);
+
+        assert_eq!(address_id, Some("addr-remote-1"));
     }
 
     #[test]
