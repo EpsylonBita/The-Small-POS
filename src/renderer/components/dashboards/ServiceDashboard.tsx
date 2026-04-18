@@ -342,8 +342,8 @@ export const ServiceDashboard = memo<ServiceDashboardProps>(({ className = '' })
         </div>
       )}
 
-      {/* Order Flow with floating Add Order button */}
-      <OrderFlow />
+      {/* Reuse order-flow modals/state here, but let OrderDashboard own the visible FAB */}
+      <OrderFlow showFab={false} />
     </div>
   );
 });

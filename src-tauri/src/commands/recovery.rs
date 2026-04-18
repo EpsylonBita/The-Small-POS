@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::{api, auth, db, recovery, storage, sync, sync_queue};
+use crate::{api, auth, db, payments, recovery, storage, sync, sync_queue};
 
 fn parse_point_id(arg0: Option<Value>) -> Result<String, String> {
     crate::payload_arg0_as_string(arg0, &["id", "pointId", "point_id", "value"])
@@ -533,6 +533,66 @@ pub async fn recovery_execute_action(
                 "success": true,
                 "requiresRefresh": true,
                 "message": format!("Requeued {count} failed financial sync item(s)."),
+            }))
+        }
+        "resolveCheckoutPaymentBlocker" => {
+            auth::authorize_privileged_action(
+                auth::PrivilegedActionScope::CashDrawerControl,
+                &db,
+                &auth_state,
+            )?;
+
+            let order_id = request_field_str(&request, "orderId")
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "Missing orderId for checkout payment repair".to_string())?;
+            let preferred_method = request_param_str(&request, "preferredMethod")
+                .or_else(|| request_param_str(&request, "paymentMethod"))
+                .or_else(
+                    || match request_param_str(&request, "reasonCode").as_deref() {
+                        Some("missing_cash_payment") | Some("partial_cash_payment") => {
+                            Some("cash".to_string())
+                        }
+                        Some("missing_card_payment") | Some("partial_card_payment") => {
+                            Some("card".to_string())
+                        }
+                        _ => None,
+                    },
+                )
+                .unwrap_or_else(|| "card".to_string());
+
+            let result = payments::resolve_unsettled_payment_blocker_payment(
+                &db,
+                &json!({
+                    "orderId": order_id,
+                    "method": preferred_method,
+                }),
+            )
+            .map_err(auth::GuardedCommandError::from)?;
+
+            let success = result
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !success {
+                let message = result
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .or_else(|| result.get("message").and_then(Value::as_str))
+                    .unwrap_or("Failed to repair the missing payment record");
+                return Err(message.to_string().into());
+            }
+
+            let order_number = request_field_str(&request, "orderNumber")
+                .unwrap_or("the order")
+                .to_string();
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "message": format!(
+                    "Recorded the missing {} payment for {}.",
+                    preferred_method,
+                    order_number,
+                ),
             }))
         }
         "repairOrphanedFinancial" => {

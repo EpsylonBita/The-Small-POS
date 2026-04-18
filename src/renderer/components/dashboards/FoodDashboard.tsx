@@ -75,8 +75,8 @@ export const FoodDashboard = memo<FoodDashboardProps>(({ className = '' }) => {
       {/* Main Order Dashboard */}
       <OrderDashboard className="flex-1" orderFilter={foodOrderFilter} />
 
-      {/* Order Flow with floating Add Order button */}
-      <OrderFlow />
+      {/* Reuse order-flow modals/state here, but let OrderDashboard own the visible FAB */}
+      <OrderFlow showFab={false} />
     </div>
   );
 });

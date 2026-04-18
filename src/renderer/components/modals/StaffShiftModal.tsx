@@ -472,6 +472,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [checkoutPaymentBlockers, setCheckoutPaymentBlockers] = useState<
     UnsettledPaymentBlocker[]
   >([]);
+  const [resolvingCheckoutBlockerKey, setResolvingCheckoutBlockerKey] = useState<string | null>(
+    null,
+  );
 
   // Expense state
   const [showExpenseForm, setShowExpenseForm] = useState(false);
@@ -2369,6 +2372,74 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       );
     } finally {
       setIsPrintCheckoutLoading(false);
+    }
+  };
+
+  const handleResolveCheckoutPaymentBlocker = async (
+    blocker: UnsettledPaymentBlocker,
+    method: 'cash' | 'card',
+  ) => {
+    const actionKey = `${blocker.orderId}:${method}`;
+    setResolvingCheckoutBlockerKey(actionKey);
+    setError('');
+    setSuccess('');
+
+    try {
+      const result = await bridge.reports.resolvePaymentBlocker({
+        orderId: blocker.orderId,
+        method,
+      });
+
+      if (result?.success === false) {
+        const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
+        if (paymentIntegrityPayload?.blockers) {
+          setCheckoutPaymentBlockers(paymentIntegrityPayload.blockers);
+        }
+        setError(
+          formatPaymentIntegrityError(
+            result,
+            t('modals.staffShift.closeShiftFailed'),
+            t,
+          ),
+        );
+        return;
+      }
+
+      const remainingBlockers =
+        extractPaymentIntegrityPayload({
+          blockers:
+            (result as unknown as { remainingBlockers?: unknown })
+              ?.remainingBlockers,
+        })?.blockers ?? [];
+
+      setCheckoutPaymentBlockers((current) => [
+        ...current.filter((item) => item.orderId !== blocker.orderId),
+        ...remainingBlockers,
+      ]);
+      setSuccess(
+        t('modals.staffShift.paymentRepairRecorded', {
+          orderNumber: blocker.orderNumber,
+          method: t(
+            method === 'cash' ? 'modals.zReport.cash' : 'modals.zReport.card',
+          ).toLowerCase(),
+          defaultValue:
+            'Recorded the missing {{method}} payment for {{orderNumber}}. Retry shift checkout.',
+        }),
+      );
+    } catch (err) {
+      const paymentIntegrityPayload = extractPaymentIntegrityPayload(err);
+      if (paymentIntegrityPayload?.blockers) {
+        setCheckoutPaymentBlockers(paymentIntegrityPayload.blockers);
+      }
+      setError(
+        formatPaymentIntegrityError(
+          err,
+          t('modals.staffShift.closeShiftFailed'),
+          t,
+        ),
+      );
+    } finally {
+      setResolvingCheckoutBlockerKey(null);
     }
   };
 
@@ -5043,9 +5114,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               })}
               helperText={t('modals.staffShift.paymentIntegrityHelper', {
                 defaultValue:
-                  'These orders belong to the current business day and must be repaired before the cashier can check out.',
+                  'These orders belong to the current business day. Record or confirm the missing payment row before the cashier can check out.',
               })}
               className="mb-4"
+              onResolveBlocker={handleResolveCheckoutPaymentBlocker}
+              resolvingKey={resolvingCheckoutBlockerKey}
             />
           )}
 

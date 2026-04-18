@@ -6,6 +6,7 @@ import type {
   SyncFinancialIntegrityIssue,
   SyncFinancialIntegrityResponse,
   SyncFinancialQueueItem,
+  UnsettledPaymentBlocker,
 } from '../../../lib';
 import type { SyncQueueItem } from '../../../../../shared/pos/sync-queue-types';
 
@@ -89,6 +90,16 @@ const createRetryFinancialItemAction = (): RecoveryActionDescriptor =>
 
 const createRetryAllFailedFinancialAction = (): RecoveryActionDescriptor =>
   createAction('retryAllFailedFinancial', 'recovery.actions.retryAllFailedFinancial.label');
+
+const createResolveCheckoutPaymentBlockerAction = (
+  method: 'cash' | 'card',
+): RecoveryActionDescriptor =>
+  createAction(
+    'resolveCheckoutPaymentBlocker',
+    method === 'cash'
+      ? 'modals.zReport.resolveBlockerCash'
+      : 'modals.zReport.resolveBlockerCard',
+  );
 
 const createRepairOrphanedFinancialAction = (): RecoveryActionDescriptor =>
   createAction('repairOrphanedFinancial', 'recovery.actions.repairOrphanedFinancial.label', {
@@ -298,6 +309,75 @@ const buildMissingCredentialIssue = (
       missingItems: missing.join(', '),
     },
   };
+};
+
+const preferredCheckoutBlockerMethod = (
+  blocker: UnsettledPaymentBlocker,
+): 'cash' | 'card' | null => {
+  if (
+    blocker.reasonCode === 'missing_cash_payment' ||
+    blocker.reasonCode === 'partial_cash_payment' ||
+    blocker.paymentMethod === 'cash'
+  ) {
+    return 'cash';
+  }
+
+  if (
+    blocker.reasonCode === 'missing_card_payment' ||
+    blocker.reasonCode === 'partial_card_payment' ||
+    blocker.paymentMethod === 'card'
+  ) {
+    return 'card';
+  }
+
+  return null;
+};
+
+const buildCheckoutPaymentBlockerIssues = (
+  systemHealth: DiagnosticsSystemHealth,
+): RecoveryIssue[] => {
+  const blockerSnapshot = systemHealth.checkoutPaymentBlockers;
+  const blockers = blockerSnapshot?.details ?? [];
+  if (blockers.length === 0) {
+    return [];
+  }
+
+  return blockers.map((blocker) => {
+    const preferredMethod = preferredCheckoutBlockerMethod(blocker);
+    const outstandingAmount = Math.max(
+      Number(blocker.totalAmount || 0) - Number(blocker.settledAmount || 0),
+      0,
+    );
+    return {
+      id: `checkout-payment-blocker-${blocker.orderId}`,
+      code: blocker.reasonCode,
+      severity: 'error',
+      status: 'blocking',
+      entityType: 'order',
+      entityId: blocker.orderId,
+      titleKey: 'recovery.issues.checkoutPaymentBlocker.title',
+      summaryKey: 'recovery.issues.checkoutPaymentBlocker.summary',
+      guidanceKey: 'recovery.issues.checkoutPaymentBlocker.guidance',
+      actions: preferredMethod
+        ? [createResolveCheckoutPaymentBlockerAction(preferredMethod)]
+        : [createContactOperatorAction()],
+      params: {
+        orderNumber: blocker.orderNumber,
+        reasonCode: blocker.reasonCode,
+        reasonText: blocker.reasonText,
+        suggestedFix: blocker.suggestedFix,
+        paymentMethod: blocker.paymentMethod,
+        paymentStatus: blocker.paymentStatus,
+        totalAmount: Number(blocker.totalAmount || 0).toFixed(2),
+        settledAmount: Number(blocker.settledAmount || 0).toFixed(2),
+        outstandingAmount: outstandingAmount.toFixed(2),
+        preferredMethod,
+        sourceWindow: blockerSnapshot?.sourceWindow ?? 'active_shift',
+      },
+      orderId: blocker.orderId,
+      orderNumber: blocker.orderNumber,
+    } satisfies RecoveryIssue;
+  });
 };
 
 const buildParityProcessorIssue = (
@@ -630,6 +710,9 @@ export function buildSyncRecoveryIssues({
 
   const issues: RecoveryIssue[] = [];
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
+  for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth)) {
+    pushIssue(issues, issue);
+  }
   pushIssue(issues, buildInvalidOrdersIssue(systemHealth));
   pushIssue(issues, buildParityProcessorIssue(systemHealth, parityItems, lastParitySync));
 

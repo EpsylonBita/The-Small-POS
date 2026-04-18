@@ -3007,8 +3007,8 @@
       "pendingLocalSubmitQueued": "Previous day closed locally. Z-report is queued for admin sync. Logging out…",
       "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
       "submitFailed": "Failed: {{error}}",
-      "resolveBlockerCash": "Collect Cash",
-      "resolveBlockerCard": "Collect Card",
+      "resolveBlockerCash": "Record Cash Payment",
+      "resolveBlockerCard": "Record Card Payment",
       "resolvingPayment": "Recording payment…",
       "resolveBlockerSuccess": "Recorded {{method}} payment for {{orderNumber}}. Review the refreshed report and submit the Z-report again.",
       "resolveBlockerFailed": "Failed to resolve {{orderNumber}}: {{error}}",
@@ -5044,6 +5044,11 @@
         "title": "Failed financial sync row",
         "summary": "A financial sync row failed with {{lastError}}.",
         "guidance": "Use the mapped recovery action when available. If the same failure returns after retry, contact operator."
+      },
+      "checkoutPaymentBlocker": {
+        "title": "Order blocks shift checkout",
+        "summary": "{{reasonText}}",
+        "guidance": "{{suggestedFix}} Total {{totalAmount}}, settled {{settledAmount}}, outstanding {{outstandingAmount}}."
       },
       "contactOperatorFallback": {
         "title": "Operator attention required",

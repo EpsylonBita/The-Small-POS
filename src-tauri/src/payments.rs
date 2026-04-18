@@ -1039,14 +1039,14 @@ pub fn resolve_unsettled_payment_blocker_payment(
     let blockers = payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
     let Some(blocker) = blockers.first() else {
         return Ok(build_payment_blocker_failure(
-            "This order no longer has a payment blocker. Refresh the Z-report preview.",
+            "This order no longer has a payment blocker. Refresh the payment blockers and try again.",
             &[],
         ));
     };
 
     if !blocker_is_resolvable_from_z_report(blocker) {
         return Ok(build_payment_blocker_failure(
-            "This blocker needs manual review and cannot be repaired automatically from the Z-report screen.",
+            "This blocker needs manual review and cannot be repaired automatically from this screen.",
             &blockers,
         ));
     }
@@ -1055,7 +1055,7 @@ pub fn resolve_unsettled_payment_blocker_payment(
     let outstanding_amount = balance_snapshot.outstanding_amount;
     if outstanding_amount <= 0.009 {
         return Ok(build_payment_blocker_failure(
-            "This order no longer has a collectible outstanding balance. Refresh the Z-report preview.",
+            "This order no longer has a collectible outstanding balance. Refresh the payment blockers and try again.",
             &blockers,
         ));
     }

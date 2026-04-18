@@ -90,6 +90,7 @@ export type {
   DiagnosticsExportOptions,
   DiagnosticsExportResponse,
   DiagnosticsTerminalContext,
+  UnsettledPaymentBlocker,
   RecoveryIssueSeverity,
   RecoveryIssueStatus,
   RecoveryRouteTarget,

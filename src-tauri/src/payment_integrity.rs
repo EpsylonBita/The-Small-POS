@@ -113,8 +113,8 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
         return Some(build_blocker(
             &row,
             "missing_local_payment_row",
-            "Order is marked paid but no local cash/card payment row was saved.".to_string(),
-            "Refresh the order payments or reopen the order and collect cash or card.".to_string(),
+            "Order is marked paid but its local payment record is missing.".to_string(),
+            "Refresh payment mirrors or recreate the missing payment record.".to_string(),
         ));
     }
 
@@ -123,14 +123,14 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
             "cash" => build_blocker(
                 &row,
                 "missing_cash_payment",
-                "Order was completed without a persisted cash payment.".to_string(),
-                "Open the order and collect cash.".to_string(),
+                "Order is missing its recorded cash payment.".to_string(),
+                "Record or confirm the missing cash payment.".to_string(),
             ),
             "card" => build_blocker(
                 &row,
                 "missing_card_payment",
-                "Order was completed without a persisted card payment.".to_string(),
-                "Open the order and collect card.".to_string(),
+                "Order is missing its recorded card payment.".to_string(),
+                "Record or confirm the missing card payment.".to_string(),
             ),
             "split" | "mixed" => build_blocker(
                 &row,
@@ -146,7 +146,7 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
                 &row,
                 "no_persisted_payment",
                 "Order was completed without a persisted cash/card payment.".to_string(),
-                "Open the order and collect cash or card.".to_string(),
+                "Record the missing cash or card payment.".to_string(),
             ),
         });
     }
@@ -176,7 +176,7 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
                 format_money(row.settled_amount),
                 format_money(row.total_amount)
             ),
-            "Open the order and collect the remaining cash.".to_string(),
+            "Record the remaining cash payment to continue.".to_string(),
         ),
         "card" => build_blocker(
             &row,
@@ -186,7 +186,7 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
                 format_money(row.settled_amount),
                 format_money(row.total_amount)
             ),
-            "Open the order and collect the remaining card amount.".to_string(),
+            "Record the remaining card payment to continue.".to_string(),
         ),
         _ => build_blocker(
             &row,
@@ -196,7 +196,7 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
                 format_money(row.settled_amount),
                 format_money(row.total_amount)
             ),
-            "Open the order and collect the remaining balance as cash or card.".to_string(),
+            "Record the remaining balance as cash or card.".to_string(),
         ),
     })
 }

@@ -3003,8 +3003,8 @@
       "pendingLocalSubmitQueued": "Il giorno precedente è stato chiuso localmente. Il report Z è in coda per la sincronizzazione admin. Disconnessione…",
       "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
       "submitFailed": "Non riuscito: {{error}}",
-      "resolveBlockerCash": "Incassa Contanti",
-      "resolveBlockerCard": "Incassa Carta",
+      "resolveBlockerCash": "Registra Pagamento Contanti",
+      "resolveBlockerCard": "Registra Pagamento Carta",
       "resolvingPayment": "Registrazione pagamento…",
       "resolveBlockerSuccess": "Registrato pagamento {{method}} per {{orderNumber}}. Controlla il report aggiornato e riprova il rapporto Z.",
       "resolveBlockerFailed": "Impossibile risolvere {{orderNumber}}: {{error}}",
@@ -5044,6 +5044,11 @@
         "title": "Riga di sincronizzazione finanziaria fallita",
         "summary": "Una riga di sincronizzazione finanziaria è fallita con {{lastError}}.",
         "guidance": "Usa l'azione di recupero mappata quando disponibile. Se lo stesso errore ritorna dopo il nuovo tentativo, contatta l'operatore."
+      },
+      "checkoutPaymentBlocker": {
+        "title": "L'ordine blocca la chiusura turno",
+        "summary": "{{reasonText}}",
+        "guidance": "{{suggestedFix}} Totale {{totalAmount}}, registrato {{settledAmount}}, residuo {{outstandingAmount}}."
       },
       "contactOperatorFallback": {
         "title": "Serve l'intervento dell'operatore",

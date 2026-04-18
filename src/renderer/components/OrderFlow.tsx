@@ -43,6 +43,8 @@ interface OrderFlowProps {
   className?: string;
   /** Force retail mode - always show ProductCatalogModal instead of MenuModal */
   forceRetailMode?: boolean;
+  /** Hide the floating action button when a parent screen already owns the entry point */
+  showFab?: boolean;
 }
 
 interface Customer {
@@ -89,7 +91,7 @@ interface Customer {
  * Complete Order Flow Component
  * Handles the full order creation workflow from type selection to completion
  */
-const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = false }) => {
+const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = false, showFab = true }) => {
   const bridge = getBridge();
   const { t } = useI18n();
   const { isFeatureEnabled } = useFeatures();
@@ -881,7 +883,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   return (
     <div className={`order-flow ${className}`}>
       {/* Floating Action Button for New Order - hidden when order creation is disabled */}
-      {canCreateOrders && (
+      {showFab && canCreateOrders && (
         <FloatingActionButton
           onClick={handleStartNewOrder}
           disabled={!isShiftActive}

@@ -20,20 +20,20 @@
       "waiting_parent": "En attente du paiement parent"
     },
     "reasonCodes": {
-      "missing_cash_payment": "La commande {{orderNumber}} n'a pas de paiement en espèces enregistré.",
-      "missing_card_payment": "La commande {{orderNumber}} n'a pas de paiement par carte enregistré.",
-      "missing_local_payment_row": "La commande {{orderNumber}} n'a pas sa ligne de paiement locale.",
+      "missing_cash_payment": "La commande {{orderNumber}} n'a pas son paiement en espèces enregistré.",
+      "missing_card_payment": "La commande {{orderNumber}} n'a pas son paiement par carte enregistré.",
+      "missing_local_payment_row": "La commande {{orderNumber}} est marquée payée, mais sa ligne de paiement locale manque.",
       "partial_cash_payment": "La commande {{orderNumber}} a encore un reste en espèces à encaisser.",
       "partial_card_payment": "La commande {{orderNumber}} a encore un reste par carte à encaisser.",
       "split_payment_incomplete": "Le paiement partagé de la commande {{orderNumber}} n'est pas terminé.",
       "unsupported_payment_method": "La commande {{orderNumber}} utilise un mode de paiement à encaisser manuellement."
     },
     "fixCodes": {
-      "missing_cash_payment": "Ouvrez la commande et encaissez le paiement en espèces.",
-      "missing_card_payment": "Ouvrez la commande et encaissez le paiement par carte.",
-      "missing_local_payment_row": "Ouvrez la commande et enregistrez à nouveau le paiement attendu.",
-      "partial_cash_payment": "Encaissez le montant restant en espèces pour continuer.",
-      "partial_card_payment": "Encaissez le montant restant par carte pour continuer.",
+      "missing_cash_payment": "Enregistrez ou confirmez le paiement en espèces manquant.",
+      "missing_card_payment": "Enregistrez ou confirmez le paiement par carte manquant.",
+      "missing_local_payment_row": "Rafraîchissez les miroirs de paiement ou recréez la ligne de paiement manquante.",
+      "partial_cash_payment": "Enregistrez le montant restant en espèces pour continuer.",
+      "partial_card_payment": "Enregistrez le montant restant par carte pour continuer.",
       "split_payment_incomplete": "Terminez toutes les parties du paiement partagé avant de continuer.",
       "unsupported_payment_method": "Vérifiez la commande et encaissez le paiement manuellement."
     }

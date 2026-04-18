@@ -398,8 +398,8 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
         <OrderDashboard className="flex-1" />
       </div>
 
-      {/* Order Flow with floating Add Order button */}
-      <OrderFlow />
+      {/* Reuse order-flow modals/state here, but let OrderDashboard own the visible FAB */}
+      <OrderFlow showFab={false} />
     </div>
   );
 });

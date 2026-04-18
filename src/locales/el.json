@@ -3019,8 +3019,8 @@
       "pendingLocalSubmitQueued": "Η προηγούμενη ημέρα έκλεισε τοπικά. Η Αναφορά Z μπήκε σε ουρά για συγχρονισμό με τον διαχειριστή. Αποσύνδεση…",
       "submitSuccessSynced": "Η ημέρα έκλεισε τοπικά. Η Αναφορά Z έχει ήδη συγχρονιστεί με τον διαχειριστή. Αποσύνδεση…",
       "submitFailed": "Αποτυχία: {{error}}",
-      "resolveBlockerCash": "Είσπραξη Μετρητών",
-      "resolveBlockerCard": "Είσπραξη Κάρτας",
+      "resolveBlockerCash": "Καταγραφή Πληρωμής Μετρητών",
+      "resolveBlockerCard": "Καταγραφή Πληρωμής Κάρτας",
       "resolvingPayment": "Καταγραφή πληρωμής…",
       "resolveBlockerSuccess": "Καταγράφηκε πληρωμή {{method}} για την παραγγελία {{orderNumber}}. Ελέγξτε την ανανεωμένη αναφορά και δοκιμάστε ξανά το Z-report.",
       "resolveBlockerFailed": "Αποτυχία επίλυσης της {{orderNumber}}: {{error}}",
@@ -5190,6 +5190,11 @@
         "title": "Αποτυχημένη οικονομική γραμμή συγχρονισμού",
         "summary": "Μια οικονομική γραμμή συγχρονισμού απέτυχε με {{lastError}}.",
         "guidance": "Χρησιμοποιήστε τη διαθέσιμη ενέργεια ανάκτησης όταν υπάρχει. Αν η ίδια αποτυχία επιστρέψει μετά την επανάληψη, επικοινωνήστε με operator."
+      },
+      "checkoutPaymentBlocker": {
+        "title": "Η παραγγελία μπλοκάρει το checkout βάρδιας",
+        "summary": "{{reasonText}}",
+        "guidance": "{{suggestedFix}} Σύνολο {{totalAmount}}, τακτοποιημένα {{settledAmount}}, υπόλοιπο {{outstandingAmount}}."
       },
       "contactOperatorFallback": {
         "title": "Απαιτείται παρέμβαση operator",

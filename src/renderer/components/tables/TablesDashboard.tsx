@@ -5,9 +5,10 @@ import { useOrderStore } from '../../hooks/useOrderStore';
 import { useTables } from '../../hooks/useTables';
 import { useSystemClock } from '../../hooks/useSystemClock';
 import { ReservationInfoPanel } from './ReservationInfoPanel';
+import { FloatingActionButton } from '../ui/FloatingActionButton';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
-import { ClipboardList, CheckCircle, XCircle, LayoutGrid, Users, RefreshCw, Plus, Truck } from 'lucide-react';
+import { ClipboardList, CheckCircle, XCircle, LayoutGrid, Users, RefreshCw, Truck } from 'lucide-react';
 import { formatCurrency, formatTime as formatTimeValue } from '../../utils/format';
 import { toLocalDateString } from '../../utils/date';
 
@@ -281,17 +282,11 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
       </div>
 
       {/* Floating Action Button for Add Order */}
-      <button
+      <FloatingActionButton
         onClick={onAddOrder}
-        className={`fixed bottom-6 right-6 w-16 h-16 rounded-full shadow-lg transition-all duration-300 z-50 flex items-center justify-center ${
-          isDark
-            ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/30'
-            : 'bg-blue-600 hover:bg-blue-700 text-white shadow-lg'
-        } hover:scale-110 active:scale-95`}
+        className="!bottom-6 !right-6"
         title={t('tablesDashboard.addOrder', { defaultValue: 'Add Order' })}
-      >
-        <Plus className="w-8 h-8" />
-      </button>
+      />
     </div>
   );
 });

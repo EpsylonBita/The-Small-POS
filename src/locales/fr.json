@@ -3003,8 +3003,8 @@
       "pendingLocalSubmitQueued": "La journée précédente a été clôturée localement. Le rapport Z est en file d'attente pour la synchronisation admin. Déconnexion…",
       "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
       "submitFailed": "Échec : {{error}}",
-      "resolveBlockerCash": "Encaisser en Espèces",
-      "resolveBlockerCard": "Encaisser par Carte",
+      "resolveBlockerCash": "Enregistrer le Paiement Espèces",
+      "resolveBlockerCard": "Enregistrer le Paiement Carte",
       "resolvingPayment": "Enregistrement du paiement…",
       "resolveBlockerSuccess": "Un paiement {{method}} a été enregistré pour {{orderNumber}}. Vérifiez le rapport actualisé puis relancez le rapport Z.",
       "resolveBlockerFailed": "Impossible de corriger {{orderNumber}} : {{error}}",
@@ -5044,6 +5044,11 @@
         "title": "Ligne de synchro financière en échec",
         "summary": "Une ligne de synchro financière a échoué avec {{lastError}}.",
         "guidance": "Utilisez l'action de récupération associée lorsqu'elle existe. Si le même échec revient après une nouvelle tentative, contactez l'operator."
+      },
+      "checkoutPaymentBlocker": {
+        "title": "La commande bloque la clôture de caisse",
+        "summary": "{{reasonText}}",
+        "guidance": "{{suggestedFix}} Total {{totalAmount}}, encaissé {{settledAmount}}, restant {{outstandingAmount}}."
       },
       "contactOperatorFallback": {
         "title": "Intervention de l'operator requise",

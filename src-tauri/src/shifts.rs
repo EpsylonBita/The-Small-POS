@@ -25,9 +25,9 @@ struct CheckInEligibility {
 }
 
 #[derive(Debug, Clone)]
-struct ShiftBusinessDayContext {
-    report_date: String,
-    period_start_at: String,
+pub(crate) struct ShiftBusinessDayContext {
+    pub(crate) report_date: String,
+    pub(crate) period_start_at: String,
 }
 
 impl CheckInEligibility {
@@ -44,7 +44,7 @@ impl CheckInEligibility {
     }
 }
 
-fn resolve_shift_business_day_context(
+pub(crate) fn resolve_shift_business_day_context(
     conn: &Connection,
     branch_id: &str,
     fallback_at: &str,
@@ -68,6 +68,51 @@ fn resolve_shift_business_day_context(
     ShiftBusinessDayContext {
         report_date,
         period_start_at,
+    }
+}
+
+fn load_checkout_payment_blockers_with_auto_repair(
+    db: &DbState,
+    branch_id: &str,
+    period_start_at: &str,
+    cutoff_at: &str,
+) -> Result<Vec<payment_integrity::UnsettledPaymentBlocker>, String> {
+    let load_blockers = || {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        payment_integrity::load_branch_window_payment_blockers(
+            &conn,
+            branch_id,
+            period_start_at,
+            Some(cutoff_at),
+            true,
+        )
+    };
+
+    let initial_blockers = load_blockers()?;
+    let blocking_order_ids: Vec<String> = initial_blockers
+        .iter()
+        .filter(|blocker| blocker.missing_local_payment_row())
+        .map(|blocker| blocker.order_id.clone())
+        .collect();
+
+    if blocking_order_ids.is_empty() {
+        return Ok(initial_blockers);
+    }
+
+    match tauri::async_runtime::block_on(crate::sync::repair_local_payment_mirrors_for_orders(
+        db,
+        &blocking_order_ids,
+    )) {
+        Ok(_) => load_blockers(),
+        Err(error) => {
+            warn!(
+                branch_id = %branch_id,
+                order_ids = ?blocking_order_ids,
+                error = %error,
+                "Failed to auto-repair payment mirrors before shift close"
+            );
+            Ok(initial_blockers)
+        }
     }
 }
 
@@ -415,8 +460,6 @@ fn load_cash_drawer_snapshot_for_shift(
 /// For calculation_version >= 2, recorded staff payouts for the cashier shift are
 /// used as the source of truth, with the cash drawer aggregate as a fallback.
 pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
     let shift_id = str_field(payload, "shiftId")
         .or_else(|| str_field(payload, "shift_id"))
         .ok_or("Missing shiftId")?;
@@ -439,32 +482,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let now = Utc::now().to_rfc3339();
 
     // Fetch the active shift (include branch_id/terminal_id for driver return + transfer logic)
-    let shift = conn
-        .query_row(
-            "SELECT id, staff_id, staff_name, role_type, opening_cash_amount, calculation_version,
-                    branch_id, terminal_id, check_in_time, report_date, period_start_at
-             FROM staff_shifts WHERE id = ?1 AND status = 'active'",
-            params![shift_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, f64>(4)?,
-                    row.get::<_, Option<i32>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                ))
-            },
-        )
-        .map_err(|_| format!("No active shift found with id {shift_id}"))?;
-
     let (
-        _id,
         staff_id,
         staff_name,
         role_type,
@@ -473,19 +491,68 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         shift_branch_id,
         shift_terminal_id,
         shift_check_in_time,
-        stored_report_date,
-        stored_period_start_at,
-    ) = shift;
-    let calc_version = calc_version.unwrap_or(1);
-    let shift_branch_id = shift_branch_id.unwrap_or_default();
-    let shift_terminal_id = shift_terminal_id.unwrap_or_default();
-    let shift_business_day = resolve_shift_business_day_context(
-        &conn,
-        &shift_branch_id,
-        &now,
-        stored_report_date.as_deref(),
-        stored_period_start_at.as_deref(),
-    );
+        shift_business_day,
+    ) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let shift = conn
+            .query_row(
+                "SELECT id, staff_id, staff_name, role_type, opening_cash_amount, calculation_version,
+                        branch_id, terminal_id, check_in_time, report_date, period_start_at
+                 FROM staff_shifts WHERE id = ?1 AND status = 'active'",
+                params![shift_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, Option<i32>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                    ))
+                },
+            )
+            .map_err(|_| format!("No active shift found with id {shift_id}"))?;
+
+        let (
+            _id,
+            staff_id,
+            staff_name,
+            role_type,
+            opening_cash,
+            calc_version,
+            shift_branch_id,
+            shift_terminal_id,
+            shift_check_in_time,
+            stored_report_date,
+            stored_period_start_at,
+        ) = shift;
+        let shift_branch_id = shift_branch_id.unwrap_or_default();
+        let shift_terminal_id = shift_terminal_id.unwrap_or_default();
+        let shift_business_day = resolve_shift_business_day_context(
+            &conn,
+            &shift_branch_id,
+            &now,
+            stored_report_date.as_deref(),
+            stored_period_start_at.as_deref(),
+        );
+
+        (
+            staff_id,
+            staff_name,
+            role_type,
+            opening_cash,
+            calc_version.unwrap_or(1),
+            shift_branch_id,
+            shift_terminal_id,
+            shift_check_in_time,
+            shift_business_day,
+        )
+    };
     let is_non_financial_role = is_non_financial_shift_role(&role_type);
     let closing_cash_to_persist = if is_non_financial_role {
         0.0
@@ -500,6 +567,23 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         } else {
             payment_amount
         };
+
+    if role_type == "cashier" || role_type == "manager" {
+        let blockers = load_checkout_payment_blockers_with_auto_repair(
+            db,
+            &shift_branch_id,
+            shift_business_day.period_start_at.as_str(),
+            now.as_str(),
+        )?;
+        if !blockers.is_empty() {
+            return Ok(payment_integrity::build_unsettled_payment_blocker_response(
+                "Cannot close shift",
+                &blockers,
+            ));
+        }
+    }
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     // Wrap the entire reconciliation + close in a single IMMEDIATE transaction so
     // that no order/payment can be inserted between the aggregate SELECTs and the

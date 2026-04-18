@@ -104,6 +104,9 @@ export function UnsettledPaymentBlockersPanel({
                   blocker.paymentMethod === "card"
                 ? "card"
                 : null;
+          const resolveMethods = preferredMethod
+            ? ([preferredMethod] as const)
+            : (["cash", "card"] as const);
           return (
             <div
               key={`${blocker.orderId}-${blocker.reasonCode}`}
@@ -185,7 +188,7 @@ export function UnsettledPaymentBlockersPanel({
 
               {canResolveHere && (
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {(["cash", "card"] as const).map((method) => {
+                  {resolveMethods.map((method) => {
                     const buttonKey = `${blocker.orderId}:${method}`;
                     const isResolving = resolvingKey === buttonKey;
                     const isBusy = Boolean(resolvingKey) && resolvingKey !== buttonKey;

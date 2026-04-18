@@ -525,6 +525,12 @@ export interface DiagnosticsLastParitySync {
   queueStatus?: DiagnosticsParityQueueStatus | null;
 }
 
+export interface DiagnosticsCheckoutPaymentBlockers {
+  count: number;
+  details: UnsettledPaymentBlocker[];
+  sourceWindow: 'active_shift' | 'z_report';
+}
+
 export interface DiagnosticsSystemHealth {
   schemaVersion: number;
   syncBacklog: Record<string, Record<string, number>>;
@@ -557,6 +563,7 @@ export interface DiagnosticsSystemHealth {
   financialQueueStatus?: DiagnosticsFinancialQueueStatus | null;
   lastParitySync?: DiagnosticsLastParitySync | null;
   credentialState?: DiagnosticsCredentialState | null;
+  checkoutPaymentBlockers?: DiagnosticsCheckoutPaymentBlockers | null;
   isOnline: boolean;
   lastSyncTime: string | null;
 }

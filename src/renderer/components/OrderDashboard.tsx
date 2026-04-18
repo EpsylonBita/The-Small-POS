@@ -46,7 +46,7 @@ import type { CreateReservationDto } from "./tables";
 import { toLocalDateString } from "../utils/date";
 import { reservationsService } from "../services/ReservationsService";
 import { PrintPreviewModal } from "./modals/PrintPreviewModal";
-import { Plus } from "lucide-react";
+import { FloatingActionButton } from "./ui/FloatingActionButton";
 import { useTheme } from "../contexts/theme-context";
 import { useI18n } from "../contexts/i18n-context";
 import { useAcquiredModules } from "../hooks/useAcquiredModules";
@@ -4345,15 +4345,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         )}
 
         {/* Floating Action Button for New Order */}
-        <button
+        <FloatingActionButton
           onClick={handleNewOrderClick}
           disabled={!isShiftActive}
-          className={`fixed bottom-6 right-6 w-16 h-16 rounded-full shadow-lg transition-all duration-300 z-50 ${
+          className={`!bottom-6 !right-6 ${
             !isShiftActive
-              ? "bg-gray-400 cursor-not-allowed opacity-50"
-              : resolvedTheme === "light"
-                ? "bg-blue-600 hover:bg-blue-700 text-white hover:scale-110 active:scale-95"
-                : "bg-blue-500 hover:bg-blue-600 text-white hover:scale-110 active:scale-95"
+              ? "cursor-not-allowed opacity-50"
+              : resolvedTheme === "dark"
+                ? "shadow-blue-500/30"
+                : ""
           }`}
           title={
             !isShiftActive
@@ -4363,9 +4363,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 )
               : t("orders.newOrder")
           }
-        >
-          <Plus size={24} className="mx-auto" />
-        </button>
+        />
 
         {/* Order Type Selection Modal - Glassmorphism style */}
         <LiquidGlassModal

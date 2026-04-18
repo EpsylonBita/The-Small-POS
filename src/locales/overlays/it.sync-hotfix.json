@@ -20,20 +20,20 @@
       "waiting_parent": "In attesa del pagamento padre"
     },
     "reasonCodes": {
-      "missing_cash_payment": "L'ordine {{orderNumber}} non ha un pagamento in contanti registrato.",
-      "missing_card_payment": "L'ordine {{orderNumber}} non ha un pagamento con carta registrato.",
-      "missing_local_payment_row": "L'ordine {{orderNumber}} non ha la riga di pagamento locale.",
+      "missing_cash_payment": "L'ordine {{orderNumber}} non ha il pagamento in contanti registrato.",
+      "missing_card_payment": "L'ordine {{orderNumber}} non ha il pagamento con carta registrato.",
+      "missing_local_payment_row": "L'ordine {{orderNumber}} risulta pagato, ma manca la riga di pagamento locale.",
       "partial_cash_payment": "L'ordine {{orderNumber}} ha ancora un importo in contanti da incassare.",
       "partial_card_payment": "L'ordine {{orderNumber}} ha ancora un importo con carta da incassare.",
       "split_payment_incomplete": "Il pagamento misto dell'ordine {{orderNumber}} non è completo.",
       "unsupported_payment_method": "L'ordine {{orderNumber}} usa un metodo di pagamento da incassare manualmente."
     },
     "fixCodes": {
-      "missing_cash_payment": "Apri l'ordine e incassa il pagamento in contanti.",
-      "missing_card_payment": "Apri l'ordine e incassa il pagamento con carta.",
-      "missing_local_payment_row": "Apri l'ordine e registra di nuovo il pagamento previsto.",
-      "partial_cash_payment": "Incassa l'importo residuo in contanti per continuare.",
-      "partial_card_payment": "Incassa l'importo residuo con carta per continuare.",
+      "missing_cash_payment": "Registra o conferma il pagamento in contanti mancante.",
+      "missing_card_payment": "Registra o conferma il pagamento con carta mancante.",
+      "missing_local_payment_row": "Aggiorna i payment mirror o ricrea la riga di pagamento mancante.",
+      "partial_cash_payment": "Registra l'importo residuo in contanti per continuare.",
+      "partial_card_payment": "Registra l'importo residuo con carta per continuare.",
       "split_payment_incomplete": "Completa tutte le parti del pagamento misto prima di continuare.",
       "unsupported_payment_method": "Controlla l'ordine e incassa il pagamento manualmente."
     }

@@ -20,20 +20,20 @@
       "waiting_parent": "Waiting for parent"
     },
     "reasonCodes": {
-      "missing_cash_payment": "Order {{orderNumber}} is missing a recorded cash payment.",
-      "missing_card_payment": "Order {{orderNumber}} is missing a recorded card payment.",
-      "missing_local_payment_row": "Order {{orderNumber}} is missing its local payment record.",
+      "missing_cash_payment": "Order {{orderNumber}} is missing its recorded cash payment.",
+      "missing_card_payment": "Order {{orderNumber}} is missing its recorded card payment.",
+      "missing_local_payment_row": "Order {{orderNumber}} is marked paid but its local payment record is missing.",
       "partial_cash_payment": "Order {{orderNumber}} still has unpaid cash remaining.",
       "partial_card_payment": "Order {{orderNumber}} still has unpaid card remaining.",
       "split_payment_incomplete": "Order {{orderNumber}} still has an incomplete split payment.",
       "unsupported_payment_method": "Order {{orderNumber}} uses a payment method that must be collected manually."
     },
     "fixCodes": {
-      "missing_cash_payment": "Open the order and collect the cash payment.",
-      "missing_card_payment": "Open the order and collect the card payment.",
-      "missing_local_payment_row": "Open the order and collect the expected payment again.",
-      "partial_cash_payment": "Collect the remaining cash amount to continue.",
-      "partial_card_payment": "Collect the remaining card amount to continue.",
+      "missing_cash_payment": "Record or confirm the missing cash payment.",
+      "missing_card_payment": "Record or confirm the missing card payment.",
+      "missing_local_payment_row": "Refresh payment mirrors or recreate the missing payment record.",
+      "partial_cash_payment": "Record the remaining cash payment to continue.",
+      "partial_card_payment": "Record the remaining card payment to continue.",
       "split_payment_incomplete": "Complete all split-payment portions before continuing.",
       "unsupported_payment_method": "Review the order and collect the payment manually."
     }

@@ -10,7 +10,7 @@
 use crate::db::DbState;
 use crate::sync::normalize_optional_uuid_str;
 use crate::sync::SyncBlockerDetail;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read as _, Write as _};
@@ -139,6 +139,17 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
     let financial_queue_status = get_financial_queue_status(db).unwrap_or(Value::Null);
     let last_parity_sync = get_last_parity_sync(db);
     let credential_state = get_credential_state(db);
+    let checkout_payment_blockers = get_checkout_payment_blockers(db).unwrap_or_else(|error| {
+        warn!(
+            error = %error,
+            "Failed to collect checkout payment blockers for system health"
+        );
+        json!({
+            "count": 0,
+            "details": [],
+            "sourceWindow": "active_shift",
+        })
+    });
 
     Ok(json!({
         "schemaVersion": schema_version,
@@ -157,6 +168,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         "financialQueueStatus": financial_queue_status,
         "lastParitySync": last_parity_sync,
         "credentialState": credential_state,
+        "checkoutPaymentBlockers": checkout_payment_blockers,
         "invalidOrders": {
             "count": invalid_orders_count,
             "details": invalid_orders
@@ -218,6 +230,83 @@ fn get_sync_backlog(conn: &rusqlite::Connection) -> Value {
     }
 
     result
+}
+
+fn get_checkout_payment_blockers(db: &DbState) -> Result<Value, String> {
+    let terminal_id = crate::storage::get_credential("terminal_id")
+        .or_else(|| crate::read_local_setting(db, "terminal", "terminal_id"))
+        .unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let load_active_shift = |filter_terminal: bool| -> Result<
+        Option<(String, Option<String>, Option<String>)>,
+        String,
+    > {
+        let sql = if filter_terminal {
+            "SELECT COALESCE(branch_id, ''), report_date, period_start_at
+             FROM staff_shifts
+             WHERE status = 'active'
+               AND role_type IN ('cashier', 'manager')
+               AND COALESCE(terminal_id, '') = ?1
+             ORDER BY check_in_time DESC
+             LIMIT 1"
+        } else {
+            "SELECT COALESCE(branch_id, ''), report_date, period_start_at
+             FROM staff_shifts
+             WHERE status = 'active'
+               AND role_type IN ('cashier', 'manager')
+             ORDER BY check_in_time DESC
+             LIMIT 1"
+        };
+
+        if filter_terminal {
+            conn.query_row(sql, params![terminal_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+            .map_err(|e| format!("load active checkout shift for diagnostics: {e}"))
+        } else {
+            conn.query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .optional()
+                .map_err(|e| format!("load fallback checkout shift for diagnostics: {e}"))
+        }
+    };
+
+    let active_shift = if terminal_id.trim().is_empty() {
+        load_active_shift(false)?
+    } else {
+        load_active_shift(true)?.or_else(|| load_active_shift(false).ok().flatten())
+    };
+
+    let Some((branch_id, stored_report_date, stored_period_start_at)) = active_shift else {
+        return Ok(json!({
+            "count": 0,
+            "details": [],
+            "sourceWindow": "active_shift",
+        }));
+    };
+
+    let shift_business_day = crate::shifts::resolve_shift_business_day_context(
+        &conn,
+        &branch_id,
+        &now,
+        stored_report_date.as_deref(),
+        stored_period_start_at.as_deref(),
+    );
+    let blockers = crate::payment_integrity::load_branch_window_payment_blockers(
+        &conn,
+        &branch_id,
+        shift_business_day.period_start_at.as_str(),
+        Some(now.as_str()),
+        true,
+    )?;
+
+    Ok(json!({
+        "count": blockers.len(),
+        "details": blockers,
+        "sourceWindow": "active_shift",
+    }))
 }
 
 fn get_payment_adjustment_backlog(conn: &rusqlite::Connection) -> Value {
@@ -1046,7 +1135,55 @@ mod tests {
         assert!(health.get("financialQueueStatus").is_some());
         assert!(health.get("lastParitySync").is_some());
         assert!(health.get("credentialState").is_some());
+        assert!(health.get("checkoutPaymentBlockers").is_some());
         // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_system_health_includes_active_shift_checkout_payment_blockers() {
+        let dir =
+            std::env::temp_dir().join(format!("diag_checkout_blockers_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let conn = db_state.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id,
+                check_in_time, opening_cash_amount, status, calculation_version,
+                report_date, period_start_at, sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-health-blocked', 'cashier-health', 'cashier', 'branch-health', 'term-health',
+                '2026-04-18T06:00:00Z', 100.0, 'active', 2,
+                '2026-04-18', '2026-04-18T06:00:00Z', 'pending', '2026-04-18T06:00:00Z', '2026-04-18T06:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, staff_shift_id, items, total_amount, status,
+                payment_status, payment_method, sync_status, created_at, updated_at
+             ) VALUES (
+                'order-health-blocked', 'ORD-HEALTH-1', 'branch-health', 'shift-health-blocked', '[]', 6.1, 'delivered',
+                'pending', 'card', 'pending', '2026-04-18T09:10:00Z', '2026-04-18T09:10:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let health = get_system_health(&db_state).unwrap();
+        let blockers = &health["checkoutPaymentBlockers"];
+        assert_eq!(blockers["count"], json!(1));
+        assert_eq!(blockers["sourceWindow"], json!("active_shift"));
+        assert_eq!(blockers["details"][0]["orderNumber"], json!("ORD-HEALTH-1"));
+        assert_eq!(
+            blockers["details"][0]["reasonCode"],
+            json!("missing_card_payment")
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
