@@ -1087,7 +1087,8 @@ fn build_order_insert_body(
         "coupon_id": string_field_from_sources(&sources, &["coupon_id", "couponId"]),
         "coupon_code": string_field_from_sources(&sources, &["coupon_code", "couponCode"]),
         "coupon_discount_amount": coupon_discount_amount,
-        "tip_amount": number_field_from_sources(&sources, &["tip_amount", "tipAmount"]),
+        "tip_amount": number_field_from_sources(&sources, &["tip_amount", "tipAmount"])
+            .unwrap_or(0.0),
         "customer_id": customer_id,
         "customer_name": customer_name,
         "customer_phone": customer_phone,
@@ -1112,12 +1113,17 @@ fn build_order_insert_body(
 
 fn is_legacy_order_insert_validation_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    lower.contains("validation failed")
+    let legacy_shape_error = lower.contains("validation failed")
         && lower.contains("expected object, received array")
         && lower.contains("customizations")
         && lower.contains("order_type")
         && lower.contains("payment_method")
-        && lower.contains("total_amount")
+        && lower.contains("total_amount");
+    let missing_tip_error = lower.contains("validation failed")
+        && lower.contains("tip_amount")
+        && lower.contains("expected number, received null");
+
+    legacy_shape_error || missing_tip_error
 }
 
 fn is_rate_limit_error(error: &str) -> bool {
@@ -3523,6 +3529,40 @@ mod tests {
     }
 
     #[test]
+    fn prepare_order_request_defaults_tip_amount_to_zero() {
+        let conn = test_connection();
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-legacy-tip-1",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentMethod": "cash",
+                "tipAmount": Value::Null,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 5.0,
+                    "name": "Coffee"
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(body.get("tip_amount").and_then(Value::as_f64), Some(0.0));
+    }
+
+    #[test]
     fn prepare_order_request_uses_record_id_when_client_order_id_missing() {
         let conn = test_connection();
         let item = queue_item(
@@ -3651,6 +3691,61 @@ mod tests {
             )
             .expect("read unrelated queue row");
         assert_eq!(unrelated_status, "failed");
+    }
+
+    #[test]
+    fn retry_failed_legacy_order_insert_items_requeues_tip_amount_validation_failures() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-legacy-tip-2",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentMethod": "cash",
+                "tipAmount": Value::Null,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 3.5,
+                    "name": "Tea"
+                }]
+            }),
+        );
+
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 2,
+                 error_message = ?2
+             WHERE id = ?1",
+            params![
+                queue_id,
+                r#"HTTP 400: {"success":false,"error":"Validation failed","details":[{"field":"tip_amount","message":"Expected number, received null"}]}"#
+            ],
+        )
+        .expect("seed tip amount validation failure");
+
+        let result = retry_failed_legacy_order_insert_items_limited(&conn, 1)
+            .expect("retry failed legacy order rows");
+        assert_eq!(result.retried, 1);
+
+        let retried_row: (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read retried queue row");
+        assert_eq!(retried_row.0, "pending");
+        assert_eq!(retried_row.1, 0);
+        assert_eq!(retried_row.2, None);
     }
 
     #[test]
@@ -4128,6 +4223,7 @@ mod tests {
             Some("digital_wallet")
         );
         assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(18.0));
+        assert_eq!(body.get("tip_amount").and_then(Value::as_f64), Some(0.0));
         assert!(
             body.get("items")
                 .and_then(Value::as_array)

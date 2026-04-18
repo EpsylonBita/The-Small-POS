@@ -145,8 +145,9 @@ pub(crate) use terminal_helpers::{
     hydrate_terminal_credentials_from_local_settings, is_sensitive_terminal_setting,
     is_terminal_auth_failure, mask_terminal_id,
     purge_hydrated_terminal_credentials_from_local_settings, read_local_setting,
-    scrub_sensitive_local_settings, terminal_access_reset_reason, terminal_auth_failure_code,
-    terminal_auth_failure_source, terminal_auth_failure_terminal_active,
+    reconcile_terminal_identity_from_local_sources, scrub_sensitive_local_settings,
+    terminal_access_reset_reason, terminal_auth_failure_code, terminal_auth_failure_source,
+    terminal_auth_failure_terminal_active,
 };
 
 pub(crate) async fn maybe_lazy_warm_menu_cache(
@@ -528,6 +529,12 @@ pub fn run() {
             };
             let db_for_startup = db_for_sync.clone();
 
+            {
+                let db_state = app.state::<db::DbState>();
+                hydrate_terminal_credentials_from_local_settings(&db_state);
+                let _ = reconcile_terminal_identity_from_local_sources(&db_state);
+            }
+
             // Start background sync loop (15s interval)
             if let Some(db_for_sync) = db_for_sync {
                 sync::start_sync_loop(
@@ -542,6 +549,7 @@ pub fn run() {
             match db::init(&app_data_dir) {
                 Ok(db) => {
                     sync::start_terminal_heartbeat_loop(
+                        app.handle().clone(),
                         Arc::new(db),
                         sync_state.clone(),
                         30,
@@ -620,6 +628,7 @@ pub fn run() {
                     commands::menu::start_menu_version_monitor(
                         app.handle().clone(),
                         db_for_menu_version,
+                        sync_state.clone(),
                         30,
                         cancel_token.clone(),
                     );
@@ -635,120 +644,41 @@ pub fn run() {
                 let startup_db = db_for_startup;
                 let startup_sync_state = sync_state.clone();
                 tauri::async_runtime::spawn(async move {
-                    let raw_api_key = Zeroizing::new(match storage::get_credential("pos_api_key") {
-                        Some(k) => k,
-                        None => return,
-                    });
-                    let api_key = Zeroizing::new(
-                        api::extract_api_key_from_connection_string(&raw_api_key)
-                            .unwrap_or_else(|| (*raw_api_key).clone()),
-                    );
-                    if *api_key != *raw_api_key {
-                        let _ = storage::set_credential("pos_api_key", api_key.trim());
-                    }
-
-                    let terminal_id = storage::get_credential("terminal_id")
-                        .or_else(|| api::extract_terminal_id_from_connection_string(&raw_api_key));
-                    let terminal_id = match terminal_id {
-                        Some(t) if !t.trim().is_empty() => {
-                            let _ = storage::set_credential("terminal_id", t.trim());
-                            t
-                        }
-                        _ => return,
+                    let Some(startup_db) = startup_db else {
+                        return;
                     };
 
-                    let admin_url = storage::get_credential("admin_dashboard_url")
-                        .or_else(|| api::extract_admin_url_from_connection_string(&raw_api_key));
-                    let admin_url = match admin_url {
-                        Some(u) if !u.trim().is_empty() => {
-                            let normalized = api::normalize_admin_url(&u);
-                            if !normalized.is_empty() {
-                                let _ = storage::set_credential(
-                                    "admin_dashboard_url",
-                                    normalized.trim(),
-                                );
-                                normalized
-                            } else {
-                                return;
+                    match commands::settings::refresh_terminal_context_from_admin(startup_db.as_ref()).await {
+                        Ok(()) => {
+                            startup_sync_state.clear_remote_auth_pause();
+                            if let Err(error) = sync::send_terminal_heartbeat_now(
+                                startup_db.as_ref(),
+                                startup_sync_state.as_ref(),
+                            )
+                            .await
+                            {
+                                warn!("Startup: failed to send terminal heartbeat: {error}");
                             }
                         }
-                        _ => return,
-                    };
-
-                    let path = format!("/api/pos/settings/{terminal_id}");
-                    match api::fetch_from_admin(&admin_url, &api_key, &path, "GET", None).await {
-                        Ok(resp) => {
-                            if let Some(bid) =
-                                extract_branch_id_from_terminal_settings_response(&resp)
-                            {
-                                let _ = storage::set_credential("branch_id", &bid);
-                                info!(branch_id = %bid, "Startup: stored branch_id from admin");
-                            }
-                            if let Some(oid) = extract_org_id_from_terminal_settings_response(&resp)
-                            {
-                                let _ = storage::set_credential("organization_id", &oid);
-                            }
-                            if let Some(ghost_enabled) =
-                                extract_ghost_mode_feature_from_terminal_settings_response(&resp)
-                            {
-                                let value = if ghost_enabled { "true" } else { "false" };
-                                let _ =
-                                    storage::set_credential("ghost_mode_feature_enabled", value);
-                                if let Some(ref sdb) = startup_db {
-                                    if let Ok(conn) = sdb.conn.lock() {
-                                        let _ = db::set_setting(
-                                            &conn,
-                                            "terminal",
-                                            "ghost_mode_feature_enabled",
-                                            value,
-                                        );
-                                    }
-                                }
-                            }
-                            if let Some(supa) = resp.get("supabase") {
-                                if let Some(url) = supa.get("url").and_then(|v| v.as_str()) {
-                                    if !url.is_empty() {
-                                        let _ = storage::set_credential("supabase_url", url);
-                                    }
-                                }
-                                if let Some(key) = supa.get("anon_key").and_then(|v| v.as_str()) {
-                                    if !key.is_empty() {
-                                        let _ = storage::set_credential("supabase_anon_key", key);
-                                    }
-                                }
-                            }
-                            if let Some(ref sdb) = startup_db {
-                                if let Ok(updated) =
-                                    cache_terminal_settings_snapshot(sdb.as_ref(), &resp)
-                                {
-                                    if !updated.is_empty() {
-                                        info!(
-                                            count = updated.len(),
-                                            "Startup: cached terminal settings snapshot"
-                                        );
-                                    }
-                                }
-
-                                if let Err(error) =
-                                    sync::send_terminal_heartbeat_now(
-                                        sdb.as_ref(),
+                        Err(error) => {
+                            warn!("Startup: failed to fetch terminal config: {error}");
+                            if is_terminal_auth_failure(&error) {
+                                if sync::terminal_auth_failure_requires_reset(&error) {
+                                    handle_invalid_terminal_credentials(
+                                        Some(startup_db.as_ref()),
+                                        &startup_app,
+                                        "startup_terminal_config_fetch",
+                                        &error,
+                                    );
+                                } else {
+                                    sync::handle_soft_terminal_auth_failure(
+                                        startup_db.as_ref(),
                                         startup_sync_state.as_ref(),
-                                    )
-                                    .await
-                                {
-                                    warn!("Startup: failed to send terminal heartbeat: {error}");
+                                        &startup_app,
+                                        "startup_terminal_config_fetch",
+                                        &error,
+                                    );
                                 }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Startup: failed to fetch terminal config: {e}");
-                            if is_terminal_auth_failure(&e) {
-                                handle_invalid_terminal_credentials(
-                                    startup_db.as_deref(),
-                                    &startup_app,
-                                    "startup_terminal_config_fetch",
-                                    &e,
-                                );
                             }
                         }
                     }

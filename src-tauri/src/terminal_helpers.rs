@@ -321,6 +321,51 @@ pub(crate) fn extract_enabled_features_from_terminal_settings_response(
     )
 }
 
+pub(crate) fn normalize_terminal_identity(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let normalized = trimmed.to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "default-terminal" | "default" | "terminal-001"
+        ) {
+            return None;
+        }
+
+        Some(trimmed.to_string())
+    })
+}
+
+pub(crate) fn resolve_managed_terminal_identity(
+    terminal_type: Option<&str>,
+    pos_operating_mode: Option<&str>,
+    owner_terminal_id: Option<&str>,
+    source_terminal_id: Option<&str>,
+) -> Option<String> {
+    let owner = normalize_terminal_identity(owner_terminal_id.map(|value| value.to_string()));
+    let source = normalize_terminal_identity(source_terminal_id.map(|value| value.to_string()));
+
+    let owner = owner?;
+    let source = source?;
+    if owner != source {
+        return None;
+    }
+
+    let terminal_type = terminal_type.unwrap_or("").trim().to_ascii_lowercase();
+    let pos_operating_mode = pos_operating_mode.unwrap_or("").trim().to_ascii_lowercase();
+    if matches!(terminal_type.as_str(), "main" | "primary")
+        || matches!(pos_operating_mode.as_str(), "main_isolated" | "main")
+    {
+        return Some(owner);
+    }
+
+    None
+}
+
 fn setting_value_to_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Null => None,
@@ -624,6 +669,44 @@ pub(crate) fn read_local_setting(db: &db::DbState, category: &str, key: &str) ->
     db::get_setting(&conn, category, key)
 }
 
+pub(crate) fn persist_terminal_identity(
+    db: &db::DbState,
+    terminal_id: impl Into<String>,
+) -> Option<String> {
+    let normalized = normalize_terminal_identity(Some(terminal_id.into()))?;
+    let _ = storage::set_credential("terminal_id", normalized.trim());
+    if let Ok(conn) = db.conn.lock() {
+        let _ = db::set_setting(&conn, "terminal", "terminal_id", normalized.trim());
+    }
+    Some(normalized)
+}
+
+fn resolve_connection_string_terminal_identity(db: &db::DbState) -> Option<String> {
+    read_local_setting(db, "terminal", "pos_api_key")
+        .or_else(|| read_local_setting(db, "terminal", "api_key"))
+        .and_then(|raw| api::extract_terminal_id_from_connection_string(raw.trim()))
+        .and_then(|value| normalize_terminal_identity(Some(value)))
+}
+
+pub(crate) fn resolve_canonical_local_terminal_identity(db: &db::DbState) -> Option<String> {
+    resolve_connection_string_terminal_identity(db)
+        .or_else(|| {
+            resolve_managed_terminal_identity(
+                read_local_setting(db, "terminal", "terminal_type").as_deref(),
+                read_local_setting(db, "terminal", "pos_operating_mode").as_deref(),
+                read_local_setting(db, "terminal", "owner_terminal_id").as_deref(),
+                read_local_setting(db, "terminal", "source_terminal_id").as_deref(),
+            )
+        })
+        .or_else(|| normalize_terminal_identity(read_local_setting(db, "terminal", "terminal_id")))
+        .or_else(|| normalize_terminal_identity(storage::get_credential("terminal_id")))
+}
+
+pub(crate) fn reconcile_terminal_identity_from_local_sources(db: &db::DbState) -> Option<String> {
+    let canonical = resolve_canonical_local_terminal_identity(db)?;
+    persist_terminal_identity(db, canonical)
+}
+
 fn normalized_keyring_credential(credential_key: &str) -> Option<String> {
     let value = storage::get_credential(credential_key)?;
     let trimmed = value.trim();
@@ -875,6 +958,17 @@ pub(crate) fn terminal_auth_failure_code(error: &str) -> Option<String> {
     })
 }
 
+pub(crate) fn terminal_auth_failure_requested_terminal_id(error: &str) -> Option<String> {
+    extract_terminal_auth_failure_json(error).and_then(|payload| {
+        payload
+            .get("terminalId")
+            .or_else(|| payload.get("terminal_id"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
 pub(crate) fn terminal_auth_failure_source(error: &str) -> Option<String> {
     extract_terminal_auth_failure_json(error).and_then(|payload| {
         payload
@@ -982,8 +1076,28 @@ pub(crate) fn handle_invalid_terminal_credentials(
     source: &str,
     error: &str,
 ) {
-    let reason = terminal_access_reset_reason(error);
     let auth_code = terminal_auth_failure_code(error);
+    if matches!(
+        auth_code.as_deref(),
+        Some("terminal_not_found" | "terminal_identity_mismatch")
+    ) {
+        warn!(
+            source = %source,
+            error = %error,
+            auth_code = auth_code.as_deref().unwrap_or("unknown"),
+            "Soft terminal auth failure reached destructive reset helper; emitting terminal_auth_paused instead"
+        );
+        emit_terminal_auth_paused(
+            app,
+            source,
+            error,
+            terminal_auth_failure_requested_terminal_id(error).as_deref(),
+            None,
+        );
+        return;
+    }
+
+    let reason = terminal_access_reset_reason(error);
     let auth_source = terminal_auth_failure_source(error);
     let terminal_active = terminal_auth_failure_terminal_active(error);
     warn!(
@@ -1016,6 +1130,47 @@ pub(crate) fn handle_invalid_terminal_credentials(
             "reason": reason,
             "source": source,
             "error": error,
+        }),
+    );
+}
+
+pub(crate) fn emit_terminal_auth_paused(
+    app: &tauri::AppHandle,
+    source: &str,
+    error: &str,
+    requested_terminal_id: Option<&str>,
+    canonical_terminal_id: Option<&str>,
+) {
+    let auth_code = terminal_auth_failure_code(error);
+    let auth_source = terminal_auth_failure_source(error);
+    let terminal_active = terminal_auth_failure_terminal_active(error);
+    let reason = match auth_code.as_deref() {
+        Some("terminal_identity_mismatch") => "terminal_identity_out_of_sync",
+        Some("terminal_not_found") => "terminal_identity_out_of_sync",
+        _ => "remote_auth_paused",
+    };
+
+    let requested_terminal_id = requested_terminal_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| terminal_auth_failure_requested_terminal_id(error));
+    let canonical_terminal_id = canonical_terminal_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let _ = app.emit(
+        "terminal_auth_paused",
+        serde_json::json!({
+            "reason": reason,
+            "source": source,
+            "error": error,
+            "authCode": auth_code,
+            "authSource": auth_source,
+            "terminalActive": terminal_active,
+            "requestedTerminalId": requested_terminal_id,
+            "canonicalTerminalId": canonical_terminal_id,
         }),
     );
 }
@@ -1438,6 +1593,34 @@ mod tests {
         assert_eq!(
             db::get_setting(&conn, "terminal", "admin_url").as_deref(),
             Some("admin.example.com/api/")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn reconcile_terminal_identity_prefers_managed_snapshot_over_stale_keyring() {
+        let _guard = credential_guard();
+        let db = test_db();
+
+        set_terminal_setting(&db, "terminal_type", "main");
+        set_terminal_setting(&db, "pos_operating_mode", "main_isolated");
+        set_terminal_setting(&db, "owner_terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "terminal_id", "terminal-manager");
+        storage::set_credential("terminal_id", "terminal-manager").expect("seed stale terminal id");
+
+        let reconciled = reconcile_terminal_identity_from_local_sources(&db);
+
+        assert_eq!(reconciled.as_deref(), Some("terminal-efe99d27"));
+        assert_eq!(
+            storage::get_credential("terminal_id").as_deref(),
+            Some("terminal-efe99d27")
+        );
+
+        let conn = db.conn.lock().expect("lock db");
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "terminal_id").as_deref(),
+            Some("terminal-efe99d27")
         );
     }
 }

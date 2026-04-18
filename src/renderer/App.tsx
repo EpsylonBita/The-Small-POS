@@ -52,6 +52,10 @@ import {
   runParitySyncCycle,
 } from "./services/ParitySyncCoordinator";
 import { useOrderStore } from "./hooks/useOrderStore";
+import {
+  resolveTerminalAuthPausePresentation,
+  resolveTerminalResetPresentation,
+} from "./utils/terminal-lifecycle";
 
 const INVALID_SESSION_IDENTITY_VALUES = new Set([
   '',
@@ -328,6 +332,8 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       const reason = data?.reason || 'unknown';
       console.log('App reset triggered:', reason);
 
+      const presentation = resolveTerminalResetPresentation(reason, t as never);
+
       // Clear all local storage
       localStorage.removeItem("pos-user");
       localStorage.removeItem("staff");
@@ -342,17 +348,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 
       setIsConfigured(false);
 
-      // Show appropriate message based on reason
-      let message = t('system.remoteWipe') || 'Terminal has been reset remotely';
-      if (reason === 'terminal_deleted') {
-        message = t('system.terminalDeleted') || 'This terminal has been deleted from the admin dashboard. Please reconfigure.';
-      } else if (reason === 'terminal_inactive') {
-        message = t('system.terminalInactive') || 'This terminal has been disabled in the admin dashboard. Please contact an operator or restore access.';
-      } else if (reason === 'admin_command') {
-        message = t('system.factoryReset') || 'Factory reset command received from admin dashboard.';
-      }
-
-      toast.error(message, {
+      toast.error(presentation.message, {
         duration: 8000,
         icon: <AlertTriangle className="w-4 h-4 text-amber-500" />,
       });
@@ -364,6 +360,114 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       offEvent('app:reset', handleReset);
     };
   }, [t]);
+
+  useEffect(() => {
+    const handleTerminalAuthPaused = (data: any) => {
+      console.warn('[ConfigGuard] Remote auth paused due to terminal identity drift:', data);
+
+      const presentation = resolveTerminalAuthPausePresentation(data ?? {}, t as never);
+      const canonicalTerminalId = presentation.canonicalTerminalId;
+
+      if (canonicalTerminalId) {
+        updateTerminalCredentialCache({ terminalId: canonicalTerminalId });
+      }
+
+      setConfiguredTerminalHint(true);
+      setIsConfigured(true);
+
+      const cached = getCachedTerminalCredentials();
+      setSupabaseContext({
+        terminalId: cached.terminalId || canonicalTerminalId || undefined,
+        organizationId: cached.organizationId || undefined,
+        branchId: cached.branchId || undefined,
+        clientType: 'desktop',
+      });
+
+      const openConnectionSettings = () => {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('pos:recovery-route', {
+              detail: { screen: 'connectionSettings' },
+            }),
+          );
+        }
+      };
+
+      const refreshTerminalConfig = async () => {
+        try {
+          const result: any = await bridge.terminalConfig.syncFromAdmin();
+          const payload = result?.data ?? result;
+          if (payload?.success === false) {
+            throw new Error(payload?.error || 'terminal_config_sync_failed');
+          }
+          toast.success(
+            t(
+              'system.remoteAuthPausedRefreshSuccess',
+              'Terminal settings refreshed. Remote sync can resume.',
+            ),
+          );
+        } catch (error) {
+          console.warn('[ConfigGuard] Failed to refresh terminal config after auth pause:', error);
+          toast.error(
+            t(
+              'system.remoteAuthPausedRefreshFailed',
+              'Failed to refresh terminal settings. Opening connection settings.',
+            ),
+          );
+          openConnectionSettings();
+        }
+      };
+
+      toast.custom(
+        (toastInstance) => (
+          <div className="max-w-md rounded-2xl border border-amber-500/30 bg-slate-950/95 p-4 text-sm text-slate-100 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-400" />
+              <div className="space-y-3">
+                <p>{presentation.message}</p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded-full bg-amber-500 px-3 py-1.5 text-xs font-semibold text-slate-950"
+                    onClick={() => {
+                      toast.dismiss(toastInstance.id);
+                      void refreshTerminalConfig();
+                    }}
+                  >
+                    {t(
+                      'system.remoteAuthPausedRefresh',
+                      'Refresh settings',
+                    )}
+                  </button>
+                  <button
+                    className="rounded-full border border-slate-600 px-3 py-1.5 text-xs font-semibold text-slate-100"
+                    onClick={() => {
+                      toast.dismiss(toastInstance.id);
+                      openConnectionSettings();
+                    }}
+                  >
+                    {t(
+                      'system.remoteAuthPausedSettings',
+                      'Connection settings',
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ),
+        {
+          id: 'terminal-auth-paused',
+          duration: 12000,
+        },
+      );
+    };
+
+    onEvent('terminal-auth-paused', handleTerminalAuthPaused);
+
+    return () => {
+      offEvent('terminal-auth-paused', handleTerminalAuthPaused);
+    };
+  }, [bridge.terminalConfig, t]);
 
   // Listen for terminal-credentials-updated event (after onboarding)
   // This stores terminal identity in in-memory cache for immediate renderer access

@@ -76,6 +76,10 @@ use crate::order_ownership;
 use crate::payments;
 use crate::print;
 use crate::storage;
+use crate::terminal_helpers::{
+    emit_terminal_auth_paused, normalize_terminal_identity,
+    reconcile_terminal_identity_from_local_sources, terminal_auth_failure_requested_terminal_id,
+};
 use crate::APP_START_EPOCH;
 
 // ---------------------------------------------------------------------------
@@ -326,33 +330,25 @@ fn load_zeroized_pos_api_key_optional() -> Option<Zeroizing<String>> {
     ))
 }
 
-/// Handle terminal auth failures discovered inside the sync loop.
-/// This preserves local operational data and only revokes credentials so the
-/// terminal can be reconfigured without destroying recoverable state.
-fn handle_terminal_auth_failure_from_sync(db: &DbState, app: &AppHandle, error: &str) {
-    let reason = crate::terminal_access_reset_reason(error);
-    let auth_code = crate::terminal_auth_failure_code(error);
-    let auth_source = crate::terminal_auth_failure_source(error);
-    let terminal_active = crate::terminal_auth_failure_terminal_active(error);
-    warn!(
-        reason = %reason,
-        error = %error,
-        auth_code = auth_code.as_deref().unwrap_or("unknown"),
-        auth_source = auth_source.as_deref().unwrap_or("unknown"),
-        terminal_active = ?terminal_active,
-        "Sync loop detected terminal access revocation; preserving local data and forcing re-onboarding"
-    );
-    crate::handle_invalid_terminal_credentials(Some(db), app, "sync_loop", error);
-}
-
 // ---------------------------------------------------------------------------
 // Sync engine state (managed by Tauri)
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RemoteAuthPauseState {
+    pub remote_auth_paused: bool,
+    pub remote_auth_code: Option<String>,
+    pub remote_auth_reason: Option<String>,
+    pub remote_auth_error: Option<String>,
+    pub requested_terminal_id: Option<String>,
+    pub canonical_terminal_id: Option<String>,
+}
 
 /// Managed state for the background sync engine.
 pub struct SyncState {
     pub is_running: Arc<AtomicBool>,
     pub last_sync: Arc<std::sync::Mutex<Option<String>>>,
+    remote_auth_pause: Arc<std::sync::Mutex<RemoteAuthPauseState>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -660,6 +656,283 @@ impl SyncState {
         Self {
             is_running: Arc::new(AtomicBool::new(false)),
             last_sync: Arc::new(std::sync::Mutex::new(None)),
+            remote_auth_pause: Arc::new(std::sync::Mutex::new(RemoteAuthPauseState::default())),
+        }
+    }
+
+    pub fn remote_auth_snapshot(&self) -> RemoteAuthPauseState {
+        self.remote_auth_pause
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn is_remote_auth_paused(&self) -> bool {
+        self.remote_auth_snapshot().remote_auth_paused
+    }
+
+    pub fn pause_remote_auth(
+        &self,
+        reason: impl Into<String>,
+        error: impl Into<String>,
+        requested_terminal_id: Option<String>,
+        canonical_terminal_id: Option<String>,
+        auth_code: Option<String>,
+    ) {
+        if let Ok(mut guard) = self.remote_auth_pause.lock() {
+            *guard = RemoteAuthPauseState {
+                remote_auth_paused: true,
+                remote_auth_code: auth_code,
+                remote_auth_reason: Some(reason.into()),
+                remote_auth_error: Some(error.into()),
+                requested_terminal_id,
+                canonical_terminal_id,
+            };
+        }
+    }
+
+    pub fn clear_remote_auth_pause(&self) {
+        if let Ok(mut guard) = self.remote_auth_pause.lock() {
+            *guard = RemoteAuthPauseState::default();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TerminalAuthRepairContext {
+    requested_terminal_id: Option<String>,
+    canonical_terminal_id: Option<String>,
+    repaired_identity: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteAuthExecutionOutcome<T> {
+    Success(T),
+    Paused(String),
+    Reset(String),
+    Failed(String),
+}
+
+pub(crate) fn terminal_auth_failure_requires_reset(error: &str) -> bool {
+    matches!(
+        crate::terminal_auth_failure_code(error).as_deref(),
+        Some("terminal_inactive" | "invalid_terminal_api_key")
+    )
+}
+
+fn terminal_auth_failure_should_pause(error: &str) -> bool {
+    matches!(
+        crate::terminal_auth_failure_code(error).as_deref(),
+        Some("terminal_not_found" | "terminal_identity_mismatch")
+    )
+}
+
+fn remote_auth_pause_reason(error: &str) -> String {
+    match crate::terminal_auth_failure_code(error).as_deref() {
+        Some("terminal_identity_mismatch") => "terminal_identity_out_of_sync".to_string(),
+        Some("terminal_not_found") => "terminal_identity_out_of_sync".to_string(),
+        Some(other) => other.to_string(),
+        None => "remote_auth_paused".to_string(),
+    }
+}
+
+fn prepare_terminal_auth_repair_context(db: &DbState, error: &str) -> TerminalAuthRepairContext {
+    crate::hydrate_terminal_credentials_from_local_settings(db);
+    let requested_terminal_id = terminal_auth_failure_requested_terminal_id(error)
+        .or_else(|| normalize_terminal_identity(storage::get_credential("terminal_id")));
+    let canonical_terminal_id = reconcile_terminal_identity_from_local_sources(db);
+    let repaired_identity = matches!(
+        (requested_terminal_id.as_deref(), canonical_terminal_id.as_deref()),
+        (Some(requested), Some(canonical)) if requested != canonical
+    );
+
+    TerminalAuthRepairContext {
+        requested_terminal_id,
+        canonical_terminal_id,
+        repaired_identity,
+    }
+}
+
+fn pause_remote_auth_with_context(
+    sync_state: &SyncState,
+    app: &AppHandle,
+    source: &str,
+    error: &str,
+    context: TerminalAuthRepairContext,
+) {
+    let auth_code = crate::terminal_auth_failure_code(error);
+    let reason = remote_auth_pause_reason(error);
+    warn!(
+        source = %source,
+        error = %error,
+        reason = %reason,
+        auth_code = auth_code.as_deref().unwrap_or("unknown"),
+        requested_terminal_id = context
+            .requested_terminal_id
+            .as_deref()
+            .map(crate::mask_terminal_id)
+            .unwrap_or_else(|| "unknown".to_string()),
+        canonical_terminal_id = context
+            .canonical_terminal_id
+            .as_deref()
+            .map(crate::mask_terminal_id)
+            .unwrap_or_else(|| "unknown".to_string()),
+        "Pausing remote sync after terminal identity auth failure"
+    );
+    sync_state.pause_remote_auth(
+        reason,
+        error.to_string(),
+        context.requested_terminal_id.clone(),
+        context.canonical_terminal_id.clone(),
+        auth_code.clone(),
+    );
+    emit_terminal_auth_paused(
+        app,
+        source,
+        error,
+        context.requested_terminal_id.as_deref(),
+        context.canonical_terminal_id.as_deref(),
+    );
+}
+
+pub(crate) fn handle_soft_terminal_auth_failure(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &AppHandle,
+    source: &str,
+    error: &str,
+) {
+    pause_remote_auth_with_context(
+        sync_state,
+        app,
+        source,
+        error,
+        prepare_terminal_auth_repair_context(db, error),
+    );
+}
+
+fn handle_terminal_auth_failure_from_sync(db: &DbState, app: &AppHandle, error: &str) {
+    let reason = crate::terminal_access_reset_reason(error);
+    let auth_code = crate::terminal_auth_failure_code(error);
+    let auth_source = crate::terminal_auth_failure_source(error);
+    let terminal_active = crate::terminal_auth_failure_terminal_active(error);
+    warn!(
+        reason = %reason,
+        error = %error,
+        auth_code = auth_code.as_deref().unwrap_or("unknown"),
+        auth_source = auth_source.as_deref().unwrap_or("unknown"),
+        terminal_active = ?terminal_active,
+        "Sync loop detected terminal access revocation; preserving local data and forcing re-onboarding"
+    );
+    crate::handle_invalid_terminal_credentials(Some(db), app, "sync_loop", error);
+}
+
+async fn run_sync_cycle_with_auth_guard(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &AppHandle,
+    source: &str,
+) -> RemoteAuthExecutionOutcome<usize> {
+    let mut repair_attempted = false;
+
+    loop {
+        match run_sync_cycle(db, app).await {
+            Ok(synced) => {
+                sync_state.clear_remote_auth_pause();
+                return RemoteAuthExecutionOutcome::Success(synced);
+            }
+            Err(error) => {
+                if !is_terminal_auth_failure(&error) {
+                    return RemoteAuthExecutionOutcome::Failed(error);
+                }
+
+                if terminal_auth_failure_requires_reset(&error) {
+                    handle_terminal_auth_failure_from_sync(db, app, &error);
+                    return RemoteAuthExecutionOutcome::Reset(error);
+                }
+
+                if terminal_auth_failure_should_pause(&error) {
+                    let context = prepare_terminal_auth_repair_context(db, &error);
+                    if !repair_attempted && context.repaired_identity {
+                        repair_attempted = true;
+                        info!(
+                            source = %source,
+                            requested_terminal_id = context
+                                .requested_terminal_id
+                                .as_deref()
+                                .map(crate::mask_terminal_id)
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            canonical_terminal_id = context
+                                .canonical_terminal_id
+                                .as_deref()
+                                .map(crate::mask_terminal_id)
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            "Retrying remote sync with repaired terminal identity"
+                        );
+                        continue;
+                    }
+
+                    pause_remote_auth_with_context(sync_state, app, source, &error, context);
+                    return RemoteAuthExecutionOutcome::Paused(error);
+                }
+
+                return RemoteAuthExecutionOutcome::Failed(error);
+            }
+        }
+    }
+}
+
+async fn send_terminal_heartbeat_with_auth_guard(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &AppHandle,
+    source: &str,
+) -> RemoteAuthExecutionOutcome<bool> {
+    let mut repair_attempted = false;
+
+    loop {
+        match send_terminal_heartbeat_now(db, sync_state).await {
+            Ok(sent) => {
+                sync_state.clear_remote_auth_pause();
+                return RemoteAuthExecutionOutcome::Success(sent);
+            }
+            Err(error) => {
+                if !is_terminal_auth_failure(&error) {
+                    return RemoteAuthExecutionOutcome::Failed(error);
+                }
+
+                if terminal_auth_failure_requires_reset(&error) {
+                    handle_terminal_auth_failure_from_sync(db, app, &error);
+                    return RemoteAuthExecutionOutcome::Reset(error);
+                }
+
+                if terminal_auth_failure_should_pause(&error) {
+                    let context = prepare_terminal_auth_repair_context(db, &error);
+                    if !repair_attempted && context.repaired_identity {
+                        repair_attempted = true;
+                        info!(
+                            source = %source,
+                            requested_terminal_id = context
+                                .requested_terminal_id
+                                .as_deref()
+                                .map(crate::mask_terminal_id)
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            canonical_terminal_id = context
+                                .canonical_terminal_id
+                                .as_deref()
+                                .map(crate::mask_terminal_id)
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            "Retrying terminal heartbeat with repaired terminal identity"
+                        );
+                        continue;
+                    }
+
+                    pause_remote_auth_with_context(sync_state, app, source, &error, context);
+                    return RemoteAuthExecutionOutcome::Paused(error);
+                }
+
+                return RemoteAuthExecutionOutcome::Failed(error);
+            }
         }
     }
 }
@@ -1728,8 +2001,8 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
     let is_online = storage::is_configured();
     let last_sync = sync_state.last_sync.lock().ok().and_then(|g| g.clone());
     let pending_total = pending + queued_remote;
-
-    Ok(serde_json::json!({
+    let remote_auth_pause = sync_state.remote_auth_snapshot();
+    let mut payload = serde_json::json!({
         "isOnline": is_online,
         "lastSync": last_sync,
         "lastSyncAt": last_sync,
@@ -1750,7 +2023,51 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
         "pendingPaymentItems": financial_stats.pending_payment_items(),
         "failedPaymentItems": financial_stats.failed_payment_items(),
         "financialStats": financial_stats.to_json(),
-    }))
+    });
+
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "remoteAuthPaused".to_string(),
+            Value::Bool(remote_auth_pause.remote_auth_paused),
+        );
+        map.insert(
+            "remoteAuthCode".to_string(),
+            remote_auth_pause
+                .remote_auth_code
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "remoteAuthReason".to_string(),
+            remote_auth_pause
+                .remote_auth_reason
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "remoteAuthError".to_string(),
+            remote_auth_pause
+                .remote_auth_error
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "requestedTerminalId".to_string(),
+            remote_auth_pause
+                .requested_terminal_id
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "canonicalTerminalId".to_string(),
+            remote_auth_pause
+                .canonical_terminal_id
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+    }
+
+    Ok(payload)
 }
 
 /// Get financial sync queue statistics in UI-friendly and compatibility formats.
@@ -2056,7 +2373,7 @@ fn build_terminal_heartbeat_payload(
     sync_state: &SyncState,
     network_is_online: bool,
 ) -> Option<Value> {
-    if !network_is_online {
+    if !network_is_online || sync_state.is_remote_auth_paused() {
         return None;
     }
 
@@ -2070,7 +2387,7 @@ fn build_terminal_heartbeat_payload(
         return None;
     }
 
-    let status_payload = get_sync_status_for_event(db, &sync_state.last_sync, network_is_online);
+    let status_payload = get_sync_status_for_event(db, sync_state, network_is_online);
     let pending_updates = status_payload
         .get("pendingItems")
         .and_then(Value::as_i64)
@@ -2175,6 +2492,10 @@ pub async fn send_terminal_heartbeat_now(
     db: &DbState,
     sync_state: &SyncState,
 ) -> Result<bool, String> {
+    if sync_state.is_remote_auth_paused() {
+        return Ok(false);
+    }
+
     let network_status = check_network_status().await;
     let network_is_online = network_status
         .get("isOnline")
@@ -2211,6 +2532,7 @@ pub async fn send_terminal_heartbeat_now(
 }
 
 pub fn start_terminal_heartbeat_loop(
+    app: AppHandle,
     db: Arc<DbState>,
     sync_state: Arc<SyncState>,
     interval_secs: u64,
@@ -2231,7 +2553,6 @@ pub fn start_terminal_heartbeat_loop(
                     _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {}
                     _ = cancel.cancelled() => {
                         info!("Terminal heartbeat loop cancelled");
-                        break;
                     }
                 }
             }
@@ -2241,10 +2562,31 @@ pub fn start_terminal_heartbeat_loop(
                 break;
             }
 
-            match send_terminal_heartbeat_now(db.as_ref(), sync_state.as_ref()).await {
-                Ok(true) => trace!("Terminal heartbeat sent"),
-                Ok(false) => trace!("Terminal heartbeat skipped"),
-                Err(error) => warn!(error = %error, "Terminal heartbeat failed"),
+            if sync_state.is_remote_auth_paused() {
+                trace!("Terminal heartbeat skipped while remote auth is paused");
+                continue;
+            }
+
+            match send_terminal_heartbeat_with_auth_guard(
+                db.as_ref(),
+                sync_state.as_ref(),
+                &app,
+                "terminal_heartbeat_loop",
+            )
+            .await
+            {
+                RemoteAuthExecutionOutcome::Success(true) => trace!("Terminal heartbeat sent"),
+                RemoteAuthExecutionOutcome::Success(false) => trace!("Terminal heartbeat skipped"),
+                RemoteAuthExecutionOutcome::Paused(error) => {
+                    warn!(error = %error, "Terminal heartbeat paused after terminal identity auth failure");
+                }
+                RemoteAuthExecutionOutcome::Reset(error) => {
+                    warn!(error = %error, "Terminal heartbeat stopped after terminal access revocation");
+                    break;
+                }
+                RemoteAuthExecutionOutcome::Failed(error) => {
+                    warn!(error = %error, "Terminal heartbeat failed");
+                }
             }
         }
     });
@@ -2264,7 +2606,6 @@ pub fn start_sync_loop(
     cancel: tokio_util::sync::CancellationToken,
 ) {
     let is_running = sync_state.is_running.clone();
-    let last_sync = sync_state.last_sync.clone();
 
     // Mark as running
     is_running.store(true, Ordering::SeqCst);
@@ -2304,7 +2645,14 @@ pub fn start_sync_loop(
             // UI state remains consistent.
             if !storage::is_configured() {
                 previous_network_online = None;
-                let status = get_sync_status_for_event(&db, &last_sync, network_is_online);
+                let status = get_sync_status_for_event(&db, sync_state.as_ref(), network_is_online);
+                let _ = app.emit("sync_status", &status);
+                let _ = app.emit("sync-status-changed", &status);
+                continue;
+            }
+
+            if sync_state.is_remote_auth_paused() {
+                let status = get_sync_status_for_event(&db, sync_state.as_ref(), network_is_online);
                 let _ = app.emit("sync_status", &status);
                 let _ = app.emit("sync-status-changed", &status);
                 continue;
@@ -2333,7 +2681,7 @@ pub fn start_sync_loop(
                 previous_network_online = Some(false);
 
                 if !actionable_remote_work {
-                    let status = get_sync_status_for_event(&db, &last_sync, false);
+                    let status = get_sync_status_for_event(&db, sync_state.as_ref(), false);
                     let _ = app.emit("sync_status", &status);
                     let _ = app.emit("sync-status-changed", &status);
                     continue;
@@ -2345,30 +2693,34 @@ pub fn start_sync_loop(
                 previous_network_online = Some(true);
             }
 
-            match run_sync_cycle(&db, &app).await {
-                Ok(synced) => {
+            match run_sync_cycle_with_auth_guard(&db, sync_state.as_ref(), &app, "sync_loop").await
+            {
+                RemoteAuthExecutionOutcome::Success(synced) => {
                     if synced > 0 {
                         info!("Sync cycle complete: {synced} items synced");
                     }
-                    if let Ok(mut guard) = last_sync.lock() {
+                    if let Ok(mut guard) = sync_state.last_sync.lock() {
                         *guard = Some(Utc::now().to_rfc3339());
                     }
                 }
-                Err(e) => {
-                    if is_terminal_auth_failure(&e) {
-                        handle_terminal_auth_failure_from_sync(&db, &app, &e);
-                        is_running.store(false, Ordering::SeqCst);
-                        info!("Sync loop stopped — terminal access revoked");
-                        break;
-                    }
-                    log_sync_cycle_failure_with_context(&db, &e);
+                RemoteAuthExecutionOutcome::Paused(error) => {
+                    warn!(error = %error, "Sync cycle paused after terminal identity auth failure");
+                }
+                RemoteAuthExecutionOutcome::Reset(error) => {
+                    warn!(error = %error, "Sync loop stopped after terminal access revocation");
+                    is_running.store(false, Ordering::SeqCst);
+                    info!("Sync loop stopped after terminal access revocation");
+                    break;
+                }
+                RemoteAuthExecutionOutcome::Failed(error) => {
+                    log_sync_cycle_failure_with_context(&db, &error);
                 }
             }
 
             // Emit sync status events to frontend.
             // `sync_status` is the canonical Tauri event consumed by the
             // event bridge; keep `sync-status-changed` for backward compatibility.
-            let status = get_sync_status_for_event(&db, &last_sync, network_is_online);
+            let status = get_sync_status_for_event(&db, sync_state.as_ref(), network_is_online);
             let _ = app.emit("sync_status", &status);
             let _ = app.emit("sync-status-changed", &status);
         }
@@ -2836,14 +3188,20 @@ async fn force_sync_once(
 
     let _ = run_recurring_sync_recovery(db);
 
-    let synced = run_sync_cycle(db, app).await?;
-    info!("Force sync complete: {synced} items synced");
+    match run_sync_cycle_with_auth_guard(db, sync_state, app, "force_sync").await {
+        RemoteAuthExecutionOutcome::Success(synced) => {
+            info!("Force sync complete: {synced} items synced");
 
-    if let Ok(mut guard) = sync_state.last_sync.lock() {
-        *guard = Some(Utc::now().to_rfc3339());
+            if let Ok(mut guard) = sync_state.last_sync.lock() {
+                *guard = Some(Utc::now().to_rfc3339());
+            }
+
+            Ok(synced)
+        }
+        RemoteAuthExecutionOutcome::Paused(error) => Err(error),
+        RemoteAuthExecutionOutcome::Reset(error) => Err(error),
+        RemoteAuthExecutionOutcome::Failed(error) => Err(error),
     }
-
-    Ok(synced)
 }
 
 /// Trigger an immediate sync cycle (called by `sync_force`).
@@ -11782,11 +12140,7 @@ fn mark_order_item_retry_or_fail(db: &DbState, item: &SyncItem, error: &str) -> 
 }
 
 /// Build sync status JSON for event emission (avoids needing SyncState ref).
-fn get_sync_status_for_event(
-    db: &DbState,
-    last_sync: &std::sync::Mutex<Option<String>>,
-    is_online: bool,
-) -> Value {
+fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bool) -> Value {
     let (
         pending,
         queued_remote,
@@ -11881,10 +12235,10 @@ fn get_sync_status_for_event(
         Err(_) => (0, 0, 0, 0, 0, None, FinancialSyncStats::default(), None, 0),
     };
 
-    let last = last_sync.lock().ok().and_then(|g| g.clone());
+    let last = sync_state.last_sync.lock().ok().and_then(|g| g.clone());
     let pending_total = pending + queued_remote;
-
-    serde_json::json!({
+    let remote_auth_pause = sync_state.remote_auth_snapshot();
+    let mut payload = serde_json::json!({
         "isOnline": is_online,
         "lastSync": last,
         "lastSyncAt": last,
@@ -11905,7 +12259,51 @@ fn get_sync_status_for_event(
         "pendingPaymentItems": financial_stats.pending_payment_items(),
         "failedPaymentItems": financial_stats.failed_payment_items(),
         "financialStats": financial_stats.to_json(),
-    })
+    });
+
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "remoteAuthPaused".to_string(),
+            Value::Bool(remote_auth_pause.remote_auth_paused),
+        );
+        map.insert(
+            "remoteAuthCode".to_string(),
+            remote_auth_pause
+                .remote_auth_code
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "remoteAuthReason".to_string(),
+            remote_auth_pause
+                .remote_auth_reason
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "remoteAuthError".to_string(),
+            remote_auth_pause
+                .remote_auth_error
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "requestedTerminalId".to_string(),
+            remote_auth_pause
+                .requested_terminal_id
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "canonicalTerminalId".to_string(),
+            remote_auth_pause
+                .canonical_terminal_id
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+    }
+
+    payload
 }
 
 // ---------------------------------------------------------------------------
@@ -13615,6 +14013,44 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(1)
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn prepare_terminal_auth_repair_context_repairs_stale_requested_terminal_id() {
+        let db = test_db();
+        set_terminal_setting(&db, "terminal_type", "main");
+        set_terminal_setting(&db, "pos_operating_mode", "main_isolated");
+        set_terminal_setting(&db, "owner_terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "terminal_id", "terminal-manager");
+
+        let error = r#"reconcile remote orders: Terminal not found (HTTP 401): {"success":false,"error":"Terminal not found","code":"terminal_not_found","authSource":"db","terminalId":"terminal-manager"}"#;
+
+        let context = prepare_terminal_auth_repair_context(&db, error);
+
+        assert_eq!(
+            context.requested_terminal_id.as_deref(),
+            Some("terminal-manager")
+        );
+        assert_eq!(
+            context.canonical_terminal_id.as_deref(),
+            Some("terminal-efe99d27")
+        );
+        assert!(context.repaired_identity);
+    }
+
+    #[test]
+    fn terminal_auth_failure_requires_reset_only_for_explicit_revocations() {
+        let inactive_error = r#"Terminal inactive (HTTP 401): {"success":false,"code":"terminal_inactive","error":"inactive"}"#;
+        let invalid_key_error = r#"Invalid terminal API key (HTTP 401): {"success":false,"code":"invalid_terminal_api_key","error":"invalid"}"#;
+        let missing_terminal_error = r#"Terminal not found (HTTP 401): {"success":false,"code":"terminal_not_found","error":"missing"}"#;
+
+        assert!(terminal_auth_failure_requires_reset(inactive_error));
+        assert!(terminal_auth_failure_requires_reset(invalid_key_error));
+        assert!(!terminal_auth_failure_requires_reset(
+            missing_terminal_error
+        ));
     }
 
     #[test]

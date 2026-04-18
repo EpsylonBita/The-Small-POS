@@ -15,8 +15,6 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
@@ -352,10 +350,7 @@ fn get_terminal_context(db: &DbState) -> Value {
 }
 
 fn build_diagnostics_sync_state() -> crate::sync::SyncState {
-    crate::sync::SyncState {
-        is_running: Arc::new(AtomicBool::new(false)),
-        last_sync: Arc::new(Mutex::new(None)),
-    }
+    crate::sync::SyncState::new()
 }
 
 fn get_sync_status_summary(db: &DbState) -> Result<Value, String> {

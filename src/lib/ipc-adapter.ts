@@ -645,6 +645,12 @@ export interface SyncStatus {
   lastSyncAt: string | null;
   pendingChanges: number;
   syncErrors: number;
+  remoteAuthPaused?: boolean;
+  remoteAuthCode?: string | null;
+  remoteAuthReason?: string | null;
+  remoteAuthError?: string | null;
+  requestedTerminalId?: string | null;
+  canonicalTerminalId?: string | null;
   historicalZReportConflicts?: number;
   lastQueueFailure?: {
     queueId: number;

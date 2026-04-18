@@ -298,6 +298,7 @@ fn should_run_menu_sync_for_digest(last_token: Option<&str>, digest_token: &str)
 fn handle_menu_monitor_sync_error(
     app: &tauri::AppHandle,
     db: &db::DbState,
+    sync_state: &crate::sync::SyncState,
     error: String,
     source: &str,
 ) {
@@ -305,7 +306,11 @@ fn handle_menu_monitor_sync_error(
     let mut event_error: Option<&str> = Some(error.as_str());
 
     if is_terminal_auth_failure(&error) {
-        handle_invalid_terminal_credentials(Some(db), app, source, &error);
+        if crate::sync::terminal_auth_failure_requires_reset(&error) {
+            handle_invalid_terminal_credentials(Some(db), app, source, &error);
+        } else {
+            crate::sync::handle_soft_terminal_auth_failure(db, sync_state, app, source, &error);
+        }
     } else if is_menu_connectivity_error(&error) {
         if should_emit_menu_offline_info() {
             info!(
@@ -344,6 +349,7 @@ fn handle_menu_monitor_sync_error(
 pub fn start_menu_version_monitor(
     app: tauri::AppHandle,
     db: Arc<db::DbState>,
+    sync_state: Arc<crate::sync::SyncState>,
     interval_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
 ) {
@@ -358,6 +364,17 @@ pub fn start_menu_version_monitor(
 
         loop {
             if storage::is_configured() {
+                if sync_state.is_remote_auth_paused() {
+                    tokio::select! {
+                        _ = tokio::time::sleep(cadence) => {}
+                        _ = cancel.cancelled() => {
+                            info!("Menu version monitor cancelled");
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
                 hydrate_terminal_credentials_from_local_settings(db.as_ref());
 
                 match menu::fetch_menu_version_digest(db.as_ref()).await {
@@ -412,6 +429,7 @@ pub fn start_menu_version_monitor(
                                     handle_menu_monitor_sync_error(
                                         &app,
                                         db.as_ref(),
+                                        sync_state.as_ref(),
                                         error,
                                         "menu_version_monitor",
                                     );
@@ -456,6 +474,7 @@ pub fn start_menu_version_monitor(
                                 handle_menu_monitor_sync_error(
                                     &app,
                                     db.as_ref(),
+                                    sync_state.as_ref(),
                                     error,
                                     "menu_version_monitor",
                                 );
@@ -615,6 +634,7 @@ pub async fn menu_get_combos(
 pub async fn menu_sync(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
+    sync_state: tauri::State<'_, std::sync::Arc<crate::sync::SyncState>>,
 ) -> Result<serde_json::Value, String> {
     hydrate_terminal_credentials_from_local_settings(&db);
 
@@ -630,6 +650,7 @@ pub async fn menu_sync(
 
     match menu::sync_menu(&db).await {
         Ok(result) => {
+            sync_state.clear_remote_auth_pause();
             let (updated, version, counts, timestamp) = menu_sync_snapshot(&result);
 
             emit_menu_sync_event(
@@ -668,7 +689,24 @@ pub async fn menu_sync(
         }
         Err(error) => {
             if is_terminal_auth_failure(&error) {
-                handle_invalid_terminal_credentials(Some(&db), &app, "menu_sync_command", &error);
+                let error_code = if crate::sync::terminal_auth_failure_requires_reset(&error) {
+                    handle_invalid_terminal_credentials(
+                        Some(&db),
+                        &app,
+                        "menu_sync_command",
+                        &error,
+                    );
+                    "invalid_terminal_credentials"
+                } else {
+                    crate::sync::handle_soft_terminal_auth_failure(
+                        &db,
+                        sync_state.inner().as_ref(),
+                        &app,
+                        "menu_sync_command",
+                        &error,
+                    );
+                    "terminal_auth_paused"
+                };
                 emit_menu_version_checked_event(
                     &app,
                     "menu_sync_command",
@@ -680,7 +718,7 @@ pub async fn menu_sync(
                 );
                 return Ok(serde_json::json!({
                     "success": false,
-                    "errorCode": "invalid_terminal_credentials",
+                    "errorCode": error_code,
                     "error": error
                 }));
             }

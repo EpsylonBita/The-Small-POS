@@ -3582,7 +3582,13 @@
     "remoteWipe": "Il terminale è stato ripristinato da remoto",
     "terminalDeleted": "Questo terminale è stato eliminato dal pannello di amministrazione. Riconfigurare.",
     "terminalInactive": "Questo terminale è stato disattivato nel pannello di amministrazione. Contatta un operatore o ripristina l'accesso.",
-    "factoryReset": "Comando di ripristino di fabbrica ricevuto dal pannello di amministrazione."
+    "factoryReset": "Comando di ripristino di fabbrica ricevuto dal pannello di amministrazione.",
+    "remoteAuthPaused": "La sincronizzazione remota è in pausa perché l'identità del terminale salvata non è allineata. Aggiorna le impostazioni del terminale o riapri le impostazioni di connessione.",
+    "remoteAuthPausedWithIds": "La sincronizzazione remota è in pausa perché l'identità del terminale salvata non è allineata. È stato richiesto {{requestedTerminalId}}, ma è atteso {{canonicalTerminalId}}.",
+    "remoteAuthPausedRefresh": "Aggiorna impostazioni",
+    "remoteAuthPausedSettings": "Impostazioni connessione",
+    "remoteAuthPausedRefreshSuccess": "Le impostazioni del terminale sono state aggiornate. La sincronizzazione remota può riprendere.",
+    "remoteAuthPausedRefreshFailed": "Aggiornamento delle impostazioni del terminale non riuscito. Apertura delle impostazioni di connessione."
   },
   "orderFlow": {
     "walkInCustomer": "Cliente occasionale",

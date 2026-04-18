@@ -3582,7 +3582,13 @@
     "remoteWipe": "Terminal has been reset remotely",
     "terminalDeleted": "This terminal has been deleted from the admin dashboard. Please reconfigure.",
     "terminalInactive": "This terminal has been disabled in the admin dashboard. Please contact an operator or restore access.",
-    "factoryReset": "Factory reset command received from admin dashboard."
+    "factoryReset": "Factory reset command received from admin dashboard.",
+    "remoteAuthPaused": "Remote sync is paused because the stored terminal identity is out of sync. Refresh terminal settings or reopen connection settings.",
+    "remoteAuthPausedWithIds": "Remote sync is paused because the stored terminal identity is out of sync. Requested {{requestedTerminalId}}, expected {{canonicalTerminalId}}.",
+    "remoteAuthPausedRefresh": "Refresh settings",
+    "remoteAuthPausedSettings": "Connection settings",
+    "remoteAuthPausedRefreshSuccess": "Terminal settings refreshed. Remote sync can resume.",
+    "remoteAuthPausedRefreshFailed": "Failed to refresh terminal settings. Opening connection settings."
   },
   "orderFlow": {
     "walkInCustomer": "Walk-in Customer",

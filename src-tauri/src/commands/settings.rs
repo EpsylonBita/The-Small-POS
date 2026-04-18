@@ -12,7 +12,8 @@ use crate::terminal_helpers::{
     extract_pos_operating_mode_from_terminal_settings_response,
     extract_source_terminal_db_id_from_terminal_settings_response,
     extract_source_terminal_id_from_terminal_settings_response,
-    extract_terminal_type_from_terminal_settings_response,
+    extract_terminal_type_from_terminal_settings_response, persist_terminal_identity,
+    reconcile_terminal_identity_from_local_sources, resolve_managed_terminal_identity,
 };
 use crate::{api, auth, db, menu, reset, storage};
 
@@ -278,51 +279,6 @@ fn read_runtime_setting(db: &db::DbState, category: &str, key: &str) -> Option<S
     db::get_setting(&conn, category, key)
 }
 
-fn normalize_terminal_identity(value: Option<String>) -> Option<String> {
-    value.and_then(|raw| {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        let normalized = trimmed.to_ascii_lowercase();
-        if matches!(
-            normalized.as_str(),
-            "default-terminal" | "default" | "terminal-001"
-        ) {
-            return None;
-        }
-
-        Some(trimmed.to_string())
-    })
-}
-
-fn resolve_managed_terminal_identity(
-    terminal_type: Option<&str>,
-    pos_operating_mode: Option<&str>,
-    owner_terminal_id: Option<&str>,
-    source_terminal_id: Option<&str>,
-) -> Option<String> {
-    let owner = normalize_terminal_identity(owner_terminal_id.map(|value| value.to_string()));
-    let source = normalize_terminal_identity(source_terminal_id.map(|value| value.to_string()));
-
-    let owner = owner?;
-    let source = source?;
-    if owner != source {
-        return None;
-    }
-
-    let terminal_type = terminal_type.unwrap_or("").trim().to_ascii_lowercase();
-    let pos_operating_mode = pos_operating_mode.unwrap_or("").trim().to_ascii_lowercase();
-    if matches!(terminal_type.as_str(), "main" | "primary")
-        || matches!(pos_operating_mode.as_str(), "main_isolated" | "main")
-    {
-        return Some(owner);
-    }
-
-    None
-}
-
 pub(crate) fn build_terminal_runtime_config(db: &db::DbState) -> Value {
     let terminal_id = storage::get_credential("terminal_id")
         .or_else(|| read_runtime_setting(db, "terminal", "terminal_id"));
@@ -427,9 +383,13 @@ fn emit_terminal_runtime_update(
     let _ = app.emit("terminal_settings_updated", payload);
 }
 
-async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), String> {
+pub(crate) async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), String> {
+    crate::hydrate_terminal_credentials_from_local_settings(db);
     let raw_api_key = Zeroizing::new(
-        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
+        storage::get_credential("pos_api_key")
+            .or_else(|| crate::read_local_setting(db, "terminal", "pos_api_key"))
+            .or_else(|| crate::read_local_setting(db, "terminal", "api_key"))
+            .ok_or("Terminal not configured: missing API key")?,
     );
     let api_key = Zeroizing::new(
         api::extract_api_key_from_connection_string(&raw_api_key)
@@ -439,12 +399,20 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         let _ = storage::set_credential("pos_api_key", api_key.trim());
     }
 
-    let terminal_id = storage::get_credential("terminal_id")
+    let terminal_id = reconcile_terminal_identity_from_local_sources(db)
+        .or_else(|| storage::get_credential("terminal_id"))
+        .or_else(|| crate::read_local_setting(db, "terminal", "terminal_id"))
         .or_else(|| api::extract_terminal_id_from_connection_string(&raw_api_key))
         .ok_or("Terminal not configured: missing terminal ID")?;
-    let _ = storage::set_credential("terminal_id", terminal_id.trim());
+    let terminal_id = terminal_id.trim().to_string();
+    if terminal_id.is_empty() {
+        return Err("Terminal not configured: missing terminal ID".into());
+    }
+    let _ = persist_terminal_identity(db, terminal_id.clone());
 
     let admin_url = storage::get_credential("admin_dashboard_url")
+        .or_else(|| crate::read_local_setting(db, "terminal", "admin_dashboard_url"))
+        .or_else(|| crate::read_local_setting(db, "terminal", "admin_url"))
         .or_else(|| api::extract_admin_url_from_connection_string(&raw_api_key))
         .ok_or("Terminal not configured: missing admin URL")?;
     let normalized_admin_url = api::normalize_admin_url(&admin_url);
@@ -622,6 +590,30 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
     }
 
     Ok(())
+}
+
+fn build_terminal_auth_failure_response(
+    db: &db::DbState,
+    sync_state: &crate::sync::SyncState,
+    app: &tauri::AppHandle,
+    source: &str,
+    error: &str,
+) -> Value {
+    if crate::sync::terminal_auth_failure_requires_reset(error) {
+        crate::handle_invalid_terminal_credentials(Some(db), app, source, error);
+        serde_json::json!({
+            "success": false,
+            "errorCode": "invalid_terminal_credentials",
+            "error": error
+        })
+    } else {
+        crate::sync::handle_soft_terminal_auth_failure(db, sync_state, app, source, error);
+        serde_json::json!({
+            "success": false,
+            "errorCode": "terminal_auth_paused",
+            "error": error
+        })
+    }
 }
 
 #[tauri::command]
@@ -826,6 +818,7 @@ pub async fn settings_update_terminal_credentials(
     arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
+    sync_state: tauri::State<'_, std::sync::Arc<crate::sync::SyncState>>,
 ) -> Result<Value, String> {
     let payload = arg0.ok_or("Missing credentials payload")?;
     let result = storage::update_terminal_credentials(&payload)?;
@@ -876,8 +869,22 @@ pub async fn settings_update_terminal_credentials(
 
     // After saving credentials, fetch terminal config from admin API
     // to populate branch_id, organization_id, and feature flags.
-    if let Err(e) = refresh_terminal_context_from_admin(&db).await {
-        tracing::warn!(error = %e, "Failed to fetch terminal config from admin (non-fatal)");
+    match refresh_terminal_context_from_admin(&db).await {
+        Ok(()) => {
+            sync_state.clear_remote_auth_pause();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to fetch terminal config from admin (non-fatal)");
+            if crate::is_terminal_auth_failure(&e) {
+                let _ = build_terminal_auth_failure_response(
+                    &db,
+                    sync_state.inner().as_ref(),
+                    &app,
+                    "settings_update_terminal_credentials",
+                    &e,
+                );
+            }
+        }
     }
 
     let mut credentials_payload = build_terminal_runtime_config(&db);
@@ -1383,9 +1390,22 @@ pub async fn terminal_config_get_full_config(
 pub async fn terminal_config_sync_from_admin(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
+    sync_state: tauri::State<'_, std::sync::Arc<crate::sync::SyncState>>,
 ) -> Result<Value, String> {
     crate::hydrate_terminal_credentials_from_local_settings(&db);
-    refresh_terminal_context_from_admin(&db).await?;
+    if let Err(error) = refresh_terminal_context_from_admin(&db).await {
+        if crate::is_terminal_auth_failure(&error) {
+            return Ok(build_terminal_auth_failure_response(
+                &db,
+                sync_state.inner().as_ref(),
+                &app,
+                "terminal_config_sync_from_admin",
+                &error,
+            ));
+        }
+        return Err(error);
+    }
+    sync_state.clear_remote_auth_pause();
     let config = build_terminal_runtime_config(&db);
     emit_terminal_runtime_update(&app, &db, "terminal_config_sync_from_admin", None);
     Ok(serde_json::json!({
@@ -1398,33 +1418,44 @@ pub async fn terminal_config_sync_from_admin(
 pub async fn terminal_config_refresh(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
+    sync_state: tauri::State<'_, std::sync::Arc<crate::sync::SyncState>>,
 ) -> Result<Value, String> {
     crate::hydrate_terminal_credentials_from_local_settings(&db);
     let result = match menu::sync_menu(&db).await {
         Ok(value) => value,
         Err(error) => {
             if crate::is_terminal_auth_failure(&error) {
-                crate::handle_invalid_terminal_credentials(
-                    Some(&db),
+                return Ok(build_terminal_auth_failure_response(
+                    &db,
+                    sync_state.inner().as_ref(),
                     &app,
                     "terminal_config_refresh",
                     &error,
-                );
-                return Ok(serde_json::json!({
-                    "success": false,
-                    "errorCode": "invalid_terminal_credentials",
-                    "error": error
-                }));
+                ));
             }
             return Err(error);
         }
     };
 
-    if let Err(error) = refresh_terminal_context_from_admin(&db).await {
-        tracing::warn!(
-            error = %error,
-            "terminal_config_refresh: failed to refresh terminal settings (non-fatal)"
-        );
+    match refresh_terminal_context_from_admin(&db).await {
+        Ok(()) => {
+            sync_state.clear_remote_auth_pause();
+        }
+        Err(error) => {
+            if crate::is_terminal_auth_failure(&error) {
+                return Ok(build_terminal_auth_failure_response(
+                    &db,
+                    sync_state.inner().as_ref(),
+                    &app,
+                    "terminal_config_refresh",
+                    &error,
+                ));
+            }
+            tracing::warn!(
+                error = %error,
+                "terminal_config_refresh: failed to refresh terminal settings (non-fatal)"
+            );
+        }
     }
 
     emit_terminal_runtime_update(&app, &db, "terminal_config_refresh", None);

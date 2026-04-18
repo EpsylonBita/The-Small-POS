@@ -22,6 +22,7 @@ const EVENT_MAP: Record<string, string> = {
   'terminal_disabled': 'terminal-disabled',
   'terminal_enabled': 'terminal-enabled',
   'app_reset': 'app:reset',
+  'terminal_auth_paused': 'terminal-auth-paused',
 
   // --- Auto-updater events ---
   'update_checking': 'update-checking',

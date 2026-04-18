@@ -44,6 +44,10 @@ import {
   buildSyncRecoveryIssues,
   getRepresentativeParityFailureReason,
 } from '../../src/renderer/components/recovery/sync-recovery-issues';
+import {
+  resolveTerminalAuthPausePresentation,
+  resolveTerminalResetPresentation,
+} from '../../src/renderer/utils/terminal-lifecycle';
 import type {
   HealthSupportContext,
   PrinterSupportContext,
@@ -345,6 +349,40 @@ test('parity recovery does not flag retry-scheduled backlog as stalled processor
     result.issues.some((issue) => issue.id === 'parity-processor-stalled'),
     false,
   );
+});
+
+test('terminal auth pause presentation keeps the POS configured locally', () => {
+  const presentation = resolveTerminalAuthPausePresentation(
+    {
+      requestedTerminalId: 'terminal-manager',
+      canonicalTerminalId: 'terminal-efe99d27',
+    },
+    (key, options) =>
+      key === 'system.remoteAuthPausedWithIds'
+        ? `paused:${options?.requestedTerminalId}:${options?.canonicalTerminalId}`
+        : key,
+  );
+
+  assert.equal(presentation.clearLocalSession, false);
+  assert.equal(presentation.keepConfigured, true);
+  assert.equal(
+    presentation.message,
+    'paused:terminal-manager:terminal-efe99d27',
+  );
+});
+
+test('terminal reset presentation remains destructive for inactive terminals', () => {
+  const presentation = resolveTerminalResetPresentation(
+    'terminal_inactive',
+    (key) =>
+      key === 'system.terminalInactive'
+        ? 'inactive-terminal-message'
+        : key,
+  );
+
+  assert.equal(presentation.clearLocalSession, true);
+  assert.equal(presentation.keepConfigured, false);
+  assert.equal(presentation.message, 'inactive-terminal-message');
 });
 
 test('health support entry point renders the open panel in english', async () => {

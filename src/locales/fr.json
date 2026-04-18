@@ -3582,7 +3582,13 @@
     "remoteWipe": "Le terminal a été réinitialisé à distance",
     "terminalDeleted": "Ce terminal a été supprimé du tableau de bord d'administration. Veuillez le reconfigurer.",
     "terminalInactive": "Ce terminal a été désactivé dans le tableau de bord d'administration. Veuillez contacter un opérateur ou rétablir l'accès.",
-    "factoryReset": "Commande de réinitialisation d'usine reçue du tableau de bord d'administration."
+    "factoryReset": "Commande de réinitialisation d'usine reçue du tableau de bord d'administration.",
+    "remoteAuthPaused": "La synchronisation distante est en pause car l'identité de terminal enregistrée n'est plus cohérente. Actualisez les paramètres du terminal ou rouvrez les paramètres de connexion.",
+    "remoteAuthPausedWithIds": "La synchronisation distante est en pause car l'identité de terminal enregistrée n'est plus cohérente. Le terminal demandé est {{requestedTerminalId}} alors que {{canonicalTerminalId}} est attendu.",
+    "remoteAuthPausedRefresh": "Actualiser les paramètres",
+    "remoteAuthPausedSettings": "Paramètres de connexion",
+    "remoteAuthPausedRefreshSuccess": "Les paramètres du terminal ont été actualisés. La synchronisation distante peut reprendre.",
+    "remoteAuthPausedRefreshFailed": "Impossible d'actualiser les paramètres du terminal. Ouverture des paramètres de connexion."
   },
   "orderFlow": {
     "walkInCustomer": "Client sans rendez-vous",

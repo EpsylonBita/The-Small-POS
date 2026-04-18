@@ -3582,7 +3582,13 @@
     "remoteWipe": "Terminal wurde ferngesteuert zurückgesetzt",
     "terminalDeleted": "Dieses Terminal wurde vom Admin-Dashboard gelöscht. Bitte neu konfigurieren.",
     "terminalInactive": "Dieses Terminal wurde im Admin-Dashboard deaktiviert. Bitte wenden Sie sich an einen Betreiber oder stellen Sie den Zugriff wieder her.",
-    "factoryReset": "Werksreset-Befehl vom Admin-Dashboard empfangen."
+    "factoryReset": "Werksreset-Befehl vom Admin-Dashboard empfangen.",
+    "remoteAuthPaused": "Die Remote-Synchronisierung ist pausiert, weil die gespeicherte Terminal-Identität nicht mehr übereinstimmt. Aktualisieren Sie die Terminaleinstellungen oder öffnen Sie die Verbindungseinstellungen erneut.",
+    "remoteAuthPausedWithIds": "Die Remote-Synchronisierung ist pausiert, weil die gespeicherte Terminal-Identität nicht mehr übereinstimmt. Angefordert wurde {{requestedTerminalId}}, erwartet wird {{canonicalTerminalId}}.",
+    "remoteAuthPausedRefresh": "Einstellungen aktualisieren",
+    "remoteAuthPausedSettings": "Verbindungseinstellungen",
+    "remoteAuthPausedRefreshSuccess": "Terminaleinstellungen wurden aktualisiert. Die Remote-Synchronisierung kann fortgesetzt werden.",
+    "remoteAuthPausedRefreshFailed": "Terminaleinstellungen konnten nicht aktualisiert werden. Die Verbindungseinstellungen werden geöffnet."
   },
   "orderFlow": {
     "walkInCustomer": "Laufkunde",
