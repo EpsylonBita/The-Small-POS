@@ -31,6 +31,7 @@ import {
   extractSavedAddressCoordinates,
   resolveSavedAddressCoordinates,
 } from '../../utils/saved-address-geolocation';
+import { isLegacyFallbackAddress } from '../../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
 import {
   isOfferRewardLine,
@@ -248,7 +249,11 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
           selectedCustomer?.id,
           (selectedAddress as any)?.customer_id,
         );
-        if (typeof (selectedAddress as any)?.id === 'string' && customerId) {
+        if (
+          typeof (selectedAddress as any)?.id === 'string'
+          && customerId
+          && !isLegacyFallbackAddress(selectedAddress)
+        ) {
           try {
             await bridge.customers.updateAddress(
               (selectedAddress as any).id,

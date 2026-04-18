@@ -49,6 +49,11 @@ import {
   resolveTerminalResetPresentation,
 } from '../../src/renderer/utils/terminal-lifecycle';
 import {
+  isLegacyFallbackAddress,
+  resolveSelectedCustomerAddress,
+  withMaterializedCustomerAddresses,
+} from '../../src/renderer/utils/customer-addresses';
+import {
   hasValidSyncedPosMenuItemId,
   normalizePosOrderItems,
 } from '../../src/shared/utils/pos-order-items';
@@ -263,6 +268,34 @@ test('retrieval uses localized generic fallback without marking it as english fa
   assert.equal(explanation.issueCode, null);
   assert.equal(explanation.title, 'Il sistema sembra pronto');
   assert.equal(explanation.usedFallback, false);
+});
+
+test('legacy delivery customers get a synthetic default address with persisted coordinates', () => {
+  const customer = withMaterializedCustomerAddresses({
+    id: 'customer-legacy',
+    name: 'Basilis Mourouzidis',
+    phone: '6986693537',
+    address: 'Χαλκέων 13',
+    postal_code: '546 31',
+    notes: 'Call from downstairs',
+    name_on_ringer: 'ΜΟΥΡΟΥΖΙΔΗΣ',
+    coordinates: {
+      lat: 40.6368049,
+      lng: 22.9431048,
+    },
+    addresses: [],
+  });
+
+  assert.equal(customer.addresses.length, 1);
+  assert.equal(customer.addresses[0].id, 'legacy:customer-legacy');
+  assert.equal(customer.addresses[0].street_address, 'Χαλκέων 13');
+  assert.equal(customer.addresses[0].postal_code, '546 31');
+  assert.deepEqual(customer.addresses[0].coordinates, {
+    lat: 40.6368049,
+    lng: 22.9431048,
+  });
+  assert.equal(isLegacyFallbackAddress(customer.addresses[0]), true);
+  assert.equal(resolveSelectedCustomerAddress(customer)?.id, 'legacy:customer-legacy');
 });
 
 test('retrieval falls back to english for unsupported locales', () => {

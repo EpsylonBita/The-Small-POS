@@ -41,6 +41,10 @@ import {
   hasValidSyncedPosMenuItemId,
   normalizePosOrderItems,
 } from '../../shared/utils/pos-order-items';
+import {
+  resolveSelectedCustomerAddress,
+  withMaterializedCustomerAddresses,
+} from '../utils/customer-addresses';
 
 
 interface OrderFlowProps {
@@ -88,6 +92,7 @@ interface Customer {
     is_default: boolean;
     created_at: string;
     version?: number;
+    is_legacy_fallback?: boolean;
   }>;
 }
 
@@ -278,39 +283,24 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, [t]);
 
   const handleCustomerSelected = useCallback((customer: Customer) => {
-    setSelectedCustomer(customer);
+    const normalizedCustomer = withMaterializedCustomerAddresses(customer);
+    setSelectedCustomer(normalizedCustomer);
     setIsCustomerSearchModalOpen(false);
 
-    // Check if a specific address was already selected (from CustomerSearchModal)
-    const selectedAddressId = (customer as any).selected_address_id;
-    if (selectedAddressId && customer.addresses) {
-      const selectedAddr = customer.addresses.find((a: any) => a.id === selectedAddressId);
-      if (selectedAddr) {
-        // Address already selected from CustomerSearchModal
-        // Use the notes from the customer object (which was set by CustomerSearchModal) if address notes is missing
-        const addressWithNotes = {
-          ...selectedAddr,
-          notes: selectedAddr.notes || customer.notes
-        };
-        setSelectedAddress(addressWithNotes);
-        setIsMenuModalOpen(true);
-        return;
-      }
+    const selectedAddress = resolveSelectedCustomerAddress(normalizedCustomer);
+    if (selectedAddress) {
+      setSelectedAddress(selectedAddress);
+      setIsMenuModalOpen(true);
+      return;
     }
 
-    // Use first/default address if available
-    if (customer.addresses && customer.addresses.length > 0) {
-      const defaultAddr = customer.addresses.find((a: any) => a.is_default) || customer.addresses[0];
-      setSelectedAddress(defaultAddr);
-      setIsMenuModalOpen(true);
-    } else if (customer.address) {
-      // Fallback to legacy address field
+    if (normalizedCustomer.address) {
       const legacyAddress = {
-        street_address: customer.address,
-        city: (customer as any).city || '',
-        postal_code: customer.postal_code,
-        floor_number: customer.floor_number,
-        notes: customer.notes,
+        street_address: normalizedCustomer.address,
+        city: (normalizedCustomer as any).city || '',
+        postal_code: normalizedCustomer.postal_code,
+        floor_number: normalizedCustomer.floor_number,
+        notes: normalizedCustomer.notes,
       };
       setSelectedAddress(legacyAddress);
       setIsMenuModalOpen(true);
@@ -336,7 +326,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, []);
 
   const handleAddressSelected = useCallback((customer: Customer, address: any, validationResult?: DeliveryBoundaryValidationResponse) => {
-    setSelectedCustomer(customer);
+    setSelectedCustomer(withMaterializedCustomerAddresses(customer));
     setSelectedAddress(address);
     setDeliveryZoneInfo(validationResult || null);
 

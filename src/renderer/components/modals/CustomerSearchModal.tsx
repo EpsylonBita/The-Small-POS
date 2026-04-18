@@ -9,6 +9,10 @@ import { useTheme } from '../../contexts/theme-context';
 import { inputBase } from '../../styles/designSystem';
 import { formatDate } from '../../utils/format';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
+import {
+  resolveSelectedCustomerAddress,
+  withMaterializedCustomerAddresses,
+} from '../../utils/customer-addresses';
 
 interface CustomerAddress {
   id: string;
@@ -28,6 +32,7 @@ interface CustomerAddress {
   created_at: string;
   updated_at?: string;
   version?: number;
+  is_legacy_fallback?: boolean;
 }
 
 interface Customer {
@@ -150,10 +155,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   // Set customer from initialCustomer prop when modal opens
   useEffect(() => {
     if (isOpen && initialCustomer) {
-      setCustomer({
+      setCustomer(withMaterializedCustomerAddresses({
         ...initialCustomer,
         addresses: normalizeCustomerAddresses(initialCustomer.addresses),
-      });
+      }));
       setSearchQuery(initialCustomer.phone || '');
       setCustomers([]);
       setError(null);
@@ -162,9 +167,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
   // Auto-select default or first address when customer is found
   useEffect(() => {
-    if (customer?.addresses && customer.addresses.length > 0) {
-      const defaultAddr = customer.addresses.find(a => a.is_default) || customer.addresses[0];
-      setSelectedAddressId(defaultAddr.id);
+    if (customer) {
+      const defaultAddr = resolveSelectedCustomerAddress(customer);
+      setSelectedAddressId(defaultAddr?.id ?? null);
     } else {
       setSelectedAddressId(null);
     }
@@ -241,39 +246,43 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       // Handle multiple results
       if (payload?.success && payload.multiple && payload.customers) {
-        const customersList = payload.customers.map((c: any) => ({
-          id: c.id,
-          phone: c.phone,
-          name: c.name,
-          email: c.email,
-          address: c.address,
-          postal_code: c.postal_code,
-          floor_number: c.floor_number,
-          notes: c.notes,
-          name_on_ringer: c.name_on_ringer,
-          coordinates: c.coordinates ||
-            (Number.isFinite(Number(c.latitude)) && Number.isFinite(Number(c.longitude))
-              ? { lat: Number(c.latitude), lng: Number(c.longitude) }
-              : undefined),
-          latitude: c.latitude ?? null,
-          longitude: c.longitude ?? null,
-          version: c.version,
-          addresses: normalizeCustomerAddresses(c.addresses),
-          is_banned: c.is_banned,
-          ban_reason: c.ban_reason,
-          banned_at: c.banned_at,
-        }));
+        const customersList = payload.customers.map((c: any) =>
+          withMaterializedCustomerAddresses({
+            id: c.id,
+            phone: c.phone,
+            name: c.name,
+            email: c.email,
+            address: c.address,
+            city: c.city,
+            postal_code: c.postal_code,
+            floor_number: c.floor_number,
+            notes: c.notes,
+            name_on_ringer: c.name_on_ringer,
+            coordinates: c.coordinates ||
+              (Number.isFinite(Number(c.latitude)) && Number.isFinite(Number(c.longitude))
+                ? { lat: Number(c.latitude), lng: Number(c.longitude) }
+                : undefined),
+            latitude: c.latitude ?? null,
+            longitude: c.longitude ?? null,
+            version: c.version,
+            addresses: normalizeCustomerAddresses(c.addresses),
+            is_banned: c.is_banned,
+            ban_reason: c.ban_reason,
+            banned_at: c.banned_at,
+          })
+        );
         setError(null);
         setCustomers(customersList);
         setCustomer(null);
       } else if (payload?.success && payload.customer) {
         // Single customer result
-        const customerObj = {
+        const customerObj = withMaterializedCustomerAddresses({
           id: payload.customer.id,
           phone: payload.customer.phone,
           name: payload.customer.name,
           email: payload.customer.email,
           address: payload.customer.address,
+          city: payload.customer.city,
           postal_code: payload.customer.postal_code,
           floor_number: payload.customer.floor_number,
           notes: payload.customer.notes,
@@ -290,7 +299,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           is_banned: payload.customer.is_banned,
           ban_reason: payload.customer.ban_reason,
           banned_at: payload.customer.banned_at,
-        };
+        });
 
         // Clear error when customer is found
         setError(null);
@@ -362,8 +371,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       // If no address explicitly selected but customer has addresses, use default or first
       if (!addressToUse && customer.addresses && customer.addresses.length > 0) {
-        const defaultAddr = customer.addresses.find(a => a.is_default) || customer.addresses[0];
-        addressToUse = defaultAddr.id;
+        const defaultAddr = resolveSelectedCustomerAddress(customer);
+        addressToUse = defaultAddr?.id ?? null;
       }
 
       // Use the selected/default address if available

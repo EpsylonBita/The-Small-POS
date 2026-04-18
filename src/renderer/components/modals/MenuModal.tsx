@@ -38,6 +38,7 @@ import {
   extractSavedAddressCoordinates,
   resolveSavedAddressCoordinates,
 } from '../../utils/saved-address-geolocation';
+import { isLegacyFallbackAddress } from '../../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge, isBrowser } from '../../../lib';
@@ -306,7 +307,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           selectedCustomer?.id,
           (selectedAddress as any)?.customer_id,
         );
-        if (typeof (selectedAddress as any)?.id === 'string' && customerId) {
+        if (
+          typeof (selectedAddress as any)?.id === 'string'
+          && customerId
+          && !isLegacyFallbackAddress(selectedAddress)
+        ) {
           try {
             await bridge.customers.updateAddress(
               (selectedAddress as any).id,
