@@ -4960,6 +4960,12 @@
       "repairOrphanedFinancial": { "label": "Repair orphaned financial rows" },
       "repairWaitingParentPayments": { "label": "Promote waiting payments" },
       "repairWaitingParentAdjustments": { "label": "Promote waiting adjustments" },
+      "clearLegacyFinancialOrphan": {
+        "label": "Clear stale legacy financial row",
+        "confirmTitle": "Clear stale legacy financial row?",
+        "confirmMessage": "This removes the stale legacy financial sync row for {{entityId}} from this terminal only. It does not recreate the missing payment or adjustment record.",
+        "confirmCheckbox": "I understand this only clears the stale legacy sync row from this terminal."
+      },
       "requeueFailedFinancialShiftRows": { "label": "Requeue shift-bound financial rows" },
       "requeueFailedAdjustmentMissingEndpointRows": { "label": "Requeue endpoint-blocked adjustments" },
       "requeueFailedAdjustmentLegacyValidationRows": { "label": "Requeue legacy validation adjustments" },
@@ -5034,6 +5040,11 @@
         "title": "Adjustment missing canonical remote payment",
         "summary": "The parent payment is applied, but its canonical remote payment id is still missing.",
         "guidance": "Run the orphaned financial repair. If the adjustment still cannot be linked to the backend payment, contact operator."
+      },
+      "legacyFinancialParityOrphan": {
+        "title": "Stale legacy financial sync row",
+        "summary": "A legacy payment sync row still exists, but the matching local payment or adjustment record is missing.",
+        "guidance": "If you have already confirmed this payment history is complete, clear the stale legacy row from this terminal. This removes the blocker only; it does not recreate the missing record."
       },
       "financialIntegrity": {
         "title": "Financial integrity issue",

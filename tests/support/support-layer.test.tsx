@@ -538,6 +538,43 @@ test('recovery suppresses duplicate financial parity cards when canonical paymen
   );
 });
 
+test('recovery maps legacy financial parity orphans to the local clear action', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 1, failed: 0, conflicts: 0, total: 1 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    integrity: {
+      valid: false,
+      issues: [
+        {
+          entityType: 'payment',
+          entityId: 'pay-orphan',
+          paymentId: 'pay-orphan',
+          reasonCode: 'legacy_financial_parity_orphan',
+          suggestedFix: 'clear_legacy_financial_parity_orphan',
+          createdAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+          lastError: 'Waiting for parent order sync',
+          legacyParityRowId: 'legacy-row-a',
+        },
+      ],
+    },
+  });
+
+  const issue = result.issues.find(
+    (candidate) => candidate.code === 'legacy_financial_parity_orphan',
+  );
+  assert.ok(issue, 'legacy orphan issue should be present');
+  assert.deepEqual(
+    issue?.actions.map((action) => action.id),
+    ['clearLegacyFinancialOrphan', 'contactOperator'],
+  );
+});
+
 test('terminal auth pause presentation keeps the POS configured locally', () => {
   const presentation = resolveTerminalAuthPausePresentation(
     {

@@ -94,7 +94,9 @@ npm run pos:tauri:dev
 1. Check `financial_integrity.json` first, not just `parity_actionable_items.json`.
 2. Treat `order_payment_waiting_parent` as expected recovery only while the terminal is offline or the payment is younger than 10 minutes.
 3. Treat `order_payment_waiting_parent` as blocking when the terminal is online for 10+ minutes, or when the parent already has remote identity.
-4. Treat `legacy_financial_parity_orphan` as a blocking integrity issue: the legacy parity row no longer has a matching local payment/adjustment record and needs operator escalation.
+4. Treat `legacy_financial_parity_orphan` as a blocking integrity issue: the legacy parity row no longer has a matching local payment/adjustment record.
+5. If Recovery Center offers **Clear stale legacy financial row**, use it only after confirming the payment history is already complete and the local payment/adjustment row is truly gone.
+6. Escalate only if the same orphan returns after cleanup, or if support needs to reconstruct the missing local payment/adjustment record from external evidence.
 
 ### Menu data missing
 

@@ -121,6 +121,19 @@ const createRepairWaitingParentAdjustmentsAction = (): RecoveryActionDescriptor 
     'recovery.actions.repairWaitingParentAdjustments.label',
   );
 
+const createClearLegacyFinancialOrphanAction = (): RecoveryActionDescriptor =>
+  createAction(
+    'clearLegacyFinancialOrphan',
+    'recovery.actions.clearLegacyFinancialOrphan.label',
+    {
+      safetyLevel: 'destructive_local',
+      confirmationRequired: true,
+      confirmTitleKey: 'recovery.actions.clearLegacyFinancialOrphan.confirmTitle',
+      confirmMessageKey: 'recovery.actions.clearLegacyFinancialOrphan.confirmMessage',
+      confirmCheckboxKey: 'recovery.actions.clearLegacyFinancialOrphan.confirmCheckbox',
+    },
+  );
+
 const createRequeueFailedFinancialShiftRowsAction = (): RecoveryActionDescriptor =>
   createAction(
     'requeueFailedFinancialShiftRows',
@@ -570,6 +583,12 @@ const buildIntegrityIssue = (
       suggestedFix: issue.suggestedFix,
       details: issue.details ?? issue.lastError ?? null,
       queueStatus: issue.queueStatus ?? null,
+      entityType: issue.entityType,
+      entityId: issue.entityId,
+      paymentId: issue.paymentId ?? null,
+      adjustmentId: issue.adjustmentId ?? null,
+      lastError: issue.lastError ?? null,
+      legacyParityRowId: issue.legacyParityRowId ?? null,
     },
   };
 
@@ -608,10 +627,10 @@ const buildIntegrityIssue = (
         code: issue.reasonCode,
         severity: 'error',
         status: 'blocking',
-        titleKey: 'recovery.issues.financialIntegrity.title',
-        summaryKey: 'recovery.issues.financialIntegrity.summary',
-        guidanceKey: 'recovery.issues.financialIntegrity.guidance',
-        actions: [createContactOperatorAction()],
+        titleKey: 'recovery.issues.legacyFinancialParityOrphan.title',
+        summaryKey: 'recovery.issues.legacyFinancialParityOrphan.summary',
+        guidanceKey: 'recovery.issues.legacyFinancialParityOrphan.guidance',
+        actions: [createClearLegacyFinancialOrphanAction(), createContactOperatorAction()],
         ...common,
       };
     case 'payment_adjustment_missing_canonical_remote_payment':

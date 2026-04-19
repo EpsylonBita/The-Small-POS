@@ -14017,6 +14017,103 @@ fn canonical_status_from_legacy_parity(status: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClearLegacyFinancialParityOrphanResult {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub cleared: usize,
+    pub legacy_row_ids: Vec<String>,
+}
+
+fn legacy_financial_parity_table_name(entity_type: &str) -> Result<&'static str, String> {
+    match entity_type.trim() {
+        "payment" => Ok("payments"),
+        "payment_adjustment" => Ok("payment_adjustments"),
+        other => Err(format!(
+            "Unsupported legacy financial orphan entity type: {other}"
+        )),
+    }
+}
+
+fn local_financial_record_exists(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<bool, String> {
+    let exists = match entity_type.trim() {
+        "payment" => conn
+            .query_row(
+                "SELECT 1 FROM order_payments WHERE id = ?1 LIMIT 1",
+                params![entity_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| format!("check local payment existence: {e}"))?
+            .is_some(),
+        "payment_adjustment" => conn
+            .query_row(
+                "SELECT 1 FROM payment_adjustments WHERE id = ?1 LIMIT 1",
+                params![entity_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| format!("check local adjustment existence: {e}"))?
+            .is_some(),
+        other => {
+            return Err(format!(
+                "Unsupported legacy financial orphan entity type: {other}"
+            ));
+        }
+    };
+
+    Ok(exists)
+}
+
+fn list_legacy_financial_parity_row_ids(
+    conn: &Connection,
+    table_name: &str,
+    entity_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id
+             FROM parity_sync_queue
+             WHERE table_name = ?1
+               AND record_id = ?2
+             ORDER BY datetime(created_at) ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare legacy parity orphan lookup: {e}"))?;
+
+    let row_ids = stmt
+        .query_map(params![table_name, entity_id], |row| row.get(0))
+        .map_err(|e| format!("query legacy parity orphan lookup: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+
+    Ok(row_ids)
+}
+
+pub(crate) fn count_legacy_financial_parity_orphan_rows(
+    db: &DbState,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<usize, String> {
+    let table_name = legacy_financial_parity_table_name(entity_type)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let row_ids = list_legacy_financial_parity_row_ids(&conn, table_name, entity_id)?;
+    if row_ids.is_empty() {
+        return Ok(0);
+    }
+
+    if local_financial_record_exists(&conn, entity_type, entity_id)? {
+        return Err(format!(
+            "The local {entity_type} record exists again. Refresh Recovery Center and use the canonical repair action instead."
+        ));
+    }
+
+    Ok(row_ids.len())
+}
+
 fn remove_legacy_financial_parity_rows(
     conn: &Connection,
     table_name: &str,
@@ -14029,6 +14126,55 @@ fn remove_legacy_financial_parity_rows(
         params![table_name, record_id],
     )
     .map_err(|e| format!("delete legacy parity rows for {table_name}/{record_id}: {e}"))
+}
+
+pub(crate) fn clear_legacy_financial_parity_orphan(
+    db: &DbState,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<ClearLegacyFinancialParityOrphanResult, String> {
+    let normalized_entity_type = entity_type.trim().to_string();
+    let normalized_entity_id = entity_id.trim().to_string();
+    if normalized_entity_id.is_empty() {
+        return Err("Missing legacy financial orphan entity id".into());
+    }
+
+    let table_name = legacy_financial_parity_table_name(&normalized_entity_type)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let legacy_row_ids =
+        list_legacy_financial_parity_row_ids(&conn, table_name, &normalized_entity_id)?;
+    if legacy_row_ids.is_empty() {
+        return Ok(ClearLegacyFinancialParityOrphanResult {
+            entity_type: normalized_entity_type,
+            entity_id: normalized_entity_id,
+            cleared: 0,
+            legacy_row_ids,
+        });
+    }
+
+    if local_financial_record_exists(&conn, &normalized_entity_type, &normalized_entity_id)? {
+        return Err(format!(
+            "Refusing to clear legacy orphan rows because the local {normalized_entity_type} record exists again. Refresh Recovery Center and use the canonical repair path instead."
+        ));
+    }
+
+    let cleared = remove_legacy_financial_parity_rows(&conn, table_name, &normalized_entity_id)?;
+    if cleared > 0 {
+        info!(
+            entity_type = %normalized_entity_type,
+            entity_id = %normalized_entity_id,
+            cleared,
+            legacy_row_ids = ?legacy_row_ids,
+            "Cleared stale legacy financial parity orphan rows"
+        );
+    }
+
+    Ok(ClearLegacyFinancialParityOrphanResult {
+        entity_type: normalized_entity_type,
+        entity_id: normalized_entity_id,
+        cleared,
+        legacy_row_ids,
+    })
 }
 
 pub(crate) fn reconcile_legacy_financial_parity_rows(db: &DbState) -> Result<usize, String> {
@@ -17270,6 +17416,126 @@ mod tests {
             )
             .unwrap();
         assert_eq!(legacy_count, 0);
+    }
+
+    #[test]
+    fn test_clear_legacy_financial_parity_orphan_removes_missing_payment_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status, error_message
+             ) VALUES (
+                'legacy-payment-orphan-a',
+                'payments',
+                'pay-orphan-clear',
+                'INSERT',
+                '{\"orderId\":\"ord-orphan-clear\",\"paymentId\":\"pay-orphan-clear\"}',
+                'org-1',
+                datetime('now'),
+                1,
+                1000,
+                1,
+                'financial',
+                'manual',
+                1,
+                'pending',
+                'Waiting for parent order sync'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let orphan_rows =
+            count_legacy_financial_parity_orphan_rows(&db, "payment", "pay-orphan-clear").unwrap();
+        assert_eq!(orphan_rows, 1);
+
+        let result =
+            clear_legacy_financial_parity_orphan(&db, "payment", "pay-orphan-clear").unwrap();
+        assert_eq!(result.cleared, 1);
+        assert_eq!(result.legacy_row_ids, vec!["legacy-payment-orphan-a"]);
+
+        let conn = db.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = 'pay-orphan-clear'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn test_clear_legacy_financial_parity_orphan_rejects_when_local_payment_exists() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-orphan-live', '[]', 4.0, 'completed', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-orphan-live', 'ord-orphan-live', 'cash', 4.0, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status, error_message
+             ) VALUES (
+                'legacy-payment-live-a',
+                'payments',
+                'pay-orphan-live',
+                'INSERT',
+                '{\"orderId\":\"ord-orphan-live\",\"paymentId\":\"pay-orphan-live\"}',
+                'org-1',
+                datetime('now'),
+                1,
+                1000,
+                1,
+                'financial',
+                'manual',
+                1,
+                'pending',
+                'Waiting for parent order sync'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error =
+            clear_legacy_financial_parity_orphan(&db, "payment", "pay-orphan-live").unwrap_err();
+        assert!(
+            error.contains("local payment record exists again"),
+            "unexpected error: {error}"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = 'pay-orphan-live'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
     }
 
     #[test]

@@ -251,6 +251,48 @@ pub async fn recovery_execute_action(
             "requiresRefresh": false,
             "message": "No automated fix is available for this issue yet. Contact operator.",
         })),
+        "clearLegacyFinancialOrphan" => {
+            auth::authorize_privileged_action(
+                auth::PrivilegedActionScope::CashDrawerControl,
+                &db,
+                &auth_state,
+            )?;
+            let entity_type = request
+                .get("entityType")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or("Missing entityType for legacy orphan cleanup")?;
+            let entity_id = request
+                .get("entityId")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or("Missing entityId for legacy orphan cleanup")?;
+
+            let orphan_rows =
+                sync::count_legacy_financial_parity_orphan_rows(&db, entity_type, entity_id)
+                    .map_err(auth::GuardedCommandError::from)?;
+            if orphan_rows == 0 {
+                return Ok(json!({
+                    "success": true,
+                    "requiresRefresh": true,
+                    "message": "No stale legacy financial rows remained for this issue.",
+                }));
+            }
+
+            let result = sync::clear_legacy_financial_parity_orphan(&db, entity_type, entity_id)
+                .map_err(auth::GuardedCommandError::from)?;
+
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "message": format!(
+                    "Cleared {} stale legacy financial parity row(s).",
+                    result.cleared,
+                ),
+            }))
+        }
         "openShiftRepair" | "forceCloseShift" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,

@@ -291,7 +291,7 @@ fn load_legacy_financial_parity_orphan_issues(
             "entityId": record_id,
             "paymentId": record_id,
             "reasonCode": "legacy_financial_parity_orphan",
-            "suggestedFix": "contact_operator",
+            "suggestedFix": "clear_legacy_financial_parity_orphan",
             "queueStatus": queue_status,
             "lastError": last_error,
             "details": "A legacy payments parity row still exists, but the matching local order_payments record is missing.",
@@ -336,7 +336,7 @@ fn load_legacy_financial_parity_orphan_issues(
             "entityId": record_id,
             "adjustmentId": record_id,
             "reasonCode": "legacy_financial_parity_orphan",
-            "suggestedFix": "contact_operator",
+            "suggestedFix": "clear_legacy_financial_parity_orphan",
             "queueStatus": queue_status,
             "lastError": last_error,
             "details": "A legacy payment_adjustments parity row still exists, but the matching local payment_adjustments record is missing.",
@@ -1664,6 +1664,12 @@ mod dto_tests {
         assert_eq!(
             issue.get("entityId").and_then(serde_json::Value::as_str),
             Some("pay-missing")
+        );
+        assert_eq!(
+            issue
+                .get("suggestedFix")
+                .and_then(serde_json::Value::as_str),
+            Some("clear_legacy_financial_parity_orphan")
         );
     }
 
