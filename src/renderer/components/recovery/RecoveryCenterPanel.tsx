@@ -413,7 +413,9 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
 
   const handleConfirmDestructiveAction = () => {
     if (!confirmingAction) return;
-    void runAction(confirmingAction.issue, confirmingAction.action);
+    const pending = confirmingAction;
+    setConfirmingAction(null);
+    void runAction(pending.issue, pending.action);
   };
 
   const renderSection = (
