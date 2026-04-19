@@ -925,6 +925,11 @@ pub(crate) fn record_payment_in_connection(
     }
 
     if options.enqueue_sync {
+        let queue_status = if sync_state == "waiting_parent" {
+            "deferred"
+        } else {
+            "pending"
+        };
         let sync_payload = serde_json::json!({
             "paymentId": payment_id,
             "orderId": input.order_id,
@@ -942,18 +947,25 @@ pub(crate) fn record_payment_in_connection(
             "staffShiftId": resolved_shift_id,
             "items": build_payment_items_json(&input.items),
         });
-        crate::sync_queue::enqueue_payload_item(
+        crate::sync::upsert_payment_sync_queue_row(
             conn,
-            "payments",
             &payment_id,
-            "INSERT",
-            &sync_payload,
-            Some(1),
-            Some("financial"),
-            Some("manual"),
-            Some(1),
+            &sync_payload.to_string(),
+            queue_status,
+            0,
+            None,
+            None,
+            None,
+            &updated_at,
         )
-        .map_err(|e| format!("enqueue payment parity sync: {e}"))?;
+        .map_err(|e| format!("enqueue canonical payment sync: {e}"))?;
+        conn.execute(
+            "DELETE FROM parity_sync_queue
+             WHERE table_name = 'payments'
+               AND record_id = ?1",
+            params![payment_id],
+        )
+        .map_err(|e| format!("clear legacy payment parity rows: {e}"))?;
     }
 
     Ok(RecordedPayment {
@@ -1130,7 +1142,7 @@ pub fn resolve_unsettled_payment_blocker_payment(
     }
 }
 
-fn build_payment_sync_payload_for_payment(
+pub(crate) fn build_payment_sync_payload_for_payment(
     conn: &Connection,
     payment_id: &str,
 ) -> Result<String, String> {
@@ -1232,19 +1244,30 @@ fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Resu
         serde_json::from_str::<Value>(&build_payment_sync_payload_for_payment(conn, payment_id)?)
             .map_err(|e| format!("parse refreshed payment sync payload: {e}"))?;
 
-    crate::sync_queue::clear_unsynced_items(conn, "payments", payment_id)?;
-    crate::sync_queue::enqueue_payload_item(
+    let queue_status = if sync_state == "waiting_parent" {
+        "deferred"
+    } else {
+        "pending"
+    };
+    crate::sync::upsert_payment_sync_queue_row(
         conn,
-        "payments",
         payment_id,
-        "INSERT",
-        &sync_payload,
-        Some(1),
-        Some("financial"),
-        Some("manual"),
-        Some(1),
+        &sync_payload.to_string(),
+        queue_status,
+        0,
+        None,
+        None,
+        None,
+        &now,
     )
-    .map_err(|e| format!("refresh payment parity queue row: {e}"))?;
+    .map_err(|e| format!("refresh canonical payment queue row: {e}"))?;
+    conn.execute(
+        "DELETE FROM parity_sync_queue
+         WHERE table_name = 'payments'
+           AND record_id = ?1",
+        params![payment_id],
+    )
+    .map_err(|e| format!("clear legacy payment parity rows after refresh: {e}"))?;
 
     conn.execute(
         "UPDATE order_payments
@@ -1274,13 +1297,22 @@ fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Resu
 fn payment_sync_queue_needs_retry(conn: &Connection, payment_id: &str) -> Result<bool, String> {
     let queue_row: Option<(String, i64, Option<String>, Option<String>)> = match conn.query_row(
         "SELECT status,
-                COALESCE(attempts, 0),
+                COALESCE(retry_count, 0),
                 next_retry_at,
-                error_message
-         FROM parity_sync_queue
-         WHERE table_name = 'payments'
-           AND record_id = ?1
-         ORDER BY created_at DESC
+                last_error
+         FROM sync_queue
+         WHERE entity_type = 'payment'
+           AND entity_id = ?1
+         ORDER BY
+           CASE status
+             WHEN 'failed' THEN 0
+             WHEN 'deferred' THEN 1
+             WHEN 'pending' THEN 2
+             WHEN 'queued_remote' THEN 3
+             WHEN 'in_progress' THEN 4
+             ELSE 9
+           END,
+           id DESC
          LIMIT 1",
         params![payment_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -1889,15 +1921,25 @@ mod tests {
             .unwrap();
         assert_eq!(status, "paid");
 
-        // Verify parity_sync_queue entry
-        let sq_count: i64 = conn
+        let canonical_queue_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = ?1",
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(canonical_queue_count, 1);
+
+        let legacy_queue_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name = 'payments'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(sq_count, 1);
+        assert_eq!(legacy_queue_count, 0);
         drop(conn);
 
         // Query payments
@@ -2260,12 +2302,12 @@ mod tests {
 
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "DELETE FROM parity_sync_queue
-             WHERE table_name = 'payments'
-               AND record_id = ?1",
+            "DELETE FROM sync_queue
+             WHERE entity_type = 'payment'
+               AND entity_id = ?1",
             params![payment_id.clone()],
         )
-        .expect("clear healthy payment parity row");
+        .expect("clear healthy canonical payment row");
         conn.execute(
             "UPDATE order_payments
              SET sync_status = 'synced',
@@ -2314,14 +2356,14 @@ mod tests {
 
         let (queue_status, payload): (String, String) = conn
             .query_row(
-                "SELECT status, data
-                 FROM parity_sync_queue
-                 WHERE table_name = 'payments'
-                   AND record_id = ?1",
+                "SELECT status, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = ?1",
                 params![payment_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("query refreshed payment queue row");
+            .expect("query refreshed canonical payment queue row");
         assert_eq!(queue_status, "pending");
         assert!(payload.contains("\"method\":\"card\""));
     }
@@ -2441,16 +2483,16 @@ mod tests {
 
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "UPDATE parity_sync_queue
+            "UPDATE sync_queue
              SET status = 'failed',
-                 attempts = 5,
-                 error_message = 'Internal server error',
+                 retry_count = 5,
+                 last_error = 'Internal server error',
                  next_retry_at = datetime('now', '+10 minutes')
-             WHERE table_name = 'payments'
-               AND record_id = ?1",
+             WHERE entity_type = 'payment'
+               AND entity_id = ?1",
             params![payment_id.clone()],
         )
-        .expect("mark queue row failed");
+        .expect("mark canonical queue row failed");
         conn.execute(
             "UPDATE order_payments
              SET sync_status = 'failed',
@@ -2472,14 +2514,14 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let (queue_status, retry_count, last_error): (String, i64, Option<String>) = conn
             .query_row(
-                "SELECT status, attempts, error_message
-                 FROM parity_sync_queue
-                 WHERE table_name = 'payments'
-                   AND record_id = ?1",
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = ?1",
                 params![payment_id.clone()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .expect("query refreshed queue row");
+            .expect("query refreshed canonical queue row");
         assert_eq!(queue_status, "pending");
         assert_eq!(retry_count, 0);
         assert_eq!(last_error, None);
@@ -2541,12 +2583,12 @@ mod tests {
 
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "DELETE FROM parity_sync_queue
-             WHERE table_name = 'payments'
-               AND record_id = ?1",
+            "DELETE FROM sync_queue
+             WHERE entity_type = 'payment'
+               AND entity_id = ?1",
             params![payment_id.clone()],
         )
-        .expect("clear healthy payment parity row");
+        .expect("clear healthy canonical payment row");
         conn.execute(
             "UPDATE order_payments
              SET sync_status = 'synced',
@@ -2569,13 +2611,13 @@ mod tests {
         let queue_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*)
-                 FROM parity_sync_queue
-                 WHERE table_name = 'payments'
-                   AND record_id = ?1",
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = ?1",
                 params![payment_id],
                 |row| row.get(0),
             )
-            .expect("query unchanged parity queue rows");
+            .expect("query unchanged canonical payment queue rows");
         assert_eq!(queue_count, 0);
     }
 
@@ -2631,14 +2673,14 @@ mod tests {
             .unwrap();
         assert_eq!(pay_status, "voided");
 
-        // The original payment parity row remains and the void adds an
+        // The original payment canonical queue row remains and the void adds an
         // adjustment parity row rather than a second payment queue item.
         let payment_queue_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*)
-                 FROM parity_sync_queue
-                 WHERE table_name = 'payments'
-                   AND record_id = ?1",
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = ?1",
                 params![payment_id],
                 |row| row.get(0),
             )

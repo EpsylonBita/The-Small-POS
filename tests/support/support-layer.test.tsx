@@ -434,6 +434,110 @@ test('parity recovery does not flag retry-scheduled backlog as stalled processor
   );
 });
 
+test('recovery marks fresh online waiting-parent payments as recovering and stale ones as blocking', () => {
+  const freshCreatedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const staleCreatedAt = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+
+  const freshResult = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 0, failed: 0, conflicts: 0, total: 0 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    integrity: {
+      valid: false,
+      issues: [
+        {
+          entityType: 'payment',
+          entityId: 'pay-fresh',
+          paymentId: 'pay-fresh',
+          reasonCode: 'order_payment_waiting_parent',
+          suggestedFix: 'repair_waiting_parent_payments',
+          createdAt: freshCreatedAt,
+          updatedAt: freshCreatedAt,
+          parentHasRemoteIdentity: false,
+        },
+      ],
+    },
+  });
+  const staleResult = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 0, failed: 0, conflicts: 0, total: 0 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    integrity: {
+      valid: false,
+      issues: [
+        {
+          entityType: 'payment',
+          entityId: 'pay-stale',
+          paymentId: 'pay-stale',
+          reasonCode: 'order_payment_waiting_parent',
+          suggestedFix: 'repair_waiting_parent_payments',
+          createdAt: staleCreatedAt,
+          updatedAt: staleCreatedAt,
+          parentHasRemoteIdentity: false,
+        },
+      ],
+    },
+  });
+
+  assert.equal(freshResult.issues[0]?.status, 'recovering');
+  assert.equal(staleResult.issues[0]?.status, 'blocking');
+});
+
+test('recovery suppresses duplicate financial parity cards when canonical payment issues exist', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 1, failed: 0, conflicts: 0, total: 1 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'legacy-payment-parity',
+        tableName: 'payments',
+        recordId: 'pay-dup',
+        moduleType: 'financial',
+      }),
+    ],
+    integrity: {
+      valid: false,
+      issues: [
+        {
+          entityType: 'payment',
+          entityId: 'pay-dup',
+          paymentId: 'pay-dup',
+          reasonCode: 'order_payment_waiting_parent',
+          suggestedFix: 'repair_waiting_parent_payments',
+          createdAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+          updatedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+          parentHasRemoteIdentity: false,
+        },
+      ],
+    },
+  });
+
+  assert.equal(
+    result.issues.some((issue) => issue.code === 'parity_module_pending_items'),
+    false,
+  );
+  assert.equal(
+    result.issues.some((issue) => issue.code === 'order_payment_waiting_parent'),
+    true,
+  );
+});
+
 test('terminal auth pause presentation keeps the POS configured locally', () => {
   const presentation = resolveTerminalAuthPausePresentation(
     {

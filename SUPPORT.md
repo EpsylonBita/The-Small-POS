@@ -29,6 +29,8 @@ Bundle contents:
 - `terminal_settings_snapshot.json`: cached terminal, organization, and restaurant settings snapshot
 - `sync_backlog.json`: queue counts by entity type
 - `payment_adjustment_backlog.json`: adjustment-specific deferred/waiting-parent breakdown
+- `financial_queue_items.json`: canonical financial sync rows that still need action, including payments
+- `financial_integrity.json`: waiting-parent financial issues and `legacy_financial_parity_orphan` recovery blockers
 - `sync_blocker_details.json`: self-describing blocker rows with payment/order context for failed payment sync issues
 - `sync_errors.json`: recent sync failures
 - `printer_diagnostics.json`: printer profiles and print-job state
@@ -86,6 +88,13 @@ npm run pos:tauri:dev
 2. Confirm network state transitions (offline deferral, online resume).
 3. Check `sync_errors.json` for persistent failures.
 4. Verify queue drains after reconnect; if not, attach diagnostics and logs.
+
+### Previous-day payment or closeout recovery backlog
+
+1. Check `financial_integrity.json` first, not just `parity_actionable_items.json`.
+2. Treat `order_payment_waiting_parent` as expected recovery only while the terminal is offline or the payment is younger than 10 minutes.
+3. Treat `order_payment_waiting_parent` as blocking when the terminal is online for 10+ minutes, or when the parent already has remote identity.
+4. Treat `legacy_financial_parity_orphan` as a blocking integrity issue: the legacy parity row no longer has a matching local payment/adjustment record and needs operator escalation.
 
 ### Menu data missing
 

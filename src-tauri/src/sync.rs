@@ -75,6 +75,7 @@ use crate::normalize_status_for_storage;
 use crate::order_ownership;
 use crate::payments;
 use crate::print;
+use crate::refunds;
 use crate::storage;
 use crate::terminal_helpers::{
     emit_terminal_auth_paused, normalize_terminal_identity,
@@ -2234,6 +2235,20 @@ fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
         }
         Err(error) => {
             warn!(error = %error, "Recurring sync recovery failed to recover shift-bound financial rows");
+        }
+    }
+
+    match reconcile_legacy_financial_parity_rows(db) {
+        Ok(reconciled) => {
+            if reconciled > 0 {
+                info!(
+                    reconciled,
+                    "Recurring sync recovery migrated legacy financial parity rows"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to migrate legacy financial parity rows");
         }
     }
 
@@ -5169,6 +5184,279 @@ fn mark_payment_queue_row_synced(
     crate::sync_queue::clear_unsynced_items(conn, "payments", payment_id)?;
     crate::sync_queue::clear_unsynced_items(conn, "order_payments", payment_id)?;
 
+    Ok(())
+}
+
+fn select_latest_queue_row_id(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<Option<i64>, String> {
+    conn.query_row(
+        "SELECT id
+         FROM sync_queue
+         WHERE entity_type = ?1
+           AND entity_id = ?2
+         ORDER BY
+           CASE status
+             WHEN 'failed' THEN 0
+             WHEN 'deferred' THEN 1
+             WHEN 'pending' THEN 2
+             WHEN 'queued_remote' THEN 3
+             WHEN 'in_progress' THEN 4
+             WHEN 'synced' THEN 5
+             ELSE 9
+           END,
+           id DESC
+         LIMIT 1",
+        params![entity_type, entity_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("load latest canonical queue row for {entity_type}/{entity_id}: {e}"))
+}
+
+fn canonical_financial_local_state(queue_status: &str) -> (&'static str, &'static str) {
+    match queue_status {
+        "deferred" => ("pending", "waiting_parent"),
+        "failed" => ("failed", "failed"),
+        "synced" => ("synced", "applied"),
+        _ => ("pending", "pending"),
+    }
+}
+
+pub(crate) fn upsert_payment_sync_queue_row(
+    conn: &Connection,
+    payment_id: &str,
+    payload: &str,
+    queue_status: &str,
+    retry_count: i64,
+    last_error: Option<&str>,
+    next_retry_at: Option<&str>,
+    retry_delay_ms: Option<i64>,
+    now: &str,
+) -> Result<(), String> {
+    let idempotency_key = format!("payment:{payment_id}");
+    let retry_delay_ms = retry_delay_ms.unwrap_or(5_000);
+
+    if let Some(queue_id) = select_latest_queue_row_id(conn, "payment", payment_id)? {
+        conn.execute(
+            "UPDATE sync_queue
+             SET operation = 'insert',
+                 payload = ?1,
+                 idempotency_key = ?2,
+                 status = ?3,
+                 retry_count = ?4,
+                 last_error = ?5,
+                 next_retry_at = ?6,
+                 retry_delay_ms = ?7,
+                 synced_at = CASE WHEN ?3 = 'synced' THEN COALESCE(synced_at, ?8) ELSE NULL END,
+                 updated_at = ?8
+             WHERE id = ?9",
+            params![
+                payload,
+                idempotency_key,
+                queue_status,
+                retry_count.max(0),
+                last_error,
+                next_retry_at,
+                retry_delay_ms,
+                now,
+                queue_id,
+            ],
+        )
+        .map_err(|e| format!("update canonical payment queue row: {e}"))?;
+    } else {
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type,
+                 entity_id,
+                 operation,
+                 payload,
+                 idempotency_key,
+                 status,
+                 retry_count,
+                 max_retries,
+                 last_error,
+                 next_retry_at,
+                 retry_delay_ms,
+                 created_at,
+                 updated_at,
+                 synced_at
+             ) VALUES (
+                 'payment',
+                 ?1,
+                 'insert',
+                 ?2,
+                 ?3,
+                 ?4,
+                 ?5,
+                 5,
+                 ?6,
+                 ?7,
+                 ?8,
+                 ?9,
+                 ?9,
+                 CASE WHEN ?4 = 'synced' THEN ?9 ELSE NULL END
+             )",
+            params![
+                payment_id,
+                payload,
+                idempotency_key,
+                queue_status,
+                retry_count.max(0),
+                last_error,
+                next_retry_at,
+                retry_delay_ms,
+                now,
+            ],
+        )
+        .map_err(|e| format!("insert canonical payment queue row: {e}"))?;
+    }
+
+    let (sync_status, sync_state) = canonical_financial_local_state(queue_status);
+    conn.execute(
+        "UPDATE order_payments
+         SET sync_status = ?1,
+             sync_state = ?2,
+             sync_retry_count = ?3,
+             sync_last_error = ?4,
+             sync_next_retry_at = ?5,
+             updated_at = ?6
+         WHERE id = ?7",
+        params![
+            sync_status,
+            sync_state,
+            retry_count.max(0),
+            last_error,
+            next_retry_at,
+            now,
+            payment_id,
+        ],
+    )
+    .map_err(|e| format!("align local payment sync metadata: {e}"))?;
+
+    Ok(())
+}
+
+pub(crate) fn upsert_payment_adjustment_sync_queue_row(
+    conn: &Connection,
+    adjustment_id: &str,
+    payload: &str,
+    queue_status: &str,
+    retry_count: i64,
+    last_error: Option<&str>,
+    next_retry_at: Option<&str>,
+    retry_delay_ms: Option<i64>,
+    now: &str,
+) -> Result<(), String> {
+    let idempotency_key = format!("adjustment:{adjustment_id}");
+    let retry_delay_ms = retry_delay_ms.unwrap_or(5_000);
+
+    if let Some(queue_id) = select_latest_queue_row_id(conn, "payment_adjustment", adjustment_id)? {
+        conn.execute(
+            "UPDATE sync_queue
+             SET operation = 'insert',
+                 payload = ?1,
+                 idempotency_key = ?2,
+                 status = ?3,
+                 retry_count = ?4,
+                 last_error = ?5,
+                 next_retry_at = ?6,
+                 retry_delay_ms = ?7,
+                 synced_at = CASE WHEN ?3 = 'synced' THEN COALESCE(synced_at, ?8) ELSE NULL END,
+                 updated_at = ?8
+             WHERE id = ?9",
+            params![
+                payload,
+                idempotency_key,
+                queue_status,
+                retry_count.max(0),
+                last_error,
+                next_retry_at,
+                retry_delay_ms,
+                now,
+                queue_id,
+            ],
+        )
+        .map_err(|e| format!("update canonical payment-adjustment queue row: {e}"))?;
+    } else {
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type,
+                 entity_id,
+                 operation,
+                 payload,
+                 idempotency_key,
+                 status,
+                 retry_count,
+                 max_retries,
+                 last_error,
+                 next_retry_at,
+                 retry_delay_ms,
+                 created_at,
+                 updated_at,
+                 synced_at
+             ) VALUES (
+                 'payment_adjustment',
+                 ?1,
+                 'insert',
+                 ?2,
+                 ?3,
+                 ?4,
+                 ?5,
+                 5,
+                 ?6,
+                 ?7,
+                 ?8,
+                 ?9,
+                 ?9,
+                 CASE WHEN ?4 = 'synced' THEN ?9 ELSE NULL END
+             )",
+            params![
+                adjustment_id,
+                payload,
+                idempotency_key,
+                queue_status,
+                retry_count.max(0),
+                last_error,
+                next_retry_at,
+                retry_delay_ms,
+                now,
+            ],
+        )
+        .map_err(|e| format!("insert canonical payment-adjustment queue row: {e}"))?;
+    }
+
+    let (_, sync_state) = canonical_financial_local_state(queue_status);
+    conn.execute(
+        "UPDATE payment_adjustments
+         SET sync_state = ?1,
+             sync_retry_count = ?2,
+             sync_last_error = ?3,
+             sync_next_retry_at = ?4,
+             updated_at = ?5
+         WHERE id = ?6",
+        params![
+            sync_state,
+            retry_count.max(0),
+            last_error,
+            next_retry_at,
+            now,
+            adjustment_id,
+        ],
+    )
+    .map_err(|e| format!("align local payment-adjustment sync metadata: {e}"))?;
+
+    if queue_status == "synced" {
+        let _ = conn.execute(
+            "UPDATE payment_adjustments
+             SET sync_state = 'applied',
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, adjustment_id],
+        );
+    }
     Ok(())
 }
 
@@ -11090,7 +11378,18 @@ pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<
 
     let dependency =
         ensure_financial_parent_shift_dependency_recovery(&conn, &entity_type, &payload, &now)?;
+    let payment_parent_ready = if entity_type == "payment" {
+        extract_order_id_from_financial_payload(&payload)
+            .as_deref()
+            .and_then(|order_id| local_order_has_remote_identity(&conn, order_id))
+            .unwrap_or(false)
+    } else {
+        true
+    };
     let (status, last_error) = match dependency {
+        _ if entity_type == "payment" && !payment_parent_ready => {
+            ("deferred", Some("Order not yet synced".to_string()))
+        }
         Some(ref dependency) if dependency.dependency_block_reason.is_some() => {
             ("deferred", dependency.dependency_block_reason.clone())
         }
@@ -11122,6 +11421,21 @@ pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<
                  SELECT entity_id FROM sync_queue WHERE id = ?3
              )",
             params![status, now, queue_id],
+        );
+    }
+
+    if entity_type == "payment" {
+        let (sync_status, sync_state) = canonical_financial_local_state(status);
+        let _ = conn.execute(
+            "UPDATE order_payments
+             SET sync_status = ?1,
+                 sync_state = ?2,
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 sync_next_retry_at = NULL,
+                 updated_at = ?3
+             WHERE id = ?4",
+            params![sync_status, sync_state, now, entity_id],
         );
     }
 
@@ -13694,6 +14008,241 @@ pub(crate) fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: 
             "Inline-promoted {updated} waiting_parent payments after order sync"
         );
     }
+}
+
+fn canonical_status_from_legacy_parity(status: &str) -> &'static str {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "failed" | "conflict" => "failed",
+        _ => "pending",
+    }
+}
+
+fn remove_legacy_financial_parity_rows(
+    conn: &Connection,
+    table_name: &str,
+    record_id: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM parity_sync_queue
+         WHERE table_name = ?1
+           AND record_id = ?2",
+        params![table_name, record_id],
+    )
+    .map_err(|e| format!("delete legacy parity rows for {table_name}/{record_id}: {e}"))
+}
+
+pub(crate) fn reconcile_legacy_financial_parity_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                table_name,
+                record_id,
+                status,
+                COALESCE(attempts, 0),
+                error_message,
+                next_retry_at,
+                retry_delay_ms
+             FROM parity_sync_queue
+             WHERE table_name IN ('payments', 'payment_adjustments')
+             ORDER BY datetime(created_at) ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare legacy financial parity selector: {e}"))?;
+
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        i64,
+    )> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .map_err(|e| format!("query legacy financial parity rows: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let mut reconciled = 0usize;
+
+    for (
+        table_name,
+        record_id,
+        legacy_status,
+        attempts,
+        error_message,
+        next_retry_at,
+        retry_delay_ms,
+    ) in rows
+    {
+        match table_name.as_str() {
+            "payments" => {
+                let payment_context: Option<(String, String, Option<String>)> = conn
+                    .query_row(
+                        "SELECT
+                            COALESCE(op.sync_state, ''),
+                            COALESCE(o.supabase_id, ''),
+                            op.remote_payment_id
+                         FROM order_payments op
+                         JOIN orders o ON o.id = op.order_id
+                         WHERE op.id = ?1",
+                        params![record_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(|e| format!("load local payment for legacy bridge: {e}"))?;
+
+                let Some((payment_sync_state, parent_supabase_id, remote_payment_id)) =
+                    payment_context
+                else {
+                    continue;
+                };
+
+                if payment_sync_state == "applied"
+                    || normalize_optional_uuid_str(remote_payment_id.as_deref()).is_some()
+                {
+                    mark_payment_queue_row_synced(&conn, &record_id, &now)?;
+                    if remove_legacy_financial_parity_rows(&conn, "payments", &record_id)? > 0 {
+                        reconciled += 1;
+                    }
+                    continue;
+                }
+
+                let payload = payments::build_payment_sync_payload_for_payment(&conn, &record_id)?;
+                let waiting_parent = parent_supabase_id.trim().is_empty()
+                    || payment_sync_state.trim() == "waiting_parent";
+                let queue_status = if waiting_parent {
+                    "deferred"
+                } else {
+                    canonical_status_from_legacy_parity(&legacy_status)
+                };
+                let queue_error = if waiting_parent {
+                    Some("Order not yet synced")
+                } else {
+                    error_message.as_deref()
+                };
+
+                upsert_payment_sync_queue_row(
+                    &conn,
+                    &record_id,
+                    &payload,
+                    queue_status,
+                    attempts,
+                    queue_error,
+                    next_retry_at.as_deref(),
+                    Some(retry_delay_ms),
+                    &now,
+                )?;
+                if remove_legacy_financial_parity_rows(&conn, "payments", &record_id)? > 0 {
+                    reconciled += 1;
+                }
+            }
+            "payment_adjustments" => {
+                let adjustment_context: Option<(String, Option<String>, String)> = conn
+                    .query_row(
+                        "SELECT
+                            COALESCE(op.sync_state, ''),
+                            op.remote_payment_id,
+                            COALESCE(pa.sync_state, '')
+                         FROM payment_adjustments pa
+                         LEFT JOIN order_payments op ON op.id = pa.payment_id
+                         WHERE pa.id = ?1",
+                        params![record_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(|e| format!("load local payment adjustment for legacy bridge: {e}"))?;
+
+                let Some((parent_payment_sync_state, remote_payment_id, adjustment_sync_state)) =
+                    adjustment_context
+                else {
+                    continue;
+                };
+
+                if adjustment_sync_state == "applied" {
+                    let _ = conn.execute(
+                        "UPDATE sync_queue
+                         SET status = 'synced',
+                             synced_at = ?1,
+                             updated_at = ?1
+                         WHERE entity_type = 'payment_adjustment'
+                           AND entity_id = ?2
+                           AND status != 'synced'",
+                        params![now, record_id],
+                    );
+                    if remove_legacy_financial_parity_rows(
+                        &conn,
+                        "payment_adjustments",
+                        &record_id,
+                    )? > 0
+                    {
+                        reconciled += 1;
+                    }
+                    continue;
+                }
+
+                let payload =
+                    refunds::build_adjustment_sync_payload_for_adjustment(&conn, &record_id)?;
+                let parent_ready = parent_payment_sync_state.trim() == "applied"
+                    && normalize_optional_uuid_str(remote_payment_id.as_deref()).is_some();
+                let queue_status = if parent_ready {
+                    canonical_status_from_legacy_parity(&legacy_status)
+                } else {
+                    "deferred"
+                };
+                let queue_error = if parent_payment_sync_state.trim() != "applied" {
+                    Some("Parent payment not yet synced")
+                } else if normalize_optional_uuid_str(remote_payment_id.as_deref()).is_none() {
+                    Some("Parent payment missing canonical remote id")
+                } else {
+                    error_message.as_deref()
+                };
+
+                upsert_payment_adjustment_sync_queue_row(
+                    &conn,
+                    &record_id,
+                    &payload,
+                    queue_status,
+                    attempts,
+                    queue_error,
+                    next_retry_at.as_deref(),
+                    Some(retry_delay_ms),
+                    &now,
+                )?;
+                if remove_legacy_financial_parity_rows(&conn, "payment_adjustments", &record_id)?
+                    > 0
+                {
+                    reconciled += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if reconciled > 0 {
+        info!(
+            reconciled,
+            "Reconciled legacy financial parity rows into canonical sync_queue"
+        );
+    }
+
+    Ok(reconciled)
 }
 
 // ---------------------------------------------------------------------------
@@ -16631,6 +17180,96 @@ mod tests {
         drop(conn);
         let promoted = reconcile_deferred_payments(&db).unwrap();
         assert_eq!(promoted, 0, "no double-promotion");
+    }
+
+    #[test]
+    fn test_reconcile_legacy_payment_parity_rows_migrates_to_canonical_queue() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-legacy-payment', '[]', 19.5, 'completed', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-legacy-payment', 'ord-legacy-payment', 'cash', 19.5, 'pending', 'waiting_parent', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, error_message, retry_delay_ms,
+                module_type, conflict_strategy, version, status
+             ) VALUES (
+                'legacy-payment-row',
+                'payments',
+                'pay-legacy-payment',
+                'INSERT',
+                '{\"orderId\":\"ord-legacy-payment\",\"paymentId\":\"pay-legacy-payment\"}',
+                'org-1',
+                '2026-04-19T10:00:00Z',
+                2,
+                'Waiting for parent order sync',
+                1000,
+                'financial',
+                'manual',
+                1,
+                'pending'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let reconciled = reconcile_legacy_financial_parity_rows(&db).unwrap();
+        assert_eq!(reconciled, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, retry_count): (String, i64) = conn
+            .query_row(
+                "SELECT status, retry_count
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = 'pay-legacy-payment'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(queue_status, "deferred");
+        assert_eq!(retry_count, 2);
+
+        let local_state: String = conn
+            .query_row(
+                "SELECT sync_state
+                 FROM order_payments
+                 WHERE id = 'pay-legacy-payment'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(local_state, "waiting_parent");
+
+        let legacy_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = 'pay-legacy-payment'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_count, 0);
     }
 
     #[test]

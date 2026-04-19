@@ -242,6 +242,89 @@ fn build_adjustment_queue_payload(
     Value::Object(payload).to_string()
 }
 
+pub(crate) fn build_adjustment_sync_payload_for_adjustment(
+    conn: &Connection,
+    adjustment_id: &str,
+) -> Result<String, String> {
+    type AdjustmentSyncRow = (
+        String,
+        String,
+        String,
+        f64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+
+    let (
+        payment_id,
+        order_id,
+        adjustment_type,
+        amount,
+        reason,
+        staff_id,
+        staff_shift_id,
+        refund_method,
+        cash_handler,
+        adjustment_context,
+    ): AdjustmentSyncRow = conn
+        .query_row(
+            "SELECT
+                payment_id,
+                order_id,
+                adjustment_type,
+                amount,
+                reason,
+                staff_id,
+                staff_shift_id,
+                refund_method,
+                cash_handler,
+                adjustment_context
+             FROM payment_adjustments
+             WHERE id = ?1",
+            params![adjustment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("load adjustment sync payload context: {e}"))?;
+
+    let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
+    let branch_id = storage::get_credential("branch_id").unwrap_or_default();
+    let remote_order_id = load_adjustment_remote_order_id(conn, &order_id);
+
+    Ok(build_adjustment_queue_payload(
+        adjustment_id,
+        &payment_id,
+        &order_id,
+        remote_order_id.as_deref(),
+        &adjustment_type,
+        amount,
+        &reason,
+        staff_id.as_deref(),
+        staff_shift_id.as_deref(),
+        &terminal_id,
+        &branch_id,
+        refund_method.as_deref(),
+        cash_handler.as_deref(),
+        adjustment_context.as_deref(),
+    ))
+}
+
 pub(crate) fn refund_payment_in_connection(
     conn: &Connection,
     payload: &Value,

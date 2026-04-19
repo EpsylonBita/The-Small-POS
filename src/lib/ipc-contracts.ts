@@ -213,8 +213,12 @@ export interface SyncFinancialIntegrityIssue {
   suggestedFix: string;
   syncState?: string | null;
   parentSyncState?: string | null;
+  parentHasRemoteIdentity?: boolean | null;
   lastError?: string | null;
   details?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  legacyParityRowId?: string | null;
 }
 
 export interface SyncFinancialIntegrityResponse {

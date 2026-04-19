@@ -104,7 +104,7 @@ fn parse_failed_financial_items_limit(arg0: Option<serde_json::Value>) -> i64 {
 const ACTIONABLE_FINANCIAL_QUEUE_STATUSES_SQL: &str =
     "'failed', 'pending', 'in_progress', 'deferred', 'queued_remote'";
 const ACTIONABLE_FINANCIAL_ENTITY_TYPES_SQL: &str =
-    "'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings'";
+    "'payment', 'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings'";
 
 fn parse_retry_financial_queue_id(value: &serde_json::Value) -> Option<i64> {
     match value {
@@ -150,7 +150,11 @@ fn parse_retry_financial_item_payload(arg0: Option<serde_json::Value>) -> Result
         .ok_or_else(|| "Missing sync item id".into())
 }
 
-fn query_financial_queue_items(limit: i64, db: &db::DbState) -> Result<serde_json::Value, String> {
+pub(crate) fn query_financial_queue_items(
+    limit: i64,
+    db: &db::DbState,
+) -> Result<serde_json::Value, String> {
+    let _ = sync::reconcile_legacy_financial_parity_rows(db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(&format!(
@@ -244,6 +248,429 @@ fn query_financial_queue_items(limit: i64, db: &db::DbState) -> Result<serde_jso
         )
         .collect();
     Ok(serde_json::json!({ "items": items }))
+}
+
+fn load_legacy_financial_parity_orphan_issues(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut issues = Vec::new();
+
+    let mut payment_stmt = conn
+        .prepare(
+            "SELECT
+                psq.id,
+                psq.record_id,
+                psq.status,
+                psq.error_message,
+                psq.created_at
+             FROM parity_sync_queue psq
+             LEFT JOIN order_payments op ON op.id = psq.record_id
+             WHERE psq.table_name = 'payments'
+               AND op.id IS NULL
+             ORDER BY datetime(psq.created_at) ASC, psq.id ASC",
+        )
+        .map_err(|e| format!("prepare legacy payment parity orphan query: {e}"))?;
+    let payment_rows: Vec<(String, String, String, Option<String>, String)> = payment_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(|e| format!("query legacy payment parity orphans: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(payment_stmt);
+
+    for (legacy_row_id, record_id, queue_status, last_error, created_at) in payment_rows {
+        issues.push(serde_json::json!({
+            "entityType": "payment",
+            "entityId": record_id,
+            "paymentId": record_id,
+            "reasonCode": "legacy_financial_parity_orphan",
+            "suggestedFix": "contact_operator",
+            "queueStatus": queue_status,
+            "lastError": last_error,
+            "details": "A legacy payments parity row still exists, but the matching local order_payments record is missing.",
+            "createdAt": created_at,
+            "legacyParityRowId": legacy_row_id,
+        }));
+    }
+
+    let mut adjustment_stmt = conn
+        .prepare(
+            "SELECT
+                psq.id,
+                psq.record_id,
+                psq.status,
+                psq.error_message,
+                psq.created_at
+             FROM parity_sync_queue psq
+             LEFT JOIN payment_adjustments pa ON pa.id = psq.record_id
+             WHERE psq.table_name = 'payment_adjustments'
+               AND pa.id IS NULL
+             ORDER BY datetime(psq.created_at) ASC, psq.id ASC",
+        )
+        .map_err(|e| format!("prepare legacy adjustment parity orphan query: {e}"))?;
+    let adjustment_rows: Vec<(String, String, String, Option<String>, String)> = adjustment_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(|e| format!("query legacy adjustment parity orphans: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(adjustment_stmt);
+
+    for (legacy_row_id, record_id, queue_status, last_error, created_at) in adjustment_rows {
+        issues.push(serde_json::json!({
+            "entityType": "payment_adjustment",
+            "entityId": record_id,
+            "adjustmentId": record_id,
+            "reasonCode": "legacy_financial_parity_orphan",
+            "suggestedFix": "contact_operator",
+            "queueStatus": queue_status,
+            "lastError": last_error,
+            "details": "A legacy payment_adjustments parity row still exists, but the matching local payment_adjustments record is missing.",
+            "createdAt": created_at,
+            "legacyParityRowId": legacy_row_id,
+        }));
+    }
+
+    Ok(issues)
+}
+
+pub(crate) fn collect_financial_integrity(db: &db::DbState) -> Result<serde_json::Value, String> {
+    let _ = sync::reconcile_legacy_financial_parity_rows(db);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut issues = Vec::new();
+
+    let mut payment_stmt = conn
+        .prepare(
+            "SELECT
+                op.id,
+                op.order_id,
+                COALESCE(o.order_number, op.order_id) AS order_number,
+                COALESCE(o.sync_status, ''),
+                COALESCE(o.supabase_id, ''),
+                COALESCE(op.sync_last_error, ''),
+                COALESCE(op.created_at, ''),
+                COALESCE(op.updated_at, op.created_at, ''),
+                (
+                    SELECT sq.id
+                    FROM sync_queue sq
+                    WHERE sq.entity_type = 'payment'
+                      AND sq.entity_id = op.id
+                    ORDER BY
+                      CASE sq.status
+                        WHEN 'failed' THEN 0
+                        WHEN 'deferred' THEN 1
+                        WHEN 'pending' THEN 2
+                        WHEN 'queued_remote' THEN 3
+                        WHEN 'in_progress' THEN 4
+                        ELSE 9
+                      END,
+                      sq.id DESC
+                    LIMIT 1
+                ) AS queue_id,
+                (
+                    SELECT sq.status
+                    FROM sync_queue sq
+                    WHERE sq.entity_type = 'payment'
+                      AND sq.entity_id = op.id
+                    ORDER BY
+                      CASE sq.status
+                        WHEN 'failed' THEN 0
+                        WHEN 'deferred' THEN 1
+                        WHEN 'pending' THEN 2
+                        WHEN 'queued_remote' THEN 3
+                        WHEN 'in_progress' THEN 4
+                        ELSE 9
+                      END,
+                      sq.id DESC
+                    LIMIT 1
+                ) AS queue_status,
+                (
+                    SELECT sq.last_error
+                    FROM sync_queue sq
+                    WHERE sq.entity_type = 'payment'
+                      AND sq.entity_id = op.id
+                    ORDER BY
+                      CASE sq.status
+                        WHEN 'failed' THEN 0
+                        WHEN 'deferred' THEN 1
+                        WHEN 'pending' THEN 2
+                        WHEN 'queued_remote' THEN 3
+                        WHEN 'in_progress' THEN 4
+                        ELSE 9
+                      END,
+                      sq.id DESC
+                    LIMIT 1
+                ) AS queue_last_error
+             FROM order_payments op
+             JOIN orders o ON o.id = op.order_id
+             WHERE op.sync_state = 'waiting_parent'
+             ORDER BY COALESCE(op.updated_at, op.created_at, '') ASC, op.id ASC",
+        )
+        .map_err(|e| format!("prepare waiting-parent payments query: {e}"))?;
+
+    let waiting_parent_payments: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    )> = payment_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+            ))
+        })
+        .map_err(|e| format!("query waiting-parent payments: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(payment_stmt);
+
+    for (
+        payment_id,
+        order_id,
+        order_number,
+        parent_sync_status,
+        parent_supabase_id,
+        payment_sync_error,
+        created_at,
+        updated_at,
+        queue_id,
+        queue_status,
+        queue_last_error,
+    ) in waiting_parent_payments
+    {
+        let parent_has_remote_identity = !parent_supabase_id.trim().is_empty();
+        let details = if parent_has_remote_identity {
+            "Parent order already has remote identity, but the payment is still waiting for promotion."
+        } else {
+            "Parent order has not synced to the backend yet, so this payment cannot be promoted."
+        };
+
+        issues.push(serde_json::json!({
+            "entityType": "payment",
+            "entityId": payment_id,
+            "orderId": order_id,
+            "orderNumber": order_number,
+            "paymentId": payment_id,
+            "queueId": queue_id,
+            "queueStatus": queue_status,
+            "reasonCode": "order_payment_waiting_parent",
+            "suggestedFix": "repair_waiting_parent_payments",
+            "syncState": "waiting_parent",
+            "parentSyncState": if parent_sync_status.trim().is_empty() { serde_json::Value::Null } else { serde_json::json!(parent_sync_status) },
+            "parentHasRemoteIdentity": parent_has_remote_identity,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+            "lastError": queue_last_error
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| (!payment_sync_error.trim().is_empty()).then_some(payment_sync_error)),
+            "details": details,
+        }));
+    }
+
+    let mut adjustment_stmt = conn
+        .prepare(
+            "SELECT
+                pa.id,
+                pa.payment_id,
+                pa.order_id,
+                COALESCE(o.order_number, pa.order_id) AS order_number,
+                COALESCE(op.sync_state, ''),
+                op.remote_payment_id,
+                COALESCE(pa.sync_last_error, ''),
+                COALESCE(pa.created_at, ''),
+                COALESCE(pa.updated_at, pa.created_at, ''),
+                (
+                    SELECT sq.id
+                    FROM sync_queue sq
+                    WHERE sq.entity_type = 'payment_adjustment'
+                      AND sq.entity_id = pa.id
+                    ORDER BY
+                      CASE sq.status
+                        WHEN 'failed' THEN 0
+                        WHEN 'deferred' THEN 1
+                        WHEN 'pending' THEN 2
+                        WHEN 'queued_remote' THEN 3
+                        WHEN 'in_progress' THEN 4
+                        ELSE 9
+                      END,
+                      sq.id DESC
+                    LIMIT 1
+                ) AS queue_id,
+                (
+                    SELECT sq.status
+                    FROM sync_queue sq
+                    WHERE sq.entity_type = 'payment_adjustment'
+                      AND sq.entity_id = pa.id
+                    ORDER BY
+                      CASE sq.status
+                        WHEN 'failed' THEN 0
+                        WHEN 'deferred' THEN 1
+                        WHEN 'pending' THEN 2
+                        WHEN 'queued_remote' THEN 3
+                        WHEN 'in_progress' THEN 4
+                        ELSE 9
+                      END,
+                      sq.id DESC
+                    LIMIT 1
+                ) AS queue_status,
+                (
+                    SELECT sq.last_error
+                    FROM sync_queue sq
+                    WHERE sq.entity_type = 'payment_adjustment'
+                      AND sq.entity_id = pa.id
+                    ORDER BY
+                      CASE sq.status
+                        WHEN 'failed' THEN 0
+                        WHEN 'deferred' THEN 1
+                        WHEN 'pending' THEN 2
+                        WHEN 'queued_remote' THEN 3
+                        WHEN 'in_progress' THEN 4
+                        ELSE 9
+                      END,
+                      sq.id DESC
+                    LIMIT 1
+                ) AS queue_last_error
+             FROM payment_adjustments pa
+             LEFT JOIN order_payments op ON op.id = pa.payment_id
+             LEFT JOIN orders o ON o.id = pa.order_id
+             WHERE pa.sync_state = 'waiting_parent'
+             ORDER BY COALESCE(pa.updated_at, pa.created_at, '') ASC, pa.id ASC",
+        )
+        .map_err(|e| format!("prepare waiting-parent adjustments query: {e}"))?;
+
+    let waiting_parent_adjustments: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    )> = adjustment_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+            ))
+        })
+        .map_err(|e| format!("query waiting-parent adjustments: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(adjustment_stmt);
+
+    for (
+        adjustment_id,
+        payment_id,
+        order_id,
+        order_number,
+        parent_payment_sync_state,
+        remote_payment_id,
+        adjustment_sync_error,
+        created_at,
+        updated_at,
+        queue_id,
+        queue_status,
+        queue_last_error,
+    ) in waiting_parent_adjustments
+    {
+        let parent_has_remote_identity =
+            sync::normalize_optional_uuid_str(remote_payment_id.as_deref()).is_some();
+        let (reason_code, suggested_fix, details) = if parent_payment_sync_state.trim() != "applied"
+        {
+            (
+                "payment_adjustment_waiting_parent",
+                "repair_waiting_parent_adjustments",
+                "Parent payment has not reached the applied state yet, so the adjustment cannot be promoted.",
+            )
+        } else if !parent_has_remote_identity {
+            (
+                "payment_adjustment_missing_canonical_remote_payment",
+                "repair_orphaned_financial",
+                "Parent payment is applied, but the canonical remote payment id is still missing.",
+            )
+        } else {
+            (
+                "payment_adjustment_waiting_parent",
+                "repair_waiting_parent_adjustments",
+                "Parent payment is applied and has a canonical remote id, but the adjustment is still waiting.",
+            )
+        };
+
+        issues.push(serde_json::json!({
+            "entityType": "payment_adjustment",
+            "entityId": adjustment_id,
+            "orderId": order_id,
+            "orderNumber": order_number,
+            "paymentId": payment_id,
+            "adjustmentId": adjustment_id,
+            "queueId": queue_id,
+            "queueStatus": queue_status,
+            "reasonCode": reason_code,
+            "suggestedFix": suggested_fix,
+            "syncState": "waiting_parent",
+            "parentSyncState": if parent_payment_sync_state.trim().is_empty() { serde_json::Value::Null } else { serde_json::json!(parent_payment_sync_state) },
+            "parentHasRemoteIdentity": parent_has_remote_identity,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+            "lastError": queue_last_error
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| (!adjustment_sync_error.trim().is_empty()).then_some(adjustment_sync_error)),
+            "details": details,
+        }));
+    }
+
+    issues.extend(load_legacy_financial_parity_orphan_issues(&conn)?);
+
+    Ok(serde_json::json!({
+        "valid": issues.is_empty(),
+        "issues": issues,
+    }))
 }
 
 fn parse_update_room_status_payload(
@@ -452,10 +879,29 @@ pub async fn sync_retry_all_failed_financial(
                  next_retry_at = NULL,
                  updated_at = ?1
              WHERE status = 'failed'
-               AND entity_type IN ('payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
+               AND entity_type IN ('payment', 'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
             rusqlite::params![now],
         )
         .map_err(|e| e.to_string())?;
+        if count > 0 {
+            let _ = conn.execute(
+                "UPDATE order_payments
+                 SET sync_status = 'pending',
+                     sync_state = 'pending',
+                     sync_retry_count = 0,
+                     sync_last_error = NULL,
+                     sync_next_retry_at = NULL,
+                     updated_at = ?1
+                 WHERE id IN (
+                     SELECT entity_id
+                     FROM sync_queue
+                     WHERE entity_type = 'payment'
+                       AND status = 'pending'
+                       AND updated_at = ?1
+                 )",
+                rusqlite::params![now],
+            );
+        }
         if count > 0 {
             let _ = conn.execute(
                 "UPDATE payment_adjustments
@@ -494,7 +940,7 @@ pub async fn sync_get_unsynced_financial_summary(
         .query_row(
             "SELECT COUNT(*) FROM sync_queue
              WHERE status != 'synced'
-               AND entity_type IN ('payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
+               AND entity_type IN ('payment', 'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
             [],
             |row| row.get(0),
         )
@@ -506,304 +952,7 @@ pub async fn sync_get_unsynced_financial_summary(
 pub async fn sync_validate_financial_integrity(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut issues = Vec::new();
-
-    let mut payment_stmt = conn
-        .prepare(
-            "SELECT
-                op.id,
-                op.order_id,
-                COALESCE(o.order_number, op.order_id) AS order_number,
-                COALESCE(o.sync_status, ''),
-                COALESCE(o.supabase_id, ''),
-                COALESCE(op.sync_last_error, ''),
-                (
-                    SELECT sq.id
-                    FROM sync_queue sq
-                    WHERE sq.entity_type = 'payment'
-                      AND sq.entity_id = op.id
-                    ORDER BY
-                      CASE sq.status
-                        WHEN 'failed' THEN 0
-                        WHEN 'deferred' THEN 1
-                        WHEN 'pending' THEN 2
-                        WHEN 'queued_remote' THEN 3
-                        WHEN 'in_progress' THEN 4
-                        ELSE 9
-                      END,
-                      sq.id DESC
-                    LIMIT 1
-                ) AS queue_id,
-                (
-                    SELECT sq.status
-                    FROM sync_queue sq
-                    WHERE sq.entity_type = 'payment'
-                      AND sq.entity_id = op.id
-                    ORDER BY
-                      CASE sq.status
-                        WHEN 'failed' THEN 0
-                        WHEN 'deferred' THEN 1
-                        WHEN 'pending' THEN 2
-                        WHEN 'queued_remote' THEN 3
-                        WHEN 'in_progress' THEN 4
-                        ELSE 9
-                      END,
-                      sq.id DESC
-                    LIMIT 1
-                ) AS queue_status,
-                (
-                    SELECT sq.last_error
-                    FROM sync_queue sq
-                    WHERE sq.entity_type = 'payment'
-                      AND sq.entity_id = op.id
-                    ORDER BY
-                      CASE sq.status
-                        WHEN 'failed' THEN 0
-                        WHEN 'deferred' THEN 1
-                        WHEN 'pending' THEN 2
-                        WHEN 'queued_remote' THEN 3
-                        WHEN 'in_progress' THEN 4
-                        ELSE 9
-                      END,
-                      sq.id DESC
-                    LIMIT 1
-                ) AS queue_last_error
-             FROM order_payments op
-             JOIN orders o ON o.id = op.order_id
-             WHERE op.sync_state = 'waiting_parent'
-             ORDER BY COALESCE(op.updated_at, op.created_at, '') ASC, op.id ASC",
-        )
-        .map_err(|e| format!("prepare waiting-parent payments query: {e}"))?;
-
-    let waiting_parent_payments: Vec<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    )> = payment_stmt
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-            ))
-        })
-        .map_err(|e| format!("query waiting-parent payments: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
-    drop(payment_stmt);
-
-    for (
-        payment_id,
-        order_id,
-        order_number,
-        parent_sync_status,
-        parent_supabase_id,
-        payment_sync_error,
-        queue_id,
-        queue_status,
-        queue_last_error,
-    ) in waiting_parent_payments
-    {
-        let parent_has_remote_identity = !parent_supabase_id.trim().is_empty();
-        let details = if parent_has_remote_identity {
-            "Parent order already has remote identity, but the payment is still waiting for promotion."
-        } else {
-            "Parent order has not synced to the backend yet, so this payment cannot be promoted."
-        };
-
-        issues.push(serde_json::json!({
-            "entityType": "payment",
-            "entityId": payment_id,
-            "orderId": order_id,
-            "orderNumber": order_number,
-            "paymentId": payment_id,
-            "queueId": queue_id,
-            "queueStatus": queue_status,
-            "reasonCode": "order_payment_waiting_parent",
-            "suggestedFix": "repair_waiting_parent_payments",
-            "syncState": "waiting_parent",
-            "parentSyncState": if parent_sync_status.trim().is_empty() { serde_json::Value::Null } else { serde_json::json!(parent_sync_status) },
-            "lastError": queue_last_error
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| (!payment_sync_error.trim().is_empty()).then_some(payment_sync_error)),
-            "details": details,
-        }));
-    }
-
-    let mut adjustment_stmt = conn
-        .prepare(
-            "SELECT
-                pa.id,
-                pa.payment_id,
-                pa.order_id,
-                COALESCE(o.order_number, pa.order_id) AS order_number,
-                COALESCE(op.sync_state, ''),
-                op.remote_payment_id,
-                COALESCE(pa.sync_last_error, ''),
-                (
-                    SELECT sq.id
-                    FROM sync_queue sq
-                    WHERE sq.entity_type = 'payment_adjustment'
-                      AND sq.entity_id = pa.id
-                    ORDER BY
-                      CASE sq.status
-                        WHEN 'failed' THEN 0
-                        WHEN 'deferred' THEN 1
-                        WHEN 'pending' THEN 2
-                        WHEN 'queued_remote' THEN 3
-                        WHEN 'in_progress' THEN 4
-                        ELSE 9
-                      END,
-                      sq.id DESC
-                    LIMIT 1
-                ) AS queue_id,
-                (
-                    SELECT sq.status
-                    FROM sync_queue sq
-                    WHERE sq.entity_type = 'payment_adjustment'
-                      AND sq.entity_id = pa.id
-                    ORDER BY
-                      CASE sq.status
-                        WHEN 'failed' THEN 0
-                        WHEN 'deferred' THEN 1
-                        WHEN 'pending' THEN 2
-                        WHEN 'queued_remote' THEN 3
-                        WHEN 'in_progress' THEN 4
-                        ELSE 9
-                      END,
-                      sq.id DESC
-                    LIMIT 1
-                ) AS queue_status,
-                (
-                    SELECT sq.last_error
-                    FROM sync_queue sq
-                    WHERE sq.entity_type = 'payment_adjustment'
-                      AND sq.entity_id = pa.id
-                    ORDER BY
-                      CASE sq.status
-                        WHEN 'failed' THEN 0
-                        WHEN 'deferred' THEN 1
-                        WHEN 'pending' THEN 2
-                        WHEN 'queued_remote' THEN 3
-                        WHEN 'in_progress' THEN 4
-                        ELSE 9
-                      END,
-                      sq.id DESC
-                    LIMIT 1
-                ) AS queue_last_error
-             FROM payment_adjustments pa
-             LEFT JOIN order_payments op ON op.id = pa.payment_id
-             LEFT JOIN orders o ON o.id = pa.order_id
-             WHERE pa.sync_state = 'waiting_parent'
-             ORDER BY COALESCE(pa.updated_at, pa.created_at, '') ASC, pa.id ASC",
-        )
-        .map_err(|e| format!("prepare waiting-parent adjustments query: {e}"))?;
-
-    let waiting_parent_adjustments: Vec<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    )> = adjustment_stmt
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-            ))
-        })
-        .map_err(|e| format!("query waiting-parent adjustments: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
-    drop(adjustment_stmt);
-    drop(conn);
-
-    for (
-        adjustment_id,
-        payment_id,
-        order_id,
-        order_number,
-        parent_payment_sync_state,
-        remote_payment_id,
-        adjustment_sync_error,
-        queue_id,
-        queue_status,
-        queue_last_error,
-    ) in waiting_parent_adjustments
-    {
-        let canonical_remote_payment_id =
-            sync::normalize_optional_uuid_str(remote_payment_id.as_deref());
-        let (reason_code, suggested_fix, details) = if parent_payment_sync_state.trim() != "applied"
-        {
-            (
-                    "payment_adjustment_waiting_parent",
-                    "repair_waiting_parent_adjustments",
-                    "Parent payment has not reached the applied state yet, so the adjustment cannot be promoted.",
-                )
-        } else if canonical_remote_payment_id.is_none() {
-            (
-                "payment_adjustment_missing_canonical_remote_payment",
-                "repair_orphaned_financial",
-                "Parent payment is applied, but the canonical remote payment id is still missing.",
-            )
-        } else {
-            (
-                    "payment_adjustment_waiting_parent",
-                    "repair_waiting_parent_adjustments",
-                    "Parent payment is applied and has a canonical remote id, but the adjustment is still waiting.",
-                )
-        };
-
-        issues.push(serde_json::json!({
-            "entityType": "payment_adjustment",
-            "entityId": adjustment_id,
-            "orderId": order_id,
-            "orderNumber": order_number,
-            "paymentId": payment_id,
-            "adjustmentId": adjustment_id,
-            "queueId": queue_id,
-            "queueStatus": queue_status,
-            "reasonCode": reason_code,
-            "suggestedFix": suggested_fix,
-            "syncState": "waiting_parent",
-            "parentSyncState": if parent_payment_sync_state.trim().is_empty() { serde_json::Value::Null } else { serde_json::json!(parent_payment_sync_state) },
-            "lastError": queue_last_error
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| (!adjustment_sync_error.trim().is_empty()).then_some(adjustment_sync_error)),
-            "details": details,
-        }));
-    }
-
-    Ok(serde_json::json!({
-        "valid": issues.is_empty(),
-        "issues": issues,
-    }))
+    collect_financial_integrity(&db)
 }
 
 #[tauri::command]
@@ -1318,6 +1467,71 @@ mod dto_tests {
     }
 
     #[test]
+    fn query_financial_queue_items_includes_payments() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at
+             ) VALUES (
+                'ord-financial-payment', '[]', 14.0, 'completed', 'synced', 'remote-order-1', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert payment order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-include', 'ord-financial-payment', 'cash', 14.0, 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert payment row");
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, last_error
+             ) VALUES (
+                'payment',
+                'pay-include',
+                'insert',
+                '{\"orderId\":\"ord-financial-payment\"}',
+                'payment:pay-include',
+                'failed',
+                'Validation failed'
+             )",
+            [],
+        )
+        .expect("insert failed payment queue row");
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        let response = query_financial_queue_items(10, &db).expect("query financial queue");
+        let items = response
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("items array");
+        let item = items.first().expect("payment item");
+
+        assert_eq!(
+            item.get("entityType").and_then(serde_json::Value::as_str),
+            Some("payment")
+        );
+        assert_eq!(
+            item.get("entityId").and_then(serde_json::Value::as_str),
+            Some("pay-include")
+        );
+    }
+
+    #[test]
     fn query_financial_queue_items_returns_parent_shift_dependency_metadata() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch(
@@ -1391,6 +1605,65 @@ mod dto_tests {
             item.get("dependencyBlockReason")
                 .and_then(serde_json::Value::as_str),
             Some("Cashier shift sync needs attention")
+        );
+    }
+
+    #[test]
+    fn validate_financial_integrity_reports_legacy_financial_parity_orphans() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, module_type, conflict_strategy, version, status, error_message
+             ) VALUES (
+                'legacy-pay-orphan',
+                'payments',
+                'pay-missing',
+                'INSERT',
+                '{}',
+                'org-1',
+                '2026-04-19T10:00:00Z',
+                'financial',
+                'manual',
+                1,
+                'failed',
+                'Payment row missing locally'
+             )",
+            [],
+        )
+        .expect("insert orphaned legacy payment parity row");
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        let response = collect_financial_integrity(&db).expect("collect integrity");
+        let issues = response
+            .get("issues")
+            .and_then(serde_json::Value::as_array)
+            .expect("issues array");
+        let issue = issues
+            .iter()
+            .find(|candidate| {
+                candidate.get("reasonCode")
+                    == Some(&serde_json::json!("legacy_financial_parity_orphan"))
+            })
+            .expect("legacy parity orphan issue");
+
+        assert_eq!(
+            issue.get("entityType").and_then(serde_json::Value::as_str),
+            Some("payment")
+        );
+        assert_eq!(
+            issue.get("entityId").and_then(serde_json::Value::as_str),
+            Some("pay-missing")
         );
     }
 

@@ -747,6 +747,14 @@ pub fn export_diagnostics_with_options(
         get_parity_failure_families(db).unwrap_or(Value::Null),
         export_options.redact_sensitive,
     );
+    let financial_queue_items = redact_value_for_export(
+        crate::commands::sync::query_financial_queue_items(50, db).unwrap_or(Value::Null),
+        export_options.redact_sensitive,
+    );
+    let financial_integrity = redact_value_for_export(
+        crate::commands::sync::collect_financial_integrity(db).unwrap_or(Value::Null),
+        export_options.redact_sensitive,
+    );
     let financial_queue_status = redact_value_for_export(
         get_financial_queue_status(db).unwrap_or(Value::Null),
         export_options.redact_sensitive,
@@ -822,6 +830,18 @@ pub fn export_diagnostics_with_options(
         &zip_options,
         "financial_queue_status.json",
         &financial_queue_status,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "financial_queue_items.json",
+        &financial_queue_items,
+    )?;
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        "financial_integrity.json",
+        &financial_integrity,
     )?;
     write_json_to_zip(
         &mut zip,

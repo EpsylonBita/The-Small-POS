@@ -36,6 +36,9 @@ const MODULE_LABELS: Record<string, string> = {
   loyalty: 'Loyalty',
 };
 
+const LEGACY_FINANCIAL_PARITY_TABLES = new Set(['payments', 'payment_adjustments']);
+const WAITING_PARENT_BLOCKING_AGE_MS = 10 * 60 * 1000;
+
 const createAction = (
   id: string,
   labelKey: string,
@@ -435,6 +438,7 @@ const buildParityProcessorIssue = (
 
 const buildParityModuleIssues = (
   parityItems: SyncQueueItem[],
+  suppressedLegacyFinancialRows: Set<string>,
 ): RecoveryIssue[] => {
   if (parityItems.length === 0) {
     return [];
@@ -442,6 +446,12 @@ const buildParityModuleIssues = (
 
   const grouped = new Map<string, { pending: SyncQueueItem[]; failed: SyncQueueItem[] }>();
   for (const item of parityItems) {
+    if (
+      LEGACY_FINANCIAL_PARITY_TABLES.has(item.tableName) &&
+      suppressedLegacyFinancialRows.has(`${item.tableName}:${item.recordId}`)
+    ) {
+      continue;
+    }
     const moduleType = item.moduleType || 'orders';
     const bucket = grouped.get(moduleType) ?? { pending: [], failed: [] };
     if (item.status === 'failed') {
@@ -513,7 +523,38 @@ const buildParityModuleIssues = (
   return issues;
 };
 
+const parseIssueTimestamp = (value?: string | null): number | null => {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+};
+
+const isWaitingParentIssueBlocking = (
+  systemHealth: DiagnosticsSystemHealth,
+  issue: SyncFinancialIntegrityIssue,
+): boolean => {
+  if (issue.parentHasRemoteIdentity) {
+    return true;
+  }
+
+  if (!systemHealth.isOnline) {
+    return false;
+  }
+
+  const timestamp =
+    parseIssueTimestamp(issue.updatedAt) ?? parseIssueTimestamp(issue.createdAt);
+  if (timestamp == null) {
+    return true;
+  }
+
+  return Date.now() - timestamp >= WAITING_PARENT_BLOCKING_AGE_MS;
+};
+
 const buildIntegrityIssue = (
+  systemHealth: DiagnosticsSystemHealth,
   issue: SyncFinancialIntegrityIssue,
 ): RecoveryIssue => {
   const common = {
@@ -538,7 +579,9 @@ const buildIntegrityIssue = (
         id: `integrity-order-payment-${issue.entityId}`,
         code: issue.reasonCode,
         severity: 'warning',
-        status: 'blocking',
+        status: isWaitingParentIssueBlocking(systemHealth, issue)
+          ? 'blocking'
+          : 'recovering',
         titleKey: 'recovery.issues.orderPaymentWaitingParent.title',
         summaryKey: 'recovery.issues.orderPaymentWaitingParent.summary',
         guidanceKey: 'recovery.issues.orderPaymentWaitingParent.guidance',
@@ -550,11 +593,25 @@ const buildIntegrityIssue = (
         id: `integrity-adjustment-parent-${issue.entityId}`,
         code: issue.reasonCode,
         severity: 'warning',
-        status: 'blocking',
+        status: isWaitingParentIssueBlocking(systemHealth, issue)
+          ? 'blocking'
+          : 'recovering',
         titleKey: 'recovery.issues.paymentAdjustmentWaitingParent.title',
         summaryKey: 'recovery.issues.paymentAdjustmentWaitingParent.summary',
         guidanceKey: 'recovery.issues.paymentAdjustmentWaitingParent.guidance',
         actions: [createRepairWaitingParentAdjustmentsAction(), createRunParitySyncAction()],
+        ...common,
+      };
+    case 'legacy_financial_parity_orphan':
+      return {
+        id: `integrity-legacy-financial-orphan-${issue.entityType}-${issue.entityId}`,
+        code: issue.reasonCode,
+        severity: 'error',
+        status: 'blocking',
+        titleKey: 'recovery.issues.financialIntegrity.title',
+        summaryKey: 'recovery.issues.financialIntegrity.summary',
+        guidanceKey: 'recovery.issues.financialIntegrity.guidance',
+        actions: [createContactOperatorAction()],
         ...common,
       };
     case 'payment_adjustment_missing_canonical_remote_payment':
@@ -709,6 +766,23 @@ export function buildSyncRecoveryIssues({
   }
 
   const issues: RecoveryIssue[] = [];
+  const suppressedLegacyFinancialRows = new Set<string>();
+  for (const item of financialItems) {
+    if (item.entityType === 'payment') {
+      suppressedLegacyFinancialRows.add(`payments:${item.entityId}`);
+    } else if (item.entityType === 'payment_adjustment') {
+      suppressedLegacyFinancialRows.add(`payment_adjustments:${item.entityId}`);
+    }
+  }
+  for (const issue of integrity?.issues ?? []) {
+    if (issue.entityType === 'payment') {
+      suppressedLegacyFinancialRows.add(`payments:${issue.paymentId ?? issue.entityId}`);
+    } else if (issue.entityType === 'payment_adjustment') {
+      suppressedLegacyFinancialRows.add(
+        `payment_adjustments:${issue.adjustmentId ?? issue.entityId}`,
+      );
+    }
+  }
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth)) {
     pushIssue(issues, issue);
@@ -719,11 +793,11 @@ export function buildSyncRecoveryIssues({
   for (const issue of buildSyncBlockerIssues(systemHealth)) {
     pushIssue(issues, issue);
   }
-  for (const issue of buildParityModuleIssues(parityItems)) {
+  for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {
     pushIssue(issues, issue);
   }
   for (const integrityIssue of integrity?.issues ?? []) {
-    pushIssue(issues, buildIntegrityIssue(integrityIssue));
+    pushIssue(issues, buildIntegrityIssue(systemHealth, integrityIssue));
   }
   for (const issue of buildFinancialQueueIssues(financialItems)) {
     pushIssue(issues, issue);
