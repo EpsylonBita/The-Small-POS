@@ -4956,14 +4956,20 @@
         "confirmMessage": "Questa azione rimuove le righe di ordine locali non valide che non possono essere sincronizzate."
       },
       "retryFinancialItem": { "label": "Riprova elemento finanziario" },
-      "retryAllFailedFinancial": { "label": "Riprova tutti gli elementi finanziari non riusciti" },
-      "repairOrphanedFinancial": { "label": "Ripara righe finanziarie orfane" },
-      "repairWaitingParentPayments": { "label": "Promuovi pagamenti in attesa" },
-      "repairWaitingParentAdjustments": { "label": "Promuovi rettifiche in attesa" },
-      "requeueFailedFinancialShiftRows": { "label": "Rimetti in coda le righe finanziarie legate al turno" },
-      "requeueFailedAdjustmentMissingEndpointRows": { "label": "Rimetti in coda le rettifiche bloccate dall'endpoint" },
-      "requeueFailedAdjustmentLegacyValidationRows": { "label": "Rimetti in coda le rettifiche di validazione legacy" },
-      "contactOperator": { "label": "Contatta operatore" },
+        "retryAllFailedFinancial": { "label": "Riprova tutti gli elementi finanziari non riusciti" },
+        "repairOrphanedFinancial": { "label": "Ripara righe finanziarie orfane" },
+        "repairWaitingParentPayments": { "label": "Promuovi pagamenti in attesa" },
+        "repairWaitingParentAdjustments": { "label": "Promuovi rettifiche in attesa" },
+        "clearLegacyFinancialOrphan": {
+          "label": "Rimuovi riga finanziaria legacy obsoleta",
+          "confirmTitle": "Rimuovere la riga finanziaria legacy obsoleta?",
+          "confirmMessage": "Questa azione rimuove dal solo terminale corrente la riga di sincronizzazione finanziaria legacy obsoleta per {{entityId}}. Non ricrea il record di pagamento o rettifica mancante.",
+          "confirmCheckbox": "Ho capito che questa azione rimuove solo la riga di sincronizzazione legacy obsoleta da questo terminale."
+        },
+        "requeueFailedFinancialShiftRows": { "label": "Rimetti in coda le righe finanziarie legate al turno" },
+        "requeueFailedAdjustmentMissingEndpointRows": { "label": "Rimetti in coda le rettifiche bloccate dall'endpoint" },
+        "requeueFailedAdjustmentLegacyValidationRows": { "label": "Rimetti in coda le rettifiche di validazione legacy" },
+        "contactOperator": { "label": "Contatta operatore" },
       "confirmTitle": "Conferma azione di recupero",
       "confirmMessage": "Questa azione modifica i dati locali di recupero per il problema selezionato."
     },
@@ -5035,15 +5041,20 @@
         "summary": "Il pagamento padre è applied, ma manca ancora il suo canonical remote payment id.",
         "guidance": "Esegui la riparazione delle righe finanziarie orfane. Se la rettifica continua a non poter essere collegata al pagamento backend, contatta l'operatore."
       },
-      "financialIntegrity": {
-        "title": "Problema di integrità finanziaria",
-        "summary": "Un record di pagamento o di rettifica richiede una riparazione prima che la sincronizzazione possa completarsi.",
-        "guidance": "Usa l'azione di recupero suggerita se disponibile. Se il problema resta invariato, contatta l'operatore con il reason code esatto."
-      },
-      "financialQueueFailed": {
-        "title": "Riga di sincronizzazione finanziaria fallita",
-        "summary": "Una riga di sincronizzazione finanziaria è fallita con {{lastError}}.",
-        "guidance": "Usa l'azione di recupero mappata quando disponibile. Se lo stesso errore ritorna dopo il nuovo tentativo, contatta l'operatore."
+        "financialIntegrity": {
+          "title": "Problema di integrità finanziaria",
+          "summary": "Un record di pagamento o di rettifica richiede una riparazione prima che la sincronizzazione possa completarsi.",
+          "guidance": "Usa l'azione di recupero suggerita se disponibile. Se il problema resta invariato, contatta l'operatore con il reason code esatto."
+        },
+        "legacyFinancialParityOrphan": {
+          "title": "Riga legacy di sincronizzazione finanziaria obsoleta",
+          "summary": "Esiste ancora una riga legacy di sincronizzazione del pagamento, ma manca il record locale corrispondente del pagamento o della rettifica.",
+          "guidance": "Se hai già verificato che questo storico pagamenti è completo, rimuovi la riga legacy obsoleta da questo terminale. Questo elimina solo il blocco; non ricrea il record mancante."
+        },
+        "financialQueueFailed": {
+          "title": "Riga di sincronizzazione finanziaria fallita",
+          "summary": "Una riga di sincronizzazione finanziaria è fallita con {{lastError}}.",
+          "guidance": "Usa l'azione di recupero mappata quando disponibile. Se lo stesso errore ritorna dopo il nuovo tentativo, contatta l'operatore."
       },
       "checkoutPaymentBlocker": {
         "title": "L'ordine blocca la chiusura turno",

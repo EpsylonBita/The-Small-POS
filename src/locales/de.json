@@ -4956,14 +4956,20 @@
         "confirmMessage": "Dadurch werden ungültige lokale Bestellzeilen entfernt, die nicht synchronisiert werden können."
       },
       "retryFinancialItem": { "label": "Finanzeintrag erneut versuchen" },
-      "retryAllFailedFinancial": { "label": "Alle fehlgeschlagenen Finanzeinträge erneut versuchen" },
-      "repairOrphanedFinancial": { "label": "Verwaiste Finanzzeilen reparieren" },
-      "repairWaitingParentPayments": { "label": "Wartende Zahlungen freigeben" },
-      "repairWaitingParentAdjustments": { "label": "Wartende Anpassungen freigeben" },
-      "requeueFailedFinancialShiftRows": { "label": "Schichtgebundene Finanzzeilen erneut einreihen" },
-      "requeueFailedAdjustmentMissingEndpointRows": { "label": "Durch Endpoint blockierte Anpassungen erneut einreihen" },
-      "requeueFailedAdjustmentLegacyValidationRows": { "label": "Legacy-Validation-Anpassungen erneut einreihen" },
-      "contactOperator": { "label": "Operator kontaktieren" },
+        "retryAllFailedFinancial": { "label": "Alle fehlgeschlagenen Finanzeinträge erneut versuchen" },
+        "repairOrphanedFinancial": { "label": "Verwaiste Finanzzeilen reparieren" },
+        "repairWaitingParentPayments": { "label": "Wartende Zahlungen freigeben" },
+        "repairWaitingParentAdjustments": { "label": "Wartende Anpassungen freigeben" },
+        "clearLegacyFinancialOrphan": {
+          "label": "Veraltete Legacy-Finanzzeile bereinigen",
+          "confirmTitle": "Veraltete Legacy-Finanzzeile bereinigen?",
+          "confirmMessage": "Dadurch wird die veraltete Legacy-Finanz-Sync-Zeile für {{entityId}} nur von diesem Terminal entfernt. Der fehlende Zahlungs- oder Anpassungseintrag wird dadurch nicht neu erstellt.",
+          "confirmCheckbox": "Ich verstehe, dass dadurch nur die veraltete Legacy-Sync-Zeile von diesem Terminal entfernt wird."
+        },
+        "requeueFailedFinancialShiftRows": { "label": "Schichtgebundene Finanzzeilen erneut einreihen" },
+        "requeueFailedAdjustmentMissingEndpointRows": { "label": "Durch Endpoint blockierte Anpassungen erneut einreihen" },
+        "requeueFailedAdjustmentLegacyValidationRows": { "label": "Legacy-Validation-Anpassungen erneut einreihen" },
+        "contactOperator": { "label": "Operator kontaktieren" },
       "confirmTitle": "Wiederherstellungsaktion bestätigen",
       "confirmMessage": "Diese Aktion ändert lokale Wiederherstellungsdaten für das ausgewählte Problem."
     },
@@ -5035,15 +5041,20 @@
         "summary": "Die übergeordnete Zahlung ist applied, aber ihre kanonische Remote-Payment-ID fehlt noch.",
         "guidance": "Führen Sie die Reparatur für verwaiste Finanzzeilen aus. Wenn die Anpassung weiterhin nicht mit der Backend-Zahlung verknüpft werden kann, kontaktieren Sie den Operator."
       },
-      "financialIntegrity": {
-        "title": "Problem mit finanzieller Integrität",
-        "summary": "Ein Zahlungs- oder Anpassungseintrag muss repariert werden, bevor die Synchronisierung abgeschlossen werden kann.",
-        "guidance": "Verwenden Sie die vorgeschlagene Wiederherstellungsaktion, wenn verfügbar. Wenn das Problem unverändert bleibt, kontaktieren Sie den Operator mit dem genauen Reason-Code."
-      },
-      "financialQueueFailed": {
-        "title": "Fehlgeschlagene Finanz-Sync-Zeile",
-        "summary": "Eine Finanz-Sync-Zeile ist mit {{lastError}} fehlgeschlagen.",
-        "guidance": "Verwenden Sie die zugeordnete Wiederherstellungsaktion, wenn sie verfügbar ist. Wenn derselbe Fehler nach dem erneuten Versuch zurückkehrt, kontaktieren Sie den Operator."
+        "financialIntegrity": {
+          "title": "Problem mit finanzieller Integrität",
+          "summary": "Ein Zahlungs- oder Anpassungseintrag muss repariert werden, bevor die Synchronisierung abgeschlossen werden kann.",
+          "guidance": "Verwenden Sie die vorgeschlagene Wiederherstellungsaktion, wenn verfügbar. Wenn das Problem unverändert bleibt, kontaktieren Sie den Operator mit dem genauen Reason-Code."
+        },
+        "legacyFinancialParityOrphan": {
+          "title": "Veraltete Legacy-Finanz-Sync-Zeile",
+          "summary": "Eine Legacy-Zahlungs-Sync-Zeile existiert noch, aber der passende lokale Zahlungs- oder Anpassungseintrag fehlt.",
+          "guidance": "Wenn Sie bereits bestätigt haben, dass dieser Zahlungsverlauf vollständig ist, bereinigen Sie die veraltete Legacy-Zeile auf diesem Terminal. Dadurch wird nur der Blocker entfernt; der fehlende Eintrag wird nicht neu erstellt."
+        },
+        "financialQueueFailed": {
+          "title": "Fehlgeschlagene Finanz-Sync-Zeile",
+          "summary": "Eine Finanz-Sync-Zeile ist mit {{lastError}} fehlgeschlagen.",
+          "guidance": "Verwenden Sie die zugeordnete Wiederherstellungsaktion, wenn sie verfügbar ist. Wenn derselbe Fehler nach dem erneuten Versuch zurückkehrt, kontaktieren Sie den Operator."
       },
       "checkoutPaymentBlocker": {
         "title": "Bestellung blockiert den Schichtabschluss",

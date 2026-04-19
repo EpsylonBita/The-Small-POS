@@ -4956,14 +4956,20 @@
         "confirmMessage": "Cette action supprime les lignes de commandes locales invalides qui ne peuvent pas être synchronisées."
       },
       "retryFinancialItem": { "label": "Réessayer l'élément financier" },
-      "retryAllFailedFinancial": { "label": "Réessayer tous les éléments financiers en échec" },
-      "repairOrphanedFinancial": { "label": "Réparer les lignes financières orphelines" },
-      "repairWaitingParentPayments": { "label": "Promouvoir les paiements en attente" },
-      "repairWaitingParentAdjustments": { "label": "Promouvoir les ajustements en attente" },
-      "requeueFailedFinancialShiftRows": { "label": "Réenfiler les lignes financières liées à la vacation" },
-      "requeueFailedAdjustmentMissingEndpointRows": { "label": "Réenfiler les ajustements bloqués par l'endpoint" },
-      "requeueFailedAdjustmentLegacyValidationRows": { "label": "Réenfiler les ajustements de validation legacy" },
-      "contactOperator": { "label": "Contacter l'operator" },
+        "retryAllFailedFinancial": { "label": "Réessayer tous les éléments financiers en échec" },
+        "repairOrphanedFinancial": { "label": "Réparer les lignes financières orphelines" },
+        "repairWaitingParentPayments": { "label": "Promouvoir les paiements en attente" },
+        "repairWaitingParentAdjustments": { "label": "Promouvoir les ajustements en attente" },
+        "clearLegacyFinancialOrphan": {
+          "label": "Supprimer la ligne financière legacy obsolète",
+          "confirmTitle": "Supprimer la ligne financière legacy obsolète ?",
+          "confirmMessage": "Cela supprime uniquement de ce terminal la ligne de synchronisation financière legacy obsolète pour {{entityId}}. Cela ne recrée pas l'enregistrement de paiement ou d'ajustement manquant.",
+          "confirmCheckbox": "Je comprends que cela supprime uniquement la ligne de synchronisation legacy obsolète de ce terminal."
+        },
+        "requeueFailedFinancialShiftRows": { "label": "Réenfiler les lignes financières liées à la vacation" },
+        "requeueFailedAdjustmentMissingEndpointRows": { "label": "Réenfiler les ajustements bloqués par l'endpoint" },
+        "requeueFailedAdjustmentLegacyValidationRows": { "label": "Réenfiler les ajustements de validation legacy" },
+        "contactOperator": { "label": "Contacter l'operator" },
       "confirmTitle": "Confirmer l'action de récupération",
       "confirmMessage": "Cette action modifie les données locales de récupération pour le problème sélectionné."
     },
@@ -5035,15 +5041,20 @@
         "summary": "Le paiement parent est applied, mais son identifiant de paiement distant canonique manque encore.",
         "guidance": "Lancez la réparation des lignes financières orphelines. Si l'ajustement ne peut toujours pas être lié au paiement backend, contactez l'operator."
       },
-      "financialIntegrity": {
-        "title": "Problème d'intégrité financière",
-        "summary": "Un enregistrement de paiement ou d'ajustement doit être réparé avant la fin de la synchronisation.",
-        "guidance": "Utilisez l'action de récupération proposée si elle est disponible. Si le problème reste inchangé, contactez l'operator avec le reason code exact."
-      },
-      "financialQueueFailed": {
-        "title": "Ligne de synchro financière en échec",
-        "summary": "Une ligne de synchro financière a échoué avec {{lastError}}.",
-        "guidance": "Utilisez l'action de récupération associée lorsqu'elle existe. Si le même échec revient après une nouvelle tentative, contactez l'operator."
+        "financialIntegrity": {
+          "title": "Problème d'intégrité financière",
+          "summary": "Un enregistrement de paiement ou d'ajustement doit être réparé avant la fin de la synchronisation.",
+          "guidance": "Utilisez l'action de récupération proposée si elle est disponible. Si le problème reste inchangé, contactez l'operator avec le reason code exact."
+        },
+        "legacyFinancialParityOrphan": {
+          "title": "Ligne de synchronisation financière legacy obsolète",
+          "summary": "Une ligne de synchronisation legacy pour le paiement existe encore, mais l'enregistrement local correspondant du paiement ou de l'ajustement manque.",
+          "guidance": "Si vous avez déjà confirmé que cet historique de paiement est complet, supprimez la ligne legacy obsolète sur ce terminal. Cela enlève uniquement le blocage ; cela ne recrée pas l'enregistrement manquant."
+        },
+        "financialQueueFailed": {
+          "title": "Ligne de synchro financière en échec",
+          "summary": "Une ligne de synchro financière a échoué avec {{lastError}}.",
+          "guidance": "Utilisez l'action de récupération associée lorsqu'elle existe. Si le même échec revient après une nouvelle tentative, contactez l'operator."
       },
       "checkoutPaymentBlocker": {
         "title": "La commande bloque la clôture de caisse",
