@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use tracing::info;
 
 use crate::{api, auth, db, payments, recovery, storage, sync, sync_queue};
 
@@ -252,11 +253,6 @@ pub async fn recovery_execute_action(
             "message": "No automated fix is available for this issue yet. Contact operator.",
         })),
         "clearLegacyFinancialOrphan" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
-            )?;
             let entity_type = request_field_str(&request, "entityType")
                 .map(ToOwned::to_owned)
                 .or_else(|| request_param_str(&request, "entityType"))
@@ -272,6 +268,12 @@ pub async fn recovery_execute_action(
                 .or_else(|| request_param_str(&request, "adjustmentId"))
                 .ok_or("Missing entityId for legacy orphan cleanup")?;
 
+            info!(
+                entity_type = %entity_type,
+                entity_id = %entity_id,
+                "Running local legacy financial parity orphan cleanup"
+            );
+
             let orphan_rows =
                 sync::count_legacy_financial_parity_orphan_rows(&db, &entity_type, &entity_id)
                     .map_err(auth::GuardedCommandError::from)?;
@@ -285,6 +287,13 @@ pub async fn recovery_execute_action(
 
             let result = sync::clear_legacy_financial_parity_orphan(&db, &entity_type, &entity_id)
                 .map_err(auth::GuardedCommandError::from)?;
+
+            info!(
+                entity_type = %entity_type,
+                entity_id = %entity_id,
+                cleared = result.cleared,
+                "Completed local legacy financial parity orphan cleanup"
+            );
 
             Ok(json!({
                 "success": true,
