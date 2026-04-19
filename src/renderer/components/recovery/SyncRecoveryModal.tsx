@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { FolderOpen, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -61,8 +61,10 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
     Awaited<ReturnType<typeof syncQueue.listItems>>
   >([]);
   const [recentActions, setRecentActions] = useState<RecoveryActionLogEntry[]>([]);
+  const loadRequestIdRef = useRef(0);
 
   const loadRecoveryState = async () => {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     try {
       const [
@@ -77,18 +79,27 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
         syncQueue.listItems({ limit: 250 }),
       ]);
 
+      if (requestId !== loadRequestIdRef.current) {
+        return;
+      }
+
       setSystemHealth(nextSystemHealth);
       setLastParitySync(nextSystemHealth.lastParitySync ?? initialContext?.lastParitySync ?? null);
       setFinancialItems(Array.isArray(nextFinancialItems) ? nextFinancialItems : []);
       setIntegrity(nextIntegrity ?? EMPTY_INTEGRITY_RESULT);
       setParityItems(Array.isArray(nextParityItems) ? nextParityItems : []);
     } catch (error) {
+      if (requestId !== loadRequestIdRef.current) {
+        return;
+      }
       console.error('[SyncRecoveryModal] Failed to load recovery state:', error);
       setIntegrity(EMPTY_INTEGRITY_RESULT);
       setFinancialItems([]);
       setParityItems([]);
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 

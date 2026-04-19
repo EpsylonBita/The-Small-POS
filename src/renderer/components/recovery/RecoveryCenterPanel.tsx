@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import {
@@ -295,24 +295,48 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
   const { runWithPrivilegedConfirmation, confirmationModal } =
     usePrivilegedActionConfirmation();
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
+  const [optimisticallyResolvedIssueIds, setOptimisticallyResolvedIssueIds] = useState<
+    Set<string>
+  >(new Set());
   const [confirmingAction, setConfirmingAction] = useState<{
     issue: RecoveryIssue;
     action: RecoveryActionDescriptor;
   } | null>(null);
 
+  useEffect(() => {
+    setOptimisticallyResolvedIssueIds((current) => {
+      if (current.size === 0) {
+        return current;
+      }
+
+      const next = new Set(
+        [...current].filter((issueId) =>
+          issues.some((issue) => issue.id === issueId),
+        ),
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [issues]);
+
+  const visibleIssues = useMemo(
+    () =>
+      issues.filter((issue) => !optimisticallyResolvedIssueIds.has(issue.id)),
+    [issues, optimisticallyResolvedIssueIds],
+  );
+
   const blockingIssues = useMemo(
     () =>
-      issues
+      visibleIssues
         .filter((issue) => issue.status === 'blocking')
         .sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity]),
-    [issues],
+    [visibleIssues],
   );
   const recoveringIssues = useMemo(
     () =>
-      issues
+      visibleIssues
         .filter((issue) => issue.status === 'recovering')
         .sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity]),
-    [issues],
+    [visibleIssues],
   );
   const resolvedActions = useMemo(
     () => recentActions.slice(0, 8),
@@ -354,6 +378,12 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
             defaultValue: 'Action completed successfully.',
           }),
       );
+
+      setOptimisticallyResolvedIssueIds((current) => {
+        const next = new Set(current);
+        next.add(issue.id);
+        return next;
+      });
 
       onActionResolved?.({
         id: `${issue.id}:${action.id}:${Date.now()}`,
