@@ -548,6 +548,14 @@ test('recovery maps legacy financial parity orphans to the local clear action', 
       credentialState: { hasAdminUrl: true, hasApiKey: true },
       isOnline: true,
     } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'legacy-payment-orphan',
+        tableName: 'payments',
+        recordId: 'pay-orphan',
+        moduleType: 'financial',
+      }),
+    ],
     integrity: {
       valid: false,
       issues: [
@@ -572,6 +580,39 @@ test('recovery maps legacy financial parity orphans to the local clear action', 
   assert.deepEqual(
     issue?.actions.map((action) => action.id),
     ['clearLegacyFinancialOrphan', 'contactOperator'],
+  );
+});
+
+test('recovery suppresses legacy financial orphan issues when the parity row is already gone', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 0, failed: 0, conflicts: 0, total: 0 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    parityItems: [],
+    integrity: {
+      valid: false,
+      issues: [
+        {
+          entityType: 'payment',
+          entityId: 'pay-orphan-cleared',
+          paymentId: 'pay-orphan-cleared',
+          reasonCode: 'legacy_financial_parity_orphan',
+          suggestedFix: 'clear_legacy_financial_parity_orphan',
+          createdAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+          legacyParityRowId: 'legacy-row-cleared',
+        },
+      ],
+    },
+  });
+
+  assert.equal(
+    result.issues.some((candidate) => candidate.code === 'legacy_financial_parity_orphan'),
+    false,
   );
 });
 

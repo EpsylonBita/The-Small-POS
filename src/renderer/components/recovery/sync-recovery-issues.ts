@@ -770,6 +770,27 @@ const buildFallbackIssue = (
   };
 };
 
+const getLegacyFinancialParityKey = (
+  issue: Pick<
+    SyncFinancialIntegrityIssue,
+    'reasonCode' | 'entityType' | 'entityId' | 'paymentId' | 'adjustmentId'
+  >,
+): string | null => {
+  if (issue.reasonCode !== 'legacy_financial_parity_orphan') {
+    return null;
+  }
+
+  if (issue.entityType === 'payment') {
+    return `payments:${issue.paymentId ?? issue.entityId}`;
+  }
+
+  if (issue.entityType === 'payment_adjustment') {
+    return `payment_adjustments:${issue.adjustmentId ?? issue.entityId}`;
+  }
+
+  return null;
+};
+
 export function buildSyncRecoveryIssues({
   systemHealth,
   lastParitySync,
@@ -785,6 +806,19 @@ export function buildSyncRecoveryIssues({
   }
 
   const issues: RecoveryIssue[] = [];
+  const legacyFinancialParityRows = new Set(
+    parityItems
+      .filter((item) => LEGACY_FINANCIAL_PARITY_TABLES.has(item.tableName))
+      .map((item) => `${item.tableName}:${item.recordId}`),
+  );
+  const integrityIssues = (integrity?.issues ?? []).filter((issue) => {
+    const legacyParityKey = getLegacyFinancialParityKey(issue);
+    if (!legacyParityKey) {
+      return true;
+    }
+
+    return legacyFinancialParityRows.has(legacyParityKey);
+  });
   const suppressedLegacyFinancialRows = new Set<string>();
   for (const item of financialItems) {
     if (item.entityType === 'payment') {
@@ -793,7 +827,7 @@ export function buildSyncRecoveryIssues({
       suppressedLegacyFinancialRows.add(`payment_adjustments:${item.entityId}`);
     }
   }
-  for (const issue of integrity?.issues ?? []) {
+  for (const issue of integrityIssues) {
     if (issue.entityType === 'payment') {
       suppressedLegacyFinancialRows.add(`payments:${issue.paymentId ?? issue.entityId}`);
     } else if (issue.entityType === 'payment_adjustment') {
@@ -815,7 +849,7 @@ export function buildSyncRecoveryIssues({
   for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {
     pushIssue(issues, issue);
   }
-  for (const integrityIssue of integrity?.issues ?? []) {
+  for (const integrityIssue of integrityIssues) {
     pushIssue(issues, buildIntegrityIssue(systemHealth, integrityIssue));
   }
   for (const issue of buildFinancialQueueIssues(financialItems)) {
