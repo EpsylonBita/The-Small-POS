@@ -462,17 +462,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         return;
       }
 
-        const exactCoordinates = resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates();
-        if (!exactCoordinates) {
-          setLocalDeliveryZoneInfo(null);
-          return;
-        }
-
-        const validationTarget = exactCoordinates;
-        if (!validationTarget) {
-          setLocalDeliveryZoneInfo(null);
-          return;
-        }
+      const validationTarget =
+        (resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates()) ??
+        buildSelectedAddressString();
+      if (!validationTarget) {
+        setLocalDeliveryZoneInfo(null);
+        return;
+      }
 
       try {
         const result = await validateDeliveryAddress(validationTarget, 0);
@@ -485,7 +481,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
 
     fetchDeliveryZoneInfo();
-    }, [deliveryZoneInfo, editMode, getSelectedAddressCoordinates, hasDeliveryPro, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
+  }, [buildSelectedAddressString, deliveryZoneInfo, editMode, getSelectedAddressCoordinates, hasDeliveryPro, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
 
   // Fetch delivery zones to get default minimum order amount (fallback when validation doesn't work)
   useEffect(() => {
@@ -1104,6 +1100,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const selectedAddressCoordinates =
     resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates();
   const selectedAddressValidationTarget = selectedAddressCoordinates ?? getSelectedAddressValidationTarget();
+  const hasResolvedDeliveryValidation = Boolean(effectiveDeliveryZoneInfo);
   const resolvedDeliveryFee =
     orderType !== 'delivery'
       ? 0
@@ -1117,9 +1114,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           ? 'resolved'
           : !selectedAddressValidationTarget
             ? 'requires_selection'
-            : !selectedAddressCoordinates
-              ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'requires_selection')
-              : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
+            : hasResolvedDeliveryValidation
+              ? getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, false)
+              : (isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates)
+                ? 'loading'
+                : 'requires_selection';
   const deliveryFeeResolved = deliveryFeeStatus === 'resolved';
   const cartSubtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
   const offerDiscountAmount = offerEvaluation?.discount_total ?? 0;
@@ -1271,28 +1270,28 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return effectiveDeliveryZoneInfo;
     }
 
-      if (!selectedAddressCoordinates) {
-        return null;
-      }
+    if (!selectedAddressValidationTarget) {
+      return null;
+    }
 
-      try {
-        const result = await validateDeliveryAddress(selectedAddressCoordinates, discountedSubtotal);
-        setLocalDeliveryZoneInfo(result);
-        return result;
-      } catch (error) {
+    try {
+      const result = await validateDeliveryAddress(selectedAddressValidationTarget, discountedSubtotal);
+      setLocalDeliveryZoneInfo(result);
+      return result;
+    } catch (error) {
       console.error('[MenuModal] Failed to refresh delivery validation before checkout:', error);
       return null;
     }
   }, [
-      deliveryFeeResolved,
-      discountedSubtotal,
-      effectiveDeliveryZoneInfo,
-      hasDeliveryPro,
-      orderType,
-      resolvedSelectedAddressCoordinates,
-      selectedAddressCoordinates,
-      validateDeliveryAddress,
-    ]);
+    deliveryFeeResolved,
+    discountedSubtotal,
+    effectiveDeliveryZoneInfo,
+    hasDeliveryPro,
+    orderType,
+    selectedAddressValidationTarget,
+    selectedAddressCoordinates,
+    validateDeliveryAddress,
+  ]);
 
   const handleCheckout = async () => {
     if (cartItems.length === 0) {
@@ -1328,8 +1327,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
     if (orderType === 'delivery' && hasDeliveryPro) {
       const validationResult = await ensureDeliveryValidationForCheckout();
-      if (!selectedAddressCoordinates) {
-        toast.error(t('menu.cart.deliveryFeeNeedsExactAddress'));
+      if (!selectedAddressValidationTarget) {
+        toast.error(t('orderFlow.zoneValidationRequired'));
         return;
       }
       if (getDeliveryFeeStatus(orderType, validationResult, false) !== 'resolved') {

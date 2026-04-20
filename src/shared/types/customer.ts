@@ -92,12 +92,20 @@ export interface CustomerInfo {
   email?: string;
   address?: {
     street: string;
+    street_address?: string;
     city: string;
     postalCode: string;
+    postal_code?: string;
+    floor_number?: string;
+    floor?: string;
+    notes?: string;
+    name_on_ringer?: string;
     coordinates?: {
       lat: number;
       lng: number;
     };
+    latitude?: number | null;
+    longitude?: number | null;
   };
   notes?: string;
 }
@@ -132,4 +140,3 @@ export function normalizeCustomerAddressFields<
 export type { Customer as CustomerType };
 export type { CustomerInfo as CustomerInfoType };
 export type { CustomerAddress as AddressType };
-

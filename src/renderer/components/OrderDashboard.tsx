@@ -98,6 +98,10 @@ import {
   getPickupToDeliveryValidationAmount,
   resolvePickupToDeliveryAddress,
 } from "../utils/pickup-to-delivery";
+import {
+  resolveCanonicalCustomerAddress,
+  withMaterializedCustomerAddresses,
+} from "../utils/customer-addresses";
 import { resolvePersistedCustomerId } from "../utils/persisted-customer-id";
 
 interface OrderDashboardProps {
@@ -216,7 +220,7 @@ const toLatLngCoordinates = (
 const buildCustomerInfoFromOrderFlowCustomer = (
   customer: OrderFlowCustomer,
 ): CustomerInfo => {
-  const resolvedAddress = resolvePickupToDeliveryAddress(customer);
+  const resolvedAddress = resolveCanonicalCustomerAddress(customer);
   const coordinates = toLatLngCoordinates(
     resolvedAddress?.coordinates ?? customer.coordinates,
     resolvedAddress?.latitude ?? customer.latitude,
@@ -228,10 +232,19 @@ const buildCustomerInfoFromOrderFlowCustomer = (
     phone: customer.phone,
     email: customer.email || "",
     address: {
-      street: resolvedAddress?.streetAddress || customer.address || "",
+      street: resolvedAddress?.street_address || customer.address || "",
+      street_address: resolvedAddress?.street_address || customer.address || "",
       city: resolvedAddress?.city || customer.city || "",
-      postalCode: resolvedAddress?.postalCode || customer.postal_code || "",
+      postalCode: resolvedAddress?.postal_code || customer.postal_code || "",
+      postal_code: resolvedAddress?.postal_code || customer.postal_code || "",
+      floor_number: resolvedAddress?.floor_number || customer.floor_number || "",
+      notes: resolvedAddress?.notes || customer.notes || "",
+      name_on_ringer:
+        resolvedAddress?.name_on_ringer || customer.name_on_ringer || "",
       coordinates,
+      latitude: coordinates?.lat ?? resolvedAddress?.latitude ?? customer.latitude ?? null,
+      longitude:
+        coordinates?.lng ?? resolvedAddress?.longitude ?? customer.longitude ?? null,
     },
     notes: resolvedAddress?.notes || customer.notes || "",
   };
@@ -1504,22 +1517,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         orderType,
       );
 
-      // Map customer data to form
-      const defaultAddress =
-        customer.addresses && customer.addresses.length > 0
-          ? customer.addresses[0]
-          : null;
+      const normalizedCustomer = withMaterializedCustomerAddresses(
+        customer as OrderFlowCustomer,
+      ) as OrderFlowCustomer;
+      const resolvedAddress = resolveCanonicalCustomerAddress(
+        normalizedCustomer,
+      );
       console.log(
-        "[handleCustomerSelectedDirect] defaultAddress:",
-        JSON.stringify(defaultAddress, null, 2),
+        "[handleCustomerSelectedDirect] resolvedAddress:",
+        JSON.stringify(resolvedAddress, null, 2),
       );
 
       // For delivery orders, validate that customer has an address
       if (orderType === "delivery") {
+        setDeliveryZoneInfo(null);
         const hasAddress =
-          defaultAddress?.street_address ||
-          defaultAddress?.street ||
-          customer.address;
+          resolvedAddress?.street_address || normalizedCustomer.address;
         console.log(
           "[handleCustomerSelectedDirect] Delivery check - hasAddress:",
           hasAddress,
@@ -1533,7 +1546,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               "This customer has no delivery address. Please add an address first.",
           );
           // Keep the modal open and prompt to add address
-          setExistingCustomer(customer);
+          setExistingCustomer(normalizedCustomer);
           setCustomerModalMode("addAddress");
           setShowPhoneLookupModal(false);
           setShowAddCustomerModal(true);
@@ -1543,24 +1556,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // Validate delivery zone for the address
         try {
           const addressString = [
-            defaultAddress?.street_address ||
-              defaultAddress?.street ||
-              customer.address ||
-              "",
-            defaultAddress?.city || customer.city || "",
-            defaultAddress?.postal_code || customer.postal_code || "",
+            resolvedAddress?.street_address || normalizedCustomer.address || "",
+            resolvedAddress?.city || normalizedCustomer.city || "",
+            resolvedAddress?.postal_code || normalizedCustomer.postal_code || "",
           ]
             .filter(Boolean)
             .join(", ");
-          const addressCoordinates =
-            defaultAddress?.coordinates ||
-            (Number.isFinite(defaultAddress?.latitude) &&
-            Number.isFinite(defaultAddress?.longitude)
-              ? {
-                  lat: Number(defaultAddress.latitude),
-                  lng: Number(defaultAddress.longitude),
-                }
-              : undefined);
+          const addressCoordinates = toLatLngCoordinates(
+            resolvedAddress?.coordinates,
+            resolvedAddress?.latitude,
+            resolvedAddress?.longitude,
+          );
 
           if (addressCoordinates || addressString) {
             const validationResult = await validateDeliveryAddress(
@@ -1583,39 +1589,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setDeliveryZoneInfo(null);
       }
 
-      setExistingCustomer(customer);
+      setExistingCustomer(normalizedCustomer);
 
-      setCustomerInfo({
-        name: customer.name,
-        phone: customer.phone,
-        email: customer.email || "",
-        address: defaultAddress
-          ? {
-              street: defaultAddress.street_address || customer.address || "",
-              city: defaultAddress.city || "",
-              postalCode:
-                defaultAddress.postal_code || customer.postal_code || "",
-              coordinates:
-                defaultAddress.coordinates ||
-                (Number.isFinite(defaultAddress.latitude) &&
-                Number.isFinite(defaultAddress.longitude)
-                  ? {
-                      lat: Number(defaultAddress.latitude),
-                      lng: Number(defaultAddress.longitude),
-                    }
-                  : undefined),
-            }
-          : {
-              street: customer.address || "",
-              city: customer.city || "",
-              postalCode: customer.postal_code || "",
-            },
-        notes: defaultAddress?.notes || customer.notes || "",
-      });
+      const customerInfoData =
+        buildCustomerInfoFromOrderFlowCustomer(normalizedCustomer);
+      setCustomerInfo(customerInfoData);
 
-      if (defaultAddress?.notes) {
-        setSpecialInstructions(defaultAddress.notes);
-      }
+      setSpecialInstructions(customerInfoData.notes || "");
 
       // Close search modal and go directly to menu
       setShowPhoneLookupModal(false);
@@ -1683,22 +1663,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       );
       console.log("[handleNewCustomerAdded] Current orderType:", orderType);
 
-      // Map customer data to customerInfo state
-      const defaultAddress =
-        customer.addresses && customer.addresses.length > 0
-          ? customer.addresses[0]
-          : null;
+      const normalizedCustomer = withMaterializedCustomerAddresses(
+        customer as OrderFlowCustomer,
+      ) as OrderFlowCustomer;
+      const resolvedAddress = resolveCanonicalCustomerAddress(
+        normalizedCustomer,
+      );
       console.log(
-        "[handleNewCustomerAdded] defaultAddress:",
-        JSON.stringify(defaultAddress, null, 2),
+        "[handleNewCustomerAdded] resolvedAddress:",
+        JSON.stringify(resolvedAddress, null, 2),
       );
 
       // For delivery orders, validate that customer has an address
       if (orderType === "delivery") {
+        setDeliveryZoneInfo(null);
         const hasAddress =
-          defaultAddress?.street_address ||
-          defaultAddress?.street ||
-          customer.address;
+          resolvedAddress?.street_address || normalizedCustomer.address;
         console.log(
           "[handleNewCustomerAdded] Delivery check - hasAddress:",
           hasAddress,
@@ -1712,7 +1692,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               "This customer has no delivery address. Please add an address first.",
           );
           // Keep the add customer modal open in addAddress mode
-          setExistingCustomer(customer);
+          setExistingCustomer(normalizedCustomer);
           setCustomerModalMode("addAddress");
           return;
         }
@@ -1720,31 +1700,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // Validate delivery zone for the address
         try {
           const addressString = [
-            defaultAddress?.street_address ||
-              defaultAddress?.street ||
-              customer.address ||
-              "",
-            defaultAddress?.city || customer.city || "",
-            defaultAddress?.postal_code || customer.postal_code || "",
+            resolvedAddress?.street_address || normalizedCustomer.address || "",
+            resolvedAddress?.city || normalizedCustomer.city || "",
+            resolvedAddress?.postal_code || normalizedCustomer.postal_code || "",
           ]
             .filter(Boolean)
             .join(", ");
-          const addressCoordinates =
-            defaultAddress?.coordinates ||
-            customer.coordinates ||
-            (Number.isFinite(defaultAddress?.latitude) &&
-            Number.isFinite(defaultAddress?.longitude)
-              ? {
-                  lat: Number(defaultAddress.latitude),
-                  lng: Number(defaultAddress.longitude),
-                }
-              : Number.isFinite(customer?.latitude) &&
-                  Number.isFinite(customer?.longitude)
-                ? {
-                    lat: Number(customer.latitude),
-                    lng: Number(customer.longitude),
-                  }
-                : undefined);
+          const addressCoordinates = toLatLngCoordinates(
+            resolvedAddress?.coordinates ?? normalizedCustomer.coordinates,
+            resolvedAddress?.latitude ?? normalizedCustomer.latitude,
+            resolvedAddress?.longitude ?? normalizedCustomer.longitude,
+          );
 
           if (addressCoordinates || addressString) {
             const validationResult = await validateDeliveryAddress(
@@ -1770,56 +1736,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       // Store the customer info and proceed to menu
       console.log(
         "[handleNewCustomerAdded] Setting existingCustomer to:",
-        customer?.name,
+        normalizedCustomer?.name,
       );
-      setExistingCustomer(customer);
+      setExistingCustomer(normalizedCustomer);
 
-      const customerInfoData = {
-        name: customer.name,
-        phone: customer.phone,
-        email: customer.email || "",
-        address: defaultAddress
-          ? {
-              street: defaultAddress.street_address || customer.address || "",
-              city: defaultAddress.city || customer.city || "",
-              postalCode:
-                defaultAddress.postal_code || customer.postal_code || "",
-              coordinates:
-                defaultAddress.coordinates ||
-                customer.coordinates ||
-                (Number.isFinite(defaultAddress.latitude) &&
-                Number.isFinite(defaultAddress.longitude)
-                  ? {
-                      lat: Number(defaultAddress.latitude),
-                      lng: Number(defaultAddress.longitude),
-                    }
-                  : undefined),
-            }
-          : {
-              street: customer.address || "",
-              city: customer.city || "",
-              postalCode: customer.postal_code || "",
-              coordinates:
-                customer.coordinates ||
-                (Number.isFinite(customer.latitude) &&
-                Number.isFinite(customer.longitude)
-                  ? {
-                      lat: Number(customer.latitude),
-                      lng: Number(customer.longitude),
-                    }
-                  : undefined),
-            },
-        notes: defaultAddress?.notes || customer.notes || "",
-      };
+      const customerInfoData =
+        buildCustomerInfoFromOrderFlowCustomer(normalizedCustomer);
       console.log(
         "[handleNewCustomerAdded] Setting customerInfo to:",
         JSON.stringify(customerInfoData, null, 2),
       );
       setCustomerInfo(customerInfoData);
 
-      if (defaultAddress?.notes || customer.notes) {
-        setSpecialInstructions(defaultAddress?.notes || customer.notes || "");
-      }
+      setSpecialInstructions(customerInfoData.notes || "");
 
       // Close add customer modal and open menu modal
       console.log("[handleNewCustomerAdded] Opening MenuModal");
@@ -1932,9 +1861,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       );
       if (existingCustomer) {
         const result = {
+          ...existingCustomer,
           id: existingCustomer.id,
           name: existingCustomer.name,
           phone: existingCustomer.phone,
+          phone_number: existingCustomer.phone,
           email: existingCustomer.email,
         };
         console.log(
@@ -1946,6 +1877,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         const result = {
           name: customerInfo.name,
           phone: customerInfo.phone,
+          phone_number: customerInfo.phone,
           email: customerInfo.email,
         };
         console.log(
@@ -1959,65 +1891,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     };
 
     const getSelectedAddress = () => {
-      // First check the customer_addresses array
-      if (
-        existingCustomer?.addresses &&
-        existingCustomer.addresses.length > 0
-      ) {
-        const defaultAddress =
-          existingCustomer.addresses.find((addr) => addr.is_default) ||
-          existingCustomer.addresses[0];
-        // Handle both snake_case (from API) and camelCase field names
-        const streetValue =
-          defaultAddress.street_address || defaultAddress.street;
-        if (streetValue) {
-          console.log(
-            "[getSelectedAddress] Found address from existingCustomer.addresses:",
-            streetValue,
-          );
-          return {
-            street: streetValue,
-            street_address: streetValue, // Include both for compatibility
-            city: defaultAddress.city,
-            postalCode: defaultAddress.postal_code,
-            postal_code: defaultAddress.postal_code,
-            floor: defaultAddress.floor_number,
-            floor_number: defaultAddress.floor_number,
-            notes: defaultAddress.delivery_notes || defaultAddress.notes,
-            nameOnRinger: defaultAddress.name_on_ringer,
-            name_on_ringer: defaultAddress.name_on_ringer,
-            coordinates: defaultAddress.coordinates,
-            latitude: defaultAddress.latitude ?? null,
-            longitude: defaultAddress.longitude ?? null,
-          };
-        }
+      const resolvedAddress = existingCustomer
+        ? resolveCanonicalCustomerAddress(
+            existingCustomer as OrderFlowCustomer,
+          )
+        : null;
+      if (resolvedAddress?.street_address) {
+        console.log(
+          "[getSelectedAddress] Found canonical address from existingCustomer:",
+          resolvedAddress.street_address,
+        );
+        return resolvedAddress;
       }
-      // Then check address directly on the customer object (legacy/fallback)
-      if (existingCustomer?.address) {
-        const addrValue = existingCustomer.address;
-        const streetValue = typeof addrValue === "string" ? addrValue : "";
-        if (streetValue) {
-          console.log(
-            "[getSelectedAddress] Found address from existingCustomer.address:",
-            streetValue,
-          );
-          return {
-            street: streetValue,
-            street_address: streetValue,
-            city: "",
-            postalCode: existingCustomer.postal_code || "",
-            postal_code: existingCustomer.postal_code || "",
-            floor: "",
-            floor_number: "",
-            notes: "",
-            nameOnRinger: existingCustomer.name_on_ringer || "",
-            name_on_ringer: existingCustomer.name_on_ringer || "",
-            coordinates: existingCustomer.coordinates,
-            latitude: existingCustomer.latitude ?? null,
-            longitude: existingCustomer.longitude ?? null,
-          };
-        }
-      }
+
       // Finally check customerInfo state
       if (customerInfo?.address) {
         const streetValue = customerInfo.address.street || "";
@@ -2030,16 +1916,28 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             street: streetValue,
             street_address: streetValue,
             city: customerInfo.address.city,
-            postalCode: customerInfo.address.postalCode,
-            postal_code: customerInfo.address.postalCode,
-            floor: "",
-            floor_number: "",
-            notes: customerInfo.notes,
-            nameOnRinger: "",
-            name_on_ringer: "",
+            postalCode:
+              customerInfo.address.postalCode || customerInfo.address.postal_code || "",
+            postal_code:
+              customerInfo.address.postal_code || customerInfo.address.postalCode || "",
+            floor:
+              customerInfo.address.floor_number || customerInfo.address.floor || "",
+            floor_number:
+              customerInfo.address.floor_number || customerInfo.address.floor || "",
+            notes: customerInfo.address.notes || customerInfo.notes || "",
+            delivery_notes:
+              customerInfo.address.notes || customerInfo.notes || "",
+            nameOnRinger: customerInfo.address.name_on_ringer || "",
+            name_on_ringer: customerInfo.address.name_on_ringer || "",
             coordinates: customerInfo.address.coordinates,
-            latitude: null,
-            longitude: null,
+            latitude:
+              customerInfo.address.latitude ??
+              customerInfo.address.coordinates?.lat ??
+              null,
+            longitude:
+              customerInfo.address.longitude ??
+              customerInfo.address.coordinates?.lng ??
+              null,
           };
         }
       }
@@ -2182,7 +2080,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 deliveryPostalCode = postalValue;
               }
               // Include floor number if available
-              const floorValue = addr.floor_number;
+              const floorValue = addr.floor_number || addr.floor;
               if (floorValue) {
                 const floorPart = `Floor: ${floorValue}`;
                 parts.push(floorPart);
@@ -2265,44 +2163,57 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 persistedCustomerId,
               )) as Customer | null;
               if (dbCustomer) {
+                const dbResolvedAddress = resolveCanonicalCustomerAddress(
+                  withMaterializedCustomerAddresses(
+                    dbCustomer as OrderFlowCustomer,
+                  ),
+                );
                 console.log(
                   "[OrderDashboard.handleOrderComplete] Database customer found:",
                   dbCustomer,
                 );
-                // Check customer.addresses array first
-                if (
-                  Array.isArray(dbCustomer.addresses) &&
-                  dbCustomer.addresses.length > 0
-                ) {
-                  const addr =
-                    dbCustomer.addresses.find((a) => a.is_default) ||
-                    dbCustomer.addresses[0];
+                if (dbResolvedAddress) {
                   const parts: string[] = [];
-                  const streetValue = addr.street_address || addr.street;
+                  const streetValue =
+                    dbResolvedAddress.street_address || dbResolvedAddress.street;
                   if (streetValue) {
                     parts.push(streetValue);
                     if (!deliveryAddress) deliveryAddress = streetValue;
                   }
-                  if (addr.city) {
-                    parts.push(addr.city);
-                    if (!deliveryCity) deliveryCity = addr.city;
+                  if (dbResolvedAddress.city) {
+                    parts.push(dbResolvedAddress.city);
+                    if (!deliveryCity) deliveryCity = dbResolvedAddress.city;
                   }
-                  if (addr.postal_code) {
-                    parts.push(addr.postal_code);
+                  if (dbResolvedAddress.postal_code) {
+                    parts.push(dbResolvedAddress.postal_code);
                     if (!deliveryPostalCode)
-                      deliveryPostalCode = addr.postal_code;
+                      deliveryPostalCode = dbResolvedAddress.postal_code;
                   }
-                  // Extract additional fields
-                  if (addr.floor_number) {
+                  if (dbResolvedAddress.floor_number || dbResolvedAddress.floor) {
                     if (!deliveryFloor)
-                      deliveryFloor = String(addr.floor_number);
+                      deliveryFloor = String(
+                        dbResolvedAddress.floor_number ||
+                          dbResolvedAddress.floor,
+                      );
                   }
-                  if (addr.delivery_notes || addr.notes) {
+                  if (
+                    dbResolvedAddress.delivery_notes ||
+                    dbResolvedAddress.notes
+                  ) {
                     if (!deliveryNotes)
-                      deliveryNotes = addr.delivery_notes || addr.notes || null;
+                      deliveryNotes =
+                        dbResolvedAddress.delivery_notes ||
+                        dbResolvedAddress.notes ||
+                        null;
                   }
-                  if (addr.name_on_ringer) {
-                    if (!nameOnRinger) nameOnRinger = addr.name_on_ringer;
+                  if (
+                    dbResolvedAddress.name_on_ringer ||
+                    dbResolvedAddress.nameOnRinger
+                  ) {
+                    if (!nameOnRinger)
+                      nameOnRinger =
+                        dbResolvedAddress.name_on_ringer ||
+                        dbResolvedAddress.nameOnRinger;
                   }
                   if (!deliveryAddress)
                     deliveryAddress = parts.filter(Boolean).join(", ");

@@ -39,6 +39,13 @@ interface CustomerData {
   floor_number?: string;
   notes?: string;
   name_on_ringer?: string;
+  selected_address_id?: string | null;
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] }
+    | null;
+  latitude?: number | null;
+  longitude?: number | null;
   addresses?: any[];
   version?: number;
   editAddressId?: string; // ID of address to edit (for editAddress mode)
@@ -1158,6 +1165,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
           notes: formData.notes ? formData.notes.trim() : null,
           name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
+          ...(persistedCoords
+            ? {
+                coordinates: persistedCoords,
+                latitude: persistedCoords.lat,
+                longitude: persistedCoords.lng,
+              }
+            : {}),
           is_default: true,
         };
 
@@ -1179,6 +1193,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           floor_number: formData.floorNumber ? formData.floorNumber.trim() : createdCustomer.floor_number,
           notes: formData.notes ? formData.notes.trim() : createdCustomer.notes,
           name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : createdCustomer.name_on_ringer,
+          coordinates: hasDeliveryPro ? persistedCoords : createdCustomer.coordinates,
+          latitude: persistedCoords?.lat ?? createdCustomer.latitude ?? null,
+          longitude: persistedCoords?.lng ?? createdCustomer.longitude ?? null,
+          selected_address_id:
+            createdCustomer.selected_address_id ||
+            enrichedAddresses[0]?.id ||
+            null,
           addresses: enrichedAddresses,
         };
         onCustomerAdded(enrichedCustomer);

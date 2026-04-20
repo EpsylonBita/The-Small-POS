@@ -283,7 +283,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, [t]);
 
   const handleCustomerSelected = useCallback((customer: Customer) => {
-    const normalizedCustomer = withMaterializedCustomerAddresses(customer);
+    const normalizedCustomer = withMaterializedCustomerAddresses(customer) as Customer;
     setSelectedCustomer(normalizedCustomer);
     setIsCustomerSearchModalOpen(false);
 
@@ -326,7 +326,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, []);
 
   const handleAddressSelected = useCallback((customer: Customer, address: any, validationResult?: DeliveryBoundaryValidationResponse) => {
-    setSelectedCustomer(withMaterializedCustomerAddresses(customer));
+    setSelectedCustomer(withMaterializedCustomerAddresses(customer) as Customer);
     setSelectedAddress(address);
     setDeliveryZoneInfo(validationResult || null);
 

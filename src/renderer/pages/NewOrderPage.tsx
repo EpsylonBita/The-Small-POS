@@ -25,6 +25,10 @@ import { ActivityTracker } from '../services/ActivityTracker';
 import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
+import {
+  resolveCanonicalCustomerAddress,
+  withMaterializedCustomerAddresses,
+} from '../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
 import {
@@ -38,15 +42,21 @@ interface Customer {
   id: string;
   name: string;
   phone?: string;
+  phone_number?: string;
   email?: string;
   address?: any;
   city?: string;
   postal_code?: string;
+  floor_number?: string;
+  notes?: string;
+  name_on_ringer?: string;
   coordinates?:
     | { lat: number; lng: number }
     | { type: 'Point'; coordinates: [number, number] };
   latitude?: number | null;
   longitude?: number | null;
+  selected_address_id?: string | null;
+  addresses?: any[];
   version?: number;
 }
 
@@ -58,13 +68,105 @@ interface CustomerInfo {
   name: string;
   phone: string;
   email?: string;
+  notes?: string;
   address?: {
     street: string;
+    street_address?: string;
     city: string;
     postalCode: string;
+    postal_code?: string;
+    floor_number?: string;
+    floor?: string;
+    notes?: string;
+    name_on_ringer?: string;
     coordinates?: { lat: number; lng: number };
+    latitude?: number | null;
+    longitude?: number | null;
   };
 }
+
+const toLatLngCoordinates = (
+  coordinates:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] }
+    | null
+    | undefined,
+  latitude?: number | null,
+  longitude?: number | null,
+): { lat: number; lng: number } | undefined => {
+  if (
+    coordinates &&
+    'lat' in coordinates &&
+    Number.isFinite(coordinates.lat) &&
+    Number.isFinite(coordinates.lng)
+  ) {
+    return { lat: Number(coordinates.lat), lng: Number(coordinates.lng) };
+  }
+
+  if (
+    coordinates &&
+    'type' in coordinates &&
+    coordinates.type === 'Point' &&
+    Array.isArray(coordinates.coordinates) &&
+    coordinates.coordinates.length >= 2 &&
+    Number.isFinite(coordinates.coordinates[1]) &&
+    Number.isFinite(coordinates.coordinates[0])
+  ) {
+    return {
+      lat: Number(coordinates.coordinates[1]),
+      lng: Number(coordinates.coordinates[0]),
+    };
+  }
+
+  if (Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))) {
+    return {
+      lat: Number(latitude),
+      lng: Number(longitude),
+    };
+  }
+
+  return undefined;
+};
+
+const buildCustomerInfoFromCustomer = (customer: Customer): CustomerInfo => {
+  const normalizedCustomer = withMaterializedCustomerAddresses(customer) as Customer;
+  const resolvedAddress = resolveCanonicalCustomerAddress(normalizedCustomer);
+  const coordinates = toLatLngCoordinates(
+    resolvedAddress?.coordinates ?? normalizedCustomer.coordinates,
+    resolvedAddress?.latitude ?? normalizedCustomer.latitude,
+    resolvedAddress?.longitude ?? normalizedCustomer.longitude,
+  );
+
+  return {
+    name: normalizedCustomer.name,
+    phone: normalizedCustomer.phone || normalizedCustomer.phone_number || '',
+    email: normalizedCustomer.email || '',
+    notes: resolvedAddress?.notes || normalizedCustomer.notes || '',
+    address: {
+      street: resolvedAddress?.street_address || normalizedCustomer.address || '',
+      street_address:
+        resolvedAddress?.street_address || normalizedCustomer.address || '',
+      city: resolvedAddress?.city || normalizedCustomer.city || '',
+      postalCode:
+        resolvedAddress?.postal_code || normalizedCustomer.postal_code || '',
+      postal_code:
+        resolvedAddress?.postal_code || normalizedCustomer.postal_code || '',
+      floor_number:
+        resolvedAddress?.floor_number || normalizedCustomer.floor_number || '',
+      notes: resolvedAddress?.notes || normalizedCustomer.notes || '',
+      name_on_ringer:
+        resolvedAddress?.name_on_ringer || normalizedCustomer.name_on_ringer || '',
+      coordinates,
+      latitude:
+        coordinates?.lat ?? resolvedAddress?.latitude ?? normalizedCustomer.latitude ?? null,
+      longitude:
+        coordinates?.lng ??
+        resolvedAddress?.longitude ??
+        normalizedCustomer.longitude ??
+        null,
+    },
+  };
+};
 
 const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   const bridge = getBridge();
@@ -169,88 +271,17 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
 
   // Handler for customer selection from search modal
   const handleCustomerSelected = (customer: any) => {
-    setExistingCustomer(customer);
+    const normalizedCustomer = withMaterializedCustomerAddresses(customer as Customer) as Customer;
+    const resolvedAddress = resolveCanonicalCustomerAddress(normalizedCustomer);
+    setExistingCustomer(normalizedCustomer);
 
-    // Map customer data to form
-    // Priority 1: Check if specific address was selected (e.g. from search modal)
-    let defaultAddress = null;
-    if (customer.selected_address_id && customer.addresses) {
-      defaultAddress = customer.addresses.find((a: any) => a.id === customer.selected_address_id);
-    }
+    console.log('[NewOrderPage.handleCustomerSelected] Customer:', normalizedCustomer);
+    console.log('[NewOrderPage.handleCustomerSelected] resolvedAddress:', resolvedAddress);
 
-    // Priority 2: Check default or first address in array
-    if (!defaultAddress && customer.addresses && customer.addresses.length > 0) {
-      defaultAddress = customer.addresses.find((a: any) => a.is_default) || customer.addresses[0];
-    }
+    const customerInfoData = buildCustomerInfoFromCustomer(normalizedCustomer);
+    setCustomerInfo(customerInfoData);
 
-    // Priority 2: Use legacy customer.address field if no addresses array
-    let addressInfo: { street: string; city: string; postalCode: string; coordinates?: any } = {
-      street: '',
-      city: '',
-      postalCode: '',
-    };
-
-    if (defaultAddress) {
-      // Use structured address from customer_addresses table
-      addressInfo = {
-        street: defaultAddress.street_address || defaultAddress.street || '',
-        city: defaultAddress.city || '',
-        postalCode: defaultAddress.postal_code || '',
-        coordinates:
-          defaultAddress.coordinates ||
-          (Number.isFinite(defaultAddress.latitude) && Number.isFinite(defaultAddress.longitude)
-            ? { lat: Number(defaultAddress.latitude), lng: Number(defaultAddress.longitude) }
-            : undefined),
-      };
-    } else if (customer.address) {
-      // Fallback to legacy customer.address field
-      if (typeof customer.address === 'string') {
-        // Parse string address - use full string as street, try to extract city/postal
-        // For now, just put the whole string in street field
-        addressInfo = {
-          street: customer.address,
-          city: customer.city || '',
-          postalCode: customer.postal_code || '',
-        };
-      } else if (typeof customer.address === 'object') {
-        // Handle structured address object
-        addressInfo = {
-          street: customer.address.street_address || customer.address.street || '',
-          city: customer.address.city || '',
-          postalCode: customer.address.postal_code || customer.address.postalCode || '',
-          coordinates:
-            customer.address.coordinates ||
-            (Number.isFinite(customer.address.latitude) &&
-            Number.isFinite(customer.address.longitude)
-              ? {
-                  lat: Number(customer.address.latitude),
-                  lng: Number(customer.address.longitude),
-                }
-              : undefined),
-        };
-      }
-    }
-
-    // Customer objects may use 'phone' or 'phone_number' depending on source
-    // CustomerSearchModal and AddCustomerModal use 'phone', but we check both for robustness
-    const customerPhone = customer.phone || customer.phone_number || '';
-
-    console.log('[NewOrderPage.handleCustomerSelected] Customer:', customer);
-    console.log('[NewOrderPage.handleCustomerSelected] defaultAddress:', defaultAddress);
-    console.log('[NewOrderPage.handleCustomerSelected] customer.address (legacy):', customer.address);
-    console.log('[NewOrderPage.handleCustomerSelected] customerPhone:', customerPhone);
-    console.log('[NewOrderPage.handleCustomerSelected] addressInfo:', addressInfo);
-
-    setCustomerInfo({
-      name: customer.name,
-      phone: customerPhone,
-      email: customer.email || '',
-      address: addressInfo
-    });
-
-    if (defaultAddress?.notes) {
-      setSpecialInstructions(defaultAddress.notes);
-    }
+    setSpecialInstructions(customerInfoData.notes || '');
 
     setShowPhoneLookupModal(false);
     // Open AddCustomerModal in edit mode instead of simplified CustomerInfoModal
@@ -283,51 +314,13 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
 
   const handleNewCustomerAdded = (customer: any) => {
     // Store the customer info and proceed to menu
-    setExistingCustomer(customer);
+    const normalizedCustomer = withMaterializedCustomerAddresses(customer as Customer) as Customer;
+    setExistingCustomer(normalizedCustomer);
 
-    // Map customer data to customerInfo state
-    let defaultAddress = null;
-    if (customer.selected_address_id && customer.addresses) {
-      defaultAddress = customer.addresses.find((a: any) => a.id === customer.selected_address_id);
-    }
+    const customerInfoData = buildCustomerInfoFromCustomer(normalizedCustomer);
+    setCustomerInfo(customerInfoData);
 
-    if (!defaultAddress && customer.addresses && customer.addresses.length > 0) {
-      defaultAddress = customer.addresses[0];
-    }
-
-    // Customer objects may use 'phone' or 'phone_number' depending on source
-    // AddCustomerModal uses 'phone', but we check both for robustness
-    const customerPhone = customer.phone || customer.phone_number || '';
-
-    setCustomerInfo({
-      name: customer.name,
-      phone: customerPhone,
-      email: customer.email || '',
-      address: defaultAddress ? {
-        street: defaultAddress.street_address || customer.address || '',
-        city: defaultAddress.city || customer.city || '',
-        postalCode: defaultAddress.postal_code || customer.postal_code || '',
-        coordinates:
-          defaultAddress.coordinates ||
-          customer.coordinates ||
-          (Number.isFinite(defaultAddress.latitude) && Number.isFinite(defaultAddress.longitude)
-            ? { lat: Number(defaultAddress.latitude), lng: Number(defaultAddress.longitude) }
-            : undefined),
-      } : {
-        street: customer.address || '',
-        city: customer.city || '',
-        postalCode: customer.postal_code || '',
-        coordinates:
-          customer.coordinates ||
-          (Number.isFinite(customer.latitude) && Number.isFinite(customer.longitude)
-            ? { lat: Number(customer.latitude), lng: Number(customer.longitude) }
-            : undefined),
-      }
-    });
-
-    if (defaultAddress?.notes || customer.notes) {
-      setSpecialInstructions(defaultAddress?.notes || customer.notes || '');
-    }
+    setSpecialInstructions(customerInfoData.notes || '');
 
     // Close add customer modal and open menu modal
     setShowAddCustomerModal(false);
@@ -708,18 +701,49 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     const persistedCustomerId = resolvePersistedCustomerId(existingCustomer?.id);
 
     return {
+      ...(existingCustomer || {}),
       ...(persistedCustomerId ? { id: persistedCustomerId } : {}),
       name: customerInfo.name,
+      phone: customerInfo.phone,
       phone_number: customerInfo.phone,
       email: customerInfo.email || '',
-      addresses: customerInfo.address?.street ? [{
-        id: 'primary-address',
-        street: customerInfo.address.street,
-        postal_code: customerInfo.address.postalCode || '',
-        floor: '',
-        notes: specialInstructions || '',
-        delivery_instructions: ''
-      }] : []
+      notes: customerInfo.notes || specialInstructions || '',
+      addresses: customerInfo.address?.street
+        ? [{
+            id: 'primary-address',
+            street: customerInfo.address.street,
+            street_address:
+              customerInfo.address.street_address || customerInfo.address.street,
+            city: customerInfo.address.city || '',
+            postal_code:
+              customerInfo.address.postal_code ||
+              customerInfo.address.postalCode ||
+              '',
+            floor_number:
+              customerInfo.address.floor_number || customerInfo.address.floor || '',
+            notes:
+              customerInfo.address.notes ||
+              customerInfo.notes ||
+              specialInstructions ||
+              '',
+            delivery_notes:
+              customerInfo.address.notes ||
+              customerInfo.notes ||
+              specialInstructions ||
+              '',
+            name_on_ringer: customerInfo.address.name_on_ringer || '',
+            coordinates: customerInfo.address.coordinates,
+            latitude:
+              customerInfo.address.latitude ??
+              customerInfo.address.coordinates?.lat ??
+              null,
+            longitude:
+              customerInfo.address.longitude ??
+              customerInfo.address.coordinates?.lng ??
+              null,
+            is_default: true,
+          }]
+        : []
     };
   };
 
@@ -730,59 +754,43 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       return null;
     }
 
-    // Priority 1: Use customerInfo.address (already structured from handleCustomerSelected)
+    const resolvedAddress = existingCustomer
+      ? resolveCanonicalCustomerAddress(existingCustomer)
+      : null;
+    if (resolvedAddress?.street_address) {
+      return resolvedAddress;
+    }
+
     if (customerInfo.address?.street) {
       return {
         id: 'primary-address',
         street: customerInfo.address.street,
+        street_address: customerInfo.address.street_address || customerInfo.address.street,
         city: customerInfo.address.city || '',
-        postal_code: customerInfo.address.postalCode || '',
-        floor: '',
-        notes: specialInstructions || '',
-        delivery_instructions: ''
+        postalCode:
+          customerInfo.address.postalCode || customerInfo.address.postal_code || '',
+        postal_code:
+          customerInfo.address.postal_code || customerInfo.address.postalCode || '',
+        floor:
+          customerInfo.address.floor_number || customerInfo.address.floor || '',
+        floor_number:
+          customerInfo.address.floor_number || customerInfo.address.floor || '',
+        notes:
+          customerInfo.address.notes || customerInfo.notes || specialInstructions || '',
+        delivery_notes:
+          customerInfo.address.notes || customerInfo.notes || specialInstructions || '',
+        nameOnRinger: customerInfo.address.name_on_ringer || '',
+        name_on_ringer: customerInfo.address.name_on_ringer || '',
+        coordinates: customerInfo.address.coordinates,
+        latitude:
+          customerInfo.address.latitude ??
+          customerInfo.address.coordinates?.lat ??
+          null,
+        longitude:
+          customerInfo.address.longitude ??
+          customerInfo.address.coordinates?.lng ??
+          null,
       };
-    }
-
-    // Priority 2: Check existingCustomer.addresses array
-    const customerAddresses = (existingCustomer as any)?.addresses;
-    if (customerAddresses && Array.isArray(customerAddresses) && customerAddresses.length > 0) {
-      const addr = customerAddresses.find((a: any) => a.is_default) || customerAddresses[0];
-      return {
-        id: addr.id || 'customer-address',
-        street: addr.street_address || addr.street || '',
-        city: addr.city || '',
-        postal_code: addr.postal_code || '',
-        floor: addr.floor_number || '',
-        notes: addr.notes || specialInstructions || '',
-        delivery_instructions: addr.delivery_instructions || ''
-      };
-    }
-
-    // Priority 3: Check existingCustomer.address (legacy field)
-    const legacyAddress = (existingCustomer as any)?.address;
-    if (legacyAddress) {
-      if (typeof legacyAddress === 'string') {
-        // Use the string address as street field
-        return {
-          id: 'legacy-address',
-          street: legacyAddress,
-          city: (existingCustomer as any)?.city || '',
-          postal_code: (existingCustomer as any)?.postal_code || '',
-          floor: '',
-          notes: specialInstructions || '',
-          delivery_instructions: ''
-        };
-      } else if (typeof legacyAddress === 'object') {
-        return {
-          id: 'legacy-address',
-          street: legacyAddress.street_address || legacyAddress.street || '',
-          city: legacyAddress.city || '',
-          postal_code: legacyAddress.postal_code || '',
-          floor: legacyAddress.floor_number || '',
-          notes: legacyAddress.notes || specialInstructions || '',
-          delivery_instructions: legacyAddress.delivery_instructions || ''
-        };
-      }
     }
 
     return null;
@@ -971,19 +979,36 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           onCustomerAdded={handleNewCustomerAdded}
           initialPhone={phoneNumber}
           mode={addCustomerMode}
-          initialCustomer={existingCustomer ? {
-            id: existingCustomer.id,
-            phone: existingCustomer.phone || '',
-            name: existingCustomer.name,
-            email: existingCustomer.email,
-            address: (existingCustomer as any).address,
-            city: (existingCustomer as any).city,
-            postal_code: (existingCustomer as any).postal_code,
-            floor_number: (existingCustomer as any).floor_number,
-            notes: (existingCustomer as any).notes,
-            name_on_ringer: (existingCustomer as any).name_on_ringer,
-            version: existingCustomer.version,
-          } : undefined}
+          initialCustomer={existingCustomer
+            ? (() => {
+                const resolvedAddress =
+                  resolveCanonicalCustomerAddress(existingCustomer);
+                return {
+                  id: existingCustomer.id,
+                  phone: existingCustomer.phone || existingCustomer.phone_number || '',
+                  name: existingCustomer.name,
+                  email: existingCustomer.email,
+                  address:
+                    resolvedAddress?.street_address ||
+                    (existingCustomer as any).address,
+                  city: resolvedAddress?.city || (existingCustomer as any).city,
+                  postal_code:
+                    resolvedAddress?.postal_code ||
+                    (existingCustomer as any).postal_code,
+                  floor_number:
+                    resolvedAddress?.floor_number ||
+                    (existingCustomer as any).floor_number,
+                  notes:
+                    resolvedAddress?.notes || (existingCustomer as any).notes,
+                  name_on_ringer:
+                    resolvedAddress?.name_on_ringer ||
+                    (existingCustomer as any).name_on_ringer,
+                  addresses: existingCustomer.addresses || [],
+                  selected_address_id: existingCustomer.selected_address_id,
+                  version: existingCustomer.version,
+                };
+              })()
+            : undefined}
         />
       )}
 

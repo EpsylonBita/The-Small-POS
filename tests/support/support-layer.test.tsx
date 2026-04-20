@@ -50,6 +50,7 @@ import {
 } from '../../src/renderer/utils/terminal-lifecycle';
 import {
   isLegacyFallbackAddress,
+  resolveCanonicalCustomerAddress,
   resolveSelectedCustomerAddress,
   withMaterializedCustomerAddresses,
 } from '../../src/renderer/utils/customer-addresses';
@@ -296,6 +297,54 @@ test('legacy delivery customers get a synthetic default address with persisted c
   });
   assert.equal(isLegacyFallbackAddress(customer.addresses[0]), true);
   assert.equal(resolveSelectedCustomerAddress(customer)?.id, 'legacy:customer-legacy');
+});
+
+test('resolveCanonicalCustomerAddress honors selected_address_id and preserves floor aliases', () => {
+  const customer = {
+    id: 'customer-1',
+    name: 'Alice',
+    phone: '12345',
+    selected_address_id: 'addr-2',
+    addresses: [
+      {
+        id: 'addr-1',
+        customer_id: 'customer-1',
+        street_address: '1 First Street',
+        city: 'Athens',
+        postal_code: '11111',
+        is_default: true,
+      },
+      {
+        id: 'addr-2',
+        customer_id: 'customer-1',
+        street_address: '2 Second Street',
+        city: 'Piraeus',
+        postal_code: '22222',
+        floor_number: '3',
+        notes: 'Side entrance',
+        name_on_ringer: 'Second Bell',
+        latitude: 37.95,
+        longitude: 23.63,
+        is_default: false,
+      },
+    ],
+  };
+
+  const resolved = resolveCanonicalCustomerAddress(customer);
+
+  assert.equal(resolved?.id, 'addr-2');
+  assert.equal(resolved?.street_address, '2 Second Street');
+  assert.equal(resolved?.street, '2 Second Street');
+  assert.equal(resolved?.postal_code, '22222');
+  assert.equal(resolved?.postalCode, '22222');
+  assert.equal(resolved?.floor_number, '3');
+  assert.equal(resolved?.floor, '3');
+  assert.equal(resolved?.notes, 'Side entrance');
+  assert.equal(resolved?.delivery_notes, 'Side entrance');
+  assert.equal(resolved?.name_on_ringer, 'Second Bell');
+  assert.equal(resolved?.nameOnRinger, 'Second Bell');
+  assert.equal(resolved?.latitude, 37.95);
+  assert.equal(resolved?.longitude, 23.63);
 });
 
 test('retrieval falls back to english for unsupported locales', () => {

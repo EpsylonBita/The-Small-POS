@@ -158,7 +158,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       setCustomer(withMaterializedCustomerAddresses({
         ...initialCustomer,
         addresses: normalizeCustomerAddresses(initialCustomer.addresses),
-      }));
+      }) as Customer);
       setSearchQuery(initialCustomer.phone || '');
       setCustomers([]);
       setError(null);
@@ -299,7 +299,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           is_banned: payload.customer.is_banned,
           ban_reason: payload.customer.ban_reason,
           banned_at: payload.customer.banned_at,
-        });
+        }) as Customer;
 
         // Clear error when customer is found
         setError(null);
