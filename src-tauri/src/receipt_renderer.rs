@@ -1769,42 +1769,40 @@ fn delivery_fields<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<(&'a str, &'
 
 fn delivery_slip_info_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
     let (address, city, postal, floor) = normalize_delivery_address_components(doc);
-    let mut lines = Vec::new();
-    lines.push((
-        receipt_label(lang, "Driver").to_string(),
-        delivery_value_or_dash(doc.driver_name.as_deref()),
-    ));
-
-    lines.push((
-        receipt_label(lang, "Customer").to_string(),
-        delivery_value_or_dash(doc.customer_name.as_deref()),
-    ));
-    lines.push((
-        receipt_label(lang, "Phone").to_string(),
-        delivery_value_or_dash(doc.customer_phone.as_deref()),
-    ));
-    lines.push((
-        receipt_label(lang, "Address").to_string(),
-        delivery_value_or_dash(address.as_deref()),
-    ));
-    lines.push((
-        receipt_label(lang, "City").to_string(),
-        delivery_value_or_dash(city.as_deref()),
-    ));
-    lines.push((
-        receipt_label(lang, "Postal").to_string(),
-        delivery_value_or_dash(postal.as_deref()),
-    ));
-    lines.push((
-        receipt_label(lang, "Floor").to_string(),
-        delivery_value_or_dash(floor.as_deref()),
-    ));
-    lines.push((
-        receipt_label(lang, "Ringer").to_string(),
-        delivery_value_or_dash(doc.name_on_ringer.as_deref()),
-    ));
-
-    lines
+    vec![
+        (
+            receipt_label(lang, "Driver").to_string(),
+            delivery_value_or_dash(doc.driver_name.as_deref()),
+        ),
+        (
+            receipt_label(lang, "Customer").to_string(),
+            delivery_value_or_dash(doc.customer_name.as_deref()),
+        ),
+        (
+            receipt_label(lang, "Phone").to_string(),
+            delivery_value_or_dash(doc.customer_phone.as_deref()),
+        ),
+        (
+            receipt_label(lang, "Address").to_string(),
+            delivery_value_or_dash(address.as_deref()),
+        ),
+        (
+            receipt_label(lang, "City").to_string(),
+            delivery_value_or_dash(city.as_deref()),
+        ),
+        (
+            receipt_label(lang, "Postal").to_string(),
+            delivery_value_or_dash(postal.as_deref()),
+        ),
+        (
+            receipt_label(lang, "Floor").to_string(),
+            delivery_value_or_dash(floor.as_deref()),
+        ),
+        (
+            receipt_label(lang, "Ringer").to_string(),
+            delivery_value_or_dash(doc.name_on_ringer.as_deref()),
+        ),
+    ]
 }
 
 fn is_change_like_payment_label(label: &str) -> bool {
@@ -5181,14 +5179,12 @@ impl BitmapReceiptComposer {
             } else {
                 self.draw_text_line(&merged, BitmapAlign::Left, bold, scale, 0);
             }
+        } else if apply_body_boldness {
+            self.draw_body_text_line(tail, BitmapAlign::Left, bold, scale, 0);
+            self.draw_body_text_line(value, BitmapAlign::Right, bold, scale, 0);
         } else {
-            if apply_body_boldness {
-                self.draw_body_text_line(tail, BitmapAlign::Left, bold, scale, 0);
-                self.draw_body_text_line(value, BitmapAlign::Right, bold, scale, 0);
-            } else {
-                self.draw_text_line(tail, BitmapAlign::Left, bold, scale, 0);
-                self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
-            }
+            self.draw_text_line(tail, BitmapAlign::Left, bold, scale, 0);
+            self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
         }
     }
 

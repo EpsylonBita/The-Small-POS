@@ -8,7 +8,7 @@ use crate::ecr::protocol::*;
 use crate::ecr::protocols;
 use crate::ecr::transport;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -20,6 +20,8 @@ struct ManagedDevice {
     protocol: Box<dyn EcrProtocol>,
 }
 
+type DeviceHandle = Arc<Mutex<ManagedDevice>>;
+
 // ---------------------------------------------------------------------------
 // Device Manager
 // ---------------------------------------------------------------------------
@@ -27,8 +29,16 @@ struct ManagedDevice {
 /// Central manager for all connected ECR devices.
 ///
 /// Thread-safe singleton registered as Tauri managed state.
+///
+/// Locking strategy: the outer `Mutex<HashMap>` is held only for the
+/// duration of map lookups/inserts (microseconds). Each device is wrapped
+/// in its own `Arc<Mutex<ManagedDevice>>` so that a long-running protocol
+/// exchange (e.g. ZVT transactions up to 60s) on device A does not block
+/// concurrent status polls or transactions on device B. Previously the
+/// HashMap mutex was held for the entire protocol call, serializing all
+/// ECR traffic through a single lock.
 pub struct DeviceManager {
-    devices: Mutex<HashMap<String, ManagedDevice>>,
+    devices: Mutex<HashMap<String, DeviceHandle>>,
 }
 
 impl DeviceManager {
@@ -36,6 +46,14 @@ impl DeviceManager {
         Self {
             devices: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Clone-out a handle for a device if one exists, releasing the map
+    /// lock before the caller operates on the device. Returns None if
+    /// the device id is not registered.
+    fn handle_for(&self, device_id: &str) -> Result<Option<DeviceHandle>, String> {
+        let devices = self.devices.lock().map_err(|e| e.to_string())?;
+        Ok(devices.get(device_id).cloned())
     }
 
     /// Connect a device by creating transport + protocol and initializing.
@@ -63,15 +81,15 @@ impl DeviceManager {
         protocol.initialize()?;
         let protocol_display_name = protocol.name().to_string();
 
-        // Store managed device
-        let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
-        devices.insert(
-            device_id.to_string(),
-            ManagedDevice {
-                device_id: device_id.to_string(),
-                protocol,
-            },
-        );
+        // Store managed device behind its own Mutex
+        let handle: DeviceHandle = Arc::new(Mutex::new(ManagedDevice {
+            device_id: device_id.to_string(),
+            protocol,
+        }));
+        {
+            let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
+            devices.insert(device_id.to_string(), handle);
+        }
 
         info!(
             "Device {device_id} connected ({protocol_display_name} via {transport_description}, initial transport state: {initial_transport_state:?})"
@@ -81,8 +99,21 @@ impl DeviceManager {
 
     /// Disconnect a device and remove from the manager.
     pub fn disconnect_device(&self, device_id: &str) -> Result<(), String> {
-        let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
-        if let Some(mut dev) = devices.remove(device_id) {
+        // Remove from the map first (short critical section), then abort the
+        // protocol outside the map lock so it cannot serialize other devices.
+        let removed = {
+            let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
+            devices.remove(device_id)
+        };
+        if let Some(handle) = removed {
+            // Wave 3: recover from a poisoned mutex. A panic inside a
+            // prior transaction would otherwise block cleanup forever.
+            let mut dev = handle.lock().unwrap_or_else(|poisoned| {
+                warn!(
+                    "ManagedDevice mutex poisoned during disconnect; recovering guard"
+                );
+                poisoned.into_inner()
+            });
             let _ = dev.protocol.abort();
             info!("Device {} disconnected", dev.device_id);
         }
@@ -95,20 +126,40 @@ impl DeviceManager {
         device_id: &str,
         request: &TransactionRequest,
     ) -> Result<TransactionResponse, String> {
-        let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
-        let dev = devices
-            .get_mut(device_id)
+        let handle = self
+            .handle_for(device_id)?
             .ok_or_else(|| format!("Device {device_id} not connected"))?;
+        // Wave 3: on HEAD, a panic inside `process_transaction` for any
+        // device poisoned this mutex forever, permanently bricking the
+        // device in the manager's view. We now recover the guard from
+        // the `PoisonError` and continue — the device protocol is
+        // expected to be in a recoverable state or surface its own
+        // error on the next call. A fresh error is still preferable to
+        // a permanent lockout.
+        let mut dev = handle.lock().unwrap_or_else(|poisoned| {
+            warn!(
+                device_id = %device_id,
+                "ManagedDevice mutex poisoned by prior transaction panic; recovering"
+            );
+            poisoned.into_inner()
+        });
         dev.protocol.process_transaction(request)
     }
 
     /// Get status of a connected device.
     pub fn get_device_status(&self, device_id: &str) -> Result<DeviceStatus, String> {
-        let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
-        match devices.get_mut(device_id) {
-            Some(dev) => dev.protocol.get_status(),
-            None => Ok(DeviceStatus::default()),
-        }
+        let handle = match self.handle_for(device_id)? {
+            Some(h) => h,
+            None => return Ok(DeviceStatus::default()),
+        };
+        let mut dev = handle.lock().unwrap_or_else(|poisoned| {
+            warn!(
+                device_id = %device_id,
+                "ManagedDevice mutex poisoned; recovering for get_device_status"
+            );
+            poisoned.into_inner()
+        });
+        dev.protocol.get_status()
     }
 
     /// Test connectivity of a device.
@@ -121,11 +172,15 @@ impl DeviceManager {
         protocol_config: &serde_json::Value,
     ) -> Result<bool, String> {
         // If already connected, test through existing connection
-        {
-            let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
-            if let Some(dev) = devices.get_mut(device_id) {
-                return dev.protocol.test_connection();
-            }
+        if let Some(handle) = self.handle_for(device_id)? {
+            let mut dev = handle.lock().unwrap_or_else(|poisoned| {
+                warn!(
+                    device_id = %device_id,
+                    "ManagedDevice mutex poisoned; recovering for test_connection"
+                );
+                poisoned.into_inner()
+            });
+            return dev.protocol.test_connection();
         }
 
         // Otherwise, create a temporary connection for testing
@@ -137,19 +192,19 @@ impl DeviceManager {
 
     /// Run end-of-day settlement on a device.
     pub fn settlement(&self, device_id: &str) -> Result<SettlementResult, String> {
-        let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
-        let dev = devices
-            .get_mut(device_id)
+        let handle = self
+            .handle_for(device_id)?
             .ok_or_else(|| format!("Device {device_id} not connected"))?;
+        let mut dev = handle.lock().map_err(|e| e.to_string())?;
         dev.protocol.settlement()
     }
 
     /// Send raw bytes to a device (for "POS sends receipt" mode).
     pub fn send_raw(&self, device_id: &str, data: &[u8]) -> Result<usize, String> {
-        let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
-        let dev = devices
-            .get_mut(device_id)
+        let handle = self
+            .handle_for(device_id)?
             .ok_or_else(|| format!("Device {device_id} not connected"))?;
+        let mut dev = handle.lock().map_err(|e| e.to_string())?;
         dev.protocol.send_raw(data)
     }
 

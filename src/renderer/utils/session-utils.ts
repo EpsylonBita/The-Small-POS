@@ -3,7 +3,14 @@
  * Prevents double-processing of optimistic updates
  */
 
+import { clearSecureSession } from '../lib/secure-session-cache';
+
 const SESSION_KEY = 'client_session_id';
+// `pos-user` has been moved to the OS keyring (Wave 1 C6, see
+// `renderer/lib/secure-session-cache.ts`). It is still listed here so
+// any residual pre-migration entries on an upgraded terminal are
+// cleared alongside the other end-of-day keys. The canonical clear
+// path is `clearSecureSession()` which this file also invokes.
 const BUSINESS_DAY_STORAGE_KEYS = [
   'pos-user',
   'pendingOrder',
@@ -66,6 +73,11 @@ export function clearSessionId(): void {
 /**
  * Clear only the business-day renderer state that must not leak into the next
  * cashier session. Preferences and terminal configuration stay intact.
+ *
+ * Wave 1 C6: additionally clears the keyring-backed session. Fire-and-
+ * forget — callers of this helper are typically reloading the window
+ * or otherwise resetting the renderer, so awaiting the IPC is wasted
+ * latency.
  */
 export function clearBusinessDayStorage(): void {
   if (typeof window === 'undefined') {
@@ -76,6 +88,7 @@ export function clearBusinessDayStorage(): void {
     localStorage.removeItem(key);
   }
 
+  void clearSecureSession();
   clearSessionId();
 }
 

@@ -18,6 +18,11 @@ const entryPoints = [
   path.join(testsRoot, 'services', 'offline-page-capabilities.test.ts'),
   path.join(testsRoot, 'services', 'VerticalOfflineFlows.test.ts'),
   path.join(testsRoot, 'pages', 'SettingsPage.test.tsx'),
+  // Wave 0 regression tests — currently `test.skip`, un-skip as each
+  // Critical fix lands in its wave. See
+  // D:\The-Small-002\planning\claude\now-create-a-plan-vivid-sutton.md.
+  path.join(testsRoot, 'renderer', 'session-storage.test.ts'),
+  path.join(testsRoot, 'renderer', 'login-migration.test.ts'),
 ];
 
 await fs.mkdir(outDir, { recursive: true });

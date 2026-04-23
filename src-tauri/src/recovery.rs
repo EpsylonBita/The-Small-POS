@@ -724,7 +724,7 @@ fn create_snapshot_from_connection(
     write_json_file(&layout.temp_dir.join(METADATA_FILE_NAME), &metadata)?;
     fs::rename(
         &layout.temp_snapshot_path,
-        &layout.temp_dir.join(SNAPSHOT_FILE_NAME),
+        layout.temp_dir.join(SNAPSHOT_FILE_NAME),
     )
     .map_err(|e| format!("finalize recovery snapshot file: {e}"))?;
     fs::rename(&layout.temp_dir, &layout.final_dir)

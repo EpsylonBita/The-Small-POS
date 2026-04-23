@@ -18,6 +18,7 @@ import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { menuService } from '../../services/MenuService';
+import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import type { MenuCombo } from '@shared/types/combo';
 import { getComboPrice } from '@shared/types/combo';
@@ -226,6 +227,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Track if we've loaded items for this edit session to prevent infinite loops
   const hasLoadedItemsRef = React.useRef(false);
   const lastEditOrderIdRef = React.useRef<string | undefined>(undefined);
+  // Tracks the order type we most recently repriced the cart for. Used by
+  // the reprice effect below to avoid re-entering on its own setCartItems
+  // update while still allowing repricing when cart items arrive AFTER an
+  // orderType change (common in the edit-open flow).
+  const repricedForOrderTypeRef = React.useRef<string | null>(null);
   const shouldApplyGhostMode = ghostModeFeatureEnabled && ghostModeArmed;
   const shouldBypassPaymentWithGhostMode = shouldApplyGhostMode;
 
@@ -387,6 +393,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     if (!isOpen) {
       hasLoadedItemsRef.current = false;
       lastEditOrderIdRef.current = undefined;
+      repricedForOrderTypeRef.current = null;
       // Reset cart when modal closes to ensure clean state for next open
       setCartItems([]);
       // Clear locally fetched delivery zone info and default minimum
@@ -687,6 +694,86 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     loadItems();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editMode, editOrderId, editSupabaseId]);
+
+  // Reprice existing cart items when the order-type tier changes.
+  //
+  // Fires only in edit mode (i.e. when the operator reached this modal via
+  // the EditOptionsModal "Change Order Type" flow) so the normal "start
+  // a new order" path is unaffected. Line items whose price was explicitly
+  // overridden by the operator (e.g. applied a custom discount at the
+  // item level) are skipped so we don't overwrite their intent. Manual
+  // line items (no underlying menuItemId) can't be repriced because they
+  // have no tier data to look up — left as-is.
+  //
+  // The shared `resolveMenuItemPrice` util is the single source of truth
+  // for tier resolution, matching what MenuItemGrid displays on the grid.
+  useEffect(() => {
+    if (!isOpen || !editMode) return;
+    if (!orderType) return;
+    if (cartItems.length === 0) return;
+    // Re-entry guard: once we've repriced for this orderType in this edit
+    // session, do not fire again — subsequent cart mutations (add/remove/
+    // quantity change) must not trigger a reprice loop. The ref resets in
+    // the isOpen-false cleanup above, so a fresh open starts clean.
+    if (repricedForOrderTypeRef.current === orderType) return;
+
+    let cancelled = false;
+    const reprice = async () => {
+      const updates: Array<{ id: string; unitPrice: number }> = [];
+      for (const item of cartItems) {
+        if (item.isPriceOverridden) continue;
+        if (item.is_manual) continue;
+        const menuItemId = item.menuItemId;
+        if (!menuItemId) continue;
+        try {
+          // menuItemId / item.id may be typed as string|number depending
+          // on the source; coerce to the string the bridge and Map keys
+          // expect.
+          const menuItem = await menuService.getMenuItemById(String(menuItemId));
+          if (!menuItem) continue;
+          const newUnitPrice = resolveMenuItemPrice(menuItem, orderType);
+          if (newUnitPrice !== item.unitPrice) {
+            updates.push({ id: String(item.id), unitPrice: newUnitPrice });
+          }
+        } catch (err) {
+          console.warn(
+            '[MenuModal] reprice lookup failed for menu item',
+            menuItemId,
+            err,
+          );
+        }
+      }
+      if (cancelled) return;
+      // Mark BEFORE setCartItems: the state update below re-triggers this
+      // effect (cartItems is in deps now) and we rely on the ref to
+      // short-circuit the re-entry on the next pass.
+      repricedForOrderTypeRef.current = orderType;
+      if (updates.length === 0) return;
+      const priceById = new Map(updates.map((u) => [u.id, u.unitPrice]));
+      setCartItems((prev) =>
+        prev.map((item) => {
+          const newUnitPrice = priceById.get(String(item.id));
+          if (newUnitPrice === undefined) return item;
+          return {
+            ...item,
+            price: newUnitPrice,
+            basePrice: newUnitPrice,
+            unitPrice: newUnitPrice,
+            totalPrice: newUnitPrice * (item.quantity || 1),
+          };
+        }),
+      );
+    };
+
+    void reprice();
+    return () => {
+      cancelled = true;
+    };
+  // cartItems IS in deps: the edit-open flow populates cart items
+  // asynchronously AFTER orderType flips, so we need to see the populated
+  // cart before we can reprice it. The ref guard above prevents the
+  // setCartItems inside this effect from looping it.
+  }, [orderType, editMode, isOpen, cartItems]);
 
   // Load categories on mount
   useEffect(() => {

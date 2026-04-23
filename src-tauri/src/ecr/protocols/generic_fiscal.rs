@@ -49,6 +49,22 @@ const CLOCK_DRIFT_WARN_MINUTES: i64 = 5;
 
 const FISCAL_TIMEOUT_MS: u64 = 15000;
 
+/// Wave 3 settlement/Z-report timeout in milliseconds. The 15-second
+/// default above is too short for Z-report generation on some fiscal
+/// devices (observed up to 90 seconds in the field). Settlement paths
+/// should route through this longer timeout to avoid spurious
+/// "timeout" errors mid-Z-report.
+#[allow(dead_code)]
+const FISCAL_SETTLEMENT_TIMEOUT_MS: u64 = 120_000;
+
+/// Wave 3 C5: strict LRC validation on fiscal response frames.
+/// `true` rejects any frame whose LRC byte does not match the computed
+/// XOR of the frame body; `false` would accept the frame anyway and
+/// continue as before. Keep `true` in production; flip only when a
+/// known-good device is producing false positives pending hardware
+/// remediation.
+const STRICT_LRC: bool = true;
+
 // ---------------------------------------------------------------------------
 // Protocol implementation
 // ---------------------------------------------------------------------------
@@ -90,9 +106,24 @@ impl GenericEscPosFiscal {
     }
 
     /// Build a frame: STX + Len(4) + Seq + Cmd + Data + PostAmble(0x05) + LRC + ETX
-    fn build_frame(&mut self, cmd: u8, data: &[u8]) -> Vec<u8> {
+    ///
+    /// The length byte is `Seq(1) + Cmd(1) + Data(N) + PostAmble(1) + 0x20`
+    /// offset. Because the byte is a u8, `Data(N)` must be ≤ 220 (since
+    /// 220 + 3 + 32 = 255). Previously this computed `(data.len() as u8)`
+    /// directly, which silently wraps in release builds on longer payloads
+    /// and produces a frame whose length byte does not match its actual
+    /// contents — the device rejects the frame or enters an undefined
+    /// state. Reject oversize payloads explicitly.
+    fn build_frame(&mut self, cmd: u8, data: &[u8]) -> Result<Vec<u8>, String> {
+        const MAX_FRAME_DATA_LEN: usize = 220;
+        if data.len() > MAX_FRAME_DATA_LEN {
+            return Err(format!(
+                "frame data too large: {} bytes (max {} for 1-byte length field)",
+                data.len(),
+                MAX_FRAME_DATA_LEN
+            ));
+        }
         let seq = self.next_seq();
-        // Length = Seq(1) + Cmd(1) + Data(N) + PostAmble(1) + 0x20 offset
         let len = (data.len() as u8) + 3 + 0x20;
         let mut frame = Vec::with_capacity(data.len() + 8);
         frame.push(STX);
@@ -105,7 +136,7 @@ impl GenericEscPosFiscal {
         let lrc = frame[1..].iter().fold(0u8, |acc, &b| acc ^ b);
         frame.push(lrc);
         frame.push(ETX);
-        frame
+        Ok(frame)
     }
 
     /// Parse a response frame. Returns (status_byte, data_bytes).
@@ -113,6 +144,23 @@ impl GenericEscPosFiscal {
         if raw.is_empty() {
             return Err("Empty response from device".into());
         }
+
+        // Strip leading ACK bytes iteratively. Previously this recursed
+        // once per leading ACK, so a misbehaving or hostile device that
+        // streams many ACKs could blow the stack. Real fiscal printers
+        // send at most a handful; 16 is a safe cap.
+        const MAX_LEADING_ACKS: usize = 16;
+        let mut skipped = 0;
+        while skipped < raw.len().min(MAX_LEADING_ACKS) && raw[skipped] == ACK {
+            skipped += 1;
+        }
+        let raw = &raw[skipped..];
+
+        if raw.is_empty() {
+            // Entire response was leading ACKs — treat as an ACK-only reply.
+            return Ok((ACK, Vec::new()));
+        }
+
         // Check for ACK/NAK single-byte responses
         if raw.len() == 1 {
             return match raw[0] {
@@ -126,6 +174,30 @@ impl GenericEscPosFiscal {
         let etx_pos = raw.iter().rposition(|&b| b == ETX);
         match (stx_pos, etx_pos) {
             (Some(s), Some(e)) if e > s + 3 => {
+                // Wave 3 C5: verify the frame's LRC byte. On HEAD the
+                // LRC was extracted and silently discarded — a bit-flip
+                // on the wire (or a malfunctioning device) could produce
+                // a frame the POS accepts as valid, potentially storing
+                // a corrupt fiscal receipt number in the audit trail.
+                //
+                // Layout: [STX, LEN, SEQ, CMD, ...data..., POSTAMBLE,
+                // LRC, ETX] where LRC = XOR(bytes between STX+1 and
+                // LRC itself, exclusive).
+                if STRICT_LRC && e >= 2 && e - 1 > s {
+                    let expected_lrc = raw[e - 1];
+                    let computed_lrc = raw[s + 1..e - 1]
+                        .iter()
+                        .fold(0u8, |acc, &b| acc ^ b);
+                    if computed_lrc != expected_lrc {
+                        return Err(format!(
+                            "Fiscal frame LRC mismatch: expected 0x{expected_lrc:02X}, \
+                             computed 0x{computed_lrc:02X}. Wave 3 C5 strict LRC validation \
+                             is enabled; if a specific device is known-good and producing \
+                             false positives, disable `STRICT_LRC` to downgrade to a warn."
+                        ));
+                    }
+                }
+
                 // Extract payload between STX and ETX (skip len, seq)
                 let cmd = raw[s + 3];
                 let data = if e > s + 5 {
@@ -135,24 +207,16 @@ impl GenericEscPosFiscal {
                 };
                 Ok((cmd, data))
             }
-            _ => {
-                // Might be just ACK followed by frame — check first byte
-                if raw[0] == ACK && raw.len() > 1 {
-                    // Recurse on the rest
-                    self.parse_response(&raw[1..])
-                } else {
-                    Err(format!(
-                        "Invalid frame (no STX/ETX): {:02X?}",
-                        &raw[..raw.len().min(20)]
-                    ))
-                }
-            }
+            _ => Err(format!(
+                "Invalid frame (no STX/ETX): {:02X?}",
+                &raw[..raw.len().min(20)]
+            )),
         }
     }
 
     /// Send a command and wait for response.
     fn send_command(&mut self, cmd: u8, data: &[u8]) -> Result<(u8, Vec<u8>), String> {
-        let frame = self.build_frame(cmd, data);
+        let frame = self.build_frame(cmd, data)?;
         let raw = self
             .transport
             .send_and_receive(&frame, self.transaction_timeout_ms)?;
@@ -356,6 +420,18 @@ impl EcrProtocol for GenericEscPosFiscal {
                 // 5. Close receipt
                 let (cmd, close_data) = self.send_command(CMD_CLOSE_FISCAL_RECEIPT, &[])?;
                 if cmd == NAK {
+                    // Wave 3: mirror the subtotal/payment NAK paths —
+                    // send `CMD_CANCEL_RECEIPT` so the device does not
+                    // stay in "receipt open" state. Previously a
+                    // close-NAK returned Err without cleanup; the next
+                    // transaction would then fail on the device's
+                    // "previous receipt still open" check rather than
+                    // on the real problem.
+                    if let Err(cancel_err) = self.send_command(CMD_CANCEL_RECEIPT, &[]) {
+                        error!(
+                            "Cancel after close-receipt NAK failed (device may be stuck in receipt-open state): {cancel_err}"
+                        );
+                    }
                     return Err("Device rejected close receipt".into());
                 }
 
@@ -392,18 +468,34 @@ impl EcrProtocol for GenericEscPosFiscal {
                 })
             }
             TransactionType::Sale | TransactionType::Refund | TransactionType::Void => {
-                // Generic fiscal devices typically don't process card payments
-                // directly — they only handle fiscal receipts. For sale/refund/void
-                // without fiscal_data, treat as a simple fiscal receipt with a single
-                // payment line.
-                warn!(
-                    "Generic fiscal protocol received {:?} without fiscal_data — skipping",
+                // Wave 3 C4: the previous implementation returned
+                // `TransactionStatus::Approved` for Sale / Refund / Void
+                // with no `fiscal_data` attached — WITHOUT ever talking
+                // to the device. Callers downstream (receipt writer,
+                // payment reconciliation) then treated the response as a
+                // genuine approval, which silently de-synced the POS
+                // from the fiscal device and, for legally-required
+                // reporting, produced a phantom "approved" audit entry
+                // that no fiscal memory could ever corroborate.
+                //
+                // Fiscal-class transactions without fiscal_data are not
+                // representable on this protocol. Rejecting explicitly
+                // makes the failure visible to operators at the point of
+                // sale instead of at the end-of-day reconciliation.
+                let err_msg = format!(
+                    "Generic fiscal protocol requires fiscal_data for {:?} transactions; \
+                     refusing to return a fake approval",
                     request.transaction_type
+                );
+                warn!(
+                    transaction_type = ?request.transaction_type,
+                    transaction_id = %request.transaction_id,
+                    "Generic fiscal: rejecting transaction with missing fiscal_data (Wave 3 C4)"
                 );
                 let completed = Utc::now().to_rfc3339();
                 Ok(TransactionResponse {
                     transaction_id: request.transaction_id.clone(),
-                    status: TransactionStatus::Approved,
+                    status: TransactionStatus::Declined,
                     authorization_code: None,
                     terminal_reference: None,
                     fiscal_receipt_number: None,
@@ -413,8 +505,8 @@ impl EcrProtocol for GenericEscPosFiscal {
                     entry_method: None,
                     customer_receipt_lines: None,
                     merchant_receipt_lines: None,
-                    error_message: None,
-                    error_code: None,
+                    error_message: Some(err_msg),
+                    error_code: Some("MISSING_FISCAL_DATA".to_string()),
                     raw_response: None,
                     started_at: started,
                     completed_at: completed,
@@ -578,16 +670,30 @@ mod tests {
     }
 
     /// Build a minimal STX..ETX response frame with the given cmd byte and data payload.
-    /// `parse_response` does not validate the LRC, so a placeholder zero byte is fine.
+    ///
+    /// Wave 3 C5: `parse_response` now validates the LRC byte. The LRC
+    /// is the XOR of everything between STX (exclusive) and LRC itself
+    /// (exclusive) — i.e. LEN, SEQ, CMD, all `data` bytes, and the
+    /// postamble. Tests previously wrote a literal `0x00` and relied on
+    /// the old permissive parser; now the helper must compute the byte
+    /// correctly or the parser rejects the frame.
     fn framed(cmd_byte: u8, data: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(7 + data.len());
+        const LEN_PLACEHOLDER: u8 = 0x20;
+        const SEQ_PLACEHOLDER: u8 = 0x20;
+        const POSTAMBLE: u8 = 0x05;
+
+        let mut body: Vec<u8> = Vec::with_capacity(4 + data.len());
+        body.push(LEN_PLACEHOLDER);
+        body.push(SEQ_PLACEHOLDER);
+        body.push(cmd_byte);
+        body.extend_from_slice(data);
+        body.push(POSTAMBLE);
+        let lrc = body.iter().fold(0u8, |acc, &b| acc ^ b);
+
+        let mut out = Vec::with_capacity(body.len() + 3);
         out.push(STX);
-        out.push(0x20); // len placeholder — parse_response does not validate
-        out.push(0x20); // seq placeholder
-        out.push(cmd_byte);
-        out.extend_from_slice(data);
-        out.push(0x05); // postamble
-        out.push(0x00); // LRC placeholder
+        out.extend_from_slice(&body);
+        out.push(lrc);
         out.push(ETX);
         out
     }
@@ -862,10 +968,25 @@ mod tests {
     fn test_build_frame_structure() {
         let mut proto =
             GenericEscPosFiscal::new(Box::new(MockTransport::new(vec![])), &serde_json::json!({}));
-        let frame = proto.build_frame(CMD_STATUS, &[]);
+        let frame = proto.build_frame(CMD_STATUS, &[]).unwrap();
         assert_eq!(frame[0], STX);
         assert_eq!(*frame.last().unwrap(), ETX);
         assert_eq!(frame[3], CMD_STATUS);
+    }
+
+    #[test]
+    fn test_build_frame_rejects_oversize_data() {
+        let mut proto =
+            GenericEscPosFiscal::new(Box::new(MockTransport::new(vec![])), &serde_json::json!({}));
+        let oversize = vec![0u8; 221]; // 221 + 3 + 0x20 = 256 — overflows u8
+        let err = proto
+            .build_frame(CMD_STATUS, &oversize)
+            .expect_err("oversize data must be rejected");
+        assert!(err.contains("too large"), "error should explain: {err}");
+
+        // Boundary: 220 bytes is the maximum that fits in the u8 length byte.
+        let at_limit = vec![0u8; 220];
+        assert!(proto.build_frame(CMD_STATUS, &at_limit).is_ok());
     }
 
     #[test]
@@ -907,7 +1028,7 @@ mod tests {
     fn test_lrc_calculation() {
         let mut proto =
             GenericEscPosFiscal::new(Box::new(MockTransport::new(vec![])), &serde_json::json!({}));
-        let frame = proto.build_frame(CMD_STATUS, &[]);
+        let frame = proto.build_frame(CMD_STATUS, &[]).unwrap();
         // LRC is second-to-last byte, XOR of bytes between STX and ETX
         let lrc_idx = frame.len() - 2;
         let computed = frame[1..lrc_idx].iter().fold(0u8, |acc, &b| acc ^ b);

@@ -66,6 +66,10 @@ pub struct SerialTransport {
     timeout_ms: u64,
     port: Option<Box<dyn serialport::SerialPort>>,
     state: TransportState,
+    /// Wave 3: most-recently-set read timeout, so `receive` can avoid
+    /// re-calling the blocking `set_timeout` syscall on every invocation
+    /// when the timeout has not changed between calls.
+    current_timeout_ms: u64,
 }
 
 impl SerialTransport {
@@ -76,6 +80,7 @@ impl SerialTransport {
             timeout_ms,
             port: None,
             state: TransportState::Disconnected,
+            current_timeout_ms: timeout_ms,
         }
     }
 }
@@ -121,14 +126,26 @@ impl EcrTransport for SerialTransport {
     }
 
     fn receive(&mut self, timeout_ms: u64) -> Result<Vec<u8>, String> {
+        // Wave 3: avoid re-issuing `set_timeout` on every call. On Linux
+        // this invokes `tcsetattr` and on Windows `SetCommTimeouts`;
+        // either can block longer than a fiscal-protocol caller expects
+        // and races with a concurrent write on the same port handle.
+        // Only reconfigure when the caller asks for a different value
+        // than was last set.
+        let needs_timeout_update = timeout_ms != self.current_timeout_ms;
         let port = self.port.as_mut().ok_or("Serial port not connected")?;
-
-        // Set read timeout for this call
-        port.set_timeout(Duration::from_millis(timeout_ms))
-            .map_err(|e| format!("Set timeout: {e}"))?;
-
+        if needs_timeout_update {
+            port.set_timeout(Duration::from_millis(timeout_ms))
+                .map_err(|e| format!("Set timeout: {e}"))?;
+        }
+        // We must record the new timeout even if set_timeout was skipped
+        // so a later call knows the cached value is accurate.
         let mut buf = vec![0u8; 4096];
-        match port.read(&mut buf) {
+        let result = port.read(&mut buf);
+        if needs_timeout_update {
+            self.current_timeout_ms = timeout_ms;
+        }
+        match result {
             Ok(n) => {
                 buf.truncate(n);
                 debug!("Serial RX ({n} bytes): {:02X?}", &buf);
@@ -200,9 +217,25 @@ impl EcrTransport for NetworkTransport {
             format!("TCP connect to {addr} failed: {e}")
         })?;
 
-        // Set default read/write timeouts
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(5000)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(5000)));
+        // Set default read/write timeouts. Previously these were all
+        // `let _ =` — a silent failure on a mis-configured socket
+        // would leave reads/writes unbounded. Wave 3 propagates the
+        // write-timeout and read-timeout errors because either is a
+        // deployment misconfiguration the operator needs to see. We
+        // leave `set_nodelay` as best-effort because it is an
+        // optimisation, not a correctness requirement.
+        stream
+            .set_read_timeout(Some(Duration::from_millis(5000)))
+            .map_err(|e| {
+                self.state = TransportState::Error;
+                format!("TCP set_read_timeout: {e}")
+            })?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(5000)))
+            .map_err(|e| {
+                self.state = TransportState::Error;
+                format!("TCP set_write_timeout: {e}")
+            })?;
         let _ = stream.set_nodelay(true);
 
         self.stream = Some(stream);
@@ -230,34 +263,70 @@ impl EcrTransport for NetworkTransport {
     }
 
     fn receive(&mut self, timeout_ms: u64) -> Result<Vec<u8>, String> {
-        let stream = self.stream.as_mut().ok_or("TCP not connected")?;
+        // Wave 3: ECR responses use STX..ETX framing. The HEAD
+        // implementation did a single `stream.read()` call — for a
+        // slow network or a fragmented TCP delivery, that returned
+        // before the ETX byte arrived and the caller parsed a partial
+        // frame as a complete response. We now loop: accumulate
+        // received bytes until we see `ETX` (0x03), the connection
+        // closes, or the caller's total timeout elapses. Per-read
+        // timeouts are scheduled against the remaining budget so the
+        // overall call still honours the caller's deadline.
+        const ETX: u8 = 0x03;
+        const CHUNK: usize = 4096;
 
-        stream
-            .set_read_timeout(Some(Duration::from_millis(timeout_ms)))
-            .map_err(|e| format!("Set read timeout: {e}"))?;
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let mut assembled: Vec<u8> = Vec::with_capacity(CHUNK);
 
-        let mut buf = vec![0u8; 4096];
-        match stream.read(&mut buf) {
-            Ok(0) => {
-                warn!("TCP connection closed by peer");
-                self.state = TransportState::Error;
-                Err("Connection closed by peer".into())
+        loop {
+            let stream = self.stream.as_mut().ok_or("TCP not connected")?;
+
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                debug!("TCP RX timeout after {timeout_ms}ms (no ETX seen)");
+                return Ok(assembled);
             }
-            Ok(n) => {
-                buf.truncate(n);
-                debug!("TCP RX ({n} bytes): {:02X?}", &buf);
-                Ok(buf)
-            }
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::WouldBlock =>
-            {
-                debug!("TCP RX timeout after {timeout_ms}ms");
-                Ok(Vec::new())
-            }
-            Err(e) => {
-                self.state = TransportState::Error;
-                Err(format!("TCP read: {e}"))
+            // Propagate set_read_timeout failures — the HEAD code silently
+            // ignored them via `let _ =` at connect time, so a mis-configured
+            // socket could block far longer than expected. Here we bubble
+            // the error up so the caller can surface a real network fault.
+            stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|e| format!("Set read timeout: {e}"))?;
+
+            let mut chunk = vec![0u8; CHUNK];
+            match stream.read(&mut chunk) {
+                Ok(0) => {
+                    // Peer closed the connection. If we already accumulated
+                    // a full ETX-terminated frame, that is the caller's
+                    // response; otherwise treat as failure.
+                    warn!("TCP connection closed by peer");
+                    self.state = TransportState::Error;
+                    if assembled.contains(&ETX) {
+                        return Ok(assembled);
+                    }
+                    return Err("Connection closed by peer".into());
+                }
+                Ok(n) => {
+                    chunk.truncate(n);
+                    debug!("TCP RX chunk ({n} bytes): {:02X?}", &chunk);
+                    assembled.extend_from_slice(&chunk);
+                    if assembled.contains(&ETX) {
+                        return Ok(assembled);
+                    }
+                    // Otherwise keep reading until ETX or timeout.
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    debug!("TCP RX timeout after {timeout_ms}ms (partial {} bytes)", assembled.len());
+                    return Ok(assembled);
+                }
+                Err(e) => {
+                    self.state = TransportState::Error;
+                    return Err(format!("TCP read: {e}"));
+                }
             }
         }
     }

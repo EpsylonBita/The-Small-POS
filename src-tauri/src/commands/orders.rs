@@ -146,6 +146,43 @@ struct OrderDeletePayload {
     order_id: String,
 }
 
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EditSettlementOrderUpdatesPayload {
+    #[serde(default)]
+    order_type: Option<String>,
+    #[serde(default)]
+    customer_id: Option<serde_json::Value>,
+    #[serde(default)]
+    customer_name: Option<serde_json::Value>,
+    #[serde(default)]
+    customer_phone: Option<serde_json::Value>,
+    #[serde(default)]
+    customer_email: Option<serde_json::Value>,
+    #[serde(default)]
+    delivery_address: Option<serde_json::Value>,
+    #[serde(default)]
+    delivery_city: Option<serde_json::Value>,
+    #[serde(default)]
+    delivery_postal_code: Option<serde_json::Value>,
+    #[serde(default)]
+    delivery_floor: Option<serde_json::Value>,
+    #[serde(default)]
+    delivery_notes: Option<serde_json::Value>,
+    #[serde(default)]
+    name_on_ringer: Option<serde_json::Value>,
+    #[serde(default)]
+    delivery_fee: Option<f64>,
+    #[serde(default)]
+    table_number: Option<serde_json::Value>,
+    #[serde(default)]
+    waiter_id: Option<serde_json::Value>,
+    #[serde(default)]
+    driver_id: Option<serde_json::Value>,
+    #[serde(default)]
+    driver_name: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OrderEditSettlementRawPayload {
@@ -163,6 +200,8 @@ struct OrderEditSettlementRawPayload {
         alias = "special_instructions"
     )]
     order_notes: Option<serde_json::Value>,
+    #[serde(default, alias = "order_updates")]
+    order_updates: Option<EditSettlementOrderUpdatesPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,6 +278,7 @@ struct OrderEditSettlementPayload {
     order_id: String,
     items: Vec<serde_json::Value>,
     order_notes: Option<String>,
+    order_updates: Option<EditSettlementOrderUpdatesPayload>,
 }
 
 fn parse_order_update_status_payload(
@@ -524,6 +564,7 @@ fn parse_order_edit_settlement_payload_value(
         order_id,
         items: raw.items,
         order_notes,
+        order_updates: raw.order_updates,
     })
 }
 
@@ -810,6 +851,23 @@ fn refresh_order_payment_snapshot(
         .ok()
         .unwrap_or_else(|| current_payment_method.clone());
 
+    // Count *distinct* methods across completed payments. This is the signal
+    // we want for the "split" presentation — two payments that share the
+    // same method (e.g. a €10 cash charge plus a €0.80 cash delta for an
+    // edit-settlement) should display as "cash", not as a split order.
+    // Raw completed_payment_count conflates legitimate multi-method splits
+    // with benign same-method deltas.
+    let distinct_completed_methods: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT LOWER(TRIM(method)))
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
     let next_payment_status = if total_paid >= order_total - 0.01 {
         if total_paid > 0.009 {
             "paid".to_string()
@@ -822,19 +880,29 @@ fn refresh_order_payment_snapshot(
         "pending".to_string()
     };
 
-    let normalized_current_method = current_payment_method.trim().to_ascii_lowercase();
+    // The decision tree intentionally derives the next payment_method from
+    // *actual* completed payments rather than from the existing column
+    // value. Reading the existing column was the source of a stickiness
+    // bug: an edit-settlement that briefly marked the order as
+    // partially_paid wrote payment_method='split', and then the next
+    // refresh (after the operator collected the delta) re-saw 'split' in
+    // the column and re-wrote 'split' again forever — even when both
+    // completed payments shared a single method (cash + cash). The card
+    // would keep rendering the purple ΔΙΑΧΩΡΙΣΜΟΣ chip on an ordinary
+    // single-method order. Driving the decision from the payments
+    // themselves makes it idempotent and self-correcting.
     let next_payment_method = if total_paid <= 0.009 {
         "pending".to_string()
-    } else if next_payment_status == "partially_paid"
-        || has_item_assignments
-        || completed_payment_count > 1
-        || matches!(
-            normalized_current_method.as_str(),
-            "pending" | "split" | "mixed"
-        )
-    {
+    } else if next_payment_status == "partially_paid" || has_item_assignments {
+        // Outstanding balance OR per-item split-by-payer assignments:
+        // canonical "in-progress / multi-payer" state.
+        "split".to_string()
+    } else if completed_payment_count > 1 && distinct_completed_methods > 1 {
+        // Fully paid with multiple methods used (e.g. €10 cash + €2 card).
         "split".to_string()
     } else {
+        // Fully paid via either a single payment or multiple same-method
+        // payments. Use the canonical method of the most-recent payment.
         last_completed_method
     };
 
@@ -851,6 +919,212 @@ fn refresh_order_payment_snapshot(
     Ok((next_payment_status, next_payment_method, total_paid))
 }
 
+/// Convert one of the optional `order_updates` JSON fields into a
+/// `(rusqlite Value, serde_json Value)` pair the caller can bind into a
+/// dynamically-built UPDATE statement and forward unchanged into the sync
+/// payload. Returns `None` when the field is absent, leaving the column
+/// untouched. Treats explicit JSON `null` and empty/whitespace strings as
+/// "clear the column".
+fn normalize_edit_settlement_nullable_text(
+    raw: &Option<serde_json::Value>,
+) -> Option<(rusqlite::types::Value, serde_json::Value)> {
+    match raw.as_ref()? {
+        serde_json::Value::Null => Some((rusqlite::types::Value::Null, serde_json::Value::Null)),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Some((rusqlite::types::Value::Null, serde_json::Value::Null))
+            } else {
+                Some((
+                    rusqlite::types::Value::Text(trimmed.to_string()),
+                    serde_json::Value::String(trimmed.to_string()),
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Apply the optional `order_updates` payload to the local SQLite `orders`
+/// row inside the caller's transaction. Returns a JSON object containing the
+/// fields that were actually applied (camelCase keys) so the caller can
+/// forward the same values into the sync payload destined for Supabase.
+fn apply_edit_settlement_order_updates(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    updates: &EditSettlementOrderUpdatesPayload,
+    now: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    use rusqlite::types::Value;
+
+    let mut set_clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+    let mut applied: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+    fn add_text(
+        json_key: &str,
+        sql_col: &str,
+        raw: &Option<serde_json::Value>,
+        set_clauses: &mut Vec<String>,
+        params: &mut Vec<rusqlite::types::Value>,
+        applied: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        if let Some((sql_val, json_val)) = normalize_edit_settlement_nullable_text(raw) {
+            set_clauses.push(format!("{sql_col} = ?"));
+            params.push(sql_val);
+            applied.insert(json_key.to_string(), json_val);
+        }
+    }
+
+    // order_type is required-string-only (no null/clear semantic).
+    if let Some(order_type) = updates.order_type.as_deref() {
+        let trimmed = order_type.trim();
+        if !trimmed.is_empty() {
+            set_clauses.push("order_type = ?".to_string());
+            params.push(Value::Text(trimmed.to_string()));
+            applied.insert(
+                "orderType".to_string(),
+                serde_json::Value::String(trimmed.to_string()),
+            );
+        }
+    }
+
+    add_text(
+        "customerId",
+        "customer_id",
+        &updates.customer_id,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "customerName",
+        "customer_name",
+        &updates.customer_name,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "customerPhone",
+        "customer_phone",
+        &updates.customer_phone,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "customerEmail",
+        "customer_email",
+        &updates.customer_email,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "deliveryAddress",
+        "delivery_address",
+        &updates.delivery_address,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "deliveryCity",
+        "delivery_city",
+        &updates.delivery_city,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "deliveryPostalCode",
+        "delivery_postal_code",
+        &updates.delivery_postal_code,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "deliveryFloor",
+        "delivery_floor",
+        &updates.delivery_floor,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "deliveryNotes",
+        "delivery_notes",
+        &updates.delivery_notes,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "nameOnRinger",
+        "name_on_ringer",
+        &updates.name_on_ringer,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "tableNumber",
+        "table_number",
+        &updates.table_number,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "driverId",
+        "driver_id",
+        &updates.driver_id,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+    add_text(
+        "driverName",
+        "driver_name",
+        &updates.driver_name,
+        &mut set_clauses,
+        &mut params,
+        &mut applied,
+    );
+
+    if let Some(fee) = updates.delivery_fee {
+        if fee.is_finite() && fee >= 0.0 {
+            set_clauses.push("delivery_fee = ?".to_string());
+            params.push(Value::Real(fee));
+            applied.insert("deliveryFee".to_string(), serde_json::json!(fee));
+        }
+    }
+
+    // waiter_id has no local column on `orders` yet but the admin schema
+    // accepts it, so forward the value into the sync payload only.
+    if let Some((_, json_val)) = normalize_edit_settlement_nullable_text(&updates.waiter_id) {
+        applied.insert("waiterId".to_string(), json_val);
+    }
+
+    if set_clauses.is_empty() {
+        return Ok(applied);
+    }
+
+    set_clauses.push("sync_status = 'pending'".to_string());
+    set_clauses.push("updated_at = ?".to_string());
+    params.push(Value::Text(now.to_string()));
+
+    let sql = format!("UPDATE orders SET {} WHERE id = ?", set_clauses.join(", "));
+    params.push(Value::Text(order_id.to_string()));
+
+    conn.execute(&sql, rusqlite::params_from_iter(params.iter()))
+        .map_err(|e| format!("apply edit settlement order updates: {e}"))?;
+
+    Ok(applied)
+}
+
 fn enqueue_order_edit_sync(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -859,15 +1133,39 @@ fn enqueue_order_edit_sync(
     total_amount: f64,
     payment_status: &str,
     payment_method: &str,
+    extra_fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    let sync_payload = serde_json::json!({
-        "orderId": order_id,
-        "items": items,
-        "orderNotes": order_notes,
-        "totalAmount": total_amount,
-        "paymentStatus": payment_status,
-        "paymentMethod": payment_method,
-    });
+    let mut payload_map = serde_json::Map::new();
+    payload_map.insert(
+        "orderId".to_string(),
+        serde_json::Value::String(order_id.to_string()),
+    );
+    payload_map.insert(
+        "items".to_string(),
+        serde_json::Value::Array(items.to_vec()),
+    );
+    payload_map.insert(
+        "orderNotes".to_string(),
+        match order_notes {
+            Some(s) => serde_json::Value::String(s.to_string()),
+            None => serde_json::Value::Null,
+        },
+    );
+    payload_map.insert("totalAmount".to_string(), serde_json::json!(total_amount));
+    payload_map.insert(
+        "paymentStatus".to_string(),
+        serde_json::Value::String(payment_status.to_string()),
+    );
+    payload_map.insert(
+        "paymentMethod".to_string(),
+        serde_json::Value::String(payment_method.to_string()),
+    );
+    for (key, value) in extra_fields {
+        // extra_fields wins over the defaults (e.g. caller may provide an
+        // explicit orderType that overrides the empty default).
+        payload_map.insert(key.clone(), value.clone());
+    }
+    let sync_payload = serde_json::Value::Object(payload_map);
     enqueue_order_sync_payload(conn, order_id, &sync_payload)
         .map_err(|e| format!("enqueue order edit parity sync: {e}"))?;
     Ok(())
@@ -1571,6 +1869,18 @@ pub async fn orders_apply_edit_settlement(
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<serde_json::Value, String> {
+        // Apply order-type / customer / delivery field changes FIRST so the
+        // subsequent items/total update and sync-enqueue see the new shape
+        // of the row. Without this step the caller's type change (e.g.
+        // pickup -> delivery) is silently dropped and the Supabase row
+        // keeps the old order_type even though the items/total were edited.
+        let applied_order_updates = match payload.order_updates.as_ref() {
+            Some(updates) => {
+                apply_edit_settlement_order_updates(&conn, &actual_order_id, updates, &now)?
+            }
+            None => serde_json::Map::new(),
+        };
+
         update_order_items_in_connection(
             &conn,
             &actual_order_id,
@@ -1669,6 +1979,7 @@ pub async fn orders_apply_edit_settlement(
             next_total,
             &payment_status,
             &payment_method,
+            &applied_order_updates,
         )?;
 
         Ok(serde_json::json!({
@@ -2920,6 +3231,85 @@ pub async fn orders_get_retry_info(
     }))
 }
 
+/// One-shot startup repair for orders whose `payment_method` got stuck
+/// on 'split' because the prior refresh_order_payment_snapshot version
+/// re-read 'split' from the column and re-wrote 'split' even after the
+/// operator collected the final delta with the same method as the
+/// original payment. Safe to run on every boot: only updates rows whose
+/// completed payments genuinely resolve to a single-method state under
+/// the new logic. Skips rows with item-level split assignments (true
+/// multi-payer splits) and rows with different-method completed payments.
+///
+/// Returns the number of rows repaired so the caller can log it.
+pub(crate) fn repair_sticky_split_payment_methods(db: &db::DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    let candidates: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT o.id
+                 FROM orders o
+                 WHERE LOWER(TRIM(COALESCE(o.payment_method, ''))) = 'split'
+                   AND EXISTS(
+                       SELECT 1 FROM order_payments op
+                       WHERE op.order_id = o.id AND op.status = 'completed'
+                   )
+                   AND (
+                       SELECT COUNT(DISTINCT LOWER(TRIM(method)))
+                       FROM order_payments
+                       WHERE order_id = o.id AND status = 'completed'
+                   ) = 1
+                   AND NOT EXISTS(
+                       SELECT 1
+                       FROM payment_items pi
+                       INNER JOIN order_payments op ON op.id = pi.payment_id
+                       WHERE op.order_id = o.id
+                         AND op.status = 'completed'
+                   )",
+            )
+            .map_err(|e| format!("prepare sticky split repair candidates: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("query sticky split repair candidates: {e}"))?;
+        rows.filter_map(Result::ok).collect()
+    };
+
+    let mut repaired = 0usize;
+    for order_id in candidates {
+        match refresh_order_payment_snapshot(&conn, &order_id, &now) {
+            Ok((_payment_status, new_method, _paid)) => {
+                if new_method.eq_ignore_ascii_case("split") {
+                    // New logic still resolved to split — probably a race
+                    // or a payments-table shape we don't recognize. Leave
+                    // as-is rather than oscillate.
+                    continue;
+                }
+                // Enqueue the corrected payment_method for Supabase so the
+                // admin dashboard reflects the repair on the next sync
+                // cycle. Payment status is included to avoid the admin
+                // seeing the pair get out of step.
+                let sync_payload = serde_json::json!({
+                    "orderId": order_id,
+                    "paymentMethod": new_method,
+                });
+                let _ = enqueue_order_sync_payload(&conn, &order_id, &sync_payload);
+                repaired += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "orders::repair",
+                    order_id = %order_id,
+                    error = %error,
+                    "skipped sticky split repair"
+                );
+            }
+        }
+    }
+
+    Ok(repaired)
+}
+
 #[cfg(test)]
 mod dto_tests {
     use super::*;
@@ -3623,6 +4013,167 @@ mod transition_tests {
 
         let net_paid = load_net_paid_for_order(&conn, "order-net-paid").expect("net paid");
         assert!((net_paid - 1.9).abs() < 0.001);
+    }
+
+    #[test]
+    fn refresh_order_payment_snapshot_keeps_single_method_for_same_method_delta_collection() {
+        // Regression test for the ΔΙΑΧΩΡΙΣΜΟΣ / SPLIT chip bug: when an
+        // edit-settlement collects a delta in the same method as the
+        // original payment (e.g. €10 cash + €0.80 cash), the card should
+        // not flip to the split-payment presentation. Before the fix this
+        // test would see payment_method='split' because the previous logic
+        // treated any 2+ completed payments as split regardless of method.
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-delta-same-method",
+            r#"[{"name":"Crepe","quantity":1,"unit_price":12.0,"total_price":12.0}]"#,
+            12.0,
+            12.0,
+            "cash",
+            "paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        // First payment: €10 cash (original).
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-delta-1', 'order-delta-same-method', 'cash', 10.0, 'completed',
+                 datetime('now', '-1 minute'), datetime('now', '-1 minute')
+             )",
+            [],
+        )
+        .unwrap();
+        // Delta payment: €2 cash collected via edit-settlement.
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-delta-2', 'order-delta-same-method', 'cash', 2.0, 'completed',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        let (payment_status, payment_method, total_paid) = refresh_order_payment_snapshot(
+            &conn,
+            "order-delta-same-method",
+            "2026-04-22T14:30:00Z",
+        )
+        .expect("refresh payment snapshot");
+
+        assert_eq!(payment_status, "paid");
+        assert_eq!(
+            payment_method, "cash",
+            "same-method delta collection should keep single method, not flip to split"
+        );
+        assert!((total_paid - 12.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn refresh_order_payment_snapshot_unfreezes_split_sticky_after_same_method_collect() {
+        // Specific regression test for the "split stickiness" path observed
+        // in live testing on 2026-04-22. Sequence: an order was edited,
+        // briefly marked 'partially_paid' with payment_method='split'; the
+        // operator then collected the delta with the same method as the
+        // original payment. Before this fix, the next refresh read 'split'
+        // from the current column and re-wrote 'split' even though both
+        // completed payments shared one method. The ΔΙΑΧΩΡΙΣΜΟΣ chip
+        // therefore stayed lit on an ordinary single-method cash order.
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-sticky-split",
+            r#"[{"name":"Wrap","quantity":1,"unit_price":12.0,"total_price":12.0}]"#,
+            12.0,
+            12.0,
+            "split", // <-- simulating the briefly-partial state
+            "partially_paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-sticky-1', 'order-sticky-split', 'cash', 10.0, 'completed',
+                 datetime('now', '-2 minutes'), datetime('now', '-2 minutes')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-sticky-2', 'order-sticky-split', 'cash', 2.0, 'completed',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        let (payment_status, payment_method, _total_paid) =
+            refresh_order_payment_snapshot(&conn, "order-sticky-split", "2026-04-22T15:30:00Z")
+                .expect("refresh payment snapshot");
+
+        assert_eq!(payment_status, "paid");
+        assert_eq!(
+            payment_method, "cash",
+            "sticky 'split' column must not re-mark a fully-paid, single-method order as split"
+        );
+    }
+
+    #[test]
+    fn refresh_order_payment_snapshot_flags_split_when_methods_actually_differ() {
+        // Complementary test: if the two completed payments use different
+        // methods (e.g. €10 cash + €2 card), the card SHOULD render the
+        // split presentation. This keeps the genuine split flow intact.
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-delta-mixed",
+            r#"[{"name":"Crepe","quantity":1,"unit_price":12.0,"total_price":12.0}]"#,
+            12.0,
+            12.0,
+            "cash",
+            "paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-mixed-1', 'order-delta-mixed', 'cash', 10.0, 'completed',
+                 datetime('now', '-1 minute'), datetime('now', '-1 minute')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-mixed-2', 'order-delta-mixed', 'card', 2.0, 'completed',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        let (payment_status, payment_method, _total_paid) =
+            refresh_order_payment_snapshot(&conn, "order-delta-mixed", "2026-04-22T14:30:00Z")
+                .expect("refresh payment snapshot");
+
+        assert_eq!(payment_status, "paid");
+        assert_eq!(
+            payment_method, "split",
+            "mixed methods must still render as split"
+        );
     }
 
     #[test]

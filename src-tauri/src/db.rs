@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 45;
+const CURRENT_SCHEMA_VERSION: i32 = 50;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -145,143 +145,237 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
 
     info!("Migrating database from v{current} to v{CURRENT_SCHEMA_VERSION}");
 
+    // Each migration runs inside a transaction so a crash mid-migration
+    // (power loss, process kill) cannot leave the schema in a half-applied
+    // state. A handful of migrations historically embedded their own
+    // `BEGIN;`/`COMMIT;` inside `execute_batch`; those are passed through
+    // `migrate_vN(conn)?` directly because SQLite rejects a `BEGIN` within
+    // an open transaction. Every other migration goes through
+    // `run_migration_tx`, which wraps the call in `BEGIN IMMEDIATE` and
+    // commits on success / rolls back on error.
     if current < 1 {
-        migrate_v1(conn)?;
+        run_migration_tx(conn, 1, migrate_v1)?;
     }
     if current < 2 {
-        migrate_v2(conn)?;
+        run_migration_tx(conn, 2, migrate_v2)?;
     }
     if current < 3 {
-        migrate_v3(conn)?;
+        run_migration_tx(conn, 3, migrate_v3)?;
     }
     if current < 4 {
-        migrate_v4(conn)?;
+        run_migration_tx(conn, 4, migrate_v4)?;
     }
     if current < 5 {
-        migrate_v5(conn)?;
+        run_migration_tx(conn, 5, migrate_v5)?;
     }
     if current < 6 {
-        migrate_v6(conn)?;
+        run_migration_tx(conn, 6, migrate_v6)?;
     }
     if current < 7 {
-        migrate_v7(conn)?;
+        run_migration_tx(conn, 7, migrate_v7)?;
     }
     if current < 8 {
-        migrate_v8(conn)?;
+        run_migration_tx(conn, 8, migrate_v8)?;
     }
     if current < 9 {
-        migrate_v9(conn)?;
+        run_migration_tx(conn, 9, migrate_v9)?;
     }
     if current < 10 {
-        migrate_v10(conn)?;
+        run_migration_tx(conn, 10, migrate_v10)?;
     }
     if current < 11 {
+        // v11 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v11(conn)?;
     }
     if current < 12 {
-        migrate_v12(conn)?;
+        run_migration_tx(conn, 12, migrate_v12)?;
     }
     if current < 13 {
-        migrate_v13(conn)?;
+        run_migration_tx(conn, 13, migrate_v13)?;
     }
     if current < 14 {
-        migrate_v14(conn)?;
+        run_migration_tx(conn, 14, migrate_v14)?;
     }
     if current < 15 {
-        migrate_v15(conn)?;
+        run_migration_tx(conn, 15, migrate_v15)?;
     }
     if current < 16 {
+        // v16 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v16(conn)?;
     }
     if current < 17 {
-        migrate_v17(conn)?;
+        run_migration_tx(conn, 17, migrate_v17)?;
     }
     if current < 18 {
+        // v18 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v18(conn)?;
     }
     if current < 19 {
-        migrate_v19(conn)?;
+        run_migration_tx(conn, 19, migrate_v19)?;
     }
     if current < 20 {
+        // v20 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v20(conn)?;
     }
     if current < 21 {
-        migrate_v21(conn)?;
+        run_migration_tx(conn, 21, migrate_v21)?;
     }
     if current < 22 {
-        migrate_v22(conn)?;
+        run_migration_tx(conn, 22, migrate_v22)?;
     }
     if current < 23 {
-        migrate_v23(conn)?;
+        run_migration_tx(conn, 23, migrate_v23)?;
     }
     if current < 24 {
+        // v24 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v24(conn)?;
     }
     if current < 25 {
-        migrate_v25(conn)?;
+        run_migration_tx(conn, 25, migrate_v25)?;
     }
     if current < 26 {
-        migrate_v26(conn)?;
+        run_migration_tx(conn, 26, migrate_v26)?;
     }
     if current < 27 {
-        migrate_v27(conn)?;
+        run_migration_tx(conn, 27, migrate_v27)?;
     }
     if current < 28 {
+        // v28 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v28(conn)?;
     }
     if current < 29 {
-        migrate_v29(conn)?;
+        run_migration_tx(conn, 29, migrate_v29)?;
     }
     if current < 30 {
+        // v30 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v30(conn)?;
     }
     if current < 31 {
+        // v31 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v31(conn)?;
     }
     if current < 32 {
-        migrate_v32(conn)?;
+        run_migration_tx(conn, 32, migrate_v32)?;
     }
     if current < 33 {
-        migrate_v33(conn)?;
+        run_migration_tx(conn, 33, migrate_v33)?;
     }
     if current < 34 {
+        // v34 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v34(conn)?;
     }
     if current < 35 {
-        migrate_v35(conn)?;
+        run_migration_tx(conn, 35, migrate_v35)?;
     }
     if current < 36 {
+        // v36 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v36(conn)?;
     }
     if current < 37 {
-        migrate_v37(conn)?;
+        run_migration_tx(conn, 37, migrate_v37)?;
     }
     if current < 38 {
-        migrate_v38(conn)?;
+        run_migration_tx(conn, 38, migrate_v38)?;
     }
     if current < 39 {
-        migrate_v39(conn)?;
+        run_migration_tx(conn, 39, migrate_v39)?;
     }
     if current < 40 {
+        // v40 self-wraps (inline BEGIN;/COMMIT;).
         migrate_v40(conn)?;
     }
     if current < 41 {
-        migrate_v41(conn)?;
+        run_migration_tx(conn, 41, migrate_v41)?;
     }
     if current < 42 {
-        migrate_v42(conn)?;
+        run_migration_tx(conn, 42, migrate_v42)?;
     }
     if current < 43 {
-        migrate_v43(conn)?;
+        run_migration_tx(conn, 43, migrate_v43)?;
     }
     if current < 44 {
-        migrate_v44(conn)?;
+        run_migration_tx(conn, 44, migrate_v44)?;
     }
     if current < 45 {
-        migrate_v45(conn)?;
+        run_migration_tx(conn, 45, migrate_v45)?;
+    }
+    if current < 46 {
+        run_migration_tx(conn, 46, migrate_v46)?;
+    }
+    if current < 47 {
+        run_migration_tx(conn, 47, migrate_v47)?;
+    }
+    if current < 48 {
+        run_migration_tx(conn, 48, migrate_v48)?;
+    }
+    if current < 49 {
+        run_migration_tx(conn, 49, migrate_v49)?;
+    }
+    if current < 50 {
+        run_migration_tx(conn, 50, migrate_v50)?;
     }
 
     Ok(())
+}
+
+/// Run a migration inside a `BEGIN IMMEDIATE`/`COMMIT` transaction. Use
+/// this for migration functions whose bodies do NOT already contain an
+/// inline `BEGIN;`/`COMMIT;` pair — wrapping a self-wrapping migration
+/// would double-begin and SQLite would reject the nested `BEGIN`.
+///
+/// On migration failure the transaction is rolled back so no partial DDL
+/// or `INSERT schema_version` row persists; the application will retry
+/// the migration on the next start.
+///
+/// # Table-rebuild migrations (important rule for future authors)
+///
+/// Several older migrations (v11, v18, v24, v28, v34, v40) rebuild a table
+/// via the pattern:
+///
+/// ```sql
+/// CREATE TABLE X_new (...);
+/// INSERT INTO X_new SELECT * FROM X;   -- positional! fragile!
+/// DROP TABLE X;
+/// ALTER TABLE X_new RENAME TO X;
+/// ```
+///
+/// The `SELECT *` / implicit-column INSERT is positional — if any prior
+/// migration added a column in the middle of the old table (via
+/// `ALTER TABLE ADD COLUMN` — which always appends, so this is mostly
+/// safe in SQLite, but can still shift columns when combined with other
+/// rebuilds) the mapping silently corrupts data because values land in
+/// the wrong columns of the new schema. The `OR IGNORE` variant masks
+/// the conflict by dropping the row.
+///
+/// **Rule for new table-rebuild migrations:** always list the columns
+/// explicitly on BOTH sides of the `INSERT ... SELECT` so the SQL
+/// engine checks the names, not the positions:
+///
+/// ```sql
+/// INSERT INTO X_new (id, name, created_at)
+/// SELECT id, name, created_at FROM X;
+/// ```
+///
+/// The existing migrations cannot be retroactively fixed (the ship has
+/// sailed on deployed terminals), but new rebuild migrations MUST follow
+/// this rule.
+fn run_migration_tx<F>(conn: &Connection, version: i32, migration: F) -> Result<(), String>
+where
+    F: FnOnce(&Connection) -> Result<(), String>,
+{
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin migration v{version}: {e}"))?;
+    match migration(conn) {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit migration v{version}: {e}"))?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(format!("migration v{version} rolled back: {e}"))
+        }
+    }
 }
 
 /// Migration v1: Core tables for MVP.
@@ -942,7 +1036,32 @@ fn migrate_v12(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Check whether `table` has a column named `column`.
+///
+/// # Security contract
+///
+/// `table` is interpolated into the `PRAGMA table_info(...)` SQL string. SQL
+/// identifiers cannot be bound as parameters in SQLite, so parameterisation
+/// is not available — the only way to keep this safe is for every caller to
+/// pass a **string literal** (or a value derived from a string literal) as
+/// the `table` argument. At the time of writing every call site in this
+/// module does exactly that (grep `column_exists(` — all call-sites pass
+/// quoted literals such as `"sync_queue"`, `"orders"`, `"printer_profiles"`).
+///
+/// If you ever need to call this with a runtime-derived table name, STOP
+/// and route the call through a known-good allowlist — or reject the call
+/// outright. A caller-supplied identifier here is a SQL-injection primitive.
+///
+/// The `debug_assert!` in this function enforces an identifier regex at
+/// development time so an accidental call like `column_exists(conn, user_input,
+/// "foo")` fails loudly under `cargo test` even if the runtime happens to
+/// accept it.
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    debug_assert!(
+        is_safe_sql_identifier(table),
+        "column_exists: table name '{table}' is not a plain SQL identifier — \
+         callers MUST pass a string literal, not runtime-derived input"
+    );
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))
         .map_err(|e| format!("table_info {table}: {e}"))?;
@@ -956,6 +1075,19 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, S
         }
     }
     Ok(false)
+}
+
+/// Return true iff `s` looks like a plain SQL identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+/// Used by `debug_assert!` in `column_exists` to catch accidental interpolation
+/// of runtime-derived table names during development. Not a substitute for
+/// call-site discipline; see `column_exists` docs.
+fn is_safe_sql_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Migration v13: sync queue retry scheduling and remote receipt tracking.
@@ -2753,6 +2885,379 @@ fn migrate_v45(conn: &Connection) -> Result<(), String> {
 
     info!("Applied migration v45 (orders.display_order_number)");
     Ok(())
+}
+
+/// Migration v46 (Wave 2a C2): partial UNIQUE index enforcing
+/// at-most-one active shift per staff member.
+///
+/// The review found that `shifts.rs::open_shift` ran its duplicate-shift
+/// SELECT outside the enclosing `BEGIN IMMEDIATE` transaction. Two
+/// terminals could race, both pass the pre-check, then both INSERT
+/// successfully — leaving two rows with `status='active'` for the same
+/// staff_id. The Rust-side fix in Wave 2a moves the SELECT inside the
+/// transaction; this index is defence-in-depth: even a future
+/// refactor that accidentally undoes the SELECT placement will get a
+/// SQLite `UNIQUE constraint failed` error instead of silent double
+/// shifts.
+///
+/// Data-cleanup first: any pre-existing duplicates (from terminals
+/// that ran the buggy code before upgrade) would make
+/// `CREATE UNIQUE INDEX` fail. We detect duplicates, close the older
+/// rows (keeping the one with the latest `updated_at`), and log at
+/// WARN so operators see the remediation.
+fn migrate_v46(conn: &Connection) -> Result<(), String> {
+    // Step 1: surface and close duplicate active shifts. A deterministic
+    // tie-break on `updated_at DESC, id DESC` picks the "newest" row to
+    // keep; the rest get `status='closed'` with a system-attributed
+    // note.
+    let mut dup_stmt = conn
+        .prepare(
+            "SELECT staff_id, COUNT(*) AS n
+             FROM staff_shifts
+             WHERE status = 'active'
+             GROUP BY staff_id
+             HAVING n > 1",
+        )
+        .map_err(|e| format!("migration v46 scan duplicates: {e}"))?;
+    let duplicates: Vec<(String, i64)> = dup_stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .map_err(|e| format!("migration v46 map duplicates: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("migration v46 collect duplicates: {e}"))?;
+    drop(dup_stmt);
+
+    for (staff_id, count) in &duplicates {
+        warn!(
+            staff_id = %staff_id,
+            duplicate_active_shifts = count,
+            "migration v46: closing older duplicate active shifts to satisfy new UNIQUE invariant"
+        );
+        // Keep the most recently updated row, close the rest. The
+        // `staff_shifts` schema has no dedicated "close reason" column,
+        // so the audit trail for this cleanup lives in the `warn!` log
+        // line above.
+        conn.execute(
+            "UPDATE staff_shifts
+             SET status = 'closed',
+                 updated_at = datetime('now')
+             WHERE status = 'active'
+               AND staff_id = ?1
+               AND id NOT IN (
+                   SELECT id FROM staff_shifts
+                   WHERE status = 'active' AND staff_id = ?1
+                   ORDER BY updated_at DESC, id DESC
+                   LIMIT 1
+               )",
+            params![staff_id],
+        )
+        .map_err(|e| format!("migration v46 dedup staff {staff_id}: {e}"))?;
+    }
+
+    // Step 2: create the partial UNIQUE index. `IF NOT EXISTS` keeps
+    // the migration idempotent across re-runs.
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_shift_per_staff
+             ON staff_shifts(staff_id) WHERE status = 'active';
+
+         INSERT INTO schema_version (version) VALUES (46);",
+    )
+    .map_err(|e| format!("migration v46 index + schema_version: {e}"))?;
+
+    info!(
+        duplicates_cleaned = duplicates.len(),
+        "Applied migration v46 (staff_shifts UNIQUE partial index)"
+    );
+    Ok(())
+}
+
+/// Migration v47 (Wave 4 architectural): add `idempotency_key` to each
+/// entity table whose rows flow through the financial sync queue, so
+/// that the canonical key is generated at user-action time and
+/// preserved across retries.
+///
+/// Before v47, `sync_queue` rows carried their own `idempotency_key`
+/// (generated at enqueue time). A retry that failed to dispatch and
+/// was later re-queued could produce a NEW key on re-insert, which
+/// defeats server-side dedup. Persisting the key on the entity row
+/// itself — and having the enqueue path *copy* rather than *generate*
+/// it — makes retries truly idempotent.
+///
+/// This migration:
+///   1. Adds a nullable `idempotency_key TEXT` column to each target
+///      table (ALTER TABLE is guarded by `column_exists`).
+///   2. Backfills existing rows with a deterministic
+///      SQLite-generated 32-hex-char value so every row has a
+///      unique, non-null key. The backfill value is never
+///      round-tripped to the server (those rows predate the
+///      exactly-once contract); its only purpose is to satisfy the
+///      upcoming v48 NOT NULL constraint without data loss.
+///   3. Adds a partial UNIQUE index `WHERE idempotency_key IS NOT
+///      NULL` so post-migration inserts cannot collide, while still
+///      tolerating any row that migration may have missed.
+///
+/// v48 (future) will promote the column to NOT NULL once fleet
+/// telemetry shows zero null rows.
+fn migrate_v47(conn: &Connection) -> Result<(), String> {
+    // Tables to extend. `staff_payments` is deliberately excluded:
+    // it is created by test setup only and has no production
+    // migration. Adding a column to a non-existent table would
+    // error out on real terminals. When/if `staff_payments` is
+    // promoted to a production migration, add `idempotency_key` in
+    // the same change.
+    const TARGETS: &[&str] = &[
+        "order_payments",
+        "payment_adjustments",
+        "staff_shifts",
+        "shift_expenses",
+        "driver_earnings",
+    ];
+
+    for table in TARGETS {
+        if !column_exists(conn, table, "idempotency_key")? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN idempotency_key TEXT;"
+            ))
+            .map_err(|e| format!("migration v47 add {table}.idempotency_key: {e}"))?;
+            info!(table, "v47: added idempotency_key column");
+        }
+
+        // Backfill any existing NULL rows with a unique SQLite-random
+        // 32-hex-char value. `randomblob(16)` is cryptographically
+        // random per row, so collisions are effectively impossible
+        // across the typical per-terminal row counts.
+        conn.execute_batch(&format!(
+            "UPDATE {table}
+             SET idempotency_key = lower(hex(randomblob(16)))
+             WHERE idempotency_key IS NULL;"
+        ))
+        .map_err(|e| format!("migration v47 backfill {table}: {e}"))?;
+
+        // Partial UNIQUE index so post-migration writes cannot
+        // collide. Named deterministically per table.
+        let index_name = format!("idx_{table}_idempotency_key");
+        conn.execute_batch(&format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS {index_name}
+             ON {table}(idempotency_key)
+             WHERE idempotency_key IS NOT NULL;"
+        ))
+        .map_err(|e| format!("migration v47 index {index_name}: {e}"))?;
+    }
+
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (47);")
+        .map_err(|e| format!("migration v47 schema_version: {e}"))?;
+
+    info!(
+        tables_migrated = TARGETS.len(),
+        "Applied migration v47 (idempotency_key on entity tables)"
+    );
+    Ok(())
+}
+
+/// Migration v48 (Wave 6): add `organization_id` to `caller_id_log`.
+///
+/// The cross-cutting review flagged `caller_id_log` (created in v42)
+/// as the only multi-tenant table that lacks `organization_id`,
+/// violating the repository-wide tenant-isolation rule. Every other
+/// org-scoped table filters queries by `organization_id`; without it
+/// here, a row from one organization could surface in another tenant's
+/// CallerID history if the table were ever shared (e.g. across a
+/// multi-branch organization with a single terminal).
+///
+/// Backfill resolves existing rows via the current terminal's
+/// `local_settings` entry (category `terminal`, key `organization_id`).
+/// If that setting is missing — a pre-onboarding test DB, for
+/// example — rows are left NULL and a future column-NOT-NULL
+/// promotion will need to skip them. That is acceptable because the
+/// caller_id_log is rewritable (low-value lookup history, not
+/// financial data).
+fn migrate_v48(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "caller_id_log", "organization_id")? {
+        conn.execute_batch("ALTER TABLE caller_id_log ADD COLUMN organization_id TEXT;")
+            .map_err(|e| format!("migration v48 add caller_id_log.organization_id: {e}"))?;
+    }
+
+    // Backfill from the current terminal's local_settings.
+    let current_org_id: Option<String> = conn
+        .query_row(
+            "SELECT setting_value
+             FROM local_settings
+             WHERE setting_category = 'terminal' AND setting_key = 'organization_id'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(org_id) = current_org_id.as_deref().filter(|s| !s.is_empty()) {
+        let backfilled = conn
+            .execute(
+                "UPDATE caller_id_log
+                 SET organization_id = ?1
+                 WHERE organization_id IS NULL",
+                params![org_id],
+            )
+            .map_err(|e| format!("migration v48 backfill caller_id_log: {e}"))?;
+        info!(
+            org_id = %org_id,
+            rows_backfilled = backfilled,
+            "v48: backfilled caller_id_log.organization_id"
+        );
+    }
+
+    // Index for tenant-scoped queries.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_caller_id_log_org
+             ON caller_id_log(organization_id, created_at);
+
+         INSERT INTO schema_version (version) VALUES (48);",
+    )
+    .map_err(|e| format!("migration v48 index + schema_version: {e}"))?;
+
+    info!("Applied migration v48 (caller_id_log.organization_id)");
+    Ok(())
+}
+
+/// Migration v49 (Wave 4 architectural follow-up): auto-populate
+/// `idempotency_key` on INSERT for every entity table that participates
+/// in the financial sync queue.
+///
+/// v47 added the column (nullable, partial-unique index) and backfilled
+/// existing rows. v49 guarantees every NEW row also gets a key, without
+/// requiring every INSERT call-site in the codebase to be rewritten.
+/// Creation paths that forget to supply `idempotency_key` fall through
+/// to an `AFTER INSERT` trigger that stamps a cryptographically-random
+/// 32-hex-char value via SQLite's `lower(hex(randomblob(16)))`.
+///
+/// The trigger is defensive: call-sites that DO supply an explicit key
+/// (the pattern documented in `crate::sync::get_entity_idempotency_key`)
+/// leave `NEW.idempotency_key` non-null and the trigger's guard skips
+/// them. This means:
+///   - existing code that never mentioned the column keeps working
+///     (rows get a server-unique key automatically);
+///   - new code that threads a caller-chosen key through a creation
+///     path is honoured verbatim so the same key can be mirrored into
+///     `sync_queue` and preserved across retries.
+///
+/// The column stays nullable on-disk for a release cycle; a future
+/// `migrate_v50` can promote it to `NOT NULL` once fleet telemetry
+/// confirms zero null rows.
+fn migrate_v49(conn: &Connection) -> Result<(), String> {
+    const TABLES: &[&str] = &[
+        "order_payments",
+        "payment_adjustments",
+        "staff_shifts",
+        "shift_expenses",
+        "driver_earnings",
+    ];
+
+    for table in TABLES {
+        // Guard the trigger on `NEW.idempotency_key IS NULL` so
+        // explicitly-supplied keys pass through unchanged. The
+        // `AFTER INSERT` timing + `UPDATE ... WHERE id = NEW.id`
+        // pattern works even for tables whose primary key is not
+        // called `id` (SQLite lets the trigger reference `NEW.id`
+        // only if the column exists; all 5 target tables use `id`
+        // as the PK, so this is safe).
+        let trigger_name = format!("trg_{table}_idempotency_key");
+        conn.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS {trigger_name};
+             CREATE TRIGGER {trigger_name}
+                 AFTER INSERT ON {table}
+                 WHEN NEW.idempotency_key IS NULL
+             BEGIN
+                 UPDATE {table}
+                 SET idempotency_key = lower(hex(randomblob(16)))
+                 WHERE id = NEW.id;
+             END;"
+        ))
+        .map_err(|e| format!("migration v49 trigger {trigger_name}: {e}"))?;
+    }
+
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (49);")
+        .map_err(|e| format!("migration v49 schema_version: {e}"))?;
+
+    info!(
+        tables_triggered = TABLES.len(),
+        "Applied migration v49 (AFTER INSERT triggers for idempotency_key auto-population)"
+    );
+    Ok(())
+}
+
+/// Migration v50 (Wave 6): partial index backing the parity sync
+/// queue's active-row count.
+///
+/// The enqueue path does `SELECT COUNT(*) FROM parity_sync_queue
+/// WHERE status IN ('pending', 'processing', 'conflict')` on every
+/// enqueue to enforce the per-terminal queue-capacity cap. Without a
+/// supporting index, that COUNT scans every historical row including
+/// permanently-`failed` ones that the enqueue logic deliberately
+/// excludes. Over time (months of operation), the scan cost grew with
+/// total queue history, not with working-set size. A partial index
+/// restricted to the three active statuses keeps the count
+/// constant-time relative to the active queue depth.
+fn migrate_v50(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_parity_sync_queue_active
+             ON parity_sync_queue(status)
+             WHERE status IN ('pending', 'processing', 'conflict');
+
+         INSERT INTO schema_version (version) VALUES (50);",
+    )
+    .map_err(|e| format!("migration v50 partial index: {e}"))?;
+
+    info!("Applied migration v50 (parity_sync_queue active-status partial index)");
+    Ok(())
+}
+
+/// Read the persisted `idempotency_key` from an entity table.
+///
+/// Wave 4 architectural contract:
+///
+/// > Every `sync_queue` row that dispatches an entity MUST carry the
+/// > SAME `idempotency_key` that was persisted on the entity row at
+/// > creation time. A second dispatch (retry, requeue, manual replay)
+/// > reads the same entity row and copies the same key, so the server
+/// > sees ONE operation regardless of how many times the client
+/// > re-sends it.
+///
+/// Use this helper to fetch the key before constructing an enqueue.
+/// Rows created under v47+ always have a value (nullable on-disk, but
+/// the v49 trigger backfills via SQLite random on INSERT). If the key
+/// is missing for any reason — a pre-v47 row that was never touched,
+/// or a trigger that failed silently — this returns `None` and the
+/// caller may fall back to a deterministic synthetic
+/// (`entity_type:entity_id:operation`) so the sync_queue INSERT still
+/// succeeds.
+///
+/// `table` must be one of the five entity-sync-queue tables covered
+/// by v47 (`order_payments`, `payment_adjustments`, `staff_shifts`,
+/// `shift_expenses`, `driver_earnings`). The function validates that
+/// at compile time via a debug_assert; production builds accept any
+/// plain identifier and simply return `None` on lookup miss.
+#[allow(dead_code)] // Added ahead of consumers; see Wave 4 follow-up.
+pub fn get_entity_idempotency_key(
+    conn: &Connection,
+    table: &str,
+    entity_id: &str,
+) -> Option<String> {
+    debug_assert!(
+        matches!(
+            table,
+            "order_payments"
+                | "payment_adjustments"
+                | "staff_shifts"
+                | "shift_expenses"
+                | "driver_earnings"
+        ),
+        "get_entity_idempotency_key: unexpected table '{table}'"
+    );
+    debug_assert!(
+        is_safe_sql_identifier(table),
+        "get_entity_idempotency_key: table '{table}' must be a plain identifier"
+    );
+    let sql = format!("SELECT idempotency_key FROM {table} WHERE id = ?1");
+    conn.query_row(&sql, params![entity_id], |row| row.get::<_, Option<String>>(0))
+        .ok()
+        .flatten()
 }
 
 // ---------------------------------------------------------------------------

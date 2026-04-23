@@ -5,6 +5,7 @@ import {
   refreshTerminalCredentialCache,
 } from '../services/terminal-credentials';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { getSecureSessionSync } from '../lib/secure-session-cache';
 
 interface StaffData {
   staffId: string;
@@ -124,7 +125,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       if (!branchId) {
         branchId = normalizeContextValue(staff?.branchId)
           || (() => { try { return JSON.parse(localStorage.getItem('staff') || 'null')?.branchId || null } catch { return null } })()
-          || (() => { try { return JSON.parse(localStorage.getItem('pos-user') || 'null')?.branchId || null } catch { return null } })()
+          || (() => { try { return getSecureSessionSync()?.branchId ?? null } catch { return null } })()
           || null;
       }
       branchId = normalizeContextValue(branchId);
@@ -138,7 +139,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       if (!terminalId) {
         terminalId = normalizeContextValue(staff?.terminalId)
           || (() => { try { return JSON.parse(localStorage.getItem('staff') || 'null')?.terminalId || null } catch { return null } })()
-          || (() => { try { return JSON.parse(localStorage.getItem('pos-user') || 'null')?.terminalId || null } catch { return null } })()
+          || (() => { try { return getSecureSessionSync()?.terminalId ?? null } catch { return null } })()
           || null;
       }
       terminalId = normalizeContextValue(terminalId);

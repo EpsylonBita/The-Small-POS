@@ -27,6 +27,7 @@ This document defines the active parity gate set for `pos-tauri` after native-on
 | G4 | Auth lockout behavior | Failed PIN attempts lock and recover by policy | PASS (local) |
 | G5 | Shift lifecycle integrity | Open/close flow and variance remain correct | PASS (local) |
 | G6 | Shift offline persistence + exactly-once sync | Offline shift events queue and sync once on reconnect | PASS (local) |
+| G7 | Factory reset round-trip | Wipe all credentials, re-provision from onboarding, confirm no pre-reset state survives (keyring, localStorage, local_settings, sync queues) | PENDING |
 | G8 | Payment offline persistence + exactly-once sync | Payment queue behavior remains durable/idempotent | PASS (local) |
 | G9 | Deferred payment reconciliation | Parent/child sync ordering resolves deferred states correctly | PASS (local) |
 | G10 | Print pipeline offline safety + idempotency | Receipt job durability and duplicate suppression hold | PASS (local) |

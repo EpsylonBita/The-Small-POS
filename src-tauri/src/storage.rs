@@ -8,7 +8,19 @@ use keyring::Entry;
 use serde_json::Value;
 use tracing::{info, warn};
 
+// Keyring service name. Production reads/writes `the-small-pos`. Tests
+// that seed/clean credentials via `storage::set_credential` /
+// `storage::delete_credential` (notably `credential_guard()` in
+// `terminal_helpers::tests`) would otherwise overwrite and later wipe the
+// operator's real onboarded credentials — every `cargo test` run would
+// silently kick the live POS back into onboarding. Using a separate
+// `the-small-pos-test` namespace under `#[cfg(test)]` isolates test
+// state completely so production keyring entries survive any number of
+// test runs.
+#[cfg(not(test))]
 const SERVICE_NAME: &str = "the-small-pos";
+#[cfg(test)]
+const SERVICE_NAME: &str = "the-small-pos-test";
 
 // Credential keys
 const KEY_ADMIN_URL: &str = "admin_dashboard_url";
@@ -21,6 +33,12 @@ const KEY_SUPABASE_URL: &str = "supabase_url";
 const KEY_SUPABASE_ANON_KEY: &str = "supabase_anon_key";
 const KEY_GHOST_MODE_FEATURE_ENABLED: &str = "ghost_mode_feature_enabled";
 pub const KEY_CALLERID_SIP_PASSWORD: &str = "callerid_sip_password";
+/// Renderer-side authenticated session blob. Wave 1 C6 moved this out of
+/// renderer-accessible `localStorage` because the stored object includes
+/// `sessionId`, `staffId`, `branchId`, and `organizationId` — all of which
+/// amount to live credentials. The OS keyring keeps the blob out of the
+/// JavaScript heap except for the moment it is fetched over the IPC.
+const KEY_POS_SESSION: &str = "pos_session";
 
 /// All credential keys managed by this module.
 const ALL_KEYS: &[&str] = &[
@@ -34,6 +52,7 @@ const ALL_KEYS: &[&str] = &[
     KEY_SUPABASE_ANON_KEY,
     KEY_GHOST_MODE_FEATURE_ENABLED,
     KEY_CALLERID_SIP_PASSWORD,
+    KEY_POS_SESSION,
 ];
 
 // ---------------------------------------------------------------------------
@@ -228,14 +247,62 @@ pub fn update_terminal_credentials(payload: &Value) -> Result<Value, String> {
     Ok(serde_json::json!({ "success": true }))
 }
 
+// ---------------------------------------------------------------------------
+// POS session blob (Wave 1 C6)
+// ---------------------------------------------------------------------------
+
+/// Retrieve the persisted authenticated session blob, if any.
+///
+/// The blob is opaque to Rust — the renderer serialised it as JSON before
+/// storing. We intentionally do not parse or schema-check it here: that
+/// would couple the Rust keyring wrapper to the renderer's session shape,
+/// which changes independently (e.g. when new fields are added on the JS
+/// side). The renderer revalidates the blob on boot via its normal
+/// session-validation flow, so a malformed blob is merely discarded.
+pub fn session_get() -> Option<String> {
+    get_credential(KEY_POS_SESSION)
+}
+
+/// Persist the authenticated session blob. `payload` must be pre-serialised
+/// by the caller (the renderer uses `JSON.stringify`).
+pub fn session_set(payload: &str) -> Result<(), String> {
+    set_credential(KEY_POS_SESSION, payload)
+}
+
+/// Clear the persisted session blob. Silently succeeds if no session is
+/// stored (matches `delete_credential`'s no-op-on-missing semantics).
+pub fn session_clear() -> Result<(), String> {
+    delete_credential(KEY_POS_SESSION)
+}
+
 #[allow(dead_code)]
 /// Delete every stored credential (factory reset).
+///
+/// Best-effort: every key is attempted, even if earlier ones fail. Returning
+/// on the first failure (the previous behaviour) left later credentials in
+/// the keyring, so a "factory reset" operation could silently leave an
+/// authenticated terminal in a mixed state. The aggregated error message
+/// lists every per-key failure so the operator can surface or retry them
+/// individually.
 pub fn factory_reset() -> Result<Value, String> {
     info!("performing factory reset – deleting all credentials");
+    let mut failures: Vec<String> = Vec::new();
     for key in ALL_KEYS {
-        delete_credential(key)?;
+        if let Err(e) = delete_credential(key) {
+            warn!(key, error = %e, "factory_reset: delete_credential failed");
+            failures.push(format!("{key}: {e}"));
+        }
     }
-    Ok(serde_json::json!({ "success": true }))
+    if failures.is_empty() {
+        Ok(serde_json::json!({ "success": true }))
+    } else {
+        Err(format!(
+            "factory reset partial failure ({} of {} keys): {}",
+            failures.len(),
+            ALL_KEYS.len(),
+            failures.join("; ")
+        ))
+    }
 }
 
 /// Returns the full set of credential keys managed by this module.

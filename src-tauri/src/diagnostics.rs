@@ -603,7 +603,7 @@ fn write_json_to_zip(
     file_name: &str,
     value: &Value,
 ) -> Result<(), String> {
-    zip.start_file(file_name, zip_options.clone())
+    zip.start_file(file_name, *zip_options)
         .map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| format!("Failed to serialize {file_name}: {e}"))?;
@@ -898,7 +898,7 @@ pub fn export_diagnostics_with_options(
                         .to_string_lossy()
                         .to_string();
                     let zip_entry = format!("logs/{fname}");
-                    if zip.start_file(&zip_entry, zip_options.clone()).is_ok() {
+                    if zip.start_file(&zip_entry, zip_options).is_ok() {
                         if let Ok(f) = fs::File::open(&path) {
                             let mut buf = Vec::new();
                             // Cap at 5MB per file to keep zip manageable

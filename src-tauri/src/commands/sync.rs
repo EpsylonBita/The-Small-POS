@@ -868,59 +868,158 @@ pub async fn sync_retry_all_failed_financial(
     sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    // Wave 2a C1: the previous implementation correlated the two UPDATEs
+    // via `updated_at = ?1` (where `?1` is a freshly-computed RFC3339
+    // timestamp). When any other writer happened to stamp the same
+    // second — a concurrent retry_all, a high-rate enqueue, or a fast
+    // clock — the inner subquery swept unrelated `pending` rows into
+    // the cross-table UPDATE, resetting `order_payments.sync_state`
+    // for payments that were never touched. That was a direct
+    // exactly-once violation.
+    //
+    // The fix captures the exact row identities we're about to retry
+    // as a `(queue_row_id, entity_type, entity_id)` tuple inside a
+    // single `BEGIN IMMEDIATE` transaction, then performs every
+    // follow-up UPDATE by that explicit id list. `WHERE id IN (...)`
+    // for the queue IDs is integer-only (safe to interpolate) and the
+    // per-entity updates run one-by-one with a bound parameter — no
+    // timestamp join, no subquery, no race.
     let count = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().to_rfc3339();
-        let count = conn.execute(
-            "UPDATE sync_queue
-             SET status = 'pending',
-                 retry_count = 0,
-                 last_error = NULL,
-                 next_retry_at = NULL,
-                 updated_at = ?1
-             WHERE status = 'failed'
-               AND entity_type IN ('payment', 'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
-            rusqlite::params![now],
-        )
-        .map_err(|e| e.to_string())?;
-        if count > 0 {
-            let _ = conn.execute(
-                "UPDATE order_payments
-                 SET sync_status = 'pending',
-                     sync_state = 'pending',
-                     sync_retry_count = 0,
-                     sync_last_error = NULL,
-                     sync_next_retry_at = NULL,
+
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("begin retry_all tx: {e}"))?;
+
+        let retry_result: Result<i64, String> = (|| {
+            // Step 1: snapshot the exact queue rows we're about to retry.
+            let rows: Vec<(i64, String, String)> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, entity_type, entity_id
+                         FROM sync_queue
+                         WHERE status = 'failed'
+                           AND entity_type IN (
+                               'payment',
+                               'payment_adjustment',
+                               'shift_expense',
+                               'staff_payment',
+                               'driver_earning',
+                               'driver_earnings'
+                           )",
+                    )
+                    .map_err(|e| format!("prepare retry_all select: {e}"))?;
+                let mapped = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(|e| format!("query retry_all ids: {e}"))?;
+                let mut out = Vec::new();
+                for r in mapped {
+                    out.push(r.map_err(|e| format!("row retry_all: {e}"))?);
+                }
+                out
+            };
+
+            if rows.is_empty() {
+                return Ok(0);
+            }
+
+            // Step 2: reset the sync_queue rows by explicit id list.
+            // `queue_row_id` is SQLite INTEGER PRIMARY KEY — formatting
+            // i64 values into `WHERE id IN (...)` is injection-free.
+            let ids_csv = rows
+                .iter()
+                .map(|(id, _, _)| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let update_sql = format!(
+                "UPDATE sync_queue
+                 SET status = 'pending',
+                     retry_count = 0,
+                     last_error = NULL,
+                     next_retry_at = NULL,
                      updated_at = ?1
-                 WHERE id IN (
-                     SELECT entity_id
-                     FROM sync_queue
-                     WHERE entity_type = 'payment'
-                       AND status = 'pending'
-                       AND updated_at = ?1
-                 )",
-                rusqlite::params![now],
+                 WHERE id IN ({ids_csv})"
             );
+            let updated = conn
+                .execute(&update_sql, rusqlite::params![now])
+                .map_err(|e| format!("update sync_queue by id: {e}"))?;
+
+            // Step 3: mirror sync-state onto the per-entity tables, one
+            // entity at a time. Entity_id is TEXT (UUID) so we bind it
+            // as a parameter rather than interpolating.
+            for (_queue_id, entity_type, entity_id) in &rows {
+                match entity_type.as_str() {
+                    "payment" => {
+                        let _ = conn.execute(
+                            "UPDATE order_payments
+                             SET sync_status = 'pending',
+                                 sync_state = 'pending',
+                                 sync_retry_count = 0,
+                                 sync_last_error = NULL,
+                                 sync_next_retry_at = NULL,
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            rusqlite::params![now, entity_id],
+                        );
+                    }
+                    "payment_adjustment" => {
+                        let _ = conn.execute(
+                            "UPDATE payment_adjustments
+                             SET sync_state = 'pending',
+                                 sync_retry_count = 0,
+                                 sync_last_error = NULL,
+                                 sync_next_retry_at = NULL,
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            rusqlite::params![now, entity_id],
+                        );
+                    }
+                    // shift_expense / staff_payment / driver_earning*
+                    // have no cross-table sync flags today — resetting
+                    // sync_queue is sufficient.
+                    _ => {}
+                }
+            }
+
+            // Wave 4 M: Retry-All used to touch only `sync_queue`
+            // (the financial queue). The app also maintains
+            // `parity_sync_queue` for generic table-parity items, and
+            // operators invoking "Retry All" reasonably expect "all"
+            // to mean both queues. We reset `failed` / `conflict`
+            // parity-queue rows in the same transaction so the retry
+            // is atomic with the financial reset.
+            let parity_updated = conn
+                .execute(
+                    "UPDATE parity_sync_queue
+                     SET status = 'pending',
+                         attempts = 0,
+                         error_message = NULL,
+                         next_retry_at = NULL
+                     WHERE status IN ('failed', 'conflict')",
+                    [],
+                )
+                .map_err(|e| format!("retry_all parity_sync_queue reset: {e}"))?;
+
+            Ok((updated as i64) + (parity_updated as i64))
+        })();
+
+        match retry_result {
+            Ok(n) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| format!("commit retry_all tx: {e}"))?;
+                n
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
         }
-        if count > 0 {
-            let _ = conn.execute(
-                "UPDATE payment_adjustments
-                 SET sync_state = 'pending',
-                     sync_retry_count = 0,
-                     sync_last_error = NULL,
-                     sync_next_retry_at = NULL,
-                     updated_at = ?1
-                 WHERE id IN (
-                     SELECT entity_id
-                     FROM sync_queue
-                     WHERE entity_type = 'payment_adjustment'
-                       AND status = 'pending'
-                       AND updated_at = ?1
-                 )",
-                rusqlite::params![now],
-            );
-        }
-        count
     };
 
     let _ = app.emit(
@@ -1796,5 +1895,89 @@ mod dto_tests {
         .expect("alias payload should parse");
         assert_eq!(parsed.drive_thru_order_id, "dt-1");
         assert_eq!(parsed.status, "ready");
+    }
+
+    // =======================================================================
+    // Wave 0 regression test for Critical C1 (retry_all subquery race).
+    //
+    // On HEAD, `sync_retry_all_failed_financial` runs an outer UPDATE that
+    // stamps `updated_at = ?1` (the caller's `now` sentinel), then a second
+    // UPDATE whose WHERE clause correlates via a subquery matching
+    // `updated_at = ?1`. Any other sync_queue row that happens to carry the
+    // same RFC3339 second — from a concurrent writer, a fast clock, or a
+    // prior call at the same instant — will be swept into the second
+    // UPDATE and have its `order_payments` sync flags reset.
+    //
+    // A fully-behavioural test would require freezing `Utc::now()`, which
+    // the current API does not support. Instead, this test locks in the
+    // fix structurally: Wave 2a's C1 will replace the updated_at-based
+    // correlation with an explicit id list (SELECT id FROM sync_queue
+    // WHERE status='failed' → Vec<i64> → UPDATE … WHERE id IN (…)), all
+    // wrapped in a single BEGIN IMMEDIATE. After that change, the buggy
+    // substring `AND status = 'pending' AND updated_at = ?1` MUST NOT
+    // appear in a correlated subquery inside this function.
+    // =======================================================================
+
+    #[test]
+    fn retry_all_does_not_use_updated_at_sentinel_as_correlation_key() {
+        let src_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands")
+            .join("sync.rs");
+        let src = std::fs::read_to_string(&src_path)
+            .expect("read commands/sync.rs source");
+
+        let fn_marker = "pub async fn sync_retry_all_failed_financial";
+        let fn_start = src
+            .find(fn_marker)
+            .expect("sync_retry_all_failed_financial must exist");
+
+        // Walk balanced braces to locate the end of the function body so
+        // we only inspect the target function, not other similarly named
+        // callers elsewhere in the file.
+        let body_start = fn_start
+            + src[fn_start..]
+                .find('{')
+                .expect("function body opening brace");
+        let mut depth = 0_i32;
+        let mut end = body_start;
+        for (i, ch) in src[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body_start + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let fn_body = &src[body_start..end];
+
+        // Normalise whitespace so the assertion is not brittle to
+        // reformatting.
+        let normalised: String = fn_body.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            !normalised.contains("AND status = 'pending' AND updated_at = ?1"),
+            "sync_retry_all_failed_financial still correlates via `updated_at = ?1` inside a \
+             subquery. Any concurrent writer stamping the same RFC3339 second will be swept in, \
+             resetting unrelated order_payments. Replace with an explicit id list captured \
+             before the UPDATE (Plan Wave 2a C1)."
+        );
+
+        // Positive-shape assertion: once the fix lands, the function must
+        // correlate by entity_id pulled from a locally-scoped list or a
+        // RETURNING clause. We check for the presence of one of those
+        // idioms to confirm the replacement actually happened (rather
+        // than the offending substring simply being renamed).
+        assert!(
+            normalised.contains("RETURNING id") || normalised.contains("WHERE id IN ("),
+            "sync_retry_all_failed_financial must use RETURNING id or an explicit WHERE id IN \
+             (...) list to correlate the two UPDATEs. The Wave 2a fix must introduce one of \
+             these patterns."
+        );
     }
 }

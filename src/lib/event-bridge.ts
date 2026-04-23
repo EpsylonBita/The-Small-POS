@@ -159,7 +159,24 @@ async function attachChannelListener(channel: string): Promise<void> {
 
     const listeners = listenersByChannel.get(channel);
     if (!listeners || listeners.size === 0) {
+      // The only subscriber unsubscribed while we were awaiting listen().
+      // Detach cleanly, then check one more time: if a new subscriber
+      // arrived during our await (another race), we just threw away their
+      // listener. Schedule a re-attach on the next microtask — by then
+      // the `finally` below has cleared `pendingAttachByChannel` so the
+      // re-attach can proceed normally.
       unlisten();
+      const listenersNow = listenersByChannel.get(channel);
+      if (listenersNow && listenersNow.size > 0) {
+        queueMicrotask(() => {
+          attachChannelListener(channel).catch((error) => {
+            console.error(
+              `[EventBridge] re-attach after cleanup failed for "${channel}"`,
+              error,
+            );
+          });
+        });
+      }
       return;
     }
 

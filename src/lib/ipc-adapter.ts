@@ -12,6 +12,7 @@
  */
 
 import { detectPlatform } from "./platform-detect";
+import type { UpdateInfo } from "./update-contracts";
 import type {
   AuthSetupPinRequest,
   PrivilegedActionConfirmRequest,
@@ -979,7 +980,11 @@ export interface UpdateState {
   ready: boolean;
   error: string | null;
   progress: number;
-  updateInfo: any;
+  // Wave 5 H: `updateInfo` was typed as `any`, which masked any Rust
+  // contract drift at the IPC boundary. It is now bound to the
+  // canonical `UpdateInfo` shape from `update-contracts.ts` so TS
+  // errors surface when the Rust side changes its payload.
+  updateInfo: UpdateInfo | null;
   downloadedVersion?: string | null;
   downloadedArtifactPath?: string | null;
   installPending?: boolean;
@@ -1046,12 +1051,56 @@ export interface PlatformBridge {
     ): Promise<PrivilegedActionConfirmResponse>;
   };
 
+  // -- Secure session blob (Wave 1 C6) ---------------------------------------
+  //
+  // Renderer-side authenticated session (user object including sessionId /
+  // staffId / branchId / organizationId) persisted through the OS keyring
+  // rather than `localStorage`. `get()` returns the raw JSON string or
+  // `null` when no session is stored; the caller is responsible for
+  // `JSON.parse`ing on read and `JSON.stringify`ing on write.
+  secureSession: {
+    get(): Promise<string | null>;
+    set(payload: string): Promise<void>;
+    clear(): Promise<void>;
+  };
+
   // -- Staff auth ------------------------------------------------------------
   staffAuth: {
     authenticatePin(pin: string): Promise<IpcResult>;
     verifyCheckInPin(
       request: StaffCheckInPinVerifyRequest,
     ): Promise<StaffCheckInPinVerifyResponse>;
+    /**
+     * Pull the staff directory (with currentShift busy-elsewhere info)
+     * from the admin dashboard and persist it into the local staff auth
+     * cache. Safe to call on a poll interval or UI open. If branchId is
+     * omitted, the Rust side resolves it from the keyring.
+     */
+    refreshDirectory(args?: { branchId?: string }): Promise<{
+      success: boolean;
+      branchId?: string;
+      staffCount?: number;
+      syncedAt?: string;
+      /** Terminal id this POS resolved from the keyring at fetch time. */
+      currentTerminalId?: string;
+      /** Full staff payload as returned by the admin endpoint. */
+      staff?: Array<{
+        id: string;
+        name?: string;
+        canLoginPos?: boolean;
+        hasPin?: boolean;
+        isActive?: boolean;
+        currentShift?: {
+          shiftId: string;
+          terminalId?: string | null;
+          terminalName?: string;
+          role?: string;
+          checkedInAt?: string;
+        } | null;
+      }>;
+      /** Pre-filtered convenience list: staff IDs busy on another terminal. */
+      busyElsewhereStaffIds?: string[];
+    }>;
     getSession(): Promise<any>;
     getCurrent(): Promise<any>;
     hasPermission(permission: string): Promise<boolean>;
@@ -1775,6 +1824,19 @@ export interface PlatformBridge {
       cashHandler?: "cashier_drawer" | "driver_shift";
       adjustmentContext?: "manual" | "edit_settlement";
     }): Promise<IpcResult>;
+    /**
+     * Wave 5 H: `refund_void_payment` is a registered Tauri command
+     * but previously had no typed bridge method — callers had to use
+     * the untyped `bridge.invoke()` escape hatch. Voids a captured
+     * payment and records an offsetting adjustment so the audit trail
+     * reflects both sides of the transaction.
+     */
+    voidPayment(params: {
+      paymentId: string;
+      reason: string;
+      staffId?: string;
+      staffShiftId?: string;
+    }): Promise<IpcResult>;
     listOrderAdjustments(orderId: string): Promise<any[]>;
     getPaymentBalance(paymentId: string): Promise<{
       originalAmount: number;
@@ -1807,7 +1869,13 @@ export interface PlatformBridge {
 
   /**
    * Raw invoke for channels not yet typed.
-   * Prefer adding a typed method to the appropriate namespace instead.
+   *
+   * @deprecated Wave 5 L: use a typed namespace method instead. The
+   * positional-args shape (`...args: any[]`) bypasses compile-time
+   * contract checking and masks Rust-side renames or payload-shape
+   * drift. Every channel that has a long-lived caller should be
+   * promoted to a typed method on the appropriate namespace; the
+   * remaining untyped call-sites are considered tech debt.
    */
   invoke(channel: string, ...args: any[]): Promise<any>;
 }
@@ -1850,6 +1918,8 @@ export const CHANNEL_MAP: Record<string, string> = {
   "staff-auth:logout": "staffAuth.logout",
   "staff-auth:validate-session": "staffAuth.validateSession",
   "staff-auth:track-activity": "staffAuth.trackActivity",
+  "staff-auth:verify-check-in-pin": "staffAuth.verifyCheckInPin",
+  "staff-auth:refresh-directory": "staffAuth.refreshDirectory",
 
   // Orders
   "order:get-all": "orders.getAll",
@@ -1879,6 +1949,8 @@ export const CHANNEL_MAP: Record<string, string> = {
   "orders:force-sync-retry": "orders.forceSyncRetry",
   "orders:get-retry-info": "orders.getRetryInfo",
   "orders:clear-all": "orders.clearAll",
+  "orders:preview-edit-settlement": "orders.previewEditSettlement",
+  "orders:apply-edit-settlement": "orders.applyEditSettlement",
 
   // Payments
   "payment:update-payment-status": "payments.updatePaymentStatus",
@@ -1952,6 +2024,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "settings:set-language": "settings.setLanguage",
   "settings:get-admin-url": "settings.getAdminUrl",
   "settings:get-pos-api-key": "settings.getPosApiKey",
+  "settings:get-reset-status": "settings.getResetStatus",
   "settings:clear-connection": "settings.clearConnection",
   "settings:update-terminal-credentials": "settings.updateTerminalCredentials",
   "settings:is-configured": "settings.isConfigured",
@@ -2024,6 +2097,8 @@ export const CHANNEL_MAP: Record<string, string> = {
   "report:resolve-payment-blocker": "reports.resolvePaymentBlocker",
 
   // Product dashboard metrics
+  // Direct-invoke channels (no bridge method). See comment above
+  // "rooms:get-availability" for why the values are descriptive-only.
   "inventory:get-stock-metrics": "inventory.getStockMetrics",
   "products:get-catalog-count": "products.getCatalogCount",
 
@@ -2123,12 +2198,12 @@ export const CHANNEL_MAP: Record<string, string> = {
   "ecr:fiscal-print": "ecr.fiscalPrint",
 
   // Caller ID / VoIP
-  "callerid:start": "callerid_start",
-  "callerid:stop": "callerid_stop",
-  "callerid:get-status": "callerid_get_status",
-  "callerid:save-config": "callerid_save_config",
-  "callerid:get-config": "callerid_get_config",
-  "callerid:test": "callerid_test_connection",
+  "callerid:start": "callerid.start",
+  "callerid:stop": "callerid.stop",
+  "callerid:get-status": "callerid.getStatus",
+  "callerid:save-config": "callerid.saveConfig",
+  "callerid:get-config": "callerid.getConfig",
+  "callerid:test": "callerid.testConnection",
 
   // Loyalty
   "loyalty:get-settings": "loyalty.getSettings",
@@ -2151,7 +2226,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "branch-data:get-delivery-zones": "branchData.getDeliveryZones",
   "branch-data:get-staff-schedule": "branchData.getStaffSchedule",
   "branch-data:get-tables": "branchData.getTables",
-  "branch-data:update-table-status": "branchData.updateTableStatus",
+  "branch-data:update-table-status": "tables.updateStatus",
   "branch-data:validate-coupon": "branchData.validateCoupon",
 
   // Updates
@@ -2217,7 +2292,11 @@ export const CHANNEL_MAP: Record<string, string> = {
   "recovery:open-dir": "recovery.openDir",
   "recovery:execute-action": "recovery.executeAction",
 
-  // Service dashboard metrics
+  // Service dashboard metrics. Invoked directly via `invoke(channel)` from
+  // ServiceDashboard.tsx; no matching bridge method exists (the dotted value
+  // below is aspirational/descriptive only — CHANNEL_MAP values are not
+  // consumed at dispatch time, `TauriBridge.inv()` derives the Rust command
+  // from the key via `toCmd`).
   "rooms:get-availability": "rooms.getAvailability",
   "appointments:get-today-metrics": "appointments.getTodayMetrics",
 
@@ -2279,11 +2358,22 @@ export class TauriBridge implements PlatformBridge {
 
   // Raw invoke -- packs positional args into { arg0, arg1, ... } to match
   // the Rust command signatures which use arg0: Option<Value>, arg1: Option<Value>, etc.
+  //
+  // Trailing `undefined` args are filtered out so they are not serialized
+  // as JSON `null` over the IPC boundary. Rust sees `arg1: None` instead
+  // of `arg1: Some(Value::Null)`, matching the "not provided" semantics
+  // callers intend when they pass positional options like
+  // `orders.approve(id, undefined)`.
   async invoke(channel: string, ...args: any[]): Promise<any> {
     const cmd = this.toCmd(channel);
     if (args.length === 0) return this.tauriInvoke(cmd);
     const payload: Record<string, unknown> = {};
-    for (let i = 0; i < args.length; i++) payload[`arg${i}`] = args[i];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] !== undefined) {
+        payload[`arg${i}`] = args[i];
+      }
+    }
+    if (Object.keys(payload).length === 0) return this.tauriInvoke(cmd);
     return this.tauriInvoke(cmd, payload);
   }
 
@@ -2342,11 +2432,22 @@ export class TauriBridge implements PlatformBridge {
       this.inv("auth:confirm-privileged-action", request),
   };
 
+  secureSession = {
+    get: (): Promise<string | null> =>
+      this.inv("auth:secure-session-get") as Promise<string | null>,
+    set: (payload: string): Promise<void> =>
+      this.inv("auth:secure-session-set", payload) as Promise<void>,
+    clear: (): Promise<void> =>
+      this.inv("auth:secure-session-clear") as Promise<void>,
+  };
+
   staffAuth = {
     authenticatePin: (pin: string) =>
       this.inv("staff-auth:authenticate-pin", pin),
     verifyCheckInPin: (request: StaffCheckInPinVerifyRequest) =>
       this.inv("staff-auth:verify-check-in-pin", request),
+    refreshDirectory: (args?: { branchId?: string }) =>
+      this.inv("staff-auth:refresh-directory", args ?? {}),
     getSession: () => this.inv("staff-auth:get-session"),
     getCurrent: () => this.inv("staff-auth:get-current"),
     hasPermission: (p: string) => this.inv("staff-auth:has-permission", p),
@@ -2831,40 +2932,48 @@ export class TauriBridge implements PlatformBridge {
     reprintJob: (id: string) => this.inv("print:reprint-job", id),
   };
 
+  // Wave 5 H: hardware.* channel names were the only namespace using
+  // raw `snake_case` (e.g. `scale_connect`). `inv()` pipes the channel
+  // through `toCmd()` which replaces `:` and `-` with `_` — so
+  // `scale-connect` and `scale_connect` happened to collide at the
+  // Rust side. The inconsistency was invisible at runtime but would
+  // silently break any future Rust rename that followed the standard
+  // kebab-case convention. Every hardware channel is now kebab-case,
+  // matching the rest of this file.
   hardware = {
     scaleConnect: (p: { port: string; baud?: number; protocol?: string }) =>
-      this.inv("scale_connect", p),
-    scaleDisconnect: () => this.inv("scale_disconnect"),
-    scaleReadWeight: () => this.inv("scale_read_weight"),
-    scaleTare: () => this.inv("scale_tare"),
+      this.inv("scale-connect", p),
+    scaleDisconnect: () => this.inv("scale-disconnect"),
+    scaleReadWeight: () => this.inv("scale-read-weight"),
+    scaleTare: () => this.inv("scale-tare"),
     displayConnect: (p: {
       connectionType: string;
       target: string;
       portNumber?: number;
       baudRate?: number;
-    }) => this.inv("display_connect", p),
-    displayDisconnect: () => this.inv("display_disconnect"),
+    }) => this.inv("display-connect", p),
+    displayDisconnect: () => this.inv("display-disconnect"),
     displayShowLine: (line1: string, line2?: string) =>
-      this.inv("display_show_line", line1, line2),
+      this.inv("display-show-line", line1, line2),
     displayShowItem: (p: {
       name: string;
       price: number;
       qty?: number;
       currency?: string;
-    }) => this.inv("display_show_item", p),
+    }) => this.inv("display-show-item", p),
     displayShowTotal: (p: {
       subtotal: number;
       tax?: number;
       total: number;
       currency?: string;
-    }) => this.inv("display_show_total", p),
-    displayClear: () => this.inv("display_clear"),
+    }) => this.inv("display-show-total", p),
+    displayClear: () => this.inv("display-clear"),
     scannerSerialStart: (p: { port: string; baud?: number }) =>
-      this.inv("scanner_serial_start", p),
-    scannerSerialStop: () => this.inv("scanner_serial_stop"),
-    loyaltyReaderStart: () => this.inv("loyalty_reader_start"),
-    loyaltyReaderStop: () => this.inv("loyalty_reader_stop"),
-    loyaltyProcessCard: (uid: string) => this.inv("loyalty_process_card", uid),
+      this.inv("scanner-serial-start", p),
+    scannerSerialStop: () => this.inv("scanner-serial-stop"),
+    loyaltyReaderStart: () => this.inv("loyalty-reader-start"),
+    loyaltyReaderStop: () => this.inv("loyalty-reader-stop"),
+    loyaltyProcessCard: (uid: string) => this.inv("loyalty-process-card", uid),
     getStatus: () => this.inv("hardware:get-status"),
     reconnect: (deviceType: string) =>
       this.inv("hardware:reconnect", deviceType),
@@ -3049,6 +3158,12 @@ export class TauriBridge implements PlatformBridge {
       cashHandler?: "cashier_drawer" | "driver_shift";
       adjustmentContext?: "manual" | "edit_settlement";
     }) => this.inv("refund:payment", params),
+    voidPayment: (params: {
+      paymentId: string;
+      reason: string;
+      staffId?: string;
+      staffShiftId?: string;
+    }) => this.inv("refund:void-payment", params),
     listOrderAdjustments: (orderId: string) =>
       this.inv("refund:list-order-adjustments", orderId),
     getPaymentBalance: (paymentId: string) =>

@@ -80,10 +80,32 @@ fn rate_limit_check(profile_id: &str) -> Result<(), String> {
 
 /// Send the ESC/POS drawer kick pulse via TCP to the given host:port.
 pub fn send_escpos_pulse_tcp(host: &str, port: u16) -> Result<(), String> {
+    // Reject obviously-malformed hosts before the SocketAddr parse. Control
+    // characters and empty strings are never valid IPs; filtering them here
+    // also prevents weird escape sequences from reaching the logger via
+    // `addr_str` in error messages.
+    if host.is_empty() || host.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return Err("Drawer host is empty or contains control characters".into());
+    }
+
     let addr_str = format!("{host}:{port}");
     let addr: SocketAddr = addr_str
         .parse()
         .map_err(|e| format!("Invalid drawer address {addr_str}: {e}"))?;
+
+    // Refuse loopback targets. Cash drawers live on network-attached printers
+    // (typically LAN/192.168.x.x). A drawer profile pointing at 127.0.0.1 or
+    // ::1 is almost certainly a misconfiguration or a crafted value from
+    // someone with DB write access trying to coerce the process into
+    // pulsing ESC/POS bytes at a local service on the terminal. The
+    // `cfg(not(test))` gate lets the in-process unit tests bind ephemeral
+    // TCP servers on localhost without tripping this guard.
+    #[cfg(not(test))]
+    if addr.ip().is_loopback() {
+        return Err(format!(
+            "Drawer host {addr_str} is a loopback address; configure a LAN IP for the drawer"
+        ));
+    }
 
     let stream = TcpStream::connect_timeout(&addr, TCP_CONNECT_TIMEOUT)
         .map_err(|e| format!("TCP connect to {addr_str} failed: {e}"))?;
@@ -227,9 +249,20 @@ pub fn try_drawer_kick_after_print(db: &DbState, profile: &Value) -> Result<(), 
             warn!(error = %e, "Non-fatal drawer kick failed after print");
             return Err(e);
         }
+    } else {
+        // Wave 6: previously an unknown `drawer_mode` (anything other
+        // than `escpos_tcp`) fell through to `Ok(())` with no log line,
+        // after the per-profile rate-limiter had already consumed the
+        // slot. An operator seeing "drawer not kicking" would have no
+        // audit trail pointing at the misconfiguration. A structured
+        // warn at least surfaces the condition.
+        warn!(
+            drawer_mode,
+            profile_id = %pid,
+            "Drawer mode not recognized — no kick performed. Check the printer profile's drawer_mode setting."
+        );
     }
 
-    // Ignore unknown drawer_mode silently in the worker path
     let _ = db; // ensure db is "used" for future extensions
     Ok(())
 }

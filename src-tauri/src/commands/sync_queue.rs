@@ -3,7 +3,7 @@
 //! These commands wrap the `sync_queue` module's SQLite operations and expose
 //! them to the renderer via `@tauri-apps/api/core::invoke()`.
 
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::db::DbState;
 use crate::sync_queue;
@@ -106,8 +106,20 @@ pub fn sync_queue_list_conflicts(
 #[tauri::command]
 pub async fn sync_queue_process(
     db: State<'_, DbState>,
+    app: tauri::AppHandle,
     api_base_url: String,
     api_key: String,
 ) -> Result<sync_queue::SyncResult, String> {
-    sync_queue::process_queue(&db.conn, &api_base_url, &api_key).await
+    let result = sync_queue::process_queue(&db.conn, &api_base_url, &api_key).await?;
+
+    // Wave 4 H: emit an operator-visible alarm for every monetary
+    // dead-letter in this batch. The renderer UI subscribes to this
+    // event and surfaces a persistent banner + admin-dashboard row;
+    // without it, a dead-lettered payment is effectively invisible
+    // outside the logs.
+    for dl in &result.monetary_dead_letters {
+        let _ = app.emit("sync:dead-letter:monetary", dl);
+    }
+
+    Ok(result)
 }

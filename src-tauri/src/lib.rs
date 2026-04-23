@@ -1,4 +1,15 @@
 #![recursion_limit = "256"]
+// Crate-wide clippy allowances for pragmatic patterns that appear frequently
+// in POS domain code:
+// - `too_many_arguments`: sync and financial paths take wide multi-column
+//   payloads (orders, payments, shifts) where threading parameters through
+//   helper structs adds noise without separating concerns.
+// - `type_complexity`: SQLite row tuples (used for `Vec<(T1, T2, T3, ...)>`)
+//   and Rust-level `Vec<(...)>` aggregations hit the default 250-character
+//   cap quickly. Introducing named type aliases for each one-off shape costs
+//   more than the readability benefit.
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
 
 //! The Small POS - Tauri v2 Backend
 //!
@@ -36,6 +47,7 @@ mod escpos;
 mod hardware_manager;
 mod loyalty;
 mod menu;
+mod money;
 mod order_ownership;
 mod panic_hook;
 mod payment_integrity;
@@ -307,8 +319,12 @@ async fn admin_fetch(
 }
 
 async fn updater_manifest_is_reachable() -> Result<bool, String> {
+    // Hard timeout so a stalled GitHub CDN connection cannot hang the
+    // updater check indefinitely. 15s is well above a healthy round-trip
+    // and below any reasonable user-facing wait tolerance.
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("updater manifest client: {e}"))?;
 
@@ -512,7 +528,7 @@ pub fn run() {
             {
                 let db_state = app.state::<db::DbState>();
                 commands::callerid::autostart_if_enabled(
-                    &app.handle(),
+                    app.handle(),
                     &db_state,
                     &caller_id_manager,
                     &cancel_token,
@@ -685,6 +701,24 @@ pub fn run() {
                 });
             }
 
+            // One-shot repair: re-derive payment_method for orders that
+            // got stuck on 'split' under the pre-fix stickiness path in
+            // refresh_order_payment_snapshot. Safe to run on every boot —
+            // only touches rows whose completed payments genuinely resolve
+            // to a single-method state under the new logic. Repaired rows
+            // get enqueued for sync so Supabase reflects the correction.
+            {
+                let db_state = app.state::<db::DbState>();
+                match commands::orders::repair_sticky_split_payment_methods(&db_state) {
+                    Ok(0) => {}
+                    Ok(repaired) => info!(
+                        repaired = repaired,
+                        "Repaired orders with sticky 'split' payment_method"
+                    ),
+                    Err(e) => warn!("Sticky-split repair skipped: {e}"),
+                }
+            }
+
             info!("Database, auth, sync, and print worker registered");
             Ok(())
         })
@@ -705,9 +739,13 @@ pub fn run() {
             commands::auth::auth_get_session_stats,
             commands::auth::auth_confirm_privileged_action,
             commands::auth::auth_setup_pin,
+            commands::auth::auth_secure_session_get,
+            commands::auth::auth_secure_session_set,
+            commands::auth::auth_secure_session_clear,
             // Staff auth
             commands::auth::staff_auth_authenticate_pin,
             commands::auth::staff_auth_verify_check_in_pin,
+            commands::auth::staff_auth_refresh_directory,
             commands::auth::staff_auth_get_session,
             commands::auth::staff_auth_get_current,
             commands::auth::staff_auth_has_permission,

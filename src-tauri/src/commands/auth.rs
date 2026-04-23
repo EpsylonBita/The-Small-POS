@@ -88,6 +88,44 @@ pub async fn auth_logout(
     Ok(())
 }
 
+// -- Secure session blob (Wave 1 C6) -----------------------------------------
+//
+// The renderer used to persist the authenticated session (including
+// `sessionId`, `staffId`, `branchId`, `organizationId`) to plain
+// `localStorage`. That placed a live credential in renderer-accessible
+// storage, where any script in the JS context could read it. These three
+// commands route the blob through the OS keyring via `storage.rs` so the
+// cleartext only exists in the JS heap at the moment of hydration.
+//
+// The blob is opaque to Rust: the renderer serialises its own shape with
+// `JSON.stringify` and re-parses on retrieval. Validation of the session
+// (e.g. expiry) is the renderer's job — Rust only guards durability and
+// at-rest protection.
+
+#[tauri::command]
+pub async fn auth_secure_session_get() -> Result<Option<String>, String> {
+    Ok(storage::session_get())
+}
+
+#[tauri::command]
+pub async fn auth_secure_session_set(arg0: Option<Value>) -> Result<(), String> {
+    let payload = arg0.ok_or_else(|| "Missing session payload".to_string())?;
+    let raw = match payload {
+        Value::String(s) => s,
+        // Allow callers that forgot to stringify — serialise on the Rust
+        // side. We still store as a string so the get() round-trip is
+        // stable.
+        other => serde_json::to_string(&other)
+            .map_err(|e| format!("session payload serialisation failed: {e}"))?,
+    };
+    storage::session_set(&raw)
+}
+
+#[tauri::command]
+pub async fn auth_secure_session_clear() -> Result<(), String> {
+    storage::session_clear()
+}
+
 #[tauri::command]
 pub async fn auth_get_current_session(
     auth_state: tauri::State<'_, auth::AuthState>,
@@ -201,6 +239,24 @@ pub async fn staff_auth_verify_check_in_pin(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
     auth::verify_staff_check_in_pin(arg0, &db)
+}
+
+/// staff-auth:refresh-directory — fetch the staff directory (with
+/// currentShift data) from the admin dashboard and persist it into the
+/// local staff_auth_cache. Caller can optionally override branch_id via
+/// `{ branchId: "..." }`; otherwise it's resolved from the keyring.
+#[tauri::command]
+pub async fn staff_auth_refresh_directory(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    let branch_override = arg0
+        .as_ref()
+        .and_then(|v| v.get("branchId").or_else(|| v.get("branch_id")))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    auth::refresh_staff_auth_directory(&db, branch_override.as_deref()).await
 }
 
 #[tauri::command]

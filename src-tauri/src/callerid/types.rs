@@ -2,30 +2,20 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallerIdMode {
+    #[default]
     AuthenticatedSip,
     PbxIpTrustLegacy,
 }
 
-impl Default for CallerIdMode {
-    fn default() -> Self {
-        Self::AuthenticatedSip
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallerIdTransport {
+    #[default]
     Udp,
     Tcp,
-}
-
-impl Default for CallerIdTransport {
-    fn default() -> Self {
-        Self::Udp
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

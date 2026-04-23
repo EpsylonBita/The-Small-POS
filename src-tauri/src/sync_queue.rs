@@ -38,11 +38,62 @@ pub const MAX_QUEUE_SIZE: i64 = 500;
 /// Default initial retry delay in milliseconds.
 const DEFAULT_INITIAL_RETRY_DELAY_MS: i64 = 1000;
 
-/// Maximum retry delay in milliseconds (cap for exponential backoff).
+/// Maximum retry delay in milliseconds for non-monetary items.
+/// Monetary items use a larger cap so the retry train does not hammer a
+/// failing endpoint multiple times per minute across many dead payments.
+/// See `monetary_retry_cap_ms` for the monetary-class variant.
 const MAX_RETRY_DELAY_MS: i64 = 60_000;
+
+/// Maximum retry delay in milliseconds for monetary items. Five minutes.
+const MAX_MONETARY_RETRY_DELAY_MS: i64 = 300_000;
+
+/// Upper bound on added jitter in milliseconds. Every scheduled retry gets
+/// `[0, JITTER_CAP_MS)` added to its exponentially-scaled base delay so a
+/// fleet of terminals recovering from the same outage do not stampede in
+/// perfect lockstep.
+const JITTER_CAP_MS: i64 = 1000;
+
+/// Entity/module types treated as monetary for the purpose of retry caps.
+fn is_monetary_module(module_type: &str) -> bool {
+    matches!(
+        module_type,
+        "payment"
+            | "payment_adjustment"
+            | "z_report"
+            | "staff_shift"
+            | "shift_expense"
+            | "staff_payment"
+            | "driver_earning"
+            | "driver_earnings"
+    )
+}
+
+/// Compute the next retry delay given the current `retry_delay_ms` base
+/// and the item's module type. Doubles the base, adds jitter in
+/// `[0, JITTER_CAP_MS)`, and clamps by the per-class cap.
+fn compute_next_retry_delay_ms(retry_delay_ms: i64, module_type: &str) -> i64 {
+    let cap = if is_monetary_module(module_type) {
+        MAX_MONETARY_RETRY_DELAY_MS
+    } else {
+        MAX_RETRY_DELAY_MS
+    };
+    // `timestamp_subsec_nanos` changes every call; using its ms slice as
+    // a cheap per-call jitter source avoids adding `rand` as a dep.
+    let jitter = (Utc::now().timestamp_subsec_nanos() as i64 / 1_000_000) % JITTER_CAP_MS;
+    (retry_delay_ms.saturating_mul(2).saturating_add(jitter)).min(cap)
+}
 
 /// Maximum number of retry attempts before marking an item as permanently failed.
 pub const MAX_RETRY_ATTEMPTS: i64 = 10;
+
+/// Wave 4: maximum number of times an item may be returned to `pending`
+/// via `mark_deferred` (e.g. "waiting for parent order sync") before we
+/// escalate to `conflict` status. Without a cap, a genuinely-stuck
+/// parent (missing terminal_id, corrupted payload on the parent) lets
+/// the child loop pending→processing→deferred→pending forever with no
+/// operator-visible alarm. 50 cycles at the default 5s delay is ~4
+/// minutes of retries before the item surfaces for review.
+pub const MAX_DEFERRAL_CYCLES: i64 = 50;
 
 /// Age threshold in milliseconds for old-item warnings (24 hours).
 const AGE_WARNING_THRESHOLD_MS: i64 = 24 * 60 * 60 * 1000;
@@ -110,6 +161,25 @@ pub struct SyncResult {
     pub failed: i64,
     pub conflicts: i64,
     pub errors: Vec<SyncError>,
+    /// Wave 4 H: items that exhausted `MAX_RETRY_ATTEMPTS` during this
+    /// batch for entity types classified as monetary. The Tauri
+    /// command layer emits a `sync:dead-letter:monetary` event for
+    /// each, so the operator UI can surface a persistent alarm. Empty
+    /// when no monetary items dead-lettered this cycle.
+    #[serde(default)]
+    pub monetary_dead_letters: Vec<MonetaryDeadLetter>,
+}
+
+/// A monetary sync item that crossed the max-retry threshold and was
+/// flagged `failed`. The operator UI surfaces these so silent
+/// dead-letters cannot happen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonetaryDeadLetter {
+    pub item_id: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub error_message: String,
 }
 
 /// Individual error from queue processing.
@@ -250,11 +320,21 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
 ///
 /// Rejects if the queue has reached `MAX_QUEUE_SIZE`.
 pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String> {
-    // Check queue capacity
+    // Wave 6: capacity check counts only ACTIVE rows (pending /
+    // processing / conflict). On HEAD this did a full-table COUNT(*),
+    // which also counted permanently-failed rows that can never be
+    // dequeued or retried — over time, the "queue full" guard tripped
+    // on historical dead-letters even though the real working set was
+    // tiny. The `idx_parity_sync_queue_active` partial index
+    // introduced in `migrate_v50` makes this COUNT O(active rows)
+    // instead of O(total rows).
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM parity_sync_queue
+             WHERE status IN ('pending', 'processing', 'conflict')",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|e| format!("sync_queue count: {e}"))?;
 
     if count >= MAX_QUEUE_SIZE {
@@ -674,7 +754,7 @@ fn update_customer_address_cache_after_sync(
     item: &SyncQueueItem,
     response: Option<&Value>,
 ) -> Result<(), String> {
-    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Null);
+    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
     let response_address = response.and_then(|value| {
         value
             .get("address")
@@ -710,13 +790,13 @@ fn update_customer_address_cache_after_sync(
 
     if item.operation == "DELETE" {
         addresses.retain(|address| {
-            !find_cached_customer_address_index(
+            find_cached_customer_address_index(
                 std::slice::from_ref(address),
                 item.record_id.as_str(),
                 None,
                 &payload,
             )
-            .is_some()
+            .is_none()
         });
     } else if let Some(response_address) = response_address {
         let normalized_address = normalize_customer_address_for_cache(response_address);
@@ -2056,43 +2136,38 @@ pub fn dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
 }
 
 fn recover_stale_processing_items(conn: &Connection) -> Result<i64, String> {
+    // Wave 4 H: collapse the SELECT+UPDATE pair into a single
+    // `UPDATE ... RETURNING` statement. On HEAD the SELECT ran first
+    // (gathering a list of stale rows to log) and then the UPDATE used
+    // the SAME `julianday(...)` predicate — which could match a
+    // different set of rows in the intervening moment if another
+    // writer moved rows in or out of `processing` between the two
+    // statements. `RETURNING` gives us the rows we actually mutated,
+    // atomically, so the audit log cannot drift from reality.
     let lease_modifier = format!("-{} seconds", PROCESSING_LEASE_SECS);
     let mut stmt = conn
         .prepare(
-            "SELECT id, table_name, record_id
-             FROM parity_sync_queue
-             WHERE status = 'processing'
-               AND julianday(COALESCE(last_attempt, created_at))
-                   <= julianday('now', ?1)",
-        )
-        .map_err(|e| format!("sync_queue recover_stale_processing_items prepare: {e}"))?;
-
-    let stale_rows: Vec<(String, String, String)> = stmt
-        .query_map(params![lease_modifier.as_str()], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .map_err(|e| format!("sync_queue recover_stale_processing_items query: {e}"))?
-        .filter_map(|row| row.ok())
-        .collect();
-
-    if stale_rows.is_empty() {
-        return Ok(0);
-    }
-
-    let recovered = conn
-        .execute(
             "UPDATE parity_sync_queue
              SET status = 'pending',
                  next_retry_at = NULL
              WHERE status = 'processing'
                AND julianday(COALESCE(last_attempt, created_at))
-                   <= julianday('now', ?1)",
-            params![lease_modifier.as_str()],
+                   <= julianday('now', ?1)
+             RETURNING id, table_name, record_id",
         )
-        .map_err(|e| format!("sync_queue recover_stale_processing_items update: {e}"))?
-        as i64;
+        .map_err(|e| format!("sync_queue recover_stale_processing_items prepare: {e}"))?;
 
-    for (_, table_name, record_id) in stale_rows.into_iter().take(5) {
+    let recovered_rows: Vec<(String, String, String)> = stmt
+        .query_map(params![lease_modifier.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| format!("sync_queue recover_stale_processing_items update: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    let recovered = recovered_rows.len() as i64;
+
+    for (_, table_name, record_id) in recovered_rows.into_iter().take(5) {
         warn!(
             table_name = %table_name,
             record_id = %record_id,
@@ -2395,15 +2470,27 @@ pub fn mark_success(conn: &Connection, item_id: &str) -> Result<(), String> {
 /// Mark an item as failed with exponential backoff for retry.
 ///
 /// If max retries are exhausted, the item status changes to `failed`.
-pub fn mark_failure(conn: &Connection, item_id: &str, error_message: &str) -> Result<(), String> {
+///
+/// Wave 4 H: returns `Some(MonetaryDeadLetter)` when the transition to
+/// permanent-failure just happened AND the item's module is classified
+/// as monetary. The caller is expected to collect these so the Tauri
+/// command layer can emit a `sync:dead-letter:monetary` event for
+/// operator-visible alarming. Returns `None` in every other case
+/// (still retrying, or non-monetary dead-letter).
+pub fn mark_failure(
+    conn: &Connection,
+    item_id: &str,
+    error_message: &str,
+) -> Result<Option<MonetaryDeadLetter>, String> {
     let now = Utc::now().to_rfc3339();
 
-    // Get current attempts and retry delay
-    let (attempts, retry_delay_ms): (i64, i64) = conn
+    // Get current attempts, retry delay, and module type. The module
+    // type drives the per-class retry cap below (Wave 2a).
+    let (attempts, retry_delay_ms, module_type): (i64, i64, String) = conn
         .query_row(
-            "SELECT attempts, retry_delay_ms FROM parity_sync_queue WHERE id = ?1",
+            "SELECT attempts, retry_delay_ms, module_type FROM parity_sync_queue WHERE id = ?1",
             params![item_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| format!("sync_queue mark_failure read: {e}"))?;
 
@@ -2420,14 +2507,53 @@ pub fn mark_failure(conn: &Connection, item_id: &str, error_message: &str) -> Re
         )
         .map_err(|e| format!("sync_queue mark_failed: {e}"))?;
 
-        warn!(
-            id = %item_id,
-            attempts = new_attempts,
-            "Sync queue item exhausted max retries, marked as failed"
-        );
+        // Wave 4 H: log at ERROR for monetary items so the audit log
+        // has a specific searchable marker. Non-monetary items stay at
+        // WARN.
+        let is_monetary = is_monetary_module(&module_type);
+        if is_monetary {
+            tracing::error!(
+                id = %item_id,
+                module_type = %module_type,
+                attempts = new_attempts,
+                error_message,
+                "MONETARY sync_queue item dead-lettered (operator intervention required)"
+            );
+        } else {
+            warn!(
+                id = %item_id,
+                attempts = new_attempts,
+                "Sync queue item exhausted max retries, marked as failed"
+            );
+        }
+
+        if is_monetary {
+            // Look up entity_type / entity_id for the alarm payload. A
+            // read-failure here is non-fatal: we have the item_id and
+            // the log, the alarm just lacks detail.
+            let (entity_type, entity_id): (String, String) = conn
+                .query_row(
+                    "SELECT module_type, record_id FROM parity_sync_queue WHERE id = ?1",
+                    params![item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or_else(|_| (module_type.clone(), String::new()));
+            return Ok(Some(MonetaryDeadLetter {
+                item_id: item_id.to_string(),
+                entity_type,
+                entity_id,
+                error_message: error_message.to_string(),
+            }));
+        }
+        return Ok(None);
     } else {
-        // Schedule retry with exponential backoff
-        let new_delay = (retry_delay_ms * 2).min(MAX_RETRY_DELAY_MS);
+        // Wave 2a: jittered exponential backoff with per-class caps.
+        // Without jitter, a whole fleet of terminals recovering from
+        // the same outage retries in perfect lockstep and re-DoSes the
+        // server. Monetary items use a longer cap (5 min) so the
+        // same bucket of failing payments does not hammer the server
+        // at 60 s intervals indefinitely.
+        let new_delay = compute_next_retry_delay_ms(retry_delay_ms, &module_type);
         let next_retry = Utc::now() + ChronoDuration::milliseconds(new_delay);
 
         conn.execute(
@@ -2448,7 +2574,7 @@ pub fn mark_failure(conn: &Connection, item_id: &str, error_message: &str) -> Re
         .map_err(|e| format!("sync_queue schedule_retry: {e}"))?;
     }
 
-    Ok(())
+    Ok(None)
 }
 
 pub fn mark_rate_limited(
@@ -2459,9 +2585,8 @@ pub fn mark_rate_limited(
 ) -> Result<(), String> {
     let now = Utc::now();
     let retry_after_secs = retry_after_secs.max(1);
-    let retry_delay_ms = (retry_after_secs * 1000)
-        .max(DEFAULT_INITIAL_RETRY_DELAY_MS)
-        .min(MAX_RETRY_DELAY_MS);
+    let retry_delay_ms =
+        (retry_after_secs * 1000).clamp(DEFAULT_INITIAL_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
     let next_retry = now + ChronoDuration::seconds(retry_after_secs);
 
     conn.execute(
@@ -2486,14 +2611,56 @@ pub fn mark_rate_limited(
 }
 
 pub fn mark_deferred(conn: &Connection, item_id: &str, reason: &str) -> Result<(), String> {
+    // Wave 4: increment `attempts` so deferral cannot loop forever.
+    // Before this fix a row deferred with e.g. "Waiting for parent
+    // order sync" would re-enter `pending` with a 5s retry and no
+    // counter bump — if the parent never synced, the child deferred
+    // indefinitely with no operator-visible alarm. We now cap at
+    // `MAX_DEFERRAL_CYCLES` and escalate to `conflict` status when
+    // exceeded so it surfaces in the actionable-items list.
+    let current_attempts: i64 = conn
+        .query_row(
+            "SELECT attempts FROM parity_sync_queue WHERE id = ?1",
+            params![item_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let new_attempts = current_attempts + 1;
+
+    if new_attempts >= MAX_DEFERRAL_CYCLES {
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'conflict',
+                 attempts = ?1,
+                 error_message = ?2
+             WHERE id = ?3",
+            params![
+                new_attempts,
+                format!(
+                    "Deferred too many times ({new_attempts}× \"{reason}\"); escalated to conflict"
+                ),
+                item_id
+            ],
+        )
+        .map_err(|e| format!("sync_queue mark_deferred escalate: {e}"))?;
+        warn!(
+            id = %item_id,
+            attempts = new_attempts,
+            reason,
+            "parity_sync_queue deferral cap reached; item escalated to conflict"
+        );
+        return Ok(());
+    }
+
     let next_retry = Utc::now() + ChronoDuration::seconds(5);
     conn.execute(
         "UPDATE parity_sync_queue
          SET status = 'pending',
-             error_message = ?1,
-             next_retry_at = ?2
-         WHERE id = ?3",
-        params![reason, next_retry.to_rfc3339(), item_id],
+             attempts = ?1,
+             error_message = ?2,
+             next_retry_at = ?3
+         WHERE id = ?4",
+        params![new_attempts, reason, next_retry.to_rfc3339(), item_id],
     )
     .map_err(|e| format!("sync_queue mark_deferred: {e}"))?;
 
@@ -3275,6 +3442,9 @@ pub async fn process_queue(
     let mut failed: i64 = 0;
     let mut conflicts: i64 = 0;
     let mut errors: Vec<SyncError> = Vec::new();
+    // Wave 4 H: collect monetary dead-letters so the caller can emit
+    // `sync:dead-letter:monetary` events in the Tauri command layer.
+    let mut monetary_dead_letters: Vec<MonetaryDeadLetter> = Vec::new();
 
     loop {
         // Dequeue next item under lock, then release lock before HTTP call
@@ -3302,7 +3472,9 @@ pub async fn process_queue(
             }
             RequestPreparation::Failed { reason } => {
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                mark_failure(&db, &item.id, &reason)?;
+                if let Some(dl) = mark_failure(&db, &item.id, &reason)? {
+                    monetary_dead_letters.push(dl);
+                }
                 db.execute(
                     "UPDATE parity_sync_queue SET status = 'failed' WHERE id = ?1",
                     params![item.id],
@@ -3429,7 +3601,7 @@ pub async fn process_queue(
                         "Parity sync hit admin rate limiting; pausing the batch"
                     );
                     break;
-                } else if status >= 400 && status < 500 {
+                } else if (400..500).contains(&status) {
                     // Client error (not retriable)
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                     let error_message = format!("HTTP {status}: {response_body}");
@@ -3447,7 +3619,9 @@ pub async fn process_queue(
                         processed += 1;
                         continue;
                     }
-                    mark_failure(&db, &item.id, &error_message)?;
+                    if let Some(dl) = mark_failure(&db, &item.id, &error_message)? {
+                        monetary_dead_letters.push(dl);
+                    }
                     // Force to failed status since client errors won't recover
                     db.execute(
                         "UPDATE parity_sync_queue SET status = 'failed' WHERE id = ?1",
@@ -3465,7 +3639,13 @@ pub async fn process_queue(
                 } else {
                     // Server error (retriable)
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    mark_failure(&db, &item.id, &format!("HTTP {status}: {response_body}"))?;
+                    if let Some(dl) = mark_failure(
+                        &db,
+                        &item.id,
+                        &format!("HTTP {status}: {response_body}"),
+                    )? {
+                        monetary_dead_letters.push(dl);
+                    }
                     failed += 1;
                     errors.push(SyncError {
                         item_id: item.id.clone(),
@@ -3479,7 +3659,11 @@ pub async fn process_queue(
             Err(e) => {
                 // Network error (retriable)
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                mark_failure(&db, &item.id, &format!("Network error: {e}"))?;
+                if let Some(dl) =
+                    mark_failure(&db, &item.id, &format!("Network error: {e}"))?
+                {
+                    monetary_dead_letters.push(dl);
+                }
                 failed += 1;
                 errors.push(SyncError {
                     item_id: item.id.clone(),
@@ -3500,6 +3684,7 @@ pub async fn process_queue(
         failed,
         conflicts,
         errors,
+        monetary_dead_letters,
     })
 }
 

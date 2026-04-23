@@ -1084,6 +1084,15 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     .or_else(|| normalize_identity(storage::get_credential("branch_id")))
     .unwrap_or_default();
 
+    // organization_id resolution pattern (CANONICAL for this codebase):
+    // prefer any value embedded in the payload, fall back to the keyring
+    // credential. Currently only the order payload builder carries
+    // organization_id — shift and z-report sync payloads do not include it
+    // because the admin dashboard derives tenant scoping from the
+    // X-POS-API-Key terminal auth context on those endpoints. If that
+    // server-side assumption ever changes, new payload builders should
+    // mirror the two-step lookup below (payload → keyring) rather than
+    // re-implementing the ordering inline or adding side-channel defaults.
     let organization_id = normalize_identity(
         str_field(payload, "organizationId").or_else(|| str_field(payload, "organization_id")),
     )
@@ -2311,10 +2320,27 @@ fn requeue_stale_in_progress_sync_rows(db: &DbState) -> Result<usize, String> {
         return Ok(0);
     }
 
+    // Increment retry_count on every stale-lease recovery so a row that
+    // keeps crashing mid-sync eventually exhausts its retries instead of
+    // bouncing between pending → in_progress → (stale) → pending forever.
+    // When the incremented count would hit max_retries, mark the row
+    // 'failed' directly so it leaves the active queue without another
+    // claim attempt. SQLite evaluates SET expressions against the OLD
+    // row values, so `retry_count + 1` is consistent across all three
+    // branches below.
     let requeued = conn
         .execute(
             "UPDATE sync_queue
-             SET status = 'pending',
+             SET status = CASE
+                     WHEN retry_count + 1 >= max_retries THEN 'failed'
+                     ELSE 'pending'
+                 END,
+                 retry_count = retry_count + 1,
+                 last_error = CASE
+                     WHEN retry_count + 1 >= max_retries
+                         THEN 'Stale in-progress row exhausted max retries after lease expiry'
+                     ELSE last_error
+                 END,
                  next_retry_at = NULL,
                  updated_at = datetime('now')
              WHERE status = 'in_progress'
@@ -5448,15 +5474,12 @@ pub(crate) fn upsert_payment_adjustment_sync_queue_row(
     )
     .map_err(|e| format!("align local payment-adjustment sync metadata: {e}"))?;
 
-    if queue_status == "synced" {
-        let _ = conn.execute(
-            "UPDATE payment_adjustments
-             SET sync_state = 'applied',
-                 updated_at = ?1
-             WHERE id = ?2",
-            params![now, adjustment_id],
-        );
-    }
+    // No second UPDATE for `sync_state = 'applied'` here: the align step
+    // above already derives the sync_state via `canonical_financial_local_state`,
+    // which maps queue_status='synced' → sync_state='applied'. Previously
+    // this function issued a redundant UPDATE whenever queue_status was
+    // "synced", holding the write lock for an extra round-trip with no
+    // observable effect on the row.
     Ok(())
 }
 
@@ -5466,21 +5489,48 @@ pub(crate) fn mark_local_payment_applied(
     synced_at: &str,
     remote_payment_id: Option<&str>,
 ) -> Result<(), String> {
-    conn.execute(
-        "UPDATE order_payments
-         SET sync_status = 'synced',
-             sync_state = 'applied',
-             remote_payment_id = COALESCE(?1, remote_payment_id),
-             sync_retry_count = 0,
-             sync_last_error = NULL,
-             sync_next_retry_at = NULL,
-             updated_at = ?2
-         WHERE id = ?3",
-        params![remote_payment_id, synced_at, payment_id],
-    )
-    .map_err(|e| format!("mark local payment applied: {e}"))?;
+    // Both writes (order_payments row + queue row) must commit together.
+    // A crash between them previously left order_payments.sync_state =
+    // 'applied' while the queue row stayed in_progress — stale-lease
+    // recovery would then re-promote the queue row and re-send an
+    // already-accepted payment. SAVEPOINT works whether this function
+    // runs standalone or inside an outer transaction, so callers do not
+    // need to know which mode they are in.
+    conn.execute_batch("SAVEPOINT mark_local_payment_applied")
+        .map_err(|e| format!("savepoint mark_local_payment_applied: {e}"))?;
 
-    mark_payment_queue_row_synced(conn, payment_id, synced_at)
+    let result = (|| -> Result<(), String> {
+        conn.execute(
+            "UPDATE order_payments
+             SET sync_status = 'synced',
+                 sync_state = 'applied',
+                 remote_payment_id = COALESCE(?1, remote_payment_id),
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 sync_next_retry_at = NULL,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![remote_payment_id, synced_at, payment_id],
+        )
+        .map_err(|e| format!("mark local payment applied: {e}"))?;
+
+        mark_payment_queue_row_synced(conn, payment_id, synced_at)
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("RELEASE mark_local_payment_applied")
+                .map_err(|e| format!("release mark_local_payment_applied: {e}"))?;
+            Ok(())
+        }
+        Err(e) => {
+            // ROLLBACK TO unwinds the savepoint contents; RELEASE then
+            // removes the savepoint frame so it does not linger.
+            let _ = conn.execute_batch("ROLLBACK TO mark_local_payment_applied");
+            let _ = conn.execute_batch("RELEASE mark_local_payment_applied");
+            Err(e)
+        }
+    }
 }
 
 fn find_canonical_duplicate_payment_target_with_conn(
@@ -7030,12 +7080,24 @@ fn remote_order_changed_at(remote_order: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Returns true when the local order has any sync-queue rows that haven't
+/// reached a terminal state. The active queue is `parity_sync_queue` with
+/// `(table_name, record_id)` keys; the legacy `sync_queue` table this
+/// function used to read is no longer the live queue and was always
+/// returning false here, silently disabling the guard. Statuses that count
+/// as "still in flight" mirror the values the queue lifecycle uses
+/// elsewhere (`pending`, `processing`, `failed`, `conflict`).
+///
+/// Callers use this to decide whether to skip remote→local snapshot
+/// overwrites: if local has unsynced edits, applying remote risks
+/// reverting fields the operator just changed (e.g. an in-flight
+/// pickup→delivery conversion).
 fn has_outstanding_local_order_queue(conn: &Connection, local_id: &str) -> bool {
     conn.query_row(
-        "SELECT COUNT(*) > 0 FROM sync_queue
-         WHERE entity_type = 'order'
-           AND entity_id = ?1
-           AND status IN ('pending', 'in_progress', 'queued_remote')",
+        "SELECT COUNT(*) > 0 FROM parity_sync_queue
+         WHERE table_name = 'orders'
+           AND record_id = ?1
+           AND status IN ('pending', 'processing', 'failed', 'conflict')",
         params![local_id],
         |row| row.get(0),
     )
@@ -8087,9 +8149,8 @@ async fn resolve_remote_order_for_local_order(
 
         let Some(next_cursor) = remote_orders
             .iter()
+            .rfind(|order| !remote_order_changed_at(order).trim().is_empty())
             .map(remote_order_changed_at)
-            .filter(|value| !value.trim().is_empty())
-            .next_back()
         else {
             break;
         };
@@ -8149,12 +8210,29 @@ async fn reconcile_remote_payments_for_local_order_with_context(
                 if let Some(remote_order) = remote_order_context.as_ref() {
                     let synced_at = Utc::now().to_rfc3339();
                     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                    sync_remote_order_snapshot_into_local(
-                        &conn,
-                        local_order_id,
-                        remote_order,
-                        &synced_at,
-                    )?;
+                    // Skip the wholesale local-row snapshot apply if there
+                    // are unsynced local edits queued for this order.
+                    // Without this guard, the COALESCE-based UPDATE inside
+                    // sync_remote_order_snapshot_into_local would overwrite
+                    // a freshly-converted order_type/customer/delivery
+                    // shape with whatever Supabase still has — i.e. the
+                    // pre-conversion state — silently reverting the
+                    // operator's edit without any user action. Reproduced
+                    // 2026-04-22 with order #00001 (pickup→delivery
+                    // converted then auto-reverted to pickup).
+                    if has_outstanding_local_order_queue(&conn, local_order_id) {
+                        debug!(
+                            order_id = %local_order_id,
+                            "Skipping remote order snapshot apply (post-payments path): local has unsynced queue items"
+                        );
+                    } else {
+                        sync_remote_order_snapshot_into_local(
+                            &conn,
+                            local_order_id,
+                            remote_order,
+                            &synced_at,
+                        )?;
+                    }
                 }
             }
             Ok(None) => {}
@@ -8180,7 +8258,22 @@ async fn reconcile_remote_payments_for_local_order_with_context(
         if let Some(remote_order) = remote_order_context.as_ref() {
             let synced_at = Utc::now().to_rfc3339();
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            sync_remote_order_snapshot_into_local(&conn, local_order_id, remote_order, &synced_at)?;
+            // Same guard as the post-payments branch above: never let the
+            // remote snapshot overwrite a row whose local edits are still
+            // queued for sync. See companion comment for context.
+            if has_outstanding_local_order_queue(&conn, local_order_id) {
+                debug!(
+                    order_id = %local_order_id,
+                    "Skipping remote order snapshot apply (no-payments path): local has unsynced queue items"
+                );
+            } else {
+                sync_remote_order_snapshot_into_local(
+                    &conn,
+                    local_order_id,
+                    remote_order,
+                    &synced_at,
+                )?;
+            }
         }
 
         let path = format!(
@@ -9030,53 +9123,86 @@ fn is_shift_conflict_error(error: &str) -> bool {
 
 fn claim_pending_sync_items(conn: &Connection, limit: usize) -> Result<Vec<SyncItem>, String> {
     let limit = i64::try_from(limit).map_err(|_| "sync item limit overflow".to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, entity_type, entity_id, operation, payload, idempotency_key,
-                    retry_count, max_retries, next_retry_at,
-                    COALESCE(retry_delay_ms, 5000), remote_receipt_id
-             FROM sync_queue
-             WHERE status = 'pending'
-               AND retry_count < max_retries
-               AND (
-                    next_retry_at IS NULL
-                    OR julianday(next_retry_at) <= julianday('now')
-               )
-             ORDER BY COALESCE(next_retry_at, created_at) ASC, created_at ASC
-             LIMIT ?1",
-        )
-        .map_err(|e| e.to_string())?;
 
-    let items: Vec<SyncItem> = stmt
-        .query_map(params![limit], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-                row.get(10)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+    // Claim atomically: SELECT candidate ids and UPDATE their status to
+    // `in_progress` inside a single BEGIN IMMEDIATE transaction. The
+    // previous implementation ran the SELECT and then per-row UPDATE as
+    // independent statements, so a crash between them left rows split
+    // between `pending` and `in_progress` — the in-memory Vec then held
+    // ids whose DB state did not match, relying on the 120s stale-lease
+    // recovery to heal the divergence. With BEGIN IMMEDIATE both sides
+    // commit together or neither does.
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin claim transaction: {e}"))?;
 
-    for (id, _, _, _, _, _, _, _, _, _, _) in &items {
-        let _ = conn.execute(
-            "UPDATE sync_queue
-             SET status = 'in_progress', updated_at = datetime('now')
-             WHERE id = ?1 AND status = 'pending'",
-            params![id],
-        );
+    let outcome: Result<Vec<SyncItem>, String> = (|| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, entity_type, entity_id, operation, payload, idempotency_key,
+                        retry_count, max_retries, next_retry_at,
+                        COALESCE(retry_delay_ms, 5000), remote_receipt_id
+                 FROM sync_queue
+                 WHERE status = 'pending'
+                   AND retry_count < max_retries
+                   AND (
+                        next_retry_at IS NULL
+                        OR julianday(next_retry_at) <= julianday('now')
+                   )
+                 ORDER BY COALESCE(next_retry_at, created_at) ASC, created_at ASC
+                 LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let items: Vec<SyncItem> = stmt
+            .query_map(params![limit], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Drop the prepared statement before issuing the bulk UPDATE so its
+        // resources are released on the connection first.
+        drop(stmt);
+
+        if !items.is_empty() {
+            let ids: Vec<i64> = items.iter().map(|item| item.0).collect();
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let update_sql = format!(
+                "UPDATE sync_queue
+                 SET status = 'in_progress', updated_at = datetime('now')
+                 WHERE id IN ({placeholders}) AND status = 'pending'"
+            );
+            conn.execute(&update_sql, rusqlite::params_from_iter(&ids))
+                .map_err(|e| format!("bulk claim update: {e}"))?;
+        }
+
+        Ok(items)
+    })();
+
+    match outcome {
+        Ok(items) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit claim: {e}"))?;
+            Ok(items)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-
-    Ok(items)
 }
 
 fn str_any(v: &Value, keys: &[&str]) -> Option<String> {
@@ -9883,28 +10009,56 @@ fn mark_order_synced_via_direct_fallback(
 ) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
-    let _ = conn.execute(
-        "UPDATE sync_queue
-         SET status = 'synced',
-             synced_at = ?1,
-             remote_receipt_id = NULL,
-             last_error = NULL,
-             next_retry_at = NULL,
-             updated_at = ?1
-         WHERE id = ?2",
-        params![now, queue_id],
-    );
-    let _ = conn.execute(
-        "UPDATE orders
-         SET sync_status = 'synced',
-             last_synced_at = ?1,
-             supabase_id = COALESCE(NULLIF(supabase_id, ''), ?2),
-             updated_at = ?1
-         WHERE id = ?3",
-        params![now, remote_id, entity_id],
-    );
-    promote_payments_for_order(&conn, entity_id);
-    Ok(())
+
+    // Atomize the three writes (sync_queue status, orders.supabase_id,
+    // promote_payments_for_order). Previously these ran as independent
+    // statements with errors silently swallowed via `let _ = ...`. A
+    // crash between steps 1 and 2 left the queue row marked `synced`
+    // but `orders.supabase_id` unwritten — so child-payment promotion
+    // in step 3 could not find a canonical remote id and stalled.
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin mark_order_synced_via_direct_fallback: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        conn.execute(
+            "UPDATE sync_queue
+             SET status = 'synced',
+                 synced_at = ?1,
+                 remote_receipt_id = NULL,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, queue_id],
+        )
+        .map_err(|e| format!("update sync_queue: {e}"))?;
+
+        conn.execute(
+            "UPDATE orders
+             SET sync_status = 'synced',
+                 last_synced_at = ?1,
+                 supabase_id = COALESCE(NULLIF(supabase_id, ''), ?2),
+                 updated_at = ?1
+             WHERE id = ?3",
+            params![now, remote_id, entity_id],
+        )
+        .map_err(|e| format!("update orders.supabase_id: {e}"))?;
+
+        promote_payments_for_order(&conn, entity_id);
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit mark_order_synced_via_direct_fallback: {e}"))?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 async fn sync_order_batch_via_direct_api(
@@ -11605,23 +11759,84 @@ async fn sync_financial_batch(
     let mut outcome = FinancialBatchOutcome::default();
 
     for item in items {
-        let (_, entity_type, entity_id, _, _, idem_key, _, _, _, _, _) = item;
+        let (_, entity_type, entity_id, operation, payload, idem_key, _, _, _, _, _) = item;
+
+        // Wave 2b: strengthen the fallback-match clause.
+        //
+        // If the server echoes the `idempotency_key` we sent, the primary
+        // match wins and no ambiguity is possible. Some older admin
+        // versions omit it; the old fallback matched on just
+        // `(entity_type, entity_id)` which would cross-match a second
+        // payment_adjustment that shared the same entity_id (local UUIDs
+        // are unique per table so this only fires on retries and shape
+        // drift, but it DID fire). This fix adds `operation` plus an
+        // amount+timestamp check extracted from the submission payload;
+        // that still is not exactly-once (Wave 4 delivers that via
+        // NOT NULL idempotency keys) but makes the interim cross-match
+        // window vanishingly small.
+        let local_payload: Value =
+            serde_json::from_str(payload).unwrap_or_else(|_| serde_json::json!({}));
+        let local_amount = local_payload.get("amount").and_then(Value::as_f64);
+        let local_created_at = local_payload
+            .get("created_at")
+            .or_else(|| local_payload.get("createdAt"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
         let matched = results.iter().find(|result| {
-            result
+            // Primary match: idempotency key echo.
+            let idem_match = result
                 .get("idempotency_key")
                 .and_then(Value::as_str)
                 .map(|value| value == idem_key)
-                .unwrap_or(false)
-                || (result
-                    .get("entity_type")
-                    .and_then(Value::as_str)
-                    .map(|value| value == entity_type)
-                    .unwrap_or(false)
-                    && result
-                        .get("entity_id")
-                        .and_then(Value::as_str)
-                        .map(|value| value == entity_id)
-                        .unwrap_or(false))
+                .unwrap_or(false);
+            if idem_match {
+                return true;
+            }
+
+            // Fallback match: entity_type + entity_id + operation +
+            // amount (within MONEY_EPSILON) + created_at equality.
+            let et_ok = result
+                .get("entity_type")
+                .and_then(Value::as_str)
+                .map(|value| value == entity_type)
+                .unwrap_or(false);
+            let eid_ok = result
+                .get("entity_id")
+                .and_then(Value::as_str)
+                .map(|value| value == entity_id)
+                .unwrap_or(false);
+            let op_ok = result
+                .get("operation")
+                .and_then(Value::as_str)
+                .map(|value| value == operation)
+                .unwrap_or(
+                    // If the server does not echo `operation`, accept
+                    // the 2-field match with a logged warning. This
+                    // preserves compatibility with older admin builds.
+                    true,
+                );
+            let amount_ok = match (
+                local_amount,
+                result.get("amount").and_then(Value::as_f64),
+            ) {
+                (Some(l), Some(r)) => (l - r).abs() < crate::money::MONEY_EPSILON,
+                // If either side omits amount, accept so older clients
+                // and servers interoperate.
+                _ => true,
+            };
+            let created_ok = match (
+                &local_created_at,
+                result
+                    .get("created_at")
+                    .or_else(|| result.get("createdAt"))
+                    .and_then(Value::as_str),
+            ) {
+                (Some(l), Some(r)) => l.as_str() == r,
+                _ => true,
+            };
+
+            et_ok && eid_ok && op_ok && amount_ok && created_ok
         });
 
         let Some(result) = matched else {
@@ -12265,6 +12480,33 @@ async fn sync_z_report_items(
     db: &DbState,
     items: &[&SyncItem],
 ) -> usize {
+    // Wave 4 M: reconcile any z_report rows stuck in `sync_state =
+    // 'syncing'` before we start this cycle. On HEAD, the `syncing`
+    // marker was written in a separate lock acquisition before the
+    // HTTP call; a crash between the two left the row stuck until
+    // operator intervention (or until the same z-report re-synced
+    // successfully, which may never happen if the crash coincided
+    // with server drift). Any row stuck >60 seconds is reset to
+    // `pending` so this cycle's re-dispatch can pick it up.
+    if let Ok(conn) = db.conn.lock() {
+        let reset_count = conn
+            .execute(
+                "UPDATE z_reports
+                 SET sync_state = 'pending', updated_at = datetime('now')
+                 WHERE sync_state = 'syncing'
+                   AND julianday(COALESCE(updated_at, datetime('now')))
+                       <= julianday('now', '-60 seconds')",
+                [],
+            )
+            .unwrap_or(0);
+        if reset_count > 0 {
+            warn!(
+                stuck_count = reset_count,
+                "Reset z_reports stuck in sync_state='syncing' from a prior crash"
+            );
+        }
+    }
+
     let mut synced = 0;
 
     for item in items {
@@ -12331,13 +12573,12 @@ async fn sync_z_report_items(
                     } else {
                         retry_count + 1
                     };
-                    let (queue_status, zr_state) = if is_historical_conflict {
-                        ("failed", "failed")
-                    } else if new_retry >= *max_retries {
-                        ("failed", "failed")
-                    } else {
-                        ("pending", "pending")
-                    };
+                    let (queue_status, zr_state) =
+                        if is_historical_conflict || new_retry >= *max_retries {
+                            ("failed", "failed")
+                        } else {
+                            ("pending", "pending")
+                        };
                     let _ = conn.execute(
                         "UPDATE sync_queue SET status = ?1, retry_count = ?2, last_error = ?3, updated_at = datetime('now') WHERE id = ?4",
                         params![queue_status, new_retry, parked_error, id],
@@ -14403,13 +14644,22 @@ pub(crate) fn reconcile_legacy_financial_parity_rows(db: &DbState) -> Result<usi
 pub(crate) fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
+    // Require the parent payment to have a non-empty remote_payment_id at
+    // the SQL layer. The legacy conflict-resolution path could mark a
+    // payment sync_state='applied' without writing remote_payment_id (or
+    // write an empty string), which left the child adjustment's
+    // waiting_parent → pending promotion silently blocked. Constraining
+    // here means any such row is visible to monitoring as an orphan
+    // rather than endlessly reconsidered on every sweep.
     let mut stmt = conn
         .prepare(
             "SELECT pa.id, pa.payment_id, op.remote_payment_id
              FROM payment_adjustments pa
              JOIN order_payments op ON op.id = pa.payment_id
              WHERE pa.sync_state = 'waiting_parent'
-               AND op.sync_state = 'applied'",
+               AND op.sync_state = 'applied'
+               AND op.remote_payment_id IS NOT NULL
+               AND TRIM(op.remote_payment_id) != ''",
         )
         .map_err(|e| e.to_string())?;
 
@@ -14428,6 +14678,17 @@ pub(crate) fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, Stri
 
     for (adj_id, payment_id, remote_payment_id) in &rows {
         if normalize_optional_uuid_str(remote_payment_id.as_deref()).is_none() {
+            // Defence-in-depth: the SQL filter already rejects NULL / empty
+            // remote_payment_id, so reaching here means the value exists
+            // but is not a valid UUID (e.g. whitespace-padded, malformed).
+            // Log so the previously-silent skip is observable; the row
+            // stays as waiting_parent for a human to investigate.
+            warn!(
+                adjustment_id = %adj_id,
+                payment_id = %payment_id,
+                remote_payment_id = ?remote_payment_id,
+                "reconcile_deferred_adjustments: skipping row with non-UUID remote_payment_id"
+            );
             continue;
         }
 
@@ -14792,6 +15053,94 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    fn insert_parity_sync_queue_row(
+        db: &DbState,
+        table_name: &str,
+        record_id: &str,
+        status: &str,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        let id = format!("queue-{}-{}", record_id, Uuid::new_v4());
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status
+             ) VALUES (?1, ?2, ?3, 'UPDATE', '{}', 'org-test',
+                       datetime('now'), 0, 1000, 1, 'orders', 'server-wins', 1, ?4)",
+            params![id, table_name, record_id, status],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn has_outstanding_local_order_queue_returns_true_when_pending_row_exists() {
+        // Regression test for the silent revert bug observed 2026-04-22:
+        // a freshly-converted pickup→delivery order auto-reverted to
+        // pickup because the snapshot guard helper was querying the
+        // legacy `sync_queue` table while live writes go to
+        // `parity_sync_queue`. The guard always returned false, so the
+        // remote-snapshot apply happily overwrote local edits with
+        // pre-conversion remote state. This test pins the helper to the
+        // active queue table.
+        let db = test_db();
+        insert_parity_sync_queue_row(&db, "orders", "ord-conv-1", "pending");
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            has_outstanding_local_order_queue(&conn, "ord-conv-1"),
+            "pending parity_sync_queue row for orders/ord-conv-1 must register as outstanding"
+        );
+    }
+
+    #[test]
+    fn has_outstanding_local_order_queue_returns_true_for_processing_status() {
+        let db = test_db();
+        insert_parity_sync_queue_row(&db, "orders", "ord-conv-2", "processing");
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            has_outstanding_local_order_queue(&conn, "ord-conv-2"),
+            "an in-flight 'processing' row must still count as outstanding"
+        );
+    }
+
+    #[test]
+    fn has_outstanding_local_order_queue_returns_false_when_queue_empty() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            !has_outstanding_local_order_queue(&conn, "ord-no-queue"),
+            "no parity_sync_queue rows means no outstanding edits"
+        );
+    }
+
+    #[test]
+    fn has_outstanding_local_order_queue_does_not_match_other_orders() {
+        let db = test_db();
+        insert_parity_sync_queue_row(&db, "orders", "ord-other", "pending");
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            !has_outstanding_local_order_queue(&conn, "ord-mine"),
+            "queue rows for a different order must not register as outstanding for this one"
+        );
+    }
+
+    #[test]
+    fn has_outstanding_local_order_queue_does_not_match_other_tables() {
+        let db = test_db();
+        // Payment-table rows must NOT register as outstanding-order edits
+        // even though they share the record_id namespace.
+        insert_parity_sync_queue_row(&db, "payments", "ord-mixed", "pending");
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            !has_outstanding_local_order_queue(&conn, "ord-mixed"),
+            "payments-table rows must not be confused with orders-table rows"
+        );
     }
 
     #[test]
@@ -15255,7 +15604,7 @@ mod tests {
                 }
             },
         ));
-        assert_eq!(offline_result.expect("offline heartbeat result"), false);
+        assert!(!offline_result.expect("offline heartbeat result"));
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
 
         let failure_calls = call_count.clone();
@@ -20215,12 +20564,25 @@ mod tests {
     }
 
     #[test]
-    fn test_has_outstanding_local_order_queue_treats_queued_remote_as_pending() {
+    fn test_has_outstanding_local_order_queue_picks_up_active_parity_queue_rows() {
+        // Original version of this test inserted into the legacy
+        // `sync_queue` table with status='queued_remote'. That contract no
+        // longer exists: the active queue is `parity_sync_queue` with
+        // statuses ('pending', 'processing', 'failed', 'conflict'). The
+        // intent — "the helper detects outstanding local queue items for
+        // the order, ignores other orders" — is preserved here against
+        // the live table.
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
-             VALUES ('order', 'ord-queued', 'update', '{}', 'order:queued', 'queued_remote')",
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status
+             ) VALUES (
+                 'queue-ord-queued', 'orders', 'ord-queued', 'UPDATE', '{}', 'org-test',
+                 datetime('now'), 0, 1000, 1, 'orders', 'server-wins', 1, 'pending'
+             )",
             [],
         )
         .unwrap();

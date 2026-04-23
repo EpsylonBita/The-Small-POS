@@ -42,8 +42,23 @@ export interface StaffCheckInPinVerifyResponse {
   success: boolean;
   staffId?: string;
   branchId?: string;
+  /**
+   * Machine-readable reason for a `success: false` outcome. Known values:
+   *   - `staff_auth_unavailable` — local cache missing / offline
+   *   - `staff_not_available_offline` — staff id absent from local cache
+   *   - `pos_login_disabled` — staff not allowed to log in on POS
+   *   - `pin_not_configured` — staff has no POS PIN
+   *   - `invalid_pin` — PIN didn't match the hash
+   *   - `staff_busy_elsewhere` — staff has an open shift on another terminal
+   */
   reasonCode?: string;
   error?: string;
+  /** Populated only when reasonCode === 'staff_busy_elsewhere'. */
+  busyTerminalId?: string | null;
+  busyTerminalName?: string;
+  busyRole?: string;
+  busyShiftId?: string;
+  busyCheckedInAt?: string;
 }
 
 // -- Settings / Terminal Config ----------------------------------------------

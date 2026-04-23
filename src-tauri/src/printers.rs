@@ -183,6 +183,15 @@ fn probe_network_printer_brand_http_target(
 ) -> PrinterBrand {
     use std::io::{Read, Write};
 
+    // Reject any host_header containing control characters (\r, \n, \t,
+    // other C0, or DEL). Without this guard the format! below would fold
+    // arbitrary headers into the outgoing HTTP request (CRLF injection) if
+    // the printer configuration stored a malicious host value.
+    if host_header.bytes().any(|b| b < 0x20 || b == 0x7F) || host_header.is_empty() {
+        warn!("rejecting printer brand probe: host_header contains control characters or is empty");
+        return PrinterBrand::Unknown;
+    }
+
     let mut stream = match connect_tcp_socket(connect_host, port, NETWORK_BRAND_PROBE_TIMEOUT_MS) {
         Ok(stream) => stream,
         Err(_) => return PrinterBrand::Unknown,
@@ -1365,6 +1374,14 @@ pub fn print_raw_to_tcp(
     // Chunk large payloads to avoid overwhelming the printer's receive buffer.
     // Star mC-Print3 and similar LAN printers can drop data when the full
     // payload (logo raster + receipt body) exceeds the TCP receive window.
+    //
+    // Wave 6 L: `std::thread::sleep` is correct for this sync function but
+    // can block a Tokio worker when called from a `#[tauri::command] async`
+    // entry-point. On a large raster (5-10 chunks × 20 ms) that is up to
+    // 200 ms of blocked worker. Async callers SHOULD wrap this call in
+    // `tokio::task::spawn_blocking(...)`. Converting the whole helper to
+    // async would cascade into every printer-dispatch site (serial, USB,
+    // Windows spool), which is out of scope for this fix.
     const TCP_CHUNK_SIZE: usize = 4096;
     const TCP_CHUNK_DELAY_MS: u64 = 20;
     if data.len() > TCP_CHUNK_SIZE {
@@ -1441,10 +1458,27 @@ pub fn print_raw_to_serial(
 }
 
 pub fn probe_printer_serial(port_name: &str, baud_rate: u32) -> Result<(), String> {
-    let _port = serialport::new(port_name, baud_rate)
+    // Wave 3: on HEAD this probe opened the port and immediately dropped
+    // it, returning Ok before any I/O. A busy or mis-wired serial port
+    // can satisfy `.open()` while not responding to any thermal-printer
+    // command, so users would see "probe passed" but real prints would
+    // fail. Sending a short ESC/POS initialise sequence and requiring
+    // the driver to accept the write is a better health signal with
+    // negligible cost on a real printer.
+    let mut port = serialport::new(port_name, baud_rate)
         .timeout(Duration::from_millis(RAW_SERIAL_TIMEOUT_MS))
         .open()
         .map_err(|e| format!("Open serial printer {port_name} @ {baud_rate}: {e}"))?;
+
+    // ESC @  — ESC/POS "initialise printer". Universally supported and
+    // has no observable side-effect on a healthy device.
+    const ESC_AT: &[u8] = &[0x1B, 0x40];
+    port.write_all(ESC_AT).map_err(|e| {
+        format!("Probe write to serial printer {port_name} @ {baud_rate}: {e}")
+    })?;
+    port.flush().map_err(|e| {
+        format!("Probe flush on serial printer {port_name} @ {baud_rate}: {e}")
+    })?;
     Ok(())
 }
 

@@ -434,8 +434,7 @@ mod tests {
 
     #[test]
     fn test_parse_invite_with_p_asserted_identity() {
-        let data = format!(
-            "INVITE sip:100@192.168.1.1 SIP/2.0\r\n\
+        let data = "INVITE sip:100@192.168.1.1 SIP/2.0\r\n\
              Via: SIP/2.0/UDP 10.0.0.5:5060;branch=z9hG4bK776\r\n\
              From: \"PBX\" <sip:pbx@10.0.0.5>;tag=abc\r\n\
              P-Asserted-Identity: \"Real Caller\" <sip:+306999888777@10.0.0.5>\r\n\
@@ -444,8 +443,8 @@ mod tests {
              CSeq: 1 INVITE\r\n\
              Content-Length: 0\r\n\
              \r\n"
-        )
-        .into_bytes();
+            .as_bytes()
+            .to_vec();
         let info = parse_sip_invite(&data).unwrap();
         assert_eq!(info.caller_number, "+306999888777");
         assert_eq!(info.caller_name, Some("Real Caller".into()));

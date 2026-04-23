@@ -2,6 +2,7 @@
  * Sends activity events to main via IPC and queues offline if needed.
  */
 import { getBridge, isBrowser, onEvent } from '../../lib'
+import { getSecureSessionSync } from '../lib/secure-session-cache'
 
 export type ActivityContext = {
   staffId?: string
@@ -44,10 +45,14 @@ class ActivityTrackerClass {
   }
 
   private loadFallbackContext(): ActivityContext {
+    // Wave 1 C6: the authenticated session used to live in
+    // `localStorage['pos-user']`. It is now cached via
+    // `secure-session-cache`, hydrated at app boot from the Rust
+    // keyring. The read is still synchronous and the same shape as
+    // before.
     try {
-      const raw = localStorage.getItem('pos-user')
-      if (!raw) return {}
-      const u = JSON.parse(raw)
+      const u = getSecureSessionSync()
+      if (!u) return {}
       return { staffId: u?.staffId, sessionId: u?.sessionId, terminalId: u?.terminalId, branchId: u?.branchId }
     } catch {
       return {}

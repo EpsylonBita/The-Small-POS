@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useI18n } from "../contexts/i18n-context";
 import { useTheme } from "../contexts/theme-context";
 import AnimatedBackground from "../components/AnimatedBackground";
 import ThemeToggle from "../components/ThemeToggle";
 import logoBlack from "../assets/logo-black.png";
 import logoWhite from "../assets/logo-white.png";
-import { AlertTriangle, Delete as DeleteIcon } from "lucide-react";
+import { AlertTriangle, Delete as DeleteIcon, Lock } from "lucide-react";
 import { getBridge, offEvent, onEvent } from "../../lib";
 
 interface LoginPageProps {
@@ -30,6 +31,21 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     const [setupError, setSetupError] = useState("");
     const [appVersion, setAppVersion] = useState<string>("");
     const autoSubmitRef = useRef(false);
+
+    // Escape-key closes the Setup PIN modal, unless a PIN reset is mandatory.
+    useEffect(() => {
+        if (!showPinSetup || pinResetRequired) return;
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setShowPinSetup(false);
+                setNewPin("");
+                setConfirmPin("");
+                setSetupError("");
+            }
+        };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, [showPinSetup, pinResetRequired]);
 
     // Load app version on mount
     useEffect(() => {
@@ -57,10 +73,36 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 const adminPinHash = snapshot?.['staff.admin_pin_hash'] ?? snapshot?.staff?.admin_pin_hash;
                 const staffPinHash = snapshot?.['staff.staff_pin_hash'] ?? snapshot?.staff?.staff_pin_hash;
                 const legacySimplePinFromDb = snapshot?.['staff.simple_pin'] ?? snapshot?.staff?.simple_pin;
-                const legacySimplePinFromStorage = localStorage.getItem('staff.simple_pin') || '';
+
+                // Wave 1 C7: persistent migration-complete marker. Once set,
+                // we MUST NOT read `localStorage['staff.simple_pin']` again
+                // — the legacy PIN never belongs in renderer-accessible
+                // storage and every boot that re-reads it briefly lifts
+                // the cleartext back into the JS heap. The flag lives in
+                // terminal settings (Rust-side SQLite) so it survives
+                // across reboots and browser-storage clears.
+                const legacyPinMigratedRaw =
+                    snapshot?.['terminal.legacy_pin_migrated'] ??
+                    snapshot?.terminal?.legacy_pin_migrated;
+                const legacyPinMigrated =
+                    legacyPinMigratedRaw === true || legacyPinMigratedRaw === 'true';
+
+                // Guarded: only read localStorage if the migration marker
+                // says the cleartext PIN may still be there. Once the
+                // marker is set this expression evaluates to '' without
+                // touching storage at all.
+                const legacySimplePinFromStorage = legacyPinMigrated
+                    ? ''
+                    : localStorage.getItem('staff.simple_pin') || '';
 
                 let hasPinHashes = !!adminPinHash || !!staffPinHash;
                 if (!hasPinHashes) {
+                    // Never-migrated path: read legacy sources and attempt
+                    // migration. After the attempt (whether it succeeds or
+                    // fails), remove the localStorage key FIRST, THEN set
+                    // the marker — this ordering ensures we never end up
+                    // with {marker=true, localStorage=still-set}, which
+                    // would leave the PIN stranded forever.
                     const legacyPin = (legacySimplePinFromDb || legacySimplePinFromStorage || '').toString().trim();
                     if (legacyPin.length >= 4) {
                         try {
@@ -72,11 +114,31 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                 settings: { simple_pin: '' },
                             });
                             localStorage.removeItem('staff.simple_pin');
+                            await bridge.settings.updateLocal({
+                                settingType: 'terminal',
+                                settings: { legacy_pin_migrated: true },
+                            });
                             hasPinHashes = true;
                             console.log('[LoginPage] Migrated legacy simple_pin to hashed staff PIN');
                         } catch (migrationError) {
                             console.warn('[LoginPage] Failed to migrate legacy simple_pin:', migrationError);
                         }
+                    }
+                } else if (!legacyPinMigrated) {
+                    // Already-migrated-but-marker-not-set recovery path:
+                    // hashes exist, so setupPin completed on a prior boot,
+                    // but either the localStorage removal or the marker
+                    // write failed. Idempotently finish the cleanup so
+                    // subsequent boots stop reading localStorage.
+                    try {
+                        localStorage.removeItem('staff.simple_pin');
+                        await bridge.settings.updateLocal({
+                            settingType: 'terminal',
+                            settings: { legacy_pin_migrated: true },
+                        });
+                        console.log('[LoginPage] Finished pending legacy_pin_migrated cleanup');
+                    } catch (cleanupError) {
+                        console.warn('[LoginPage] Failed to finalise legacy_pin_migrated:', cleanupError);
                     }
                 }
 
@@ -341,38 +403,83 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     </button>
                 )}
 
-                {/* PIN Setup Modal */}
-                {showPinSetup && (
-                    <>
+                {/* PIN Setup Modal — portalled to document.body so it escapes
+                    the login-card's flow and renders as a proper centered overlay.
+                    Backdrop-click and Escape dismiss (unless pinResetRequired, in
+                    which case the user MUST set a PIN before proceeding). */}
+                {showPinSetup && createPortal(
+                    <div
+                        className="fixed inset-0 z-[1050] flex items-center justify-center p-4 sm:p-6"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="setup-pin-title"
+                        onMouseDown={(e) => {
+                            if (!pinResetRequired && e.target === e.currentTarget) {
+                                setShowPinSetup(false);
+                                setNewPin("");
+                                setConfirmPin("");
+                                setSetupError("");
+                            }
+                        }}
+                    >
                         <div className="liquid-glass-modal-backdrop" />
-                        <div className="liquid-glass-modal-shell w-full p-6" style={{ maxWidth: '24rem' }}>
-                            <h2 className="text-xl font-bold liquid-glass-modal-text mb-4 text-center">{t('login.setupPin', 'Setup PIN')}</h2>
-                            <p className="liquid-glass-modal-text-muted text-sm mb-4 text-center">{t('login.setupPinDesc', 'Create a 6-digit PIN for admin access')}</p>
+                        <div
+                            className="relative liquid-glass-modal-shell w-full px-10 py-8 sm:px-12"
+                            style={{ maxWidth: '34rem' }}
+                            onMouseDown={(e) => e.stopPropagation()}
+                        >
+                            <div className="flex flex-col items-center mb-6">
+                                <div
+                                    className={`flex h-14 w-14 items-center justify-center rounded-full mb-3 ${
+                                        isDark ? 'bg-blue-500/15 ring-1 ring-blue-400/30' : 'bg-blue-500/10 ring-1 ring-blue-500/20'
+                                    }`}
+                                >
+                                    <Lock className={isDark ? 'text-blue-300' : 'text-blue-600'} size={24} aria-hidden="true" />
+                                </div>
+                                <h2
+                                    id="setup-pin-title"
+                                    className="text-2xl font-bold liquid-glass-modal-text text-center"
+                                >
+                                    {t('login.setupPin', 'Setup PIN')}
+                                </h2>
+                                <p className="liquid-glass-modal-text-muted text-sm mt-1.5 text-center">
+                                    {t('login.setupPinDesc', 'Create a 6-digit PIN for admin access')}
+                                </p>
+                            </div>
 
-                            <div className="space-y-4">
+                            <div className="space-y-5 mx-auto" style={{ maxWidth: '22rem' }}>
                                 <div>
-                                    <label className="liquid-glass-modal-text-muted text-sm block mb-1">{t('login.newPin', 'New PIN (6+ digits)')}</label>
+                                    <label className="liquid-glass-modal-text-muted text-sm font-medium block mb-2">
+                                        {t('login.newPin', 'New PIN (6+ digits)')}
+                                    </label>
                                     <input
                                         type="password"
+                                        inputMode="numeric"
+                                        autoComplete="new-password"
                                         value={newPin}
                                         onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 10))}
                                         placeholder={pinPlaceholder}
-                                        className="w-full liquid-glass-modal-input text-center text-xl tracking-widest"
+                                        className="w-full liquid-glass-modal-input text-center text-xl tracking-[0.4em] py-3"
+                                        autoFocus
                                     />
                                 </div>
                                 <div>
-                                    <label className="liquid-glass-modal-text-muted text-sm block mb-1">{t('login.confirmPin', 'Confirm PIN')}</label>
+                                    <label className="liquid-glass-modal-text-muted text-sm font-medium block mb-2">
+                                        {t('login.confirmPin', 'Confirm PIN')}
+                                    </label>
                                     <input
                                         type="password"
+                                        inputMode="numeric"
+                                        autoComplete="new-password"
                                         value={confirmPin}
                                         onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, '').slice(0, 10))}
                                         placeholder={pinPlaceholder}
-                                        className="w-full liquid-glass-modal-input text-center text-xl tracking-widest"
+                                        className="w-full liquid-glass-modal-input text-center text-xl tracking-[0.4em] py-3"
                                     />
                                 </div>
 
                                 {setupError && (
-                                    <p className="text-red-400 text-sm text-center">{setupError}</p>
+                                    <p className="text-red-400 text-sm text-center" role="alert">{setupError}</p>
                                 )}
 
                                 <div className="flex gap-3 pt-2">
@@ -442,7 +549,8 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                 </div>
                             </div>
                         </div>
-                    </>
+                    </div>,
+                    document.body
                 )}
 
                 <div className="mt-4 sm:mt-6 text-center relative z-10">

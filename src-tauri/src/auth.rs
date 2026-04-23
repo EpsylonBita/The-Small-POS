@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{db, storage};
+use crate::{api, db, storage};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -136,6 +136,27 @@ struct StaffAuthCacheEntry {
     pin_hash: Option<String>,
     #[serde(default)]
     is_active: Option<bool>,
+    /// Present when this staff has an open shift on any terminal in the
+    /// organization. Used to gray-out the staff on the check-in UI of every
+    /// *other* terminal with a subtitle like "Checked in at {terminal} as
+    /// {role}". The server-side unique partial index on staff_shifts is the
+    /// ultimate guarantee; this field drives UX pre-emptively.
+    #[serde(default, alias = "currentShift")]
+    current_shift: Option<StaffAuthCacheCurrentShift>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StaffAuthCacheCurrentShift {
+    #[serde(alias = "shiftId")]
+    shift_id: String,
+    #[serde(default, alias = "terminalId")]
+    terminal_id: Option<String>,
+    #[serde(default, alias = "terminalName")]
+    terminal_name: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default, alias = "checkedInAt")]
+    checked_in_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -288,11 +309,147 @@ fn load_staff_auth_cache(
     serde_json::from_str(&raw).map_err(|e| format!("invalid staff auth cache: {e}"))
 }
 
+/// Persist a staff auth directory payload (as returned by
+/// `/api/pos/staff-directory`) into `local_settings.staff_auth_cache`,
+/// keyed by branch. The structure is wrapped so the reader's schema-drift
+/// tolerance (version + synced_at envelope) is preserved.
+fn persist_staff_auth_cache(
+    db: &db::DbState,
+    branch_id: &str,
+    staff_entries: &Value,
+) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "version": 1,
+        "branch_id": branch_id,
+        "synced_at": Utc::now().to_rfc3339(),
+        "staff": staff_entries,
+    });
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    db::set_setting(
+        &conn,
+        STAFF_AUTH_CACHE_CATEGORY,
+        &staff_auth_cache_key(branch_id),
+        &payload.to_string(),
+    )
+    .map_err(|e| format!("persist staff auth cache: {e}"))
+}
+
+/// Fetch the staff directory (including `currentShift` data for cross-
+/// terminal busy state) from the admin dashboard and persist it to the
+/// local staff auth cache. Safe to call on any poll interval or event
+/// trigger; idempotent.
+///
+/// The server endpoint is `/api/pos/staff-directory?branchId={id}`, added
+/// as part of the cross-terminal staff exclusivity feature. If the
+/// credentials aren't configured (fresh install, keyring not yet
+/// populated), this returns an error and the caller should fall back to
+/// whatever staff auth cache is currently on disk (which may be stale or
+/// empty — the verify flow handles both).
+pub async fn refresh_staff_auth_directory(
+    db: &db::DbState,
+    branch_id_override: Option<&str>,
+) -> Result<Value, String> {
+    let admin_url = storage::get_credential("admin_dashboard_url")
+        .or_else(|| storage::get_credential("admin_url"))
+        .ok_or_else(|| "admin_url credential not configured".to_string())?;
+    let api_key = storage::get_credential("pos_api_key")
+        .or_else(|| storage::get_credential("api_key"))
+        .ok_or_else(|| "pos_api_key credential not configured".to_string())?;
+    let branch_id = branch_id_override
+        .map(|s| s.to_string())
+        .or_else(|| storage::get_credential("branch_id"))
+        .ok_or_else(|| "branch_id unavailable (not in payload or keyring)".to_string())?;
+    let branch_id = branch_id.trim().to_string();
+    if branch_id.is_empty() {
+        return Err("branch_id is empty".into());
+    }
+
+    // branch_id is a UUID in practice — no URL-encoding needed for valid
+    // values. If a non-UUID ever slips through, the admin endpoint will
+    // reject it with a 400, which bubbles up as a clean error here.
+    let path = format!("/api/pos/staff-directory?branchId={branch_id}");
+    let response = api::fetch_from_admin(&admin_url, &api_key, &path, "GET", None).await?;
+
+    if response.get("success").and_then(Value::as_bool) != Some(true) {
+        let reason = response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("staff directory fetch failed");
+        return Err(reason.to_string());
+    }
+
+    let staff_entries = response
+        .get("staff")
+        .cloned()
+        .unwrap_or(Value::Array(Vec::new()));
+    let staff_count = staff_entries.as_array().map(|arr| arr.len()).unwrap_or(0);
+
+    persist_staff_auth_cache(db, &branch_id, &staff_entries)?;
+
+    // Surface the set of staff IDs that are busy on some OTHER terminal.
+    // This is a convenience for the check-in UI so it doesn't need to know
+    // the current terminal id or walk the `currentShift` field itself.
+    let current_terminal_id = storage::get_credential("terminal_id")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let mut busy_elsewhere_ids: Vec<String> = Vec::new();
+    if let Some(arr) = staff_entries.as_array() {
+        for entry in arr {
+            let Some(staff_id) = entry.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(current_shift) = entry.get("currentShift").filter(|v| !v.is_null()) else {
+                continue;
+            };
+            let shift_terminal = current_shift
+                .get("terminalId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if shift_terminal.is_empty() {
+                continue;
+            }
+            if current_terminal_id.is_empty() || shift_terminal != current_terminal_id {
+                busy_elsewhere_ids.push(staff_id.to_string());
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "branchId": branch_id,
+        "currentTerminalId": current_terminal_id,
+        "staff": staff_entries,
+        "busyElsewhereStaffIds": busy_elsewhere_ids,
+        "staffCount": staff_count,
+        "syncedAt": Utc::now().to_rfc3339(),
+    }))
+}
+
 fn check_in_verify_failure(code: &str, error: &str) -> Value {
     serde_json::json!({
         "success": false,
         "reasonCode": code,
         "error": error,
+    })
+}
+
+/// Build the "staff is checked in on another terminal" failure payload. The
+/// React layer uses `terminalName` and `role` to render a localized message
+/// like "Checked in at {terminal} as {role}"; the `shiftId` is useful for
+/// diagnostics but not shown to the operator.
+fn check_in_busy_elsewhere_failure(current: &StaffAuthCacheCurrentShift) -> Value {
+    let terminal_name = current.terminal_name.as_deref().unwrap_or("").to_string();
+    let role = current.role.as_deref().unwrap_or("").to_string();
+    serde_json::json!({
+        "success": false,
+        "reasonCode": "staff_busy_elsewhere",
+        "error": "Staff is checked in on another terminal.",
+        "busyTerminalId": current.terminal_id,
+        "busyTerminalName": terminal_name,
+        "busyRole": role,
+        "busyShiftId": current.shift_id,
+        "busyCheckedInAt": current.checked_in_at,
     })
 }
 
@@ -381,12 +538,8 @@ fn current_terminal_has_cash_drawer_role(db: &db::DbState) -> Result<bool, Strin
     Ok(matches!(role.as_deref(), Some("cashier" | "manager")))
 }
 
-fn verify_pin_for_session(
-    pin: &str,
-    session: &StaffSession,
-    db: &db::DbState,
-) -> Result<bool, String> {
-    let key = if session.role == "admin" {
+fn verify_pin_for_role(pin: &str, role: &str, db: &db::DbState) -> Result<bool, String> {
+    let key = if role == "admin" {
         "admin_pin_hash"
     } else {
         "staff_pin_hash"
@@ -396,6 +549,14 @@ fn verify_pin_for_session(
         return Ok(false);
     };
     bcrypt::verify(pin, &hash).map_err(|e| format!("Failed to verify PIN: {e}"))
+}
+
+fn verify_pin_for_session(
+    pin: &str,
+    session: &StaffSession,
+    db: &db::DbState,
+) -> Result<bool, String> {
+    verify_pin_for_role(pin, &session.role, db)
 }
 
 /// Check whether the terminal is currently locked out.
@@ -427,6 +588,13 @@ fn reset_lockout(lockout: &mut LockoutEntry) {
 }
 
 /// Load persisted lockout state from local_settings.
+///
+/// When no persisted `last_attempt` row exists (fresh install, factory reset,
+/// or corrupted value), we default to UNIX_EPOCH rather than `Utc::now()`.
+/// `Utc::now()` would cause a fresh terminal to appear to have "just had a
+/// failed attempt", which is semantically wrong (check_lockout then treats
+/// the terminal as recently attempted) and could interact badly with any
+/// future logic that gates behavior on attempt recency.
 fn load_lockout_from_db(conn: &rusqlite::Connection) -> LockoutEntry {
     let attempts = db::get_setting(conn, "staff", LOCKOUT_ATTEMPTS_KEY)
         .and_then(|v| v.parse::<u32>().ok())
@@ -434,7 +602,10 @@ fn load_lockout_from_db(conn: &rusqlite::Connection) -> LockoutEntry {
     let last_attempt = db::get_setting(conn, "staff", LOCKOUT_LAST_ATTEMPT_KEY)
         .and_then(|v| chrono::DateTime::parse_from_rfc3339(&v).ok())
         .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(|| {
+            chrono::DateTime::<Utc>::from_timestamp(0, 0)
+                .expect("UNIX_EPOCH is a valid timestamp")
+        });
 
     LockoutEntry {
         attempts,
@@ -443,19 +614,38 @@ fn load_lockout_from_db(conn: &rusqlite::Connection) -> LockoutEntry {
 }
 
 /// Persist lockout state in local_settings.
+///
+/// Wave 6: previously used `let _ = db::set_setting(...)` which
+/// silently discarded any write failure. A persist failure here means
+/// the in-memory lockout state (attempts count, last-attempt time)
+/// will NOT survive a process restart — a malicious user could evade
+/// lockout by forcing the process to restart between attempts. We now
+/// log write failures at `warn!` so the issue is at least visible in
+/// the audit trail.
 fn persist_lockout_to_db(conn: &rusqlite::Connection, lockout: &LockoutEntry) {
-    let _ = db::set_setting(
+    if let Err(e) = db::set_setting(
         conn,
         "staff",
         LOCKOUT_ATTEMPTS_KEY,
         &lockout.attempts.to_string(),
-    );
-    let _ = db::set_setting(
+    ) {
+        warn!(
+            attempts = lockout.attempts,
+            error = %e,
+            "Failed to persist lockout attempts to DB; lockout will not survive restart"
+        );
+    }
+    if let Err(e) = db::set_setting(
         conn,
         "staff",
         LOCKOUT_LAST_ATTEMPT_KEY,
         &lockout.last_attempt.to_rfc3339(),
-    );
+    ) {
+        warn!(
+            error = %e,
+            "Failed to persist lockout last_attempt to DB; lockout will not survive restart"
+        );
+    }
 }
 
 /// Create a new session and register it in the auth state.
@@ -522,37 +712,89 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
     // The entire lockout load→check→verify→record→persist flow is wrapped in
     // a single DB transaction + mutex critical section to prevent TOCTOU races
     // if two login attempts arrive simultaneously.
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-    // BEGIN IMMEDIATE to acquire a write lock up front
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("begin auth transaction: {e}"))?;
-
-    let persisted_lockout = load_lockout_from_db(&conn);
+    //
+    // ======================================================================
+    // LOCK ORDERING INVARIANT — DO NOT VIOLATE
+    // ======================================================================
+    // Order: `auth.lockout` MUST be acquired BEFORE `db.conn`.
+    //
+    // Why not "release lockout before acquiring conn" (the naïve safer
+    // refactor)? Between the release and the re-acquire, another login
+    // thread could acquire `auth.lockout`, read stale lockout state from
+    // the DB (our write has not yet committed), and make an authorization
+    // decision on it. Holding both across the DB write is what makes the
+    // lockout state + DB state consistent under concurrent logins.
+    //
+    // Only `login()` (this function) acquires `auth.lockout`. If you
+    // introduce a second call site, it MUST take the locks in the same
+    // order or you will deadlock. Grep for `lockout.lock()` before adding
+    // any new critical section that also touches `db.conn`.
+    // ======================================================================
     let mut lockout = auth
         .lockout
         .lock()
         .map_err(|e| format!("mutex poisoned: {e}"))?;
-    *lockout = persisted_lockout;
-    if let Err(e) = check_lockout(&lockout) {
-        let _ = conn.execute_batch("ROLLBACK");
-        return Err(e);
-    }
 
-    let admin_hash = db::get_setting(&conn, "staff", "admin_pin_hash");
-    let staff_hash = db::get_setting(&conn, "staff", "staff_pin_hash");
+    // Phase 1 — under db.conn: load lockout, check it, read PIN hashes.
+    // We release db.conn BEFORE running bcrypt so the ~300 ms per-hash CPU
+    // work does not hold the DB write lock (previously it did, blocking
+    // every other DB op for ~600 ms on every login attempt). `auth.lockout`
+    // stays held across all three phases so concurrent login attempts
+    // remain serialized and TOCTOU-safe.
+    let (admin_hash, staff_hash) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("begin auth phase-1 transaction: {e}"))?;
+
+        let persisted_lockout = load_lockout_from_db(&conn);
+        *lockout = persisted_lockout;
+        if let Err(e) = check_lockout(&lockout) {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+
+        let admin_hash = db::get_setting(&conn, "staff", "admin_pin_hash");
+        let staff_hash = db::get_setting(&conn, "staff", "staff_pin_hash");
+
+        conn.execute_batch("COMMIT")
+            .map_err(|e| format!("commit auth phase-1 transaction: {e}"))?;
+        (admin_hash, staff_hash)
+        // MutexGuard dropped here — DB is free for other operations during bcrypt.
+    };
 
     // Dummy hash used when no PIN is configured, so bcrypt::verify still runs
     // and the total timing remains constant regardless of which hashes exist.
     const DUMMY_HASH: &str = "$2b$12$000000000000000000000uKYMKnMSMFxOuTQFqzfB/F6JcvrFvlq";
 
-    // Always verify against BOTH hashes to prevent timing side-channels.
-    // An attacker must not be able to distinguish admin/staff/no-PIN by
+    // Phase 2 — CPU-bound bcrypt verification, no DB lock held. We still
+    // always verify against BOTH hashes to prevent timing side-channels:
+    // an attacker must not be able to distinguish admin/staff/no-PIN by
     // measuring response time (each path runs exactly 2 bcrypt verifications).
-    let admin_ok =
-        bcrypt::verify(&pin, admin_hash.as_deref().unwrap_or(DUMMY_HASH)).unwrap_or(false);
-    let staff_ok =
-        bcrypt::verify(&pin, staff_hash.as_deref().unwrap_or(DUMMY_HASH)).unwrap_or(false);
+    //
+    // A bcrypt::verify error (corrupt hash, format mismatch) is logged but
+    // still treated as "no match" — logging makes the operational issue
+    // visible while keeping the response indistinguishable from a wrong PIN
+    // so the attacker cannot learn which hash is corrupt.
+    let admin_ok = match bcrypt::verify(&pin, admin_hash.as_deref().unwrap_or(DUMMY_HASH)) {
+        Ok(matched) => matched,
+        Err(err) => {
+            warn!(error = %err, "bcrypt verify failed against admin hash — treating as no-match");
+            false
+        }
+    };
+    let staff_ok = match bcrypt::verify(&pin, staff_hash.as_deref().unwrap_or(DUMMY_HASH)) {
+        Ok(matched) => matched,
+        Err(err) => {
+            warn!(error = %err, "bcrypt verify failed against staff hash — treating as no-match");
+            false
+        }
+    };
+
+    // Phase 3 — re-acquire db.conn and persist the outcome (reset or
+    // record-failure + persist lockout). Short critical section.
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin auth phase-3 transaction: {e}"))?;
 
     let result = if admin_ok && admin_hash.is_some() {
         reset_lockout(&mut lockout);
@@ -571,7 +813,7 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
     };
 
     conn.execute_batch("COMMIT")
-        .map_err(|e| format!("commit auth transaction: {e}"))?;
+        .map_err(|e| format!("commit auth phase-3 transaction: {e}"))?;
     // Release the lockout mutex before creating the session
     drop(lockout);
 
@@ -617,10 +859,15 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
         ));
     }
 
+    // UUID comparison is case-sensitive by spec (RFC 4122 §3): canonical
+    // form uses lowercase hex. Accepting mixed-case matches would hide
+    // upstream bugs where staff_id is not normalised and could conceivably
+    // be exploited if an attacker controls the input casing in a system
+    // that treats the two forms differently elsewhere.
     let maybe_staff = cache
         .staff
         .iter()
-        .find(|entry| entry.id.trim().eq_ignore_ascii_case(staff_id));
+        .find(|entry| entry.id.trim() == staff_id);
 
     let Some(staff) = maybe_staff else {
         return Ok(check_in_verify_failure(
@@ -654,6 +901,34 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
             "No POS PIN is configured for this staff member.",
         ));
     };
+
+    // Busy-elsewhere check: if this staff has an open shift on any
+    // terminal OTHER than the one running this check, refuse the check-in
+    // before burning ~300ms on bcrypt. The UI should already gate this,
+    // but a stale cache can let it slip through. The Supabase unique
+    // partial index `staff_shifts_one_open_per_staff` is the ultimate
+    // guarantee — if this check misses, the admin-side INSERT still
+    // fails with SQLSTATE 23505.
+    if let Some(current_shift) = staff.current_shift.as_ref() {
+        let current_terminal = storage::get_credential("terminal_id")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let busy_terminal = current_shift
+            .terminal_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
+        // Block when the busy terminal is known and differs from ours.
+        // If our own terminal_id is not yet resolvable (fresh install,
+        // keyring not populated), err on the side of blocking — letting
+        // it through could let a race produce duplicate open shifts that
+        // the server rejects anyway.
+        if !busy_terminal.is_empty()
+            && (current_terminal.is_empty() || current_terminal != busy_terminal)
+        {
+            return Ok(check_in_busy_elsewhere_failure(current_shift));
+        }
+    }
 
     let pin_ok =
         bcrypt::verify(pin, hash).map_err(|e| format!("Failed to verify staff PIN: {e}"))?;
@@ -885,6 +1160,12 @@ fn confirm_privileged_action_at(
     let scope = extract_scope(&payload)
         .ok_or_else(|| PrivilegedActionError::unauthorized(None, "Invalid privileged scope"))?;
 
+    // `pin_already_verified` lets the SystemControl-no-session branch verify
+    // the PIN *before* creating any temporary session (otherwise a wrong PIN
+    // leaves a persistent admin session in auth.sessions). Other branches
+    // verify through the normal flow below.
+    let mut pin_already_verified = false;
+
     let session = match scope {
         PrivilegedActionScope::SystemControl => {
             match get_current_session(auth) {
@@ -896,8 +1177,18 @@ fn confirm_privileged_action_at(
                     ));
                 }
                 None => {
-                    // No active session — create a temporary admin session so the
-                    // privileged-grant chain works. PIN verified by standard flow below.
+                    // Verify the PIN against admin_pin_hash BEFORE creating a
+                    // session. Previous order created the session first, so a
+                    // wrong PIN left a privileged session hanging in memory.
+                    let admin_ok = verify_pin_for_role(&pin, "admin", db)
+                        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+                    if !admin_ok {
+                        return Err(PrivilegedActionError::unauthorized(
+                            Some(scope),
+                            "Invalid PIN",
+                        ));
+                    }
+                    pin_already_verified = true;
                     let _ = create_session(auth, "admin", "system-control");
                     get_current_session(auth).ok_or_else(|| {
                         PrivilegedActionError::unauthorized(
@@ -930,13 +1221,15 @@ fn confirm_privileged_action_at(
         }
     };
 
-    let pin_ok = verify_pin_for_session(&pin, &session, db)
-        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
-    if !pin_ok {
-        return Err(PrivilegedActionError::unauthorized(
-            Some(scope),
-            "Invalid PIN",
-        ));
+    if !pin_already_verified {
+        let pin_ok = verify_pin_for_session(&pin, &session, db)
+            .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+        if !pin_ok {
+            return Err(PrivilegedActionError::unauthorized(
+                Some(scope),
+                "Invalid PIN",
+            ));
+        }
     }
 
     let expires_at = record_privileged_grant_at(auth, &session.session_id, scope, now)

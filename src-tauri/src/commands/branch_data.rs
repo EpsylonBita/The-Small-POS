@@ -813,7 +813,7 @@ pub async fn branch_data_validate_coupon(
             "valid": true,
             "coupon": {
                 "id": coupon.get("id").cloned().unwrap_or(Value::Null),
-                "code": coupon.get("code").cloned().unwrap_or_else(|| Value::String(code)),
+                "code": coupon.get("code").cloned().unwrap_or(Value::String(code)),
                 "name": coupon.get("name").cloned().unwrap_or(Value::Null),
                 "description": coupon.get("description").cloned().unwrap_or(Value::Null),
                 "discount_type": coupon.get("discount_type").cloned().or_else(|| coupon.get("discountType").cloned()).unwrap_or_else(|| json!("fixed")),

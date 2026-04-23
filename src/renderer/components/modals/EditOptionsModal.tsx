@@ -131,9 +131,9 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     {([
-                      ["pickup", t('orders.type.takeaway', 'Pickup')],
+                      ["pickup", t('orders.type.pickup', 'Pickup')],
                       ["delivery", t('orders.type.delivery', 'Delivery')],
-                      ["dine-in", t('orders.type.dine_in', 'Dine In')],
+                      ["dine-in", t('orders.type.dineIn', 'Dine In')],
                     ] as const).map(([type, label]) => {
                       const isActive = currentOrderType === type;
                       return (

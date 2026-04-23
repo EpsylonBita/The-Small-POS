@@ -7,11 +7,30 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use reqwest::{Client, Method, StatusCode};
 use serde_json::Value;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 /// Default timeout for API requests (30 seconds).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Shared reqwest::Client — holds a connection pool, TLS session cache,
+/// and DNS cache. Previously a fresh Client was built on every call to
+/// `fetch_from_admin` and `test_connectivity`, which defeated keep-alive,
+/// forced a TLS handshake per request, and could leak file descriptors
+/// under load. `reqwest::Client` is cheap to clone (internally Arc-based),
+/// but referencing the singleton directly avoids even that overhead. Each
+/// caller sets its own timeout via `RequestBuilder::timeout()` rather
+/// than the client-level default.
+static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn shared_client() -> &'static Client {
+    HTTP_CLIENT.get_or_init(|| {
+        Client::builder()
+            .build()
+            .expect("build shared reqwest Client")
+    })
+}
 
 /// Redact a sensitive string for log output: shows only the last 4 characters.
 /// Returns `"****"` for strings shorter than 5 chars, `"...XXXX"` otherwise.
@@ -184,21 +203,13 @@ pub async fn test_connectivity(admin_url: &str, api_key: &str) -> ConnectivityRe
         extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
     let health_url = format!("{url}/api/health");
 
-    let client = match Client::builder().timeout(CONNECTIVITY_TIMEOUT).build() {
-        Ok(c) => c,
-        Err(e) => {
-            return ConnectivityResult {
-                success: false,
-                latency_ms: None,
-                error: Some(format!("Failed to create HTTP client: {e}")),
-            };
-        }
-    };
+    let client = shared_client();
 
     let start = Instant::now();
 
     let resp = match client
         .get(&health_url)
+        .timeout(CONNECTIVITY_TIMEOUT)
         .header("X-POS-API-Key", resolved_api_key)
         .send()
         .await
@@ -257,17 +268,22 @@ pub async fn fetch_from_admin(
         .parse()
         .map_err(|_| format!("Invalid HTTP method: {method}"))?;
 
-    let client = Client::builder()
-        .timeout(DEFAULT_TIMEOUT)
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+    let client = shared_client();
 
     // Include terminal_id header — required by verifyPosAuth on the admin side
     let mut terminal_id = crate::storage::get_credential("terminal_id").unwrap_or_default();
     if terminal_id.trim().is_empty() {
+        // If the keyring lacks a terminal_id, fall back to whatever the
+        // caller put in the request body so the server still receives a
+        // terminal header. We intentionally do NOT persist this value:
+        // the body is caller-supplied and unverified at this point, so
+        // trusting it for durable storage would let a bad payload seed
+        // the keyring with an attacker-chosen identity. The
+        // connection-string path below (which came through onboarding
+        // and is cryptographically scoped) remains the only trusted
+        // source that writes to the keyring.
         if let Some(body_terminal_id) = extract_terminal_id_from_body(body.as_ref()) {
-            terminal_id = body_terminal_id.clone();
-            let _ = crate::storage::set_credential("terminal_id", &body_terminal_id);
+            terminal_id = body_terminal_id;
         }
     }
     if let Some(decoded_tid) = extract_terminal_id_from_connection_string(api_key) {
@@ -287,6 +303,7 @@ pub async fn fetch_from_admin(
 
     let mut req = client
         .request(http_method, &full_url)
+        .timeout(DEFAULT_TIMEOUT)
         .header("X-POS-API-Key", resolved_api_key)
         .header("x-terminal-id", &terminal_id)
         .header("Content-Type", "application/json");
@@ -303,12 +320,30 @@ pub async fn fetch_from_admin(
         req = req.json(&resolved);
     }
 
-    let resp = req.send().await.map_err(|e| friendly_error(&base, &e))?;
+    let mut resp = req.send().await.map_err(|e| friendly_error(&base, &e))?;
     let status = resp.status();
 
     if !status.is_success() {
-        // Preserve validation details for diagnostics and sync queue visibility.
-        let body_text = resp.text().await.unwrap_or_default();
+        // Preserve validation details for diagnostics and sync queue visibility,
+        // but cap the response body at 64 KB so a hostile or misconfigured
+        // server returning a huge error payload cannot OOM the terminal.
+        const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+        let mut body_bytes: Vec<u8> = Vec::new();
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(body_bytes.len());
+                    if chunk.len() >= remaining {
+                        body_bytes.extend_from_slice(&chunk[..remaining]);
+                        break;
+                    }
+                    body_bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
         let detail = if let Ok(json) = serde_json::from_str::<Value>(&body_text) {
             let message = json
                 .get("error")
@@ -338,7 +373,16 @@ pub async fn fetch_from_admin(
     }
 
     // Return the JSON body, or null for empty 204 responses.
-    let body_text = resp.text().await.unwrap_or_default();
+    //
+    // Wave 6: propagate body-read errors rather than swallowing them
+    // with `unwrap_or_default()`. On HEAD a transport error mid-body
+    // returned an empty string which was then parsed as a JSON null,
+    // indistinguishable from a genuine 204. The caller had no way to
+    // tell the two apart.
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read admin response body: {e}"))?;
     if body_text.is_empty() {
         return Ok(Value::Null);
     }

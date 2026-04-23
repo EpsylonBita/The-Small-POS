@@ -29,6 +29,7 @@ import KioskManagementPage from '../pages/KioskManagementPage';
 import IntegrationsPage from '../pages/IntegrationsPage';
 import SettingsPage from '../pages/SettingsPage';
 import { getBridge } from '../../lib';
+import { clearSecureSession } from '../lib/secure-session-cache';
 import { getOfflinePageBanner } from '../services/offline-page-capabilities';
 
 import { ExpenseModal } from './modals/ExpenseModal';
@@ -306,7 +307,10 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     if (onLogout) {
       onLogout();
     } else {
-      localStorage.removeItem("pos-user");
+      // Wave 1 C6: clear the keyring-backed session before reloading.
+      // Fire-and-forget is safe here — the reload re-hydrates from the
+      // (now-empty) keyring and routes to the login screen regardless.
+      void clearSecureSession();
       window.location.reload();
     }
   };

@@ -2416,6 +2416,21 @@
     }
   },
   "modals": {
+    "editSettlementDelta": {
+      "collectTitle": "Paiement supplémentaire",
+      "refundTitle": "Remboursement",
+      "collectBody": "Encaisser €{{amount}} supplémentaires — choisissez la méthode.",
+      "refundBody": "Rendre €{{amount}} au client — choisissez la méthode.",
+      "collectAmountLabel": "Supplément à encaisser",
+      "refundAmountLabel": "Montant du remboursement",
+      "payWithCash": "Payer en espèces",
+      "payWithCard": "Payer par carte",
+      "refundCash": "Rembourser en espèces",
+      "refundCard": "Rembourser sur carte",
+      "refundNote": "Les remboursements par carte sont enregistrés comme une correction comptable. Effectuez l'annulation de carte séparément si nécessaire.",
+      "cancel": "Annuler",
+      "failed": "Impossible de finaliser le règlement"
+    },
     "orderType": {
       "title": "Sélectionner le type de commande",
       "pickup": "Commande à emporter",
@@ -2645,6 +2660,9 @@
       "openingCash": "Espèces d'ouverture",
       "authenticating": "Authentification en cours...",
       "invalidPIN": "PIN invalide",
+      "busyElsewhere": "Connecté à {{terminal}} en tant que {{role}}",
+      "busyTerminalFallback": "un autre terminal",
+      "unavailable": "Indisponible",
       "noStaffSelected": "Veuillez sélectionner un membre du personnel",
       "shiftStarted": "Service démarré avec succès",
       "shiftEnded": "Service terminé avec succès",
@@ -3212,6 +3230,8 @@
       "editOrderItemsDesc": "Modifier les articles, quantités, notes",
       "editPaymentMethod": "Modifier le mode de paiement",
       "editPaymentMethodDesc": "Basculer entre espèces et carte",
+      "changeOrderType": "Changer le type de commande",
+      "changeOrderTypeDesc": "Recalculer la commande selon les tarifs emporter, livraison ou sur place",
       "cancel": "Annuler"
     },
     "editPaymentMethod": {
@@ -3562,6 +3582,15 @@
     "enterWithoutPin": "Entrer sans PIN",
     "noPinWarning": "Aucun PIN défini. Vous pouvez en définir un dans les Paramètres après connexion.",
     "pinResetRequired": "Réinitialisation du PIN requise. Veuillez définir un nouveau PIN pour continuer.",
+    "setupPin": "Configurer le PIN",
+    "setupPinDesc": "Créez un code PIN à 6 chiffres pour l'accès administrateur",
+    "newPin": "Nouveau PIN (6+ chiffres)",
+    "confirmPin": "Confirmer le PIN",
+    "savePin": "Enregistrer le PIN",
+    "createPin": "Créer un PIN",
+    "pinTooShort": "Le PIN doit comporter au moins 6 chiffres",
+    "pinMismatch": "Les PIN ne correspondent pas",
+    "setupFailed": "Échec de la configuration du PIN",
     "errors": {
       "enterPin": "Veuillez saisir votre PIN",
       "invalidPin": "Code incorrect",
@@ -3673,7 +3702,9 @@
     "delivery": "Livraison",
     "pickup": "Emporter",
     "edit": "Modifier",
+    "editOrders": "Modifier les commandes",
     "cancel": "Annuler",
+    "cancelOrders": "Annuler les commandes",
     "map": "Carte",
     "delivered": "Livré",
     "view": "Voir",

@@ -226,7 +226,7 @@ export function useAutoUpdater() {
         const downloadedVersion = initialState.downloadedVersion ?? null;
         const installPending = initialState.installPending ?? false;
         const installingVersion = initialState.installingVersion ?? null;
-        const updateInfo = normalizeUpdateInfo(initialState.updateInfo, downloadedVersion);
+        const updateInfo = normalizeUpdateInfo(initialState.updateInfo ?? null, downloadedVersion);
 
         setState((s) => ({
           ...s,

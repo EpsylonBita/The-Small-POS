@@ -182,32 +182,41 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         requested_opening_cash
     };
 
-    // Check for existing active shift
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT id FROM staff_shifts WHERE staff_id = ?1 AND status = 'active'",
-            params![staff_id],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if let Some(existing_id) = existing {
-        return Err(format!(
-            "Staff member already has an active shift ({})",
-            existing_id
-        ));
-    }
-
     let shift_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
-    // Wrap all writes in a transaction for atomicity
+    // Wave 2a C2: open the transaction FIRST. The duplicate-shift check
+    // used to run here (lines 186–199 on HEAD) outside any transaction.
+    // Two terminals racing to open a shift for the same staff could both
+    // pass the pre-check and then both INSERT successfully, violating
+    // the "one active shift per staff" invariant. Moving the SELECT
+    // inside `BEGIN IMMEDIATE` — combined with the partial UNIQUE index
+    // added in `migrate_v46` as defence-in-depth — serialises the
+    // check-then-insert under SQLite's WAL write lock.
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
+        // Re-check inside the transaction: this is the authoritative
+        // guard. Any concurrent writer that beat us to `BEGIN IMMEDIATE`
+        // has already committed their INSERT, so their row is visible.
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM staff_shifts WHERE staff_id = ?1 AND status = 'active'",
+                params![staff_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        if let Some(existing_id) = existing {
+            return Err(format!(
+                "Staff member already has an active shift ({})",
+                existing_id
+            ));
+        }
+
         let check_in_eligibility = resolve_check_in_eligibility(&conn, &branch_id, &terminal_id)?;
-        if role_type.trim().to_ascii_lowercase() != "cashier"
+        if !role_type.trim().eq_ignore_ascii_case("cashier")
             && check_in_eligibility.requires_cashier_first()
         {
             return Err(
@@ -602,9 +611,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     order_ownership::repair_historical_pickup_financial_attribution(&conn, &shift_branch_id, &now)
-        .map_err(|e| {
+        .inspect_err(|_| {
             let _ = conn.execute_batch("ROLLBACK");
-            e
         })?;
 
     if role_type == "cashier" || role_type == "manager" {
@@ -615,9 +623,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             Some(now.as_str()),
             true,
         )
-        .map_err(|e| {
+        .inspect_err(|_| {
             let _ = conn.execute_batch("ROLLBACK");
-            e
         })?;
         if !blockers.is_empty() {
             let _ = conn.execute_batch("ROLLBACK");
@@ -660,6 +667,51 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     total_deducted = %transferred_driver_starting_total,
                     "Subtracted transferred driver starting amounts from driver_cash_given"
                 );
+            }
+
+            // Wave 2a (shifts.rs:823 high-severity finding): require all
+            // drivers in this cashier's business-day window to have
+            // closed or been transferred before the cashier can close.
+            // Otherwise the expected-cash formula — which deducts
+            // `driver_given` but adds back `driver_returned` — understates
+            // expected for active drivers, because `driver_returned = 0`
+            // and `inherited_driver_expected_returns` only covers
+            // drivers explicitly transferred to this cashier. Rejecting
+            // here is simpler and auditable.
+            // `transfer_active_cash_staff` has already run. Any drivers
+            // that were successfully transferred to a specific next
+            // cashier have `transferred_to_cashier_shift_id` set;
+            // drivers for which the transfer target is not yet known
+            // are marked with `is_transfer_pending = 1`. Either form
+            // is acceptable — the outstanding cash obligation moves
+            // with the driver. An "orphan" here is a driver who is
+            // BOTH unassigned AND not flagged pending — meaning
+            // transfer never happened and the cashier's formula
+            // would silently understate expected.
+            let orphan_active_dependent_drivers: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM staff_shifts
+                     WHERE status = 'active'
+                       AND role_type IN ('driver', 'server')
+                       AND branch_id = ?1
+                       AND check_in_time >= ?2
+                       AND check_in_time <= ?3
+                       AND transferred_to_cashier_shift_id IS NULL
+                       AND COALESCE(is_transfer_pending, 0) = 0",
+                    params![
+                        shift_branch_id,
+                        shift_check_in_time.as_str(),
+                        now.as_str()
+                    ],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if orphan_active_dependent_drivers > 0 {
+                return Err(format!(
+                    "Cannot close cashier shift: {} driver/server shift(s) in this business day \
+                     are still active and not transferred. Close or transfer them first.",
+                    orphan_active_dependent_drivers
+                ));
             }
 
             // Reconcile-at-close: re-derive drawer totals from source-of-truth tables.
@@ -2079,7 +2131,7 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
     let (
         role_type,
         opening_cash,
-        calc_version,
+        _calc_version,
         check_in_time,
         check_out_time,
         closing_cash_amount,
@@ -2199,11 +2251,11 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         )
         .map_err(|e| format!("load closed drawer cash movement totals: {e}"))?;
 
-    let deducted_staff_payments = if calc_version >= 2 {
-        reconciled_staff_payments
-    } else {
-        reconciled_staff_payments
-    };
+    // calc_version currently has no behavioural difference for staff-payment
+    // deduction; both V1 and V2 use `reconciled_staff_payments` directly.
+    // Keeping the binding makes the intent explicit if a future calc_version
+    // wants to diverge.
+    let deducted_staff_payments = reconciled_staff_payments;
 
     let inherited_driver_expected_returns =
         compute_inherited_cash_staff_expected_returns(conn, shift_id, &check_in_time)?;
@@ -6143,5 +6195,151 @@ mod tests {
         assert_eq!(sync_state["nextRetryAt"], next_retry_at);
         assert_eq!(sync_state["queueCreatedAt"], created_at);
         assert_eq!(sync_state["queueUpdatedAt"], failed_at);
+    }
+
+    // =======================================================================
+    // Wave 0 regression test for Critical C2 (cross-terminal shift open race).
+    //
+    // On HEAD, `open_shift` (shifts.rs ~line 186) runs the "does this staff
+    // member already have an active shift?" SELECT *outside* the enclosing
+    // `BEGIN IMMEDIATE` transaction that starts at line 205. Two terminals
+    // opening a shift for the same staff member simultaneously can both pass
+    // the pre-check, then both INSERT successfully — leaving TWO active
+    // shifts where the invariant says there must be AT MOST ONE.
+    //
+    // This test replicates the buggy pattern directly with raw SQL against
+    // a shared on-disk SQLite file (WAL mode permits concurrent writers).
+    // Two threads race through a SELECT, sleep briefly, then INSERT.
+    //
+    // Wave 2a's C2 fix will either (a) move the SELECT inside `BEGIN
+    // IMMEDIATE`, or (b) add a partial unique index via `migrate_v46`:
+    //   CREATE UNIQUE INDEX idx_one_active_shift_per_staff
+    //       ON staff_shifts(staff_id) WHERE status='active';
+    // After either fix, this raw-SQL replica will still show the bug —
+    // so at Wave 2a the test will be rewired to call the actual
+    // `open_shift` entry-point so it picks up the fix.
+    // =======================================================================
+
+    #[test]
+    fn concurrent_shift_open_rejects_second_starter() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let db_path = std::env::temp_dir().join(format!(
+            "pos-shift-race-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+
+        // Setup: fresh file-backed DB with migrations + WAL + foreign keys.
+        {
+            let conn = Connection::open(&db_path).expect("open db for setup");
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA foreign_keys = ON;
+                 PRAGMA busy_timeout = 5000;
+                 PRAGMA synchronous = NORMAL;",
+            )
+            .expect("pragma setup");
+            db::run_migrations_for_test(&conn);
+        }
+
+        /// Mirrors the buggy pattern in shifts.rs::open_shift — pre-check
+        /// SELECT runs outside the IMMEDIATE tx. Returns Ok(shift_id) on
+        /// INSERT success, Err(msg) if pre-check or INSERT rejects.
+        fn attempt_open_mirroring_bug(
+            path: &std::path::Path,
+            staff_id: &str,
+        ) -> Result<String, String> {
+            let conn = Connection::open(path).map_err(|e| format!("open: {e}"))?;
+            conn.execute_batch("PRAGMA busy_timeout = 5000;")
+                .map_err(|e| format!("pragma: {e}"))?;
+
+            // Pre-check OUTSIDE transaction (mirrors the bug).
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM staff_shifts WHERE staff_id = ?1 AND status = 'active'",
+                    params![staff_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            if let Some(existing_id) = existing {
+                return Err(format!("already active: {existing_id}"));
+            }
+
+            // Small window where the other thread's INSERT can slip in
+            // after OUR pre-check but before OUR INSERT.
+            thread::sleep(std::time::Duration::from_millis(15));
+
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| format!("begin: {e}"))?;
+            let shift_id = uuid::Uuid::new_v4().to_string();
+            let now = Utc::now().to_rfc3339();
+            let ins = conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    created_at, updated_at)
+                 VALUES (?1, ?2, 'cashier', 'branch-race', ?3, ?4, 0.0, 'active', 2, 'pending', ?4, ?4)",
+                params![shift_id, staff_id, format!("term-{shift_id}"), now],
+            );
+            match ins {
+                Ok(_) => {
+                    conn.execute_batch("COMMIT")
+                        .map_err(|e| format!("commit: {e}"))?;
+                    Ok(shift_id)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(format!("insert rejected: {e}"))
+                }
+            }
+        }
+
+        let staff_id = "staff-race-test";
+        let barrier = Arc::new(Barrier::new(2));
+
+        let (path_a, path_b) = (db_path.clone(), db_path.clone());
+        let (bar_a, bar_b) = (Arc::clone(&barrier), Arc::clone(&barrier));
+
+        let ta = thread::spawn(move || {
+            bar_a.wait();
+            attempt_open_mirroring_bug(&path_a, staff_id)
+        });
+        let tb = thread::spawn(move || {
+            bar_b.wait();
+            attempt_open_mirroring_bug(&path_b, staff_id)
+        });
+
+        let ra = ta.join().expect("t1 join");
+        let rb = tb.join().expect("t2 join");
+
+        // Count successful INSERTs before cleanup.
+        let ok_count = [&ra, &rb].iter().filter(|r| r.is_ok()).count();
+
+        // Also: query the DB for total active shifts.
+        let active_count: i64 = {
+            let conn = Connection::open(&db_path).expect("open for verify");
+            conn.query_row(
+                "SELECT COUNT(*) FROM staff_shifts WHERE staff_id = ?1 AND status = 'active'",
+                params![staff_id],
+                |row| row.get(0),
+            )
+            .expect("count active shifts")
+        };
+
+        // Best-effort cleanup (ignore failures on WAL sidecar files).
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+
+        assert_eq!(
+            ok_count, 1,
+            "Expected exactly one concurrent shift-open to succeed, got {ok_count}. \
+             Results: ra={ra:?} rb={rb:?}. Wave 2a C2 must close this race."
+        );
+        assert_eq!(
+            active_count, 1,
+            "Expected exactly one active shift in DB after the race, found {active_count}. \
+             Cross-terminal exclusivity invariant violated (Wave 2a C2)."
+        );
     }
 }

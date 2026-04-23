@@ -6,6 +6,7 @@ import { ComboCard } from './ComboCard';
 import { menuService, MenuItem } from '../../services/MenuService';
 import { AlertTriangle, Utensils } from 'lucide-react';
 import type { MenuCombo } from '@shared/types/combo';
+import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
 
 interface MenuItemGridProps {
   selectedCategory: string;
@@ -45,7 +46,17 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Wave 5 H: guard against setState-after-unmount. The previous
+    // implementation fired `loadMenuItems` and (later) subscribed to
+    // real-time updates — either callback could resolve after the
+    // component unmounted (fast category switches, menu modal
+    // closing), landing a React warning and, in the wrong order,
+    // overwriting the new component's state. `disposed` matches the
+    // pattern already used in App.tsx's validateAndRestoreSession.
+    let disposed = false;
+
     const loadMenuItems = async () => {
+      if (disposed) return;
       setLoading(true);
       setError(null);
 
@@ -134,27 +145,39 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
             )
           : uniqueItems;
 
-        setMenuItems(searchFiltered);
+        if (!disposed) {
+          setMenuItems(searchFiltered);
+        }
       } catch (err) {
         console.error('Error loading menu items:', err);
-        setError(t('menu.grid.error'));
+        if (!disposed) {
+          setError(t('menu.grid.error'));
+        }
       } finally {
-        setLoading(false);
+        if (!disposed) {
+          setLoading(false);
+        }
       }
     };
 
     loadMenuItems();
 
-    // Subscribe to real-time updates
+    // Subscribe to real-time updates. The callback also routes through
+    // `loadMenuItems`, which already checks `disposed` at each setState.
+    let unsubscribe: (() => void) | undefined;
     try {
-      const unsubscribe = menuService.subscribeToMenuUpdates(() => {
+      unsubscribe = menuService.subscribeToMenuUpdates(() => {
         loadMenuItems();
       });
-      return unsubscribe;
     } catch (error) {
       console.error('Error setting up real-time subscription:', error);
-      // Continue without real-time updates
+      // Continue without real-time updates.
     }
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
   }, [featuredRankedIds, searchQuery, selectedCategory, selectedSubcategory, topSellerIds]);
 
   // Combo mode - render combo cards instead of menu items
@@ -281,14 +304,10 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
     <div className="flex-1 p-2 sm:p-4 overflow-y-auto touch-scroll scrollbar-hide">
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-3 sm:gap-4">
         {menuItems.map((item) => {
-          // Get the correct price based on order type (three-tier pricing)
-          const getDisplayPrice = () => {
-            if (orderType === 'pickup') return item.pickup_price || item.price;
-            if (orderType === 'delivery') return item.delivery_price || item.price;
-            if (orderType === 'dine-in') return item.dine_in_price || item.pickup_price || item.price;
-            return item.price;
-          };
-          const displayPrice = getDisplayPrice();
+          // Tier-price resolution lives in a shared util so cart-repricing
+          // in MenuModal (when order type changes mid-edit) uses exactly
+          // the same fallback chain as the grid displays here.
+          const displayPrice = resolveMenuItemPrice(item, orderType);
 
           return (
             <MenuItemCard

@@ -21,6 +21,12 @@ import SyncRecoveryModal, {
 } from "./components/recovery/SyncRecoveryModal";
 
 import { ActivityTracker } from "./services/ActivityTracker";
+import {
+  hydrateSecureSession,
+  getSecureSessionSync,
+  setSecureSession,
+  clearSecureSession,
+} from "./lib/secure-session-cache";
 import { screenCaptureHandler } from "./services/ScreenCaptureHandler";
 import AnimatedBackground from "./components/AnimatedBackground";
 import ThemeToggle from "./components/ThemeToggle";
@@ -112,7 +118,7 @@ function inferConfiguredTerminalFallback(): boolean {
   try {
     return (
       getConfiguredTerminalHint() ||
-      Boolean(localStorage.getItem('pos-user')) ||
+      Boolean(getSecureSessionSync()) ||
       Boolean(localStorage.getItem('admin_dashboard_url')) ||
       Boolean(cached.terminalId || cached.branchId || cached.organizationId)
     );
@@ -255,7 +261,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
         // If not configured, ensure we clear any stale session data
         if (!isConfiguredValue) {
           console.log('Terminal not configured, clearing stale session data');
-          localStorage.removeItem("pos-user");
+          void clearSecureSession();
           clearTerminalCredentialCache();
         } else {
           // If configured, sync terminal identity from the main process to the
@@ -335,7 +341,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       const presentation = resolveTerminalResetPresentation(reason, t as never);
 
       // Clear all local storage
-      localStorage.removeItem("pos-user");
+      void clearSecureSession();
       localStorage.removeItem("staff");
       localStorage.removeItem("activeShift");
       localStorage.removeItem("last_known_terminal_id");
@@ -772,7 +778,7 @@ function AppContent() {
   // Use custom hook for app events
   const { isShuttingDown, shutdownState } = useAppEvents({
     onLogout: () => {
-      localStorage.removeItem("pos-user");
+      void clearSecureSession();
       setUser(null);
       // Do NOT clear shift on session timeout to preserve active shift per EOD policy
     }
@@ -1033,10 +1039,15 @@ function AppContent() {
 
     const validateAndRestoreSession = async () => {
       try {
-        const storedUser = localStorage.getItem("pos-user");
-        if (storedUser) {
+        // Wave 1 C6: ensure the secure-session cache is populated from
+        // the OS keyring BEFORE any synchronous consumer (ActivityTracker,
+        // shift-context fallbacks) runs. Hydration is idempotent — if
+        // another call-site already kicked it off, this awaits the
+        // in-flight promise.
+        await hydrateSecureSession();
+        const parsedUser = getSecureSessionSync();
+        if (parsedUser) {
           try {
-            const parsedUser = JSON.parse(storedUser);
 
             // For local simple PIN login, just restore the session directly
             // (no database validation needed)
@@ -1046,7 +1057,7 @@ function AppContent() {
                 'enrichSessionUserWithOrganization',
               ).catch(() => parsedUser);
               if (!disposed) {
-                localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
+                await setSecureSession(enrichedUser);
                 setUser(enrichedUser);
                 setStaff({
                   staffId: enrichedUser.staffId,
@@ -1079,12 +1090,12 @@ function AppContent() {
 
                 if (!validationResult || !validationResult.valid) {
                   console.warn('Session invalid or expired, clearing local storage');
-                  localStorage.removeItem("pos-user");
+                  void clearSecureSession();
                   return;
                 }
               } catch (err) {
                 console.error('Session validation failed:', err);
-                localStorage.removeItem("pos-user");
+                void clearSecureSession();
                 return;
               }
             }
@@ -1094,7 +1105,7 @@ function AppContent() {
               'enrichSessionUserWithOrganization',
             ).catch(() => parsedUser);
             if (!disposed) {
-              localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
+              await setSecureSession(enrichedUser);
               setUser(enrichedUser);
               // Set staff in shift context
               setStaff({
@@ -1118,7 +1129,7 @@ function AppContent() {
 
           } catch (err) {
             console.error('Error restoring session:', err);
-            localStorage.removeItem("pos-user");
+            void clearSecureSession();
           }
         }
       } finally {
@@ -1178,8 +1189,11 @@ function AppContent() {
           return userData;
         });
 
-        // Store session in localStorage
-        localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
+        // Wave 1 C6: session persists through the OS keyring rather than
+        // localStorage. `setSecureSession` updates the in-memory cache
+        // first (so sync readers see the new session immediately) and
+        // then writes through to the keyring.
+        await setSecureSession(enrichedUser);
 
         // Update React state
         setUser(enrichedUser);
@@ -1223,7 +1237,7 @@ function AppContent() {
     } catch (e) {
       console.error('auth:logout failed', e);
     }
-    localStorage.removeItem("pos-user");
+    void clearSecureSession();
     setUser(null);
     // Do NOT clear shift context on explicit logout; EOD Z Report will clear shifts
   };

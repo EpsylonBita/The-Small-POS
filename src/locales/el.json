@@ -2422,6 +2422,21 @@
     }
   },
   "modals": {
+    "editSettlementDelta": {
+      "collectTitle": "Επιπλέον Πληρωμή",
+      "refundTitle": "Επιστροφή Χρημάτων",
+      "collectBody": "Είσπραξη επιπλέον €{{amount}} — επιλέξτε τη μέθοδο.",
+      "refundBody": "Επιστροφή €{{amount}} στον πελάτη — επιλέξτε τη μέθοδο.",
+      "collectAmountLabel": "Επιπλέον είσπραξη",
+      "refundAmountLabel": "Ποσό επιστροφής",
+      "payWithCash": "Πληρωμή με Μετρητά",
+      "payWithCard": "Πληρωμή με Κάρτα",
+      "refundCash": "Επιστροφή σε Μετρητά",
+      "refundCard": "Επιστροφή στην Κάρτα",
+      "refundNote": "Οι επιστροφές σε κάρτα καταγράφονται ως λογιστική προσαρμογή. Εκτελέστε την επιστροφή στην κάρτα ξεχωριστά εφόσον απαιτείται.",
+      "cancel": "Ακύρωση",
+      "failed": "Δεν ήταν δυνατή η ολοκλήρωση της εκκαθάρισης"
+    },
     "orderTypeSelection": {
       "title": "Παραγγελία",
       "subtitle": "Επιλέξτε παραλαβή ή παράδοση παραγγελίας",
@@ -2652,6 +2667,9 @@
       "openingCash": "Αρχικά Μετρητά",
       "authenticating": "Έλεγχος ταυτότητας...",
       "invalidPIN": "Μη έγκυρο PIN",
+      "busyElsewhere": "Έχει συνδεθεί στο {{terminal}} ως {{role}}",
+      "busyTerminalFallback": "άλλο τερματικό",
+      "unavailable": "Μη διαθέσιμος",
       "pinNotConfigured": "Δεν έχει οριστεί PIN POS για αυτό το μέλος προσωπικού. Ορίστε το πρώτα από το Admin.",
       "posLoginDisabled": "Αυτό το μέλος προσωπικού δεν επιτρέπεται να συνδεθεί στο POS.",
       "staffAuthServerUpgradeRequired": "Αυτό το POS είναι συνδεδεμένο με παλαιότερο Admin deployment που δεν στέλνει ακόμη τα δεδομένα PIN προσωπικού. Κάντε deploy το τελευταίο Admin και ανοίξτε ξανά το POS.",
@@ -3286,6 +3304,8 @@
       "editOrderItemsDesc": "Τροποποίηση προϊόντων, ποσοτήτων, σημειώσεων",
       "editPaymentMethod": "Επεξεργασία Τρόπου Πληρωμής",
       "editPaymentMethodDesc": "Αλλαγή μεταξύ μετρητών και κάρτας",
+      "changeOrderType": "Αλλαγή Τύπου Παραγγελίας",
+      "changeOrderTypeDesc": "Επανυπολογισμός τιμών με βάση τη χρέωση για παραλαβή, διανομή ή επιτόπου",
       "cancel": "Ακύρωση"
     },
     "editPaymentMethod": {
@@ -3581,6 +3601,15 @@
     "enterWithoutPin": "Είσοδος χωρίς PIN",
     "noPinWarning": "Δεν έχει οριστεί PIN. Μπορείτε να ορίσετε ένα στις Ρυθμίσεις μετά τη σύνδεση.",
     "pinResetRequired": "Απαιτείται επαναφορά PIN. Παρακαλώ ορίστε ένα νέο PIN για να συνεχίσετε.",
+    "setupPin": "Ρύθμιση PIN",
+    "setupPinDesc": "Δημιουργήστε έναν κωδικό PIN 6 ψηφίων για πρόσβαση διαχειριστή",
+    "newPin": "Νέο PIN (6+ ψηφία)",
+    "confirmPin": "Επιβεβαίωση PIN",
+    "savePin": "Αποθήκευση PIN",
+    "createPin": "Δημιουργία PIN",
+    "pinTooShort": "Το PIN πρέπει να έχει τουλάχιστον 6 ψηφία",
+    "pinMismatch": "Τα PIN δεν ταιριάζουν",
+    "setupFailed": "Αποτυχία ρύθμισης PIN",
     "errors": {
       "enterPin": "Παρακαλώ εισαγάγετε το PIN σας",
       "invalidPin": "Λάθος κωδικός",
@@ -3692,7 +3721,9 @@
     "delivery": "Παράδοση",
     "pickup": "Παραλαβή",
     "edit": "Επεξεργασία",
+    "editOrders": "Επεξεργασία Παραγγελιών",
     "cancel": "Ακύρωση",
+    "cancelOrders": "Ακύρωση Παραγγελιών",
     "map": "Χάρτης",
     "delivered": "Παραδόθηκε",
     "view": "Προβολή",

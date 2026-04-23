@@ -1088,7 +1088,7 @@ fn build_staff_cash_breakdown_row(
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND COALESCE(o.is_ghost, 0) = 0
-                   AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+                   AND o.status NOT IN ('cancelled', 'canceled')
                    AND COALESCE(o.order_type, 'dine-in') = 'delivery'";
 
             conn.query_row(sql, params![staff_shift_id], |row| {
@@ -1105,7 +1105,7 @@ fn build_staff_cash_breakdown_row(
              LEFT JOIN order_payments op ON op.order_id = o.id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+               AND o.status NOT IN ('cancelled', 'canceled')
                {}",
             role_order_type_filter_sql(role_type, "o")
         );
@@ -1516,7 +1516,7 @@ fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Val
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND op.status = 'completed'
                AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+               AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY bucket, op.method",
         )
         .map_err(|e| format!("prepare sales by type for shift: {e}"))?;
@@ -2330,7 +2330,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
              WHERE op.staff_shift_id = ?1
                AND op.status = 'completed'
                AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+               AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY op.method",
         )
         .map_err(|e| format!("prepare payment query: {e}"))?;
@@ -2370,16 +2370,22 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         }
     }
 
-    // Adjustments: refunds and voids
+    // Adjustments: refunds and voids.
+    //
+    // Use COALESCE(op.staff_shift_id, o.staff_shift_id) so adjustments on
+    // orders whose payment row has a NULL staff_shift_id (delivery orders,
+    // unassigned driver) still aggregate under the owning shift via the
+    // order's shift_id. Previously the bare `op.staff_shift_id = ?1` filter
+    // silently dropped these, under-reporting refunds/voids in the Z-report.
     let mut adj_stmt = conn
         .prepare(
             "SELECT pa.adjustment_type, COALESCE(SUM(pa.amount), 0)
              FROM payment_adjustments pa
              JOIN order_payments op ON pa.payment_id = op.id
              JOIN orders o ON o.id = op.order_id
-             WHERE op.staff_shift_id = ?1
+             WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+               AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY pa.adjustment_type",
         )
         .map_err(|e| format!("prepare adjustment query: {e}"))?;
@@ -2539,15 +2545,32 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         }
     }
 
-    // Order type breakdown (dine-in, takeaway, delivery)
+    // Order type breakdown (dine-in, takeaway, delivery).
+    //
+    // Wave 2b: subtract refund adjustments before emitting per-type
+    // totals. Previously the query summed `orders.total_amount` only,
+    // which overstates delivery/takeaway/dine-in revenue whenever
+    // refunds are recorded against an order but leave the order in
+    // a non-cancelled status. The per-order refund subtotal is
+    // pre-aggregated in a subquery so the LEFT JOIN does not
+    // multiply `total_amount` by the number of adjustments per order.
     let mut ot_stmt = conn
         .prepare(
-            "SELECT COALESCE(order_type, 'dine-in'), COUNT(*), COALESCE(SUM(total_amount), 0)
-             FROM orders
-             WHERE staff_shift_id = ?1
-               AND COALESCE(is_ghost, 0) = 0
-               AND status NOT IN ('cancelled', 'canceled')
-             GROUP BY COALESCE(order_type, 'dine-in')",
+            "SELECT COALESCE(o.order_type, 'dine-in'),
+                    COUNT(*),
+                    COALESCE(SUM(o.total_amount), 0)
+                        - COALESCE(SUM(COALESCE(r.refund_sum, 0)), 0) AS net_total
+             FROM orders o
+             LEFT JOIN (
+                 SELECT order_id, SUM(amount) AS refund_sum
+                 FROM payment_adjustments
+                 WHERE adjustment_type = 'refund'
+                 GROUP BY order_id
+             ) r ON r.order_id = o.id
+             WHERE o.staff_shift_id = ?1
+               AND COALESCE(o.is_ghost, 0) = 0
+               AND o.status NOT IN ('cancelled', 'canceled')
+             GROUP BY COALESCE(o.order_type, 'dine-in')",
         )
         .map_err(|e| format!("prepare order_type query: {e}"))?;
 
@@ -2613,6 +2636,13 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
 
     // --- Compute derived totals ---
 
+    // net_sales subtracts voids_total from gross_sales. This is NOT double-counting
+    // with cash_sales/card_sales: gross_sales comes from `orders.total_amount`
+    // (order-level, includes orders whose payments were later voided), while
+    // cash_sales/card_sales come from `op.status = 'completed'` (payment-level,
+    // excludes voided payments). Gross is an order-side figure; voids adjust it
+    // down to money actually recognized. A prior review flagged this as a possible
+    // double-deduction — it isn't.
     let net_sales = gross_sales - refunds_total - voids_total - discounts_total;
     let opening = opening_cash;
     let closing = closing_cash.unwrap_or(0.0);
@@ -2734,6 +2764,36 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
 
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
+
+    // Re-check idempotency inside the BEGIN IMMEDIATE critical section.
+    // The pre-transaction SELECT near the top of this function is a fast
+    // path that avoids doing the aggregation work if a report already
+    // exists, but two concurrent callers can both pass that early check
+    // and then serialize on this write lock. Without this re-check the
+    // second caller would INSERT a duplicate z_report row for the same
+    // shift_id (there is no UNIQUE constraint on z_reports.shift_id).
+    let racing_existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM z_reports WHERE shift_id = ?1",
+            params![shift_id],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(existing_id) = racing_existing {
+        // Wave 6: ROLLBACK, not COMMIT. We opened BEGIN IMMEDIATE but
+        // performed no writes on the idempotency-race short-circuit
+        // path; COMMIT forces a zero-op WAL checkpoint marker.
+        // ROLLBACK is semantically identical (no writes to undo) and
+        // keeps the journal clean.
+        let _ = conn.execute_batch("ROLLBACK");
+        return get_z_report_by_id(&conn, &existing_id).map(|report| {
+            serde_json::json!({
+                "success": true,
+                "existing": true,
+                "report": report,
+            })
+        });
+    }
 
     let result = (|| -> Result<(), String> {
         conn.execute(
@@ -3447,6 +3507,9 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         .unwrap_or(0);
 
     // --- Compute derived totals ---
+    // See single-shift path for the rationale: gross_sales is order-level
+    // (orders.total_amount, NOT cash_sales + card_sales), so subtracting
+    // voids_total does not double-count against payment-level figures.
     let net_sales = gross_sales - refunds_total - voids_total - discounts_total;
 
     // Sum opening/closing/variance across all cashier shifts
@@ -3690,6 +3753,33 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
+
+    // Race-guard — see the single-shift generate_z_report path above for
+    // rationale. Two callers that both pass the pre-tx idempotency SELECT
+    // will serialize here; the second must exit without inserting a
+    // duplicate row for the same shift.
+    let racing_existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM z_reports WHERE shift_id = ?1",
+            params![shift_id_for_db],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(existing_id) = racing_existing {
+        // Wave 6: ROLLBACK, not COMMIT. We opened BEGIN IMMEDIATE but
+        // performed no writes on the idempotency-race short-circuit
+        // path; COMMIT forces a zero-op WAL checkpoint marker.
+        // ROLLBACK is semantically identical (no writes to undo) and
+        // keeps the journal clean.
+        let _ = conn.execute_batch("ROLLBACK");
+        return get_z_report_by_id(&conn, &existing_id).map(|report| {
+            serde_json::json!({
+                "success": true,
+                "existing": true,
+                "report": report,
+            })
+        });
+    }
 
     let result = (|| -> Result<(), String> {
         conn.execute(

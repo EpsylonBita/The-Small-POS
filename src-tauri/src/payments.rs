@@ -316,6 +316,7 @@ fn parse_payment_items(payload: &Value) -> Vec<PaymentItemInput> {
                         .or_else(|| item_val.get("item_amount"))
                         .or_else(|| item_val.get("amount"))
                         .and_then(Value::as_f64)
+                        .filter(|value| value.is_finite())
                         .unwrap_or(0.0),
                 })
                 .collect()
@@ -536,7 +537,11 @@ fn validate_payment_amount_against_outstanding(
     }
 
     let snapshot = load_order_payment_balance_snapshot(conn, &input.order_id)?;
-    if input.amount > snapshot.outstanding_amount + 0.01 {
+    // Wave 2a C3: symmetric MONEY_EPSILON. Previously the overpayment
+    // guard used `+ 0.01` while `recompute_order_payment_state` used
+    // `- 0.01`, which left a €0.01 dead-band where an under-payment
+    // passed the guard and was then stamped "paid".
+    if input.amount > snapshot.outstanding_amount + crate::money::MONEY_EPSILON {
         return Err(format!(
             "Payment amount {:.2} exceeds outstanding balance {:.2} for order {} (total {:.2}, settled {:.2})",
             input.amount,
@@ -577,9 +582,13 @@ pub(crate) fn recompute_order_payment_state(
         )
         .unwrap_or(0);
 
-    let new_payment_status = if total_paid <= 0.009 {
+    // Wave 2a C3: symmetric tolerance. The old literals (`0.009` and
+    // `- 0.01`) were close but not aligned — combined with the
+    // `+ 0.01` overpayment guard, the order-status state machine had
+    // a €0.01 hole where an under-payment was marked "paid".
+    let new_payment_status = if total_paid <= crate::money::MONEY_EPSILON {
         "pending"
-    } else if total_paid >= order_total - 0.01 {
+    } else if total_paid >= order_total - crate::money::MONEY_EPSILON {
         "paid"
     } else {
         "partially_paid"
@@ -1065,7 +1074,10 @@ pub fn resolve_unsettled_payment_blocker_payment(
 
     let balance_snapshot = load_order_payment_balance_snapshot(&conn, &actual_order_id)?;
     let outstanding_amount = balance_snapshot.outstanding_amount;
-    if outstanding_amount <= 0.009 {
+    // Wave 2a C3: use shared MONEY_EPSILON rather than a bare literal
+    // so the blocker threshold stays aligned with every other money
+    // comparison in the module.
+    if outstanding_amount <= crate::money::MONEY_EPSILON {
         return Ok(build_payment_blocker_failure(
             "This order no longer has a collectible outstanding balance. Refresh the payment blockers and try again.",
             &blockers,
@@ -1839,7 +1851,11 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
 }
 
 fn num_field(v: &Value, key: &str) -> Option<f64> {
-    v.get(key).and_then(Value::as_f64)
+    // Reject NaN and ±Infinity at the field-reading layer so downstream
+    // comparisons like `amount <= 0.0` (which are NaN-unsafe) stay sound.
+    v.get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
 }
 
 #[allow(dead_code)]
@@ -3278,5 +3294,119 @@ mod tests {
         assert_eq!(payment_shift_id, None);
         assert_eq!(payment_staff_id, None);
         assert_eq!(cashier_cash_sales, 0.0);
+    }
+
+    // =======================================================================
+    // Wave 0 regression tests for Critical C3 (asymmetric money epsilon).
+    //
+    // On HEAD, `validate_payment_amount_against_outstanding` uses `+ 0.01`
+    // while `recompute_order_payment_state` uses `- 0.01` (and `0.009`) as
+    // its "fully paid" / "pending" thresholds. The asymmetry permits an
+    // order paid with 9.99 against a 10.00 total to be silently marked
+    // "paid".
+    //
+    // These tests are marked `#[ignore]` until Wave 2a's C3 fix lands
+    // (replacing the bare literals with `crate::money::MONEY_EPSILON =
+    // 0.005`). Un-ignore and assert green as part of that wave.
+    // =======================================================================
+
+    #[test]
+    fn paying_exactly_one_cent_short_is_not_marked_paid() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-1c-short', '[]', 10.00, 'pending', 'pending', ?1, ?1)",
+                params![now],
+            )
+            .expect("insert 10.00 order");
+        }
+
+        // Pay 9.99 — strictly one cent short of 10.00.
+        let payload = serde_json::json!({
+            "orderId": "ord-1c-short",
+            "method": "cash",
+            "amount": 9.99_f64,
+        });
+        let result = record_payment(&db, &payload).expect("record 9.99 payment");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT payment_status FROM orders WHERE id = 'ord-1c-short'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "partially_paid",
+            "Paying 9.99 against a 10.00 order must NOT be marked 'paid' — asymmetric epsilon bug (Wave 2a C3)."
+        );
+    }
+
+    #[test]
+    fn total_paid_exactly_equals_total_is_paid() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-exact', '[]', 10.00, 'pending', 'pending', ?1, ?1)",
+                params![now],
+            )
+            .expect("insert exact-total order");
+        }
+
+        let payload = serde_json::json!({
+            "orderId": "ord-exact",
+            "method": "cash",
+            "amount": 10.00_f64,
+        });
+        record_payment(&db, &payload).expect("record exact payment");
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT payment_status FROM orders WHERE id = 'ord-exact'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "paid",
+            "Exact payment (total_paid == order_total) must be marked 'paid' under both current and symmetric-epsilon regimes."
+        );
+    }
+
+    #[test]
+    fn overpaying_by_half_cent_is_accepted() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-half-cent-over', '[]', 10.00, 'pending', 'pending', ?1, ?1)",
+                params![now],
+            )
+            .expect("insert overpay order");
+        }
+
+        // 10.005 — exactly at MONEY_EPSILON above outstanding. Must be accepted.
+        let payload = serde_json::json!({
+            "orderId": "ord-half-cent-over",
+            "method": "cash",
+            "amount": 10.005_f64,
+        });
+        let result = record_payment(&db, &payload);
+        assert!(
+            result.is_ok(),
+            "Overpaying by 0.005 (one MONEY_EPSILON) must be accepted. Got: {:?}",
+            result
+        );
     }
 }

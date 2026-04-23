@@ -33,31 +33,35 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
   const { resolvedTheme } = useTheme();
   const { t } = useI18n();
 
-  // Define actions based on active tab
+  // Define actions based on active tab.
+  //
+  // Wave 6 L: labels previously hardcoded English strings. All labels
+  // now route through the `bulkActions.*` i18n namespace so both
+  // en.json and el.json (and any future locale) can translate them.
   const getActionsForTab = useCallback((): ActionConfig[] => {
     switch (activeTab) {
       case 'orders':
         return [
-          { id: 'assign', label: 'Driver', icon: '', variant: 'primary' },
-          { id: 'edit', label: 'Edit Orders', icon: '✎', variant: 'info' },
-          { id: 'delivered', label: 'Delivered', icon: '', variant: 'warning' },
-          { id: 'cancel', label: 'Cancel Orders', icon: '✕', variant: 'danger' },
+          { id: 'assign', label: t('bulkActions.driver'), icon: '', variant: 'primary' },
+          { id: 'edit', label: t('bulkActions.editOrders'), icon: '✎', variant: 'info' },
+          { id: 'delivered', label: t('bulkActions.delivered'), icon: '', variant: 'warning' },
+          { id: 'cancel', label: t('bulkActions.cancelOrders'), icon: '✕', variant: 'danger' },
         ];
       case 'delivered':
         return [
-          { id: 'return', label: 'Return to Orders', icon: '↶', variant: 'secondary' },
-          { id: 'assign', label: 'Reassign Driver', icon: '🚗', variant: 'primary' },
-          { id: 'cancel', label: 'Cancel Orders', icon: '✕', variant: 'danger' },
+          { id: 'return', label: t('bulkActions.return'), icon: '↶', variant: 'secondary' },
+          { id: 'assign', label: t('bulkActions.reassign'), icon: '🚗', variant: 'primary' },
+          { id: 'cancel', label: t('bulkActions.cancelOrders'), icon: '✕', variant: 'danger' },
         ];
       case 'canceled':
         return [
-          { id: 'return', label: 'Return to Orders', icon: '↶', variant: 'primary' },
-          { id: 'map', label: 'Map', icon: '🗺️', variant: 'map' },
+          { id: 'return', label: t('bulkActions.return'), icon: '↶', variant: 'primary' },
+          { id: 'map', label: t('bulkActions.map'), icon: '🗺️', variant: 'map' },
         ];
       default:
         return [];
     }
-  }, [activeTab]);
+  }, [activeTab, t]);
 
   const actions = useMemo(() => getActionsForTab(), [getActionsForTab]);
   const primaryActions = useMemo(() => actions.filter(action => action.variant === 'primary'), [actions]);
@@ -175,7 +179,14 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
           {selectionType === 'delivery' && (
             <>
               <button className={getButtonStyles('primary')} onClick={(e) => { e.preventDefault(); onBulkAction('assign'); }}>{t('bulkActions.driver')}</button>
-              <button className={getButtonStyles('success')} onClick={(e) => { e.preventDefault(); onBulkAction('pickup'); }}>{t('bulkActions.pickup')}</button>
+              {/* The "Set as Pickup" (Παραλαβή) shortcut used to live here.
+                  Removed 2026-04-22: the EditOptionsModal now exposes the
+                  same delivery → pickup conversion inline alongside the
+                  other order-type changes, so keeping a top-level bulk
+                  shortcut just duplicates the path and clutters the
+                  toolbar. The underlying handler + confirmation modal
+                  remain in OrderDashboard in case a future entry point
+                  re-introduces a programmatic conversion trigger. */}
               {deliverySelectionCanBeCompleted && (
                 <button className={getButtonStyles('warning')} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}>{t('bulkActions.delivered')}</button>
               )}

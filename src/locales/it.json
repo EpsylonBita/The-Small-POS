@@ -2416,6 +2416,21 @@
     }
   },
   "modals": {
+    "editSettlementDelta": {
+      "collectTitle": "Pagamento aggiuntivo",
+      "refundTitle": "Rimborso",
+      "collectBody": "Riscuotere €{{amount}} aggiuntivi — scegli il metodo.",
+      "refundBody": "Restituire €{{amount}} al cliente — scegli il metodo.",
+      "collectAmountLabel": "Importo aggiuntivo",
+      "refundAmountLabel": "Importo del rimborso",
+      "payWithCash": "Paga in contanti",
+      "payWithCard": "Paga con carta",
+      "refundCash": "Rimborso in contanti",
+      "refundCard": "Rimborso su carta",
+      "refundNote": "I rimborsi su carta sono registrati come rettifica contabile. Esegui l'annullamento della carta separatamente se necessario.",
+      "cancel": "Annulla",
+      "failed": "Impossibile completare il regolamento"
+    },
     "orderType": {
       "title": "Seleziona tipo di ordine",
       "pickup": "Ordine asporto",
@@ -2645,6 +2660,9 @@
       "openingCash": "Cassa iniziale",
       "authenticating": "Autenticazione...",
       "invalidPIN": "PIN non valido",
+      "busyElsewhere": "Connesso a {{terminal}} come {{role}}",
+      "busyTerminalFallback": "un altro terminale",
+      "unavailable": "Non disponibile",
       "noStaffSelected": "Seleziona un membro del personale",
       "shiftStarted": "Turno iniziato con successo",
       "shiftEnded": "Turno terminato con successo",
@@ -3212,6 +3230,8 @@
       "editOrderItemsDesc": "Modifica articoli, quantità, note",
       "editPaymentMethod": "Modifica metodo di pagamento",
       "editPaymentMethodDesc": "Cambia tra contanti e carta",
+      "changeOrderType": "Cambia tipo di ordine",
+      "changeOrderTypeDesc": "Ricalcola l'ordine con i prezzi per asporto, consegna o in loco",
       "cancel": "Annulla"
     },
     "editPaymentMethod": {
@@ -3562,6 +3582,15 @@
     "enterWithoutPin": "Entra senza PIN",
     "noPinWarning": "Nessun PIN impostato. Puoi impostarne uno nelle Impostazioni dopo l'accesso.",
     "pinResetRequired": "Reimpostazione PIN richiesta. Imposta un nuovo PIN per continuare.",
+    "setupPin": "Imposta PIN",
+    "setupPinDesc": "Crea un PIN di 6 cifre per l'accesso amministratore",
+    "newPin": "Nuovo PIN (6+ cifre)",
+    "confirmPin": "Conferma PIN",
+    "savePin": "Salva PIN",
+    "createPin": "Crea PIN",
+    "pinTooShort": "Il PIN deve avere almeno 6 cifre",
+    "pinMismatch": "I PIN non corrispondono",
+    "setupFailed": "Impostazione PIN non riuscita",
     "errors": {
       "enterPin": "Inserisci il PIN",
       "invalidPin": "Codice errato",
@@ -3673,7 +3702,9 @@
     "delivery": "Consegna",
     "pickup": "Asporto",
     "edit": "Modifica",
+    "editOrders": "Modifica ordini",
     "cancel": "Annulla",
+    "cancelOrders": "Annulla ordini",
     "map": "Mappa",
     "delivered": "Consegnato",
     "view": "Visualizza",

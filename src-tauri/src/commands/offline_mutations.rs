@@ -170,7 +170,7 @@ fn upsert_array_record(items: &mut Vec<Value>, record: &Value) -> Value {
     record.clone()
 }
 
-fn update_array_record<F>(items: &mut Vec<Value>, record_id: &str, mut updater: F) -> Option<Value>
+fn update_array_record<F>(items: &mut [Value], record_id: &str, mut updater: F) -> Option<Value>
 where
     F: FnMut(&mut Map<String, Value>),
 {

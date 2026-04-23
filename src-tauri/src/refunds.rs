@@ -16,6 +16,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
+use crate::money::MONEY_EPSILON;
 use crate::storage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -406,7 +407,7 @@ pub(crate) fn refund_payment_in_connection(
         .unwrap_or(0.0);
 
     let remaining = original_amount - prior_refunds;
-    if amount > remaining + 0.001 {
+    if amount > remaining + MONEY_EPSILON {
         return Err(format!(
             "Refund amount {amount:.2} exceeds remaining balance {remaining:.2}"
         ));
@@ -429,7 +430,7 @@ pub(crate) fn refund_payment_in_connection(
     let adjustment_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let new_total_refunds = prior_refunds + amount;
-    let is_fully_refunded = (new_total_refunds - original_amount).abs() < 0.01;
+    let is_fully_refunded = (new_total_refunds - original_amount).abs() < MONEY_EPSILON;
     let order_shift_id: Option<String> = conn
         .query_row(
             "SELECT staff_shift_id FROM orders WHERE id = ?1",
@@ -573,7 +574,7 @@ pub(crate) fn refund_payment_in_connection(
     let sync_payload_value = serde_json::from_str::<Value>(&sync_payload)
         .map_err(|e| format!("parse adjustment payload: {e}"))?;
     crate::sync_queue::enqueue_payload_item(
-        &conn,
+        conn,
         "payment_adjustments",
         &adjustment_id,
         "INSERT",
@@ -663,14 +664,51 @@ pub fn void_payment_with_adjustment(
 ) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    // Verify payment exists and is completed
-    let (order_id, amount, pay_method): (String, f64, String) = conn
+    // Fetch the payment in any state so we can return a precise, typed error
+    // rather than a misleading "not found". A completed payment is the only
+    // voidable state; other states each surface their own error message.
+    let (order_id, amount, pay_method, pay_status): (String, f64, String, String) = conn
         .query_row(
-            "SELECT order_id, amount, method FROM order_payments WHERE id = ?1 AND status = 'completed'",
+            "SELECT order_id, amount, method, status FROM order_payments WHERE id = ?1",
             params![payment_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .map_err(|_| format!("No completed payment found with id {payment_id}"))?;
+        .map_err(|_| format!("Payment not found: {payment_id}"))?;
+
+    match pay_status.as_str() {
+        "completed" => {}
+        "voided" => return Err(format!("Payment {payment_id} is already voided")),
+        "refunded" => {
+            return Err(format!(
+                "Payment {payment_id} has been refunded and cannot be voided"
+            ))
+        }
+        other => {
+            return Err(format!(
+                "Payment {payment_id} has status '{other}' and cannot be voided"
+            ))
+        }
+    }
+
+    // Reconciliation guard: a completed payment must have no prior refund
+    // adjustments. If any exist, the payment is in a partially-materialized
+    // state — voiding it now would compound monetary drift because the void
+    // reverses the full amount while refunds have already been paid out.
+    let prior_refunds: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0.0) FROM payment_adjustments
+             WHERE payment_id = ?1 AND adjustment_type = 'refund'",
+            params![payment_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+    if prior_refunds > MONEY_EPSILON {
+        return Err(format!(
+            "Payment {payment_id} has {prior_refunds:.2} in prior refunds; \
+             complete the remaining balance as a refund instead of voiding"
+        ));
+    }
+
     let order_shift_id: Option<String> = conn
         .query_row(
             "SELECT staff_shift_id FROM orders WHERE id = ?1",
@@ -689,25 +727,28 @@ pub fn void_payment_with_adjustment(
     let now = Utc::now().to_rfc3339();
     let adjustment_id = Uuid::new_v4().to_string();
 
-    // Determine sync_state for the adjustment
-    let pay_sync_state: String = conn
-        .query_row(
-            "SELECT sync_state FROM order_payments WHERE id = ?1",
-            params![payment_id],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "pending".to_string());
-
-    let initial_sync_state = if pay_sync_state == "applied" {
-        "pending"
-    } else {
-        "waiting_parent"
-    };
-
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
+        // Read pay_sync_state INSIDE the transaction. Previously this ran
+        // outside BEGIN IMMEDIATE, so a payment that transitioned from a
+        // non-applied state to 'applied' in the gap would still cause the
+        // void adjustment to be routed to `waiting_parent` and then stall
+        // indefinitely waiting for a parent that had already synced.
+        let pay_sync_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM order_payments WHERE id = ?1",
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "pending".to_string());
+        let initial_sync_state = if pay_sync_state == "applied" {
+            "pending"
+        } else {
+            "waiting_parent"
+        };
+
         // Mark payment as voided
         conn.execute(
             "UPDATE order_payments SET
@@ -923,7 +964,13 @@ pub fn get_payment_balance(db: &DbState, payment_id: &str) -> Result<Value, Stri
         )
         .unwrap_or(0.0);
 
-    let balance = original_amount - total_refunds;
+    // Wave 6: clamp to zero. If `total_refunds` accidentally exceeds
+    // `original_amount` (DB inconsistency, historical corruption,
+    // over-refund guard misconfiguration), a negative balance would
+    // render as e.g. "-€0.01 refundable" in the UI and confuse the
+    // cashier. The source-of-truth stays in the underlying rows; we
+    // only prevent surfacing a meaningless negative to the operator.
+    let balance = (original_amount - total_refunds).max(0.0);
 
     Ok(serde_json::json!({
         "success": true,
@@ -944,7 +991,15 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
 }
 
 fn num_field(v: &Value, key: &str) -> Option<f64> {
-    v.get(key).and_then(Value::as_f64)
+    // Reject NaN and ±Infinity at the field-reading layer. `Value::as_f64`
+    // returns `Some` for any JSON number that fits in f64, including
+    // representations that parse to NaN or Infinity through edge encodings.
+    // Downstream guards like `amount <= 0.0` are NOT NaN-safe (every NaN
+    // comparison returns false), so a non-finite value would silently
+    // bypass the positive-amount check.
+    v.get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
 }
 
 // ===========================================================================
@@ -1405,17 +1460,23 @@ mod tests {
         let db = test_db();
         let pay_id = seed_order_and_payment(&db, "ord-mrv", 50.0);
 
-        // Refund 20
+        // Refund 20 — payment stays status='completed' (fully-refunded threshold
+        // not yet reached) but now has a non-zero prior refund total.
         let p = serde_json::json!({ "paymentId": pay_id, "amount": 20.0, "reason": "Partial" });
         refund_payment(&db, &p).unwrap();
 
-        // Now void — should fail because payment has refunds and is not purely "completed"
-        // Actually, the payment is still "completed" (only "refunded" when fully refunded)
-        // So void should work
-        let result = void_payment_with_adjustment(&db, &pay_id, "Cancel rest", None, None).unwrap();
-        assert_eq!(result["success"], true);
+        // Void must now be rejected: the payment is partially materialized via
+        // the prior refund, so voiding (which reverses the full sale) would
+        // double-count the already-paid-out refund. The correct operator flow
+        // is to process the remaining 30.0 as another refund, not a void.
+        let err = void_payment_with_adjustment(&db, &pay_id, "Cancel rest", None, None)
+            .expect_err("void of partially-refunded payment must be rejected");
+        assert!(
+            err.contains("prior refunds"),
+            "error should mention prior refunds, got: {err}"
+        );
 
-        // Payment should be voided
+        // Payment status must remain 'completed' — no void was applied.
         let conn = db.conn.lock().unwrap();
         let status: String = conn
             .query_row(
@@ -1424,9 +1485,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(status, "voided");
+        assert_eq!(status, "completed");
 
-        // Should have 2 adjustments: 1 refund + 1 void
+        // Only the one prior refund adjustment exists; no void row was inserted.
         let count: i32 = conn
             .query_row(
                 "SELECT COUNT(*) FROM payment_adjustments WHERE payment_id = ?1",
@@ -1434,7 +1495,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 1);
     }
 
     #[test]

@@ -437,7 +437,7 @@ pub fn cancel_print_jobs(
                              WHERE id = ?2 AND status IN ('pending', 'printing')",
                             params![now, job_id],
                         )
-                        .map_err(|e| e.to_string())? as usize;
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -453,7 +453,7 @@ pub fn cancel_print_jobs(
                          WHERE status = ?2",
                         params![now, status],
                     )
-                    .map_err(|e| e.to_string())? as usize;
+                    .map_err(|e| e.to_string())?;
             }
         }
     }
@@ -3950,12 +3950,37 @@ fn build_document_for_job(
     }
 }
 
+/// Reject a path segment that could escape the receipts directory or
+/// contain filesystem-hostile characters. POS entity ids (UUIDs, order
+/// ids, z-report ids) are machine-generated and always match
+/// `[A-Za-z0-9_-]{1,128}`, so this allowlist is tight without false
+/// positives while blocking `..`, `/`, `\`, NUL, and every other path
+/// traversal primitive.
+fn sanitize_path_segment(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{label} cannot be empty"));
+    }
+    if value.len() > 128 {
+        return Err(format!("{label} exceeds 128 characters"));
+    }
+    for ch in value.chars() {
+        if !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_' {
+            return Err(format!(
+                "{label} contains invalid character; only [A-Za-z0-9_-] allowed"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn write_print_html_file(
     data_dir: &Path,
     entity_type: &str,
     entity_id: &str,
     html: &str,
 ) -> Result<String, String> {
+    sanitize_path_segment("entity_type", entity_type)?;
+    sanitize_path_segment("entity_id", entity_id)?;
     let receipts_dir = data_dir.join(RECEIPTS_DIR);
     fs::create_dir_all(&receipts_dir).map_err(|e| format!("create receipts dir: {e}"))?;
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
@@ -4340,7 +4365,7 @@ pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
                  WHERE id = ?2 AND status = 'printing'",
                 params![now, job_id],
             )
-            .map_err(|e| format!("recover stale printing jobs: {e}"))? as usize;
+            .map_err(|e| format!("recover stale printing jobs: {e}"))?;
     }
 
     if affected > 0 {
@@ -4431,15 +4456,26 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
                     return Ok(());
                 }
 
-                // Mark as printing
+                // Mark as printing.
+                //
+                // Wave 3: refresh `Utc::now()` per job. The outer
+                // `process_pending_jobs` captured a single `now_str` at
+                // the top of the function and reused it here for every
+                // job in the batch. A slow batch (large queue, slow
+                // printer) could cause all jobs' `updated_at` to carry
+                // a stale timestamp; combined with
+                // `recover_stale_printing_jobs`'s age check, jobs
+                // marked `printing` early in the tick could appear
+                // stale and get re-queued, producing duplicate prints.
                 {
+                    let per_job_now = Utc::now().to_rfc3339();
                     let conn = db.conn.lock().map_err(|e| e.to_string())?;
                     let affected = conn
                         .execute(
                             "UPDATE print_jobs
                          SET status = 'printing', updated_at = ?1
                          WHERE id = ?2 AND status = 'pending'",
-                            params![now_str, job_id],
+                            params![per_job_now, job_id],
                         )
                         .map_err(|e| format!("mark print job as printing: {e}"))?;
                     if affected == 0 {
@@ -4647,6 +4683,37 @@ mod tests {
     use crate::db;
     use rusqlite::{params, Connection};
     use std::sync::Mutex;
+
+    #[test]
+    fn sanitize_path_segment_blocks_traversal_and_control_chars() {
+        // Accept: machine-generated ids.
+        assert!(sanitize_path_segment("entity_id", "abc-123").is_ok());
+        assert!(sanitize_path_segment("entity_id", "550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert!(sanitize_path_segment("entity_type", "receipt").is_ok());
+        assert!(sanitize_path_segment("entity_type", "z_report").is_ok());
+
+        // Reject: path traversal attempts.
+        assert!(sanitize_path_segment("entity_id", "../evil").is_err());
+        assert!(sanitize_path_segment("entity_id", "..\\evil").is_err());
+        assert!(sanitize_path_segment("entity_id", "a/b").is_err());
+        assert!(sanitize_path_segment("entity_id", "a\\b").is_err());
+        assert!(sanitize_path_segment("entity_id", "..").is_err());
+
+        // Reject: control characters and NUL.
+        assert!(sanitize_path_segment("entity_id", "abc\0def").is_err());
+        assert!(sanitize_path_segment("entity_id", "abc\ndef").is_err());
+        assert!(sanitize_path_segment("entity_id", "abc\tdef").is_err());
+
+        // Reject: empty and over-length.
+        assert!(sanitize_path_segment("entity_id", "").is_err());
+        assert!(sanitize_path_segment("entity_id", &"a".repeat(129)).is_err());
+
+        // Reject: characters that would be valid in a filename but are
+        // filesystem-hostile or reserved on Windows.
+        assert!(sanitize_path_segment("entity_id", "a:b").is_err());
+        assert!(sanitize_path_segment("entity_id", "a*b").is_err());
+        assert!(sanitize_path_segment("entity_id", "a<b").is_err());
+    }
 
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");

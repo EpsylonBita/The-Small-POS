@@ -221,9 +221,7 @@ fn normalize_discovery_type(value: &str) -> Option<&'static str> {
     let normalized = value
         .trim()
         .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_")
-        .replace('/', "_");
+        .replace(['-', ' ', '/'], "_");
 
     match normalized.as_str() {
         "serial_usb" | "serial" | "usb" | "usb_serial" => Some("serial_usb"),

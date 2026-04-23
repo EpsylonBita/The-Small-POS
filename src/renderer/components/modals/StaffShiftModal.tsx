@@ -422,6 +422,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [roleType, setRoleType] = useState<StaffShiftRole>('cashier');
   const [staffAuthMetadataStatus, setStaffAuthMetadataStatus] = useState<'available' | 'missing'>('available');
 
+  // Cross-terminal busy-state — populated by `bridge.staffAuth.refreshDirectory()`.
+  // Keys are staff ids that are checked in on a DIFFERENT terminal than this one;
+  // the value is the resolved terminal name + role for the subtitle on the
+  // grayed-out card. Busy entries are not clickable on the check-in list. The
+  // server-side unique partial index is still the ultimate guarantee — this map
+  // exists to pre-empt the bad UX of "user types PIN, then sees rejection".
+  const [busyElsewhereByStaffId, setBusyElsewhereByStaffId] = useState<
+    Map<string, { terminalName: string; role: string }>
+  >(new Map());
+
   // PIN Input reference for focus management
   const pinInputRef = useRef<HTMLInputElement>(null);
 
@@ -1153,6 +1163,37 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       } catch (e) {
         console.warn('Active shifts load failed', e);
       }
+
+      // Fetch cross-terminal busy state so the "Ready to check in" list
+      // can gray out staff who are already on a shift on another terminal.
+      // Non-fatal — if the endpoint is unreachable (offline, old admin
+      // build without the staff-directory route) we just show the list
+      // without busy markers and rely on the server-side unique index to
+      // reject duplicate check-ins.
+      try {
+        const directoryResult = await bridge.staffAuth.refreshDirectory();
+        if (directoryResult?.success && Array.isArray(directoryResult.staff)) {
+          const myTerminalId = (directoryResult.currentTerminalId ?? '').trim();
+          const busy = new Map<string, { terminalName: string; role: string }>();
+          for (const entry of directoryResult.staff) {
+            const cs = entry?.currentShift;
+            if (!cs) continue;
+            const shiftTerminal = (cs.terminalId ?? '').trim();
+            if (!shiftTerminal) continue;
+            // If we don't know our own terminal id, be conservative and
+            // treat every open shift as "elsewhere" — mirrors the Rust
+            // verify path's same-sided safe default.
+            if (myTerminalId && shiftTerminal === myTerminalId) continue;
+            busy.set(entry.id, {
+              terminalName: (cs.terminalName ?? '').trim(),
+              role: (cs.role ?? '').trim(),
+            });
+          }
+          setBusyElsewhereByStaffId(busy);
+        }
+      } catch (directoryErr) {
+        console.warn('[StaffShiftModal] refreshDirectory failed (non-fatal):', directoryErr);
+      }
     } catch (err) {
       console.error('Failed to load staff:', err);
       if (branchId) {
@@ -1544,7 +1585,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   };
 
   const getCheckInPinErrorMessage = (
-    result: { reasonCode?: unknown; error?: unknown } | undefined,
+    result:
+      | {
+          reasonCode?: unknown;
+          error?: unknown;
+          busyTerminalName?: unknown;
+          busyRole?: unknown;
+        }
+      | undefined,
   ): string => {
     const reasonCode = typeof result?.reasonCode === 'string' ? result.reasonCode : '';
     switch (reasonCode) {
@@ -1566,6 +1614,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           'modals.staffShift.staffAuthUnavailable',
           'Staff auth data is not available offline yet. Open the staff list while online first.',
         );
+      case 'staff_busy_elsewhere': {
+        const terminalName =
+          typeof result?.busyTerminalName === 'string' && result.busyTerminalName.trim()
+            ? result.busyTerminalName.trim()
+            : t('modals.staffShift.busyTerminalFallback', 'another terminal');
+        const role =
+          typeof result?.busyRole === 'string' && result.busyRole.trim()
+            ? result.busyRole.trim()
+            : '';
+        return t('modals.staffShift.busyElsewhere', {
+          defaultValue: 'Checked in at {{terminal}} as {{role}}',
+          terminal: terminalName,
+          role,
+        });
+      }
       default:
         return String(result?.error || t('modals.staffShift.verifyPinFailed'));
     }
@@ -4601,6 +4664,54 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       const roles = getStaffRoles(staffMember);
                       const primaryRole = roles[0];
                       const primaryPresentation = getRolePresentation(primaryRole?.role_name);
+                      const busyInfo = busyElsewhereByStaffId.get(staffMember.id);
+
+                      // Busy-elsewhere card: disabled, muted, shows terminal + role subtitle.
+                      if (busyInfo) {
+                        const busyTerminal =
+                          busyInfo.terminalName ||
+                          t('modals.staffShift.busyTerminalFallback', 'another terminal');
+                        const busyRole =
+                          busyInfo.role || t('shift.labels.active', 'Active');
+                        return (
+                          <div
+                            key={staffMember.id}
+                            role="presentation"
+                            aria-disabled="true"
+                            title={t('modals.staffShift.busyElsewhere', {
+                              defaultValue: 'Checked in at {{terminal}} as {{role}}',
+                              terminal: busyTerminal,
+                              role: busyRole,
+                            })}
+                            className="group w-full cursor-not-allowed rounded-[24px] border border-slate-200/70 bg-slate-50/60 p-4 text-left opacity-60 dark:border-white/5 dark:bg-white/[0.02]"
+                          >
+                            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                              <div className="flex min-w-0 items-start gap-4">
+                                <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[20px] border border-slate-200/70 bg-slate-100/60 dark:border-white/10 dark:bg-white/[0.04]">
+                                  <User className="h-8 w-8 text-slate-400 dark:text-slate-500" strokeWidth={1.8} />
+                                </div>
+
+                                <div className="min-w-0">
+                                  <div className="truncate text-lg font-black text-slate-500 dark:text-slate-400">
+                                    {staffMember.name}
+                                  </div>
+                                  <div className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                                    {t('modals.staffShift.busyElsewhere', {
+                                      defaultValue: 'Checked in at {{terminal}} as {{role}}',
+                                      terminal: busyTerminal,
+                                      role: busyRole,
+                                    })}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <span className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200/70 bg-slate-100/70 px-4 py-2 text-xs font-semibold text-slate-500 dark:border-white/10 dark:bg-white/[0.03] dark:text-slate-400">
+                                {t('modals.staffShift.unavailable', 'Unavailable')}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      }
 
                       return (
                         <motion.button

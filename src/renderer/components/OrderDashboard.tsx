@@ -27,13 +27,16 @@ import { CustomerInfoModal } from "./modals/CustomerInfoModal";
 import { AddCustomerModal } from "./modals/AddCustomerModal";
 import { MenuModal } from "./modals/MenuModal";
 import { EditOrderRefundSettlementModal } from "./modals/EditOrderRefundSettlementModal";
+import {
+  EditSettlementDeltaModal,
+  type EditSettlementDeltaMethod,
+} from "./modals/EditSettlementDeltaModal";
 import { SplitPaymentModal } from "./modals/SplitPaymentModal";
 import {
   SinglePaymentCollectionModal,
   type SinglePaymentCollectionResult,
 } from "./modals/SinglePaymentCollectionModal";
 import OrderDetailsModal from "./modals/OrderDetailsModal";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
 import type {
   SplitPaymentCollectionMode,
   SplitPaymentResult,
@@ -144,12 +147,6 @@ interface PendingEditRefundSettlement {
   request: EditSettlementRequest;
 }
 
-interface PendingPickupConversion {
-  isOpen: boolean;
-  orders: Array<Pick<Order, "id" | "orderNumber" | "status">>;
-  outForDeliveryCount: number;
-}
-
 type OrderFlowCustomer = Customer & {
   selected_address_id?: string | null;
   editAddressId?: string;
@@ -162,6 +159,18 @@ type OrderFlowCustomer = Customer & {
 interface PickupToDeliveryContext {
   orderId: string;
   orderNumber: string;
+  /**
+   * Controls what happens after the customer-search + address-pick flow
+   * succeeds:
+   *   - `'finalize'` (default, bulk-action path): calls
+   *     `convertPickupOrderToDelivery` to commit the type change +
+   *     delivery fee + zone validation and close the flow.
+   *   - `'edit'` (Change Order Type button in EditOptionsModal): attaches
+   *     the new customer + address, then reopens the menu-edit session in
+   *     delivery mode so the operator can add/remove items with delivery
+   *     tier pricing before saving.
+   */
+  mode?: 'finalize' | 'edit';
 }
 
 type StatusTransitionTarget = Extract<Order["status"], "completed" | "delivered">;
@@ -283,7 +292,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       approveOrder,
       declineOrder,
       assignDriver,
-      convertToPickup,
       conflicts,
       resolveConflict,
       createOrder,
@@ -485,6 +493,23 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       useState<PendingStatusPaymentCollection | null>(null);
     const [pendingEditRefundSettlement, setPendingEditRefundSettlement] =
       useState<PendingEditRefundSettlement | null>(null);
+    // Drives the new small "cash or card?" modal shown after a paid-order
+    // edit produces a non-zero delta. Positive delta → mode 'collect'
+    // (extra to collect from the customer). Negative delta → mode 'refund'
+    // (money owed back to the customer). Zero-delta edits skip this modal
+    // entirely and commit directly. This supersedes the previous routing
+    // through SplitPaymentModal (kind 'edit-settlement') and
+    // EditOrderRefundSettlementModal for edit-settlement cases; those
+    // components remain mounted for safety but are no longer the primary
+    // UX path. See plan at
+    // D:/The-Small-002/planning/claude/rustling-chasing-puzzle.md.
+    const [editSettlementDeltaPrompt, setEditSettlementDeltaPrompt] = useState<{
+      mode: "collect" | "refund";
+      amount: number;
+      orderNumber?: string | null;
+      preview: OrderEditSettlementPreview;
+      request: EditSettlementRequest;
+    } | null>(null);
 
     // State for delivery flow
     const [showPhoneLookupModal, setShowPhoneLookupModal] = useState(false);
@@ -518,12 +543,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       string | null
     >(null);
     const [receiptPreviewPrinting, setReceiptPreviewPrinting] = useState(false);
-    const [pendingPickupConversion, setPendingPickupConversion] =
-      useState<PendingPickupConversion>({
-        isOpen: false,
-        orders: [],
-        outForDeliveryCount: 0,
-      });
     const [pickupToDeliveryContext, setPickupToDeliveryContext] =
       useState<PickupToDeliveryContext | null>(null);
 
@@ -642,7 +661,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const closeCustomerSearchModal = useCallback(() => {
       if (pickupToDeliveryContext) {
+        const wasEditMode = pickupToDeliveryContext.mode === "edit";
         resetPickupToDeliveryFlow();
+        // If the flow was opened from the EditOptionsModal "Change Order
+        // Type → Delivery" entry point, bounce back to that modal so the
+        // operator can pick a different action instead of landing on the
+        // bare dashboard.
+        if (wasEditMode) {
+          setShowEditOptionsModal(true);
+        }
         return;
       }
       setShowPhoneLookupModal(false);
@@ -650,7 +677,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const closeAddCustomerModal = useCallback(() => {
       if (pickupToDeliveryContext) {
+        const wasEditMode = pickupToDeliveryContext.mode === "edit";
         resetPickupToDeliveryFlow();
+        if (wasEditMode) {
+          setShowEditOptionsModal(true);
+        }
         return;
       }
       setShowAddCustomerModal(false);
@@ -1425,7 +1456,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
           setSelectedOrders([targetOrder.id]);
           setSelectionType("delivery");
-          resetPickupToDeliveryFlow();
+
+          // Capture mode before resetPickupToDeliveryFlow clears context.
+          const conversionMode = pickupToDeliveryContext.mode || "finalize";
 
           try {
             await silentRefresh();
@@ -1437,6 +1470,23 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             await loadOrders();
           }
 
+          if (conversionMode === "edit") {
+            // EditOptionsModal "Change Order Type → Delivery" entry path.
+            // Customer + address are persisted; order is now delivery with
+            // delivery_fee set. Reopen the menu-edit session so the operator
+            // can add/remove items against the delivery tier before saving.
+            resetPickupToDeliveryFlow();
+            setCurrentEditOrderId(targetOrder.id);
+            setCurrentEditSupabaseId(targetOrder.supabase_id);
+            setCurrentEditOrderNumber(
+              targetOrder.order_number || targetOrder.orderNumber,
+            );
+            setEditingOrderType("delivery");
+            setShowEditMenuModal(true);
+            return true;
+          }
+
+          resetPickupToDeliveryFlow();
           toast.success(
             t("orderDashboard.convertedToDelivery", {
               orderNumber:
@@ -2665,9 +2715,77 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderType: targetOrderType,
         };
 
+        // Forward customer + delivery fields into orderUpdates so the
+        // atomic edit-settlement preserves (and, for pickup→delivery
+        // conversions, commits) the full final shape of the order. Before
+        // this, only orderType + some null-outs were forwarded, which
+        // left paid pickup→delivery converted orders with customer=null
+        // and delivery_address=null even after the user went through the
+        // phone-lookup + address flow (see order #00003 incident,
+        // 2026-04-22). Reading from the most recent local order state
+        // means that whatever the earlier bridge.orders.convertPickupToDelivery
+        // call landed is preserved — and if anything was lost in transit,
+        // the client-side source of truth (the local order row after the
+        // silentRefresh) wins the final commit.
+        const orderAny = order as any;
+        const customerId =
+          orderAny?.customer_id ??
+          orderAny?.customerId ??
+          null;
+        const customerName =
+          orderAny?.customer_name ??
+          orderAny?.customerName ??
+          null;
+        const customerPhone =
+          orderAny?.customer_phone ??
+          orderAny?.customerPhone ??
+          null;
+        const customerEmail =
+          orderAny?.customer_email ??
+          orderAny?.customerEmail ??
+          null;
+        if (customerId !== undefined) {
+          orderUpdates.customerId = customerId;
+        }
+        if (typeof customerName === "string" && customerName.trim()) {
+          orderUpdates.customerName = customerName;
+        }
+        if (typeof customerPhone === "string" && customerPhone.trim()) {
+          orderUpdates.customerPhone = customerPhone;
+        }
+        if (customerEmail !== undefined) {
+          orderUpdates.customerEmail = customerEmail;
+        }
+
         if (targetOrderType === "delivery") {
           orderUpdates.tableNumber = null;
           orderUpdates.waiterId = null;
+          // Forward delivery address from the current order row so the
+          // atomic commit re-affirms it. The earlier phone-lookup flow
+          // ran bridge.orders.convertPickupToDelivery which writes these
+          // server-side; reading them back here defends against any
+          // partial-commit or server-side null-out that would leave the
+          // row type-converted but address-less.
+          const deliveryAddress =
+            orderAny?.delivery_address ?? orderAny?.deliveryAddress ?? null;
+          const deliveryCity =
+            orderAny?.delivery_city ?? orderAny?.deliveryCity ?? null;
+          const deliveryPostalCode =
+            orderAny?.delivery_postal_code ??
+            orderAny?.deliveryPostalCode ??
+            null;
+          const deliveryFloor =
+            orderAny?.delivery_floor ?? orderAny?.deliveryFloor ?? null;
+          const deliveryNotes =
+            orderAny?.delivery_notes ?? orderAny?.deliveryNotes ?? null;
+          const nameOnRinger =
+            orderAny?.name_on_ringer ?? orderAny?.nameOnRinger ?? null;
+          orderUpdates.deliveryAddress = deliveryAddress;
+          orderUpdates.deliveryCity = deliveryCity;
+          orderUpdates.deliveryPostalCode = deliveryPostalCode;
+          orderUpdates.deliveryFloor = deliveryFloor;
+          orderUpdates.deliveryNotes = deliveryNotes;
+          orderUpdates.nameOnRinger = nameOnRinger;
         } else {
           orderUpdates.deliveryAddress = null;
           orderUpdates.deliveryCity = null;
@@ -2702,53 +2820,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const openEditSettlementCollectionPrompt = useCallback(
       (preview: OrderEditSettlementPreview, request: EditSettlementRequest) => {
-        const collectionMode: SplitPaymentCollectionMode | undefined = preview
-          .deliverySettlement?.driverCashOwned
-          ? {
-              enabled: true,
-              allowDriverShift: true,
-              defaultCollectedBy: "driver_shift",
-              label: t("splitPayment.collectedBy", {
-                defaultValue: "Collected By",
-              }),
-              description: t("orderDashboard.deliveryDriverSettlement", {
-                defaultValue:
-                  "Choose whether the extra amount was settled by the driver or by the cashier.",
-              }),
-            }
-          : undefined;
-
-        setSplitPaymentData({
-          kind: "edit-settlement",
-          orderId: preview.orderId,
-          orderTotal: preview.nextTotal,
-          existingPayments: preview.completedPayments,
-          items: buildSplitPaymentItems({
-            items: request.items.map((item: any, index: number) => ({
-              name: item.name || "Item",
-              quantity: Number(item.quantity || 1),
-              price: Number(
-                item.unit_price ?? item.unitPrice ?? item.price ?? 0,
-              ),
-              totalPrice: Number(
-                item.total_price ??
-                  item.totalPrice ??
-                  (item.unit_price ?? item.unitPrice ?? item.price ?? 0) *
-                    (item.quantity || 1),
-              ),
-              itemIndex: Number(item.itemIndex ?? index),
-            })),
-            orderTotal: preview.nextTotal,
-            adjustmentLabel: t("splitPayment.adjustment", {
-              defaultValue: "Adjustment",
-            }),
-          }),
-          isGhostOrder: preview.isGhostOrder,
-          initialMode: "by-amount",
-          collectionMode,
+        // New simple cash/card delta picker replaces the former
+        // SplitPaymentModal routing for edit-settlement collect cases.
+        // Amount = how much more the customer still owes after the edit.
+        const amount = Math.max(
+          0,
+          Number(preview.nextTotal || 0) - Number(preview.paidTotal || 0),
+        );
+        setEditSettlementDeltaPrompt({
+          mode: "collect",
+          amount,
+          orderNumber: request.orderNumber ?? null,
+          preview,
+          request,
         });
       },
-      [t],
+      [],
     );
 
     const applySettlementAwareOrderEdit = useCallback(
@@ -2806,7 +2893,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           clearBulkSelection();
           setPendingEditRefundSettlement(null);
           if (refreshedPreview?.requiredAction === "refund") {
-            setPendingEditRefundSettlement({
+            const refundAmount = Math.max(
+              0,
+              Number(refreshedPreview.paidTotal || 0) -
+                Number(refreshedPreview.nextTotal || 0),
+            );
+            setEditSettlementDeltaPrompt({
+              mode: "refund",
+              amount: refundAmount,
+              orderNumber: request.orderNumber ?? null,
               preview: refreshedPreview,
               request,
             });
@@ -2840,7 +2935,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         ) {
           resetEditOrderState();
           clearBulkSelection();
-          setPendingEditRefundSettlement({
+          const refundAmount = Math.max(
+            0,
+            Number(previews[0].paidTotal || 0) -
+              Number(previews[0].nextTotal || 0),
+          );
+          setEditSettlementDeltaPrompt({
+            mode: "refund",
+            amount: refundAmount,
+            orderNumber: normalizedRequests[0].orderNumber ?? null,
             preview: previews[0],
             request: normalizedRequests[0],
           });
@@ -2927,6 +3030,121 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         t,
       ],
     );
+
+    /**
+     * Confirm handler for the new simple cash/card delta modal. Dispatches
+     * to applyEditSettlement with a single-element payments or refunds
+     * array depending on mode. Replaces the former SplitPaymentModal
+     * (collect) and EditOrderRefundSettlementModal (refund) paths for
+     * edit-settlement cases.
+     */
+    const handleEditSettlementDeltaConfirm = useCallback(
+      async (method: EditSettlementDeltaMethod) => {
+        if (!editSettlementDeltaPrompt) return;
+        const { mode, amount, preview, request } = editSettlementDeltaPrompt;
+
+        if (mode === "collect") {
+          await bridge.orders.applyEditSettlement({
+            orderId: request.orderId,
+            items: request.items,
+            orderNotes: request.orderNotes,
+            financials: request.financials,
+            orderUpdates: request.orderUpdates,
+            action: {
+              type: "collect",
+              payments: [
+                {
+                  orderId: request.orderId,
+                  method,
+                  amount,
+                  paymentOrigin: "manual",
+                  collectedBy: "cashier_drawer",
+                },
+              ],
+            },
+          });
+        } else {
+          // Refund path: attribute the refund to the first completed
+          // payment that can cover it. Prefer a payment whose method
+          // matches the operator's chosen refund method; fall back to the
+          // payment with the most remaining refundable.
+          const eligible = (preview.completedPayments || []).filter(
+            (p) => Number(p.remainingRefundable || 0) >= amount - 0.005,
+          );
+          const preferred =
+            eligible.find(
+              (p) => String(p.method || "").toLowerCase() === method,
+            ) ||
+            eligible
+              .slice()
+              .sort(
+                (a, b) =>
+                  Number(b.remainingRefundable || 0) -
+                  Number(a.remainingRefundable || 0),
+              )[0];
+          if (!preferred) {
+            toast.error(
+              t("orderDashboard.refundNoEligiblePayment", {
+                defaultValue:
+                  "No completed payment with enough remaining balance to refund against.",
+              }),
+            );
+            throw new Error("no-eligible-payment-for-refund");
+          }
+          const attribution = resolveAdjustmentAttribution({
+            databaseStaffId: staff?.databaseStaffId,
+            shiftStaffOwnerId: activeShift?.staff_id,
+            staffShiftId: activeShift?.id,
+            candidateStaffIds: [staff?.staffId],
+          });
+          await bridge.orders.applyEditSettlement({
+            orderId: request.orderId,
+            items: request.items,
+            orderNotes: request.orderNotes,
+            financials: request.financials,
+            orderUpdates: request.orderUpdates,
+            action: {
+              type: "refund",
+              refunds: [
+                {
+                  paymentId: preferred.id,
+                  amount,
+                  reason: t("orderDashboard.editSettlementRefundReason", {
+                    defaultValue: "Edit settlement refund",
+                  }),
+                  refundMethod: method,
+                  cashHandler:
+                    method === "cash" ? "cashier_drawer" : undefined,
+                  staffId: attribution.staffId,
+                  staffShiftId: attribution.staffShiftId,
+                },
+              ],
+            },
+          });
+        }
+
+        setEditSettlementDeltaPrompt(null);
+        toast.success(t("orderDashboard.orderItemsUpdated", { count: 1 }));
+        await loadOrders();
+      },
+      [
+        activeShift?.id,
+        activeShift?.staff_id,
+        bridge.orders,
+        editSettlementDeltaPrompt,
+        loadOrders,
+        staff?.databaseStaffId,
+        staff?.staffId,
+        t,
+      ],
+    );
+
+    const handleEditSettlementDeltaCancel = useCallback(() => {
+      // Nothing to roll back server-side — the edit-settlement payments
+      // row only gets written on confirm. Close the modal and let the
+      // operator retry via the normal edit flow if they still want to.
+      setEditSettlementDeltaPrompt(null);
+    }, []);
 
     const handleSplitComplete = async (_result: SplitPaymentResult) => {
       splitPaymentCompletedRef.current = true;
@@ -3128,58 +3346,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       [retryBlockedStatusTransition, silentRefresh, singlePaymentCollectionData],
     );
 
-    const closePickupConversionConfirm = useCallback(() => {
-      setPendingPickupConversion({
-        isOpen: false,
-        orders: [],
-        outForDeliveryCount: 0,
-      });
-    }, []);
-
-    const confirmPickupConversion = useCallback(async () => {
-      const ordersToConvert = pendingPickupConversion.orders;
-      closePickupConversionConfirm();
-
-      if (ordersToConvert.length === 0) {
-        return;
-      }
-
-      setIsBulkActionLoading(true);
-      try {
-        let successCount = 0;
-        for (const ord of ordersToConvert) {
-          const ok = await convertToPickup(ord.id);
-          if (ok) {
-            successCount++;
-            continue;
-          }
-
-          toast.error(
-            t("orderDashboard.convertToPickupFailed", {
-              orderNumber: ord.orderNumber,
-            }) || `Failed to convert ${ord.orderNumber}`,
-          );
-          return;
-        }
-
-        if (successCount > 0) {
-          toast.success(
-            t("orderDashboard.convertedToPickup", { count: successCount }) ||
-              `Converted ${successCount} order(s) to pickup`,
-          );
-        }
-
-        setSelectionType("pickup");
-      } finally {
-        setIsBulkActionLoading(false);
-      }
-    }, [
-      closePickupConversionConfirm,
-      convertToPickup,
-      pendingPickupConversion.orders,
-      t,
-    ]);
-
     // Handle bulk actions
     const handleBulkAction = async (action: string) => {
       const deliveryOrders = selectedOrderObjects.filter(
@@ -3200,27 +3366,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           status !== "completed"
         );
       });
-
-      if (action === "pickup") {
-        if (deliveryOrders.length === 0) {
-          toast.error(
-            t("orderDashboard.noDeliveryOrdersSelected") ||
-              "Select delivery orders to convert to pickup",
-          );
-          return;
-        }
-
-        setPendingPickupConversion({
-          isOpen: true,
-          orders: deliveryOrders.map((order) => ({
-            id: order.id,
-            orderNumber: order.orderNumber,
-            status: order.status,
-          })),
-          outForDeliveryCount: deliveryOrdersInTransit.length,
-        });
-        return;
-      }
 
       if (action === "delivery") {
         if (!selectedSinglePickupOrder) {
@@ -3694,6 +3839,65 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowEditPaymentModal(true);
     };
 
+    // Used when the operator changes order type FROM delivery TO pickup or
+    // dine-in via the Change-Order-Type card. Per product decision: customer
+    // name/phone are preserved on the order record (reprints, loyalty,
+    // recall search by phone) but delivery-specific fields are cleared so
+    // z-reports and driver views don't show a delivery address attached
+    // to a pickup/dine-in order. Best-effort — if the bridge call fails
+    // the local state is still updated, and the server-side update will
+    // retry through the normal sync queue on the next save.
+    //
+    // Known gap: `deliveryCity` and `deliveryFloor` are not currently in
+    // the `bridge.orders.updateCustomerInfo` payload shape; those fields
+    // remain in the server record until the next full order edit. Local
+    // state clearance below keeps the UI consistent in the meantime.
+    const clearDeliveryFieldsForOrder = async (orderId: string) => {
+      try {
+        const order = orders.find((o) => o.id === orderId);
+        if (!order) return;
+        const customerName = String(
+          order.customer_name || order.customerName || "",
+        ).trim();
+        const customerPhone = String(
+          order.customer_phone || order.customerPhone || "",
+        ).trim();
+        if (!customerName || !customerPhone) {
+          // The `updateCustomerInfo` bridge requires name + phone as
+          // required fields. If neither is set, we can't call it —
+          // that's fine, the order had nothing delivery-specific to
+          // clear anyway (or it'll be corrected on the next save).
+          return;
+        }
+        const result = await bridge.orders.updateCustomerInfo({
+          orderId,
+          customerName,
+          customerPhone,
+          deliveryAddress: "",
+          deliveryPostalCode: "",
+          deliveryNotes: "",
+        });
+        if (!result?.success) {
+          console.warn(
+            "[OrderDashboard] clearDeliveryFieldsForOrder: non-success response",
+            result,
+          );
+        }
+        // silentRefresh picks up the cleared fields for subsequent
+        // renders; also re-hydrates any other fields that drift.
+        try {
+          await silentRefresh();
+        } catch {
+          /* non-fatal — loadOrders will converge later */
+        }
+      } catch (err) {
+        console.warn(
+          "[OrderDashboard] clearDeliveryFieldsForOrder failed (non-fatal):",
+          err,
+        );
+      }
+    };
+
     const openMenuEditSession = (targetOrderType?: EditableOrderType) => {
       setShowEditOptionsModal(false);
 
@@ -3742,6 +3946,62 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }),
         );
         return;
+      }
+
+      const orderBeingEdited = orders.find(
+        (o) => o.id === pendingEditOrders[0],
+      );
+      if (!orderBeingEdited) {
+        openMenuEditSession(targetOrderType);
+        return;
+      }
+
+      const currentType = resolveEditableOrderType(orderBeingEdited);
+      if (currentType === targetOrderType) {
+        // Button should be disabled, but belt-and-suspenders in case the
+        // EditOptionsModal passes a same-type click through.
+        openMenuEditSession(targetOrderType);
+        return;
+      }
+
+      // Pickup / dine-in → delivery: route through the existing
+      // customer-search + address-pick flow. After it resolves, the
+      // `mode: 'edit'` branch in convertPickupOrderToDelivery reopens
+      // the menu-edit session instead of finalizing as a bulk convert.
+      if (targetOrderType === "delivery") {
+        setShowEditOptionsModal(false);
+        setCurrentEditOrderId(orderBeingEdited.id);
+        setCurrentEditSupabaseId(orderBeingEdited.supabase_id);
+        setCurrentEditOrderNumber(
+          orderBeingEdited.order_number || orderBeingEdited.orderNumber,
+        );
+        setEditingOrderType("delivery");
+        setPickupToDeliveryContext({
+          orderId: orderBeingEdited.id,
+          orderNumber:
+            orderBeingEdited.orderNumber ||
+            orderBeingEdited.order_number ||
+            "",
+          mode: "edit",
+        });
+        setExistingCustomer(null);
+        setCustomerInfo(null);
+        setPhoneNumber("");
+        setCustomerModalMode("new");
+        setDeliveryZoneInfo(null);
+        setShowAddCustomerModal(false);
+        setShowPhoneLookupModal(true);
+        return;
+      }
+
+      // Delivery → pickup/dine-in: keep customer, clear delivery-only
+      // fields before reopening the menu. Per product decision: we never
+      // silently keep delivery_address on an order whose type is no
+      // longer delivery — that pollutes z-reports and driver views.
+      // TS note: targetOrderType is narrowed to "pickup" | "dine-in" here
+      // because the delivery branch above returned.
+      if (currentType === "delivery") {
+        void clearDeliveryFieldsForOrder(orderBeingEdited.id);
       }
 
       openMenuEditSession(targetOrderType);
@@ -4539,6 +4799,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           onConfirm={handleEditRefundSettlementConfirm}
         />
 
+        {/*
+          New simple cash/card picker shown after a paid-order edit produces
+          a non-zero delta. Replaces the former SplitPaymentModal routing
+          (collect) and the multi-line EditOrderRefundSettlementModal
+          (refund) for edit-settlement cases. Zero-delta edits commit
+          directly without this modal.
+        */}
+        <EditSettlementDeltaModal
+          isOpen={editSettlementDeltaPrompt !== null}
+          mode={editSettlementDeltaPrompt?.mode ?? "collect"}
+          amount={editSettlementDeltaPrompt?.amount ?? 0}
+          orderNumber={editSettlementDeltaPrompt?.orderNumber ?? null}
+          onConfirm={handleEditSettlementDeltaConfirm}
+          onCancel={handleEditSettlementDeltaCancel}
+        />
+
         {/* Order Detail / Approval */}
         {showApprovalPanel && selectedOrderForApproval && isViewOnlyMode && (
           <OrderDetailsModal
@@ -4624,52 +4900,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         )}
 
         {/* Existing Modals */}
-        <ConfirmDialog
-          isOpen={pendingPickupConversion.isOpen}
-          onClose={closePickupConversionConfirm}
-          onConfirm={() => {
-            void confirmPickupConversion();
-          }}
-          title={
-            t("orderDashboard.confirmPickupConversionTitle", {
-              defaultValue: "Convert delivery orders to pickup?",
-            }) || "Convert delivery orders to pickup?"
-          }
-          message={
-            t("orderDashboard.confirmPickupConversionMessage", {
-              count: pendingPickupConversion.orders.length,
-              defaultValue:
-                "You are converting {{count}} delivery order(s) to pickup. Delivery assignment and driver handling will be removed.",
-            }) ||
-            `You are converting ${pendingPickupConversion.orders.length} delivery order(s) to pickup. Delivery assignment and driver handling will be removed.`
-          }
-          confirmText={t("orderDashboard.confirmPickupConversionConfirm", {
-            defaultValue: "Convert to pickup",
-          })}
-          cancelText={t("common.actions.cancel")}
-          variant="warning"
-          isLoading={isBulkActionLoading}
-          details={
-            <div className="space-y-2">
-              <p>
-                {t("orderDashboard.confirmPickupConversionWarning", {
-                  defaultValue:
-                    "Delivery handling is removed for these orders.",
-                })}
-              </p>
-              {pendingPickupConversion.outForDeliveryCount > 0 && (
-                <p>
-                  {t("orderDashboard.confirmPickupConversionTransitWarning", {
-                    count: pendingPickupConversion.outForDeliveryCount,
-                    defaultValue:
-                      "{{count}} order(s) are already out for delivery and may return to ready after the conversion.",
-                  })}
-                </p>
-              )}
-            </div>
-          }
-        />
-
         <DriverAssignmentModal
           isOpen={showDriverModal}
           orderCount={pendingDeliveryOrders.length}

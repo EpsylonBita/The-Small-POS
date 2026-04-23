@@ -2416,6 +2416,21 @@
     }
   },
   "modals": {
+    "editSettlementDelta": {
+      "collectTitle": "Zusätzliche Zahlung",
+      "refundTitle": "Erstattung",
+      "collectBody": "Zusätzlich €{{amount}} einziehen — Methode wählen.",
+      "refundBody": "€{{amount}} an den Kunden zurückgeben — Methode wählen.",
+      "collectAmountLabel": "Zusatzbetrag",
+      "refundAmountLabel": "Erstattungsbetrag",
+      "payWithCash": "Mit Bargeld zahlen",
+      "payWithCard": "Mit Karte zahlen",
+      "refundCash": "In Bar erstatten",
+      "refundCard": "Auf Karte erstatten",
+      "refundNote": "Kartenerstattungen werden als Buchhaltungskorrektur erfasst. Führen Sie die eigentliche Kartenstornierung bei Bedarf separat durch.",
+      "cancel": "Abbrechen",
+      "failed": "Die Abrechnung konnte nicht abgeschlossen werden"
+    },
     "orderType": {
       "title": "Bestellart auswählen",
       "pickup": "Abholbestellung",
@@ -2645,6 +2660,9 @@
       "openingCash": "Anfangsbestand Kasse",
       "authenticating": "Authentifizierung...",
       "invalidPIN": "Ungültige PIN",
+      "busyElsewhere": "Angemeldet an {{terminal}} als {{role}}",
+      "busyTerminalFallback": "einem anderen Terminal",
+      "unavailable": "Nicht verfügbar",
       "noStaffSelected": "Bitte wählen Sie einen Mitarbeiter",
       "shiftStarted": "Schicht erfolgreich gestartet",
       "shiftEnded": "Schicht erfolgreich beendet",
@@ -3212,6 +3230,8 @@
       "editOrderItemsDesc": "Artikel, Mengen, Anmerkungen ändern",
       "editPaymentMethod": "Zahlungsmethode bearbeiten",
       "editPaymentMethodDesc": "Zwischen Bar und Karte wechseln",
+      "changeOrderType": "Bestelltyp ändern",
+      "changeOrderTypeDesc": "Bestellung neu berechnen mit Abhol-, Liefer- oder Vor-Ort-Tarif",
       "cancel": "Abbrechen"
     },
     "editPaymentMethod": {
@@ -3562,6 +3582,15 @@
     "enterWithoutPin": "Ohne PIN fortfahren",
     "noPinWarning": "Keine PIN festgelegt. Sie können eine in den Einstellungen nach der Anmeldung festlegen.",
     "pinResetRequired": "PIN-Zurücksetzung erforderlich. Bitte legen Sie eine neue PIN fest, um fortzufahren.",
+    "setupPin": "PIN einrichten",
+    "setupPinDesc": "Erstellen Sie eine 6-stellige PIN für den Administratorzugang",
+    "newPin": "Neue PIN (6+ Ziffern)",
+    "confirmPin": "PIN bestätigen",
+    "savePin": "PIN speichern",
+    "createPin": "PIN erstellen",
+    "pinTooShort": "Die PIN muss mindestens 6 Ziffern enthalten",
+    "pinMismatch": "PINs stimmen nicht überein",
+    "setupFailed": "PIN-Einrichtung fehlgeschlagen",
     "errors": {
       "enterPin": "Bitte geben Sie Ihre PIN ein",
       "invalidPin": "Falscher Code",
@@ -3673,7 +3702,9 @@
     "delivery": "Lieferung",
     "pickup": "Abholung",
     "edit": "Bearbeiten",
+    "editOrders": "Bestellungen bearbeiten",
     "cancel": "Stornieren",
+    "cancelOrders": "Bestellungen stornieren",
     "map": "Karte",
     "delivered": "Geliefert",
     "view": "Anzeigen",
