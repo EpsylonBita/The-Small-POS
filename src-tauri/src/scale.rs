@@ -256,8 +256,20 @@ pub fn connect(
         let mut line_buf = String::new();
 
         while SCALE_RUNNING.load(Ordering::SeqCst) {
-            // Read from serial port
-            match crate::serial::read_port(&handle_clone, 256) {
+            // Wave 2 C11: the serial read is a synchronous, blocking I/O
+            // call that can hold for up to `timeout_ms` (~200 ms per call).
+            // Running it directly on the Tokio worker would starve every
+            // other async task sharing the same worker thread. Moving it
+            // into `spawn_blocking` keeps the read on a dedicated blocking
+            // thread so the runtime stays responsive even with multiple
+            // peripherals polling in parallel.
+            let handle_for_read = handle_clone.clone();
+            let read_outcome = tokio::task::spawn_blocking(move || {
+                crate::serial::read_port(&handle_for_read, 256)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("scale read join error: {e}")));
+            match read_outcome {
                 Ok(result) => {
                     if let Some(data) = result["data"].as_str() {
                         if !data.is_empty() {

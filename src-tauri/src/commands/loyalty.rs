@@ -4,7 +4,7 @@ use serde_json::Value;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::{db, storage, value_f64, value_str};
+use crate::{db, storage, sync_queue, value_f64, value_str};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -662,8 +662,13 @@ pub async fn loyalty_earn_points(
     )
     .map_err(|e| format!("loyalty_earn_points update tier: {e}"))?;
 
-    // Enqueue for sync — include the original purchase amount so the admin
-    // /api/pos/loyalty/earn endpoint can recalculate points server-side.
+    // Wave 5 Session 6: enqueue via canonical parity queue. The parity
+    // dispatcher's `prepare_loyalty_request` reads `transaction_type` from
+    // this payload to route between `/api/pos/loyalty/earn` and
+    // `/api/pos/loyalty/redeem` and reshapes the body accordingly —
+    // wire-identical to the legacy `sync_loyalty_transaction` drain.
+    // `loyalty_transactions` is NOT in v47, so idempotency falls back to
+    // the deterministic synthetic `entity:loyalty_transactions:{tx_id}`.
     let sync_payload = serde_json::json!({
         "id": tx_id,
         "customer_id": canonical_customer_id,
@@ -675,11 +680,16 @@ pub async fn loyalty_earn_points(
         "description": description,
         "created_at": now,
     });
-    let idem_key = format!("loyalty_tx:{tx_id}");
-    let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('loyalty_transaction', ?1, 'insert', ?2, ?3)",
-        params![tx_id, sync_payload.to_string(), idem_key],
+    let _ = sync_queue::enqueue_payload_item(
+        &conn,
+        "loyalty_transactions",
+        &tx_id,
+        "INSERT",
+        &sync_payload,
+        Some(1),
+        Some("loyalty"),
+        Some("manual"),
+        Some(1),
     );
 
     info!(
@@ -801,7 +811,9 @@ pub async fn loyalty_redeem_points(
 
     let new_balance = current_balance - points;
 
-    // Enqueue for sync
+    // Wave 5 Session 6: enqueue via canonical parity queue. Local stores
+    // `points` as the signed negative delta; `prepare_loyalty_request`
+    // flips to absolute value before POSTing to /redeem.
     let sync_payload = serde_json::json!({
         "id": tx_id,
         "customer_id": canonical_customer_id,
@@ -813,11 +825,16 @@ pub async fn loyalty_redeem_points(
         "discount_value": discount_value,
         "created_at": now,
     });
-    let idem_key = format!("loyalty_tx:{tx_id}");
-    let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('loyalty_transaction', ?1, 'insert', ?2, ?3)",
-        params![tx_id, sync_payload.to_string(), idem_key],
+    let _ = sync_queue::enqueue_payload_item(
+        &conn,
+        "loyalty_transactions",
+        &tx_id,
+        "INSERT",
+        &sync_payload,
+        Some(1),
+        Some("loyalty"),
+        Some("manual"),
+        Some(1),
     );
 
     info!(

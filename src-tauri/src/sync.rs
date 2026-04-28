@@ -71,12 +71,18 @@ use crate::business_day;
 use crate::can_transition_locally;
 use crate::db;
 use crate::db::DbState;
+use crate::money::Cents;
 use crate::normalize_status_for_storage;
 use crate::order_ownership;
 use crate::payments;
 use crate::print;
-use crate::refunds;
+// Wave 5 Session 7 PR 0: `use crate::refunds;` was dropped together with
+// the reconcile-bridge gutting that was its sole caller (via
+// `refunds::build_adjustment_sync_payload_for_adjustment`). PR 2 re-adds
+// it if the adjustment producer path gets wired up to a new call site,
+// or drops the remaining helper family entirely.
 use crate::storage;
+use crate::sync_queue;
 use crate::terminal_helpers::{
     emit_terminal_auth_paused, normalize_terminal_identity,
     reconcile_terminal_identity_from_local_sources, terminal_auth_failure_requested_terminal_id,
@@ -192,7 +198,7 @@ pub(crate) struct ZReportSyncResponse {
 }
 
 const CLOSEOUT_SYNC_DRAIN_MAX_PASSES: usize = 4;
-const STALE_IN_PROGRESS_SYNC_LEASE_SECS: i64 = 120;
+const STALE_INFLIGHT_SYNC_LEASE_SECS: i64 = 120;
 const CLOSEOUT_SYNC_BLOCKER_SUMMARY_LIMIT: i64 = 5;
 const ADJUSTMENT_BLOCKER_PARENT_PAYMENT_NOT_SYNCED: &str = "parent_payment_not_synced";
 const ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID: &str =
@@ -359,6 +365,11 @@ struct RecurringSyncRecoverySummary {
     cashier_reference_requeues: usize,
     retryable_shift_requeues: usize,
     stale_in_progress_requeues: usize,
+    /// Wave 3 C6: count of `payment_adjustments` rows reset from
+    /// `sync_state = 'syncing'` back to `'pending'` because the sync
+    /// attempt that set them exceeded the `STALE_INFLIGHT_SYNC_LEASE_SECS`
+    /// lease without a success/failure write.
+    stale_syncing_adjustment_resets: usize,
     failed_shift_bound_financial_recoveries: usize,
     deferred_payment_promotions: usize,
     deferred_adjustment_promotions: usize,
@@ -372,6 +383,7 @@ impl RecurringSyncRecoverySummary {
             + self.cashier_reference_requeues
             + self.retryable_shift_requeues
             + self.stale_in_progress_requeues
+            + self.stale_syncing_adjustment_resets
             + self.failed_shift_bound_financial_recoveries
             + self.deferred_payment_promotions
             + self.deferred_adjustment_promotions
@@ -964,13 +976,25 @@ fn next_order_number(conn: &rusqlite::Connection) -> String {
         .unwrap_or(0);
 
     let next = current + 1;
-    let _ = conn.execute(
+    // Wave 6 M5: surface the counter write failure at `warn!` so operators
+    // can diagnose duplicate-order-number regressions. A silent `let _ = …`
+    // here used to hide disk-full / pragma / WAL-checkpoint failures; the
+    // next `create_order` call would then re-read `current` and produce
+    // the SAME order number as the previous call. At minimum we want the
+    // failure in the logs so the duplicate trail has an explanation.
+    if let Err(err) = conn.execute(
         "INSERT INTO local_settings (setting_category, setting_key, setting_value, updated_at) \
          VALUES ('orders', 'order_counter', ?1, datetime('now')) \
          ON CONFLICT(setting_category, setting_key) DO UPDATE SET \
             setting_value = excluded.setting_value, updated_at = excluded.updated_at",
         params![next.to_string()],
-    );
+    ) {
+        warn!(
+            next_counter = next,
+            error = %err,
+            "next_order_number: failed to persist counter; next call may re-use this number"
+        );
+    }
 
     format!("ORD-{}-{:05}", date_display, next)
 }
@@ -1140,6 +1164,16 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         str_field(payload, "tableNumber").or_else(|| str_field(payload, "table_number"));
     let delivery_address =
         str_field(payload, "deliveryAddress").or_else(|| str_field(payload, "delivery_address"));
+    let delivery_address_id = str_field(payload, "deliveryAddressId")
+        .or_else(|| str_field(payload, "delivery_address_id"));
+    let delivery_latitude =
+        num_field(payload, "deliveryLatitude").or_else(|| num_field(payload, "delivery_latitude"));
+    let delivery_longitude = num_field(payload, "deliveryLongitude")
+        .or_else(|| num_field(payload, "delivery_longitude"));
+    let delivery_address_fingerprint = str_field(payload, "deliveryAddressFingerprint")
+        .or_else(|| str_field(payload, "delivery_address_fingerprint"));
+    let delivery_zone_id =
+        str_field(payload, "deliveryZoneId").or_else(|| str_field(payload, "delivery_zone_id"));
     let delivery_city =
         str_field(payload, "deliveryCity").or_else(|| str_field(payload, "delivery_city"));
     let delivery_postal_code = str_field(payload, "deliveryPostalCode")
@@ -1160,6 +1194,16 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     }
     if let Some(ref v) = delivery_address {
         validate_string_length("delivery_address", v, 500)?;
+    }
+    if delivery_latitude
+        .is_some_and(|value| !value.is_finite() || !(-90.0..=90.0).contains(&value))
+    {
+        return Err("Invalid deliveryLatitude".into());
+    }
+    if delivery_longitude
+        .is_some_and(|value| !value.is_finite() || !(-180.0..=180.0).contains(&value))
+    {
+        return Err("Invalid deliveryLongitude".into());
     }
     let estimated_time = payload
         .get("estimatedTime")
@@ -1273,25 +1317,34 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin order transaction: {e}"))?;
 
+    // W6: `orders.payment_method` was dropped in v55. The renderer's
+    // `payment_method` is still plumbed into the sync payload below (so
+    // the admin dashboard can record operator intent for zero-payment
+    // orders); it simply no longer lands in a local column. Derived
+    // method-on-read uses `order_payments` rows exclusively.
+    let _ = &payment_method; // preserved for sync payload construction
     conn.execute(
         "INSERT INTO orders (
             id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
             items, total_amount, tax_amount, subtotal, status,
             order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
             delivery_floor, delivery_notes, name_on_ringer, special_instructions,
-            created_at, updated_at, estimated_time, sync_status, payment_status, payment_method,
+            created_at, updated_at, estimated_time, sync_status, payment_status,
             staff_shift_id, staff_id, driver_id, driver_name, discount_percentage,
             discount_amount, tip_amount, version, terminal_id, branch_id, plugin, tax_rate,
-            delivery_fee, client_request_id, is_ghost, ghost_source, ghost_metadata
+            delivery_fee, client_request_id, is_ghost, ghost_source, ghost_metadata,
+            delivery_address_id, delivery_latitude, delivery_longitude,
+            delivery_address_fingerprint, delivery_zone_id
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
             ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17,
             ?18, ?19, ?20, ?21,
-            ?22, ?23, ?24, 'pending', ?25, ?26,
-            ?27, ?28, ?29, ?30, ?31,
-            ?32, ?33, 1, ?34, ?35, ?36, ?37,
-            ?38, ?39, ?40, ?41, ?42
+            ?22, ?23, ?24, 'pending', ?25,
+            ?26, ?27, ?28, ?29, ?30,
+            ?31, ?32, 1, ?33, ?34, ?35, ?36,
+            ?37, ?38, ?39, ?40, ?41,
+            ?42, ?43, ?44, ?45, ?46
         )",
         params![
             &order_id,
@@ -1319,7 +1372,6 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &now,
             &estimated_time,
             &persisted_payment_status,
-            &payment_method,
             &resolved_staff_shift_id,
             &resolved_staff_id,
             &driver_id,
@@ -1336,6 +1388,11 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &(if is_ghost { 1_i64 } else { 0_i64 }),
             &ghost_source,
             &ghost_metadata,
+            &delivery_address_id,
+            &delivery_latitude,
+            &delivery_longitude,
+            &delivery_address_fingerprint,
+            &delivery_zone_id,
         ],
     )
     .map_err(|e| {
@@ -1399,6 +1456,40 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         if let Some(org_id) = organization_id.as_ref() {
             obj.insert("organizationId".to_string(), Value::String(org_id.clone()));
             obj.insert("organization_id".to_string(), Value::String(org_id.clone()));
+        }
+        if let Some(value) = customer_id.as_ref() {
+            obj.insert("customerId".to_string(), Value::String(value.clone()));
+            obj.insert("customer_id".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = delivery_address.as_ref() {
+            obj.insert("deliveryAddress".to_string(), Value::String(value.clone()));
+            obj.insert("delivery_address".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = delivery_address_id.as_ref() {
+            obj.insert("deliveryAddressId".to_string(), Value::String(value.clone()));
+            obj.insert("delivery_address_id".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = delivery_latitude {
+            obj.insert("deliveryLatitude".to_string(), serde_json::json!(value));
+            obj.insert("delivery_latitude".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = delivery_longitude {
+            obj.insert("deliveryLongitude".to_string(), serde_json::json!(value));
+            obj.insert("delivery_longitude".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = delivery_address_fingerprint.as_ref() {
+            obj.insert(
+                "deliveryAddressFingerprint".to_string(),
+                Value::String(value.clone()),
+            );
+            obj.insert(
+                "delivery_address_fingerprint".to_string(),
+                Value::String(value.clone()),
+            );
+        }
+        if let Some(value) = delivery_zone_id.as_ref() {
+            obj.insert("deliveryZoneId".to_string(), Value::String(value.clone()));
+            obj.insert("delivery_zone_id".to_string(), Value::String(value.clone()));
         }
         // Ensure the Rust-generated order number is synced to admin
         if let Some(ref num) = order_number {
@@ -1538,6 +1629,20 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             "displayOrderNumber": &display_order_number,
             "status": &status,
             "orderType": &order_type,
+            "customerId": &customer_id,
+            "customer_id": &customer_id,
+            "deliveryAddress": &delivery_address,
+            "delivery_address": &delivery_address,
+            "deliveryAddressId": &delivery_address_id,
+            "delivery_address_id": &delivery_address_id,
+            "deliveryLatitude": delivery_latitude,
+            "delivery_latitude": delivery_latitude,
+            "deliveryLongitude": delivery_longitude,
+            "delivery_longitude": delivery_longitude,
+            "deliveryAddressFingerprint": &delivery_address_fingerprint,
+            "delivery_address_fingerprint": &delivery_address_fingerprint,
+            "deliveryZoneId": &delivery_zone_id,
+            "delivery_zone_id": &delivery_zone_id,
             "totalAmount": total_amount,
             "taxAmount": tax_amount,
             "subtotal": subtotal,
@@ -1556,6 +1661,11 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 /// Get all orders, most recent first.
 pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // W6: `orders.payment_method` was dropped in v55. The SELECT keeps
+    // the same column ordering (`paymentMethod` stays at index 25)
+    // by substituting a derive subquery that matches
+    // `payments::derive_payment_method` semantics. Renderer contracts
+    // don't change — the JSON field is still populated, just computed.
     let mut stmt = conn
         .prepare(
             "SELECT id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
@@ -1563,13 +1673,26 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     cancellation_reason, order_type, table_number, delivery_address,
                     delivery_notes, name_on_ringer, special_instructions,
                     created_at, updated_at, estimated_time, supabase_id,
-                    sync_status, payment_status, payment_method,
+                    sync_status, payment_status,
+                    COALESCE((
+                        SELECT CASE
+                            WHEN COUNT(DISTINCT LOWER(TRIM(method))) > 1
+                              THEN 'split'
+                            ELSE LOWER(TRIM(MIN(method)))
+                        END
+                        FROM order_payments op
+                        WHERE op.order_id = orders.id
+                          AND op.status = 'completed'
+                          AND TRIM(COALESCE(op.method, '')) != ''
+                    ), 'pending'),
                     payment_transaction_id, staff_shift_id, staff_id,
                     discount_percentage, discount_amount, tip_amount,
                     version, updated_by, last_synced_at, remote_version,
                     terminal_id, branch_id, plugin, external_plugin_order_id,
                     tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
-                    delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name
+                    delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name,
+                    delivery_address_id, delivery_latitude, delivery_longitude,
+                    delivery_address_fingerprint, delivery_zone_id
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
              ORDER BY created_at ASC",
@@ -1658,6 +1781,16 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "driver_id": row.get::<_, Option<String>>(48)?,
                 "driverName": row.get::<_, Option<String>>(49)?,
                 "driver_name": row.get::<_, Option<String>>(49)?,
+                "deliveryAddressId": row.get::<_, Option<String>>(50)?,
+                "delivery_address_id": row.get::<_, Option<String>>(50)?,
+                "deliveryLatitude": row.get::<_, Option<f64>>(51)?,
+                "delivery_latitude": row.get::<_, Option<f64>>(51)?,
+                "deliveryLongitude": row.get::<_, Option<f64>>(52)?,
+                "delivery_longitude": row.get::<_, Option<f64>>(52)?,
+                "deliveryAddressFingerprint": row.get::<_, Option<String>>(53)?,
+                "delivery_address_fingerprint": row.get::<_, Option<String>>(53)?,
+                "deliveryZoneId": row.get::<_, Option<String>>(54)?,
+                "delivery_zone_id": row.get::<_, Option<String>>(54)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -1676,19 +1809,36 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
 pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
+    // W6: `orders.payment_method` was dropped in v55. Derive subquery
+    // slotted in at the same position so downstream row indices stay
+    // aligned with `get_all_orders`. See that function for semantic
+    // notes.
     let result = conn.query_row(
         "SELECT id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
                 items, total_amount, tax_amount, subtotal, status,
                 cancellation_reason, order_type, table_number, delivery_address,
                 delivery_notes, name_on_ringer, special_instructions,
                 created_at, updated_at, estimated_time, supabase_id,
-                sync_status, payment_status, payment_method,
+                sync_status, payment_status,
+                COALESCE((
+                    SELECT CASE
+                        WHEN COUNT(DISTINCT LOWER(TRIM(method))) > 1
+                          THEN 'split'
+                        ELSE LOWER(TRIM(MIN(method)))
+                    END
+                    FROM order_payments op
+                    WHERE op.order_id = orders.id
+                      AND op.status = 'completed'
+                      AND TRIM(COALESCE(op.method, '')) != ''
+                ), 'pending'),
                 payment_transaction_id, staff_shift_id, staff_id,
                 discount_percentage, discount_amount, tip_amount,
                 version, updated_by, last_synced_at, remote_version,
                 terminal_id, branch_id, plugin, external_plugin_order_id,
                 tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
-                delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name
+                delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name,
+                delivery_address_id, delivery_latitude, delivery_longitude,
+                delivery_address_fingerprint, delivery_zone_id
         FROM orders WHERE id = ?1",
         params![id],
         |row| {
@@ -1772,6 +1922,16 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 "driver_id": row.get::<_, Option<String>>(48)?,
                 "driverName": row.get::<_, Option<String>>(49)?,
                 "driver_name": row.get::<_, Option<String>>(49)?,
+                "deliveryAddressId": row.get::<_, Option<String>>(50)?,
+                "delivery_address_id": row.get::<_, Option<String>>(50)?,
+                "deliveryLatitude": row.get::<_, Option<f64>>(51)?,
+                "delivery_latitude": row.get::<_, Option<f64>>(51)?,
+                "deliveryLongitude": row.get::<_, Option<f64>>(52)?,
+                "delivery_longitude": row.get::<_, Option<f64>>(52)?,
+                "deliveryAddressFingerprint": row.get::<_, Option<String>>(53)?,
+                "delivery_address_fingerprint": row.get::<_, Option<String>>(53)?,
+                "deliveryZoneId": row.get::<_, Option<String>>(54)?,
+                "delivery_zone_id": row.get::<_, Option<String>>(54)?,
             }))
         },
     );
@@ -2159,13 +2319,34 @@ fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
             if requeued > 0 {
                 info!(
                     requeued,
-                    lease_secs = STALE_IN_PROGRESS_SYNC_LEASE_SECS,
+                    lease_secs = STALE_INFLIGHT_SYNC_LEASE_SECS,
                     "Recurring sync recovery requeued stale in-progress sync rows"
                 );
             }
         }
         Err(error) => {
             warn!(error = %error, "Recurring sync recovery failed to requeue stale in-progress rows");
+        }
+    }
+
+    // Wave 3 C6: un-strand `payment_adjustments` rows left at
+    // `sync_state = 'syncing'` by a crashed sync attempt.
+    match cleanup_stale_syncing_adjustments(db) {
+        Ok(reset) => {
+            summary.stale_syncing_adjustment_resets = reset;
+            if reset > 0 {
+                info!(
+                    reset,
+                    lease_secs = STALE_INFLIGHT_SYNC_LEASE_SECS,
+                    "Recurring sync recovery reset stale syncing payment_adjustments"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Recurring sync recovery failed to reset stale syncing adjustments"
+            );
         }
     }
 
@@ -2247,19 +2428,10 @@ fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
         }
     }
 
-    match reconcile_legacy_financial_parity_rows(db) {
-        Ok(reconciled) => {
-            if reconciled > 0 {
-                info!(
-                    reconciled,
-                    "Recurring sync recovery migrated legacy financial parity rows"
-                );
-            }
-        }
-        Err(error) => {
-            warn!(error = %error, "Recurring sync recovery failed to migrate legacy financial parity rows");
-        }
-    }
+    // Wave 5 Session 7 PR 2: `reconcile_legacy_financial_parity_rows` was
+    // retired together with migration v56's drop of `sync_queue`. There
+    // are no legacy-shape rows to migrate anymore; the canonical parity
+    // queue is the sole destination.
 
     match reconcile_deferred_payments(db) {
         Ok(promoted) => {
@@ -2291,9 +2463,37 @@ fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
     summary
 }
 
+/// Wave 3 C6: reset `payment_adjustments` rows that were marked
+/// `sync_state = 'syncing'` but never transitioned to `applied` or
+/// `failed`, so the next sync cycle can pick them up again.
+///
+/// The `sync_queue` row for the adjustment is reclaimed by
+/// [`requeue_stale_in_progress_sync_rows`] above. But the
+/// `payment_adjustments.sync_state` column is a PARALLEL marker (written
+/// by `sync_adjustment_items` right before the HTTP call) that is not
+/// covered by the queue-row recovery — if the process died between the
+/// `syncing` write and the `applied` write, the adjustment row is
+/// permanently stranded in `syncing`. This function runs once per cycle
+/// to un-strand any such rows older than the lease window.
+fn cleanup_stale_syncing_adjustments(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let lease_modifier = format!("-{} seconds", STALE_INFLIGHT_SYNC_LEASE_SECS);
+    let updated = conn
+        .execute(
+            "UPDATE payment_adjustments
+             SET sync_state = 'pending',
+                 updated_at = datetime('now')
+             WHERE sync_state = 'syncing'
+               AND julianday(updated_at) <= julianday('now', ?1)",
+            params![lease_modifier],
+        )
+        .map_err(|e| format!("reset stale syncing payment_adjustments: {e}"))?;
+    Ok(updated)
+}
+
 fn requeue_stale_in_progress_sync_rows(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let lease_modifier = format!("-{} seconds", STALE_IN_PROGRESS_SYNC_LEASE_SECS);
+    let lease_modifier = format!("-{} seconds", STALE_INFLIGHT_SYNC_LEASE_SECS);
 
     let stale_rows: Vec<(i64, String, String)> = {
         let mut stmt = conn
@@ -2328,6 +2528,15 @@ fn requeue_stale_in_progress_sync_rows(db: &DbState) -> Result<usize, String> {
     // claim attempt. SQLite evaluates SET expressions against the OLD
     // row values, so `retry_count + 1` is consistent across all three
     // branches below.
+    //
+    // Wave 3 H8 (deferred to Wave 10): this retry-count bump also burns
+    // a retry for genuinely slow responses (network lag > lease, where
+    // the in-flight HTTP call eventually SUCCEEDS but the stale-reclaim
+    // already requeued the row). The proper fix is a per-row
+    // `claim_generation` column so only the active generation's
+    // success/fail writes count — that requires a schema migration and
+    // ships with Wave 10. Crash-loop protection (this current behaviour)
+    // is kept until then because it is strictly safer than no bound.
     let requeued = conn
         .execute(
             "UPDATE sync_queue
@@ -2350,11 +2559,80 @@ fn requeue_stale_in_progress_sync_rows(db: &DbState) -> Result<usize, String> {
         )
         .map_err(|e| format!("requeue stale in-progress rows: {e}"))?;
 
+    for (queue_id, entity_type, entity_id) in stale_rows.iter() {
+        let recovered_row = conn
+            .query_row(
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| format!("load recovered stale row state: {e}"))?;
+
+        let Some((queue_status, retry_count, last_error)) = recovered_row else {
+            continue;
+        };
+        let local_state = if queue_status == "failed" {
+            "failed"
+        } else {
+            "pending"
+        };
+
+        match entity_type.as_str() {
+            "payment" | "order_payment" | "order_payments" => {
+                let _ = conn.execute(
+                    "UPDATE order_payments
+                     SET sync_state = ?1,
+                         sync_status = CASE WHEN ?1 = 'failed' THEN 'failed' ELSE 'pending' END,
+                         sync_retry_count = ?2,
+                         sync_last_error = ?3,
+                         sync_next_retry_at = NULL,
+                         updated_at = datetime('now')
+                     WHERE id = ?4",
+                    params![local_state, retry_count, last_error, entity_id],
+                );
+            }
+            "payment_adjustment" => {
+                let _ = conn.execute(
+                    "UPDATE payment_adjustments
+                     SET sync_state = ?1,
+                         sync_retry_count = ?2,
+                         sync_last_error = ?3,
+                         sync_next_retry_at = NULL,
+                         updated_at = datetime('now')
+                     WHERE id = ?4",
+                    params![local_state, retry_count, last_error, entity_id],
+                );
+            }
+            "z_report" => {
+                let _ = conn.execute(
+                    "UPDATE z_reports
+                     SET sync_state = ?1,
+                         sync_retry_count = ?2,
+                         sync_last_error = ?3,
+                         sync_next_retry_at = NULL,
+                         updated_at = datetime('now')
+                     WHERE id = ?4",
+                    params![local_state, retry_count, last_error, entity_id],
+                );
+            }
+            _ => {}
+        }
+    }
+
     for (_, entity_type, entity_id) in stale_rows.into_iter().take(5) {
         info!(
             entity_type = %entity_type,
             entity_id = %entity_id,
-            lease_secs = STALE_IN_PROGRESS_SYNC_LEASE_SECS,
+            lease_secs = STALE_INFLIGHT_SYNC_LEASE_SECS,
             "Recovered stale in-progress sync row"
         );
     }
@@ -2806,7 +3084,7 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let historical_pattern = format!("{HISTORICAL_Z_REPORT_CONFLICT_PREFIX}%");
 
-    let count = conn
+    let sync_queue_count = conn
         .query_row(
             "SELECT COUNT(*)
              FROM sync_queue
@@ -2819,6 +3097,16 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
             |row| row.get::<_, i64>(0),
         )
         .map_err(|e| format!("count unsynced sync queue items: {e}"))?;
+    let parity_z_report_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM parity_sync_queue
+             WHERE table_name = 'z_reports'
+               AND status NOT IN ('synced', 'applied')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("count unsynced parity z-report items: {e}"))?;
 
     let mut stmt = conn
         .prepare(
@@ -2844,17 +3132,47 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
         })
         .map_err(|e| format!("query unsynced sync queue summary: {e}"))?;
 
-    let blockers_summary = rows
+    let mut summary_parts = rows
         .filter_map(Result::ok)
         .map(|(entity_type, status, total)| format!("{entity_type}:{status} x{total}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
 
-    let blocker_details =
+    let mut parity_stmt = conn
+        .prepare(
+            "SELECT status, COUNT(*) AS total
+             FROM parity_sync_queue
+             WHERE table_name = 'z_reports'
+               AND status NOT IN ('synced', 'applied')
+             GROUP BY status
+             ORDER BY total DESC, status ASC
+             LIMIT ?1",
+        )
+        .map_err(|e| format!("prepare unsynced parity z-report summary: {e}"))?;
+    let parity_rows = parity_stmt
+        .query_map(params![limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| format!("query unsynced parity z-report summary: {e}"))?;
+    summary_parts.extend(
+        parity_rows
+            .filter_map(Result::ok)
+            .map(|(status, total)| format!("z_report:{status} x{total}")),
+    );
+
+    let blockers_summary = summary_parts.join(", ");
+
+    let mut blocker_details =
         query_sync_blocker_details_with_conn(&conn, limit, historical_pattern.as_str())?;
+    let remaining_detail_slots = limit.saturating_sub(blocker_details.len() as i64);
+    if remaining_detail_slots > 0 {
+        blocker_details.extend(query_parity_z_report_blocker_details_with_conn(
+            &conn,
+            remaining_detail_slots,
+        )?);
+    }
 
     Ok(UnsyncedSyncQueueSnapshot {
-        count,
+        count: sync_queue_count + parity_z_report_count,
         blockers_summary,
         blocker_details,
     })
@@ -2930,6 +3248,63 @@ fn query_sync_blocker_details_with_conn(
             },
         )
         .collect()
+}
+
+fn query_parity_z_report_blocker_details_with_conn(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<SyncBlockerDetail>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, record_id, operation, status, error_message
+             FROM parity_sync_queue
+             WHERE table_name = 'z_reports'
+               AND status NOT IN ('synced', 'applied')
+             ORDER BY
+                CASE
+                    WHEN status = 'failed' THEN 0
+                    WHEN status = 'processing' THEN 1
+                    WHEN status = 'pending' THEN 2
+                    ELSE 3
+                END,
+                COALESCE(last_attempt, created_at, '') ASC,
+                id ASC
+             LIMIT ?1",
+        )
+        .map_err(|e| format!("prepare parity z-report blocker details: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|e| format!("query parity z-report blocker details: {e}"))?;
+
+    Ok(rows
+        .filter_map(Result::ok)
+        .map(
+            |(queue_id, entity_id, operation, status, last_error)| SyncBlockerDetail {
+                queue_id: 0,
+                entity_type: "z_report".to_string(),
+                entity_id,
+                operation,
+                queue_status: status.clone(),
+                blocker_reason: last_error
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(status.as_str())
+                    .to_string(),
+                last_error: last_error.or_else(|| Some(format!("parity_sync_queue:{queue_id}"))),
+                ..SyncBlockerDetail::default()
+            },
+        )
+        .collect())
 }
 
 fn build_sync_blocker_detail_with_conn(
@@ -4008,8 +4383,15 @@ fn should_use_direct_order_fallback(error: &str) -> bool {
 }
 
 fn deterministic_jitter_ms(seed: i64) -> i64 {
-    let positive = if seed < 0 { -seed } else { seed };
-    (positive % 700) + 50
+    // Wave 10 medium: consecutive `sync_queue.id` rowids differ by 1, so
+    // using the raw seed made a batch of 25 claimed items schedule at
+    // offsets 50, 51, 52, … ms — nearly simultaneous, defeating the
+    // anti-stampede purpose. Mixing the seed with the golden-ratio
+    // constant from Knuth's multiplicative hash spreads adjacent seeds
+    // across the full 0..700 ms range so a burst of claims is genuinely
+    // distributed.
+    let mixed = (seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    ((mixed % 700) as i64) + 50
 }
 
 fn schedule_next_retry(delay_ms: i64, seed: i64) -> String {
@@ -4970,6 +5352,14 @@ fn materialize_remote_order(
         str_any(remote_order, &["order_type", "orderType"]).unwrap_or_else(|| "pickup".to_string());
     let table_number = str_any(remote_order, &["table_number", "tableNumber"]);
     let delivery_address = str_any(remote_order, &["delivery_address", "deliveryAddress"]);
+    let delivery_address_id = str_any(remote_order, &["delivery_address_id", "deliveryAddressId"]);
+    let delivery_latitude = num_any(remote_order, &["delivery_latitude", "deliveryLatitude"]);
+    let delivery_longitude = num_any(remote_order, &["delivery_longitude", "deliveryLongitude"]);
+    let delivery_address_fingerprint = str_any(
+        remote_order,
+        &["delivery_address_fingerprint", "deliveryAddressFingerprint"],
+    );
+    let delivery_zone_id = str_any(remote_order, &["delivery_zone_id", "deliveryZoneId"]);
     let delivery_city = str_any(remote_order, &["delivery_city", "deliveryCity"]);
     let delivery_postal_code = str_any(
         remote_order,
@@ -5036,6 +5426,10 @@ fn materialize_remote_order(
             Some(value.to_string())
         });
 
+    // W6: `orders.payment_method` was dropped in v55; the remote
+    // materializer preserves the inbound `payment_method` only in the
+    // downstream sync replay (if any), not on the local row.
+    let _ = &payment_method;
     conn.execute(
         "INSERT INTO orders (
             id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
@@ -5043,21 +5437,24 @@ fn materialize_remote_order(
             order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
             delivery_floor, delivery_notes, name_on_ringer, special_instructions,
             created_at, updated_at, estimated_time, supabase_id, sync_status,
-            payment_status, payment_method, payment_transaction_id, staff_shift_id,
+            payment_status, payment_transaction_id, staff_shift_id,
             staff_id, driver_id, driver_name, discount_percentage, discount_amount,
             tip_amount, version, terminal_id, branch_id, plugin, external_plugin_order_id,
-            tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
+            tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
+            delivery_address_id, delivery_latitude, delivery_longitude,
+            delivery_address_fingerprint, delivery_zone_id
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
             ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17,
             ?18, ?19, ?20, ?21,
             ?22, ?23, ?24, ?25, 'synced',
-            ?26, ?27, ?28, ?29,
-            ?30, ?31, ?32, ?33, ?34,
-            ?35, ?36, ?37, ?38, ?39,
-            ?40, ?41, ?42, ?43,
-            ?44, ?45
+            ?26, ?27, ?28,
+            ?29, ?30, ?31, ?32, ?33,
+            ?34, ?35, ?36, ?37, ?38,
+            ?39, ?40, ?41, ?42,
+            ?43, ?44, ?45, ?46, ?47,
+            ?48, ?49
         )",
         params![
             local_id,
@@ -5086,7 +5483,6 @@ fn materialize_remote_order(
             estimated_time,
             remote_id,
             payment_status,
-            payment_method,
             payment_tx,
             staff_shift_id,
             staff_id,
@@ -5105,6 +5501,11 @@ fn materialize_remote_order(
             if is_ghost { 1_i64 } else { 0_i64 },
             ghost_source,
             ghost_metadata,
+            delivery_address_id,
+            delivery_latitude,
+            delivery_longitude,
+            delivery_address_fingerprint,
+            delivery_zone_id,
         ],
     )
     .map_err(|e| format!("materialize remote order: {e}"))?;
@@ -5213,35 +5614,6 @@ fn mark_payment_queue_row_synced(
     Ok(())
 }
 
-fn select_latest_queue_row_id(
-    conn: &Connection,
-    entity_type: &str,
-    entity_id: &str,
-) -> Result<Option<i64>, String> {
-    conn.query_row(
-        "SELECT id
-         FROM sync_queue
-         WHERE entity_type = ?1
-           AND entity_id = ?2
-         ORDER BY
-           CASE status
-             WHEN 'failed' THEN 0
-             WHEN 'deferred' THEN 1
-             WHEN 'pending' THEN 2
-             WHEN 'queued_remote' THEN 3
-             WHEN 'in_progress' THEN 4
-             WHEN 'synced' THEN 5
-             ELSE 9
-           END,
-           id DESC
-         LIMIT 1",
-        params![entity_type, entity_id],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(|e| format!("load latest canonical queue row for {entity_type}/{entity_id}: {e}"))
-}
-
 fn canonical_financial_local_state(queue_status: &str) -> (&'static str, &'static str) {
     match queue_status {
         "deferred" => ("pending", "waiting_parent"),
@@ -5262,83 +5634,45 @@ pub(crate) fn upsert_payment_sync_queue_row(
     retry_delay_ms: Option<i64>,
     now: &str,
 ) -> Result<(), String> {
-    let idempotency_key = format!("payment:{payment_id}");
-    let retry_delay_ms = retry_delay_ms.unwrap_or(5_000);
+    // Wave 5 Session 7 PR 0: canonical payment sync rows move onto
+    // `parity_sync_queue` via `sync_queue::clear_unsynced_items` +
+    // `sync_queue::enqueue_payload_item`. The parity processor manages
+    // retry scheduling itself, so `retry_delay_ms` is no longer consumed
+    // at enqueue time — the remaining `retry_count` / `last_error` /
+    // `next_retry_at` args still inform the downstream `order_payments`
+    // metadata update so caller expectations hold.
+    let _ = retry_delay_ms;
 
-    if let Some(queue_id) = select_latest_queue_row_id(conn, "payment", payment_id)? {
-        conn.execute(
-            "UPDATE sync_queue
-             SET operation = 'insert',
-                 payload = ?1,
-                 idempotency_key = ?2,
-                 status = ?3,
-                 retry_count = ?4,
-                 last_error = ?5,
-                 next_retry_at = ?6,
-                 retry_delay_ms = ?7,
-                 synced_at = CASE WHEN ?3 = 'synced' THEN COALESCE(synced_at, ?8) ELSE NULL END,
-                 updated_at = ?8
-             WHERE id = ?9",
-            params![
-                payload,
-                idempotency_key,
-                queue_status,
-                retry_count.max(0),
-                last_error,
-                next_retry_at,
-                retry_delay_ms,
-                now,
-                queue_id,
-            ],
-        )
-        .map_err(|e| format!("update canonical payment queue row: {e}"))?;
-    } else {
-        conn.execute(
-            "INSERT INTO sync_queue (
-                 entity_type,
-                 entity_id,
-                 operation,
-                 payload,
-                 idempotency_key,
-                 status,
-                 retry_count,
-                 max_retries,
-                 last_error,
-                 next_retry_at,
-                 retry_delay_ms,
-                 created_at,
-                 updated_at,
-                 synced_at
-             ) VALUES (
-                 'payment',
-                 ?1,
-                 'insert',
-                 ?2,
-                 ?3,
-                 ?4,
-                 ?5,
-                 5,
-                 ?6,
-                 ?7,
-                 ?8,
-                 ?9,
-                 ?9,
-                 CASE WHEN ?4 = 'synced' THEN ?9 ELSE NULL END
-             )",
-            params![
-                payment_id,
-                payload,
-                idempotency_key,
-                queue_status,
-                retry_count.max(0),
-                last_error,
-                next_retry_at,
-                retry_delay_ms,
-                now,
-            ],
-        )
-        .map_err(|e| format!("insert canonical payment queue row: {e}"))?;
-    }
+    let payload_value = serde_json::from_str::<Value>(payload)
+        .map_err(|e| format!("parse canonical payment payload: {e}"))?;
+
+    // Dispatcher routes `table_name == "payments"` through `prepare_payment_request`
+    // (sync_queue.rs:2790) and `resolve_financial_endpoint` (sync_queue.rs:3867)
+    // to `POST /api/pos/payments`. The SQLite table is `order_payments`, but
+    // parity uses the plural semantic key as the dispatch identity — same
+    // pattern Session 6 used for shifts/staff_shifts/staff_payments (plural
+    // entity-family keys, not SQLite table names). Using `"order_payments"`
+    // here would fall to the generic pass-through arm and silently drop
+    // canonical payment dispatch — the exact 2026-04-22 regression pattern.
+    sync_queue::clear_unsynced_items(conn, "payments", payment_id)
+        .map_err(|e| format!("clear stale parity payment rows: {e}"))?;
+
+    sync_queue::enqueue_payload_item(
+        conn,
+        "payments",
+        payment_id,
+        "INSERT",
+        &payload_value,
+        Some(1),
+        Some("payment"),
+        Some("manual"),
+        Some(1),
+    )
+    .map_err(|e| format!("enqueue canonical payment parity row: {e}"))?;
+
+    // Wave 5 Session 7 PR 2: the transitional `DELETE FROM sync_queue`
+    // drain that sat here in PR 0 was removed together with migration
+    // v56's drop of the legacy table.
 
     let (sync_status, sync_state) = canonical_financial_local_state(queue_status);
     conn.execute(
@@ -5365,123 +5699,16 @@ pub(crate) fn upsert_payment_sync_queue_row(
     Ok(())
 }
 
-pub(crate) fn upsert_payment_adjustment_sync_queue_row(
-    conn: &Connection,
-    adjustment_id: &str,
-    payload: &str,
-    queue_status: &str,
-    retry_count: i64,
-    last_error: Option<&str>,
-    next_retry_at: Option<&str>,
-    retry_delay_ms: Option<i64>,
-    now: &str,
-) -> Result<(), String> {
-    let idempotency_key = format!("adjustment:{adjustment_id}");
-    let retry_delay_ms = retry_delay_ms.unwrap_or(5_000);
-
-    if let Some(queue_id) = select_latest_queue_row_id(conn, "payment_adjustment", adjustment_id)? {
-        conn.execute(
-            "UPDATE sync_queue
-             SET operation = 'insert',
-                 payload = ?1,
-                 idempotency_key = ?2,
-                 status = ?3,
-                 retry_count = ?4,
-                 last_error = ?5,
-                 next_retry_at = ?6,
-                 retry_delay_ms = ?7,
-                 synced_at = CASE WHEN ?3 = 'synced' THEN COALESCE(synced_at, ?8) ELSE NULL END,
-                 updated_at = ?8
-             WHERE id = ?9",
-            params![
-                payload,
-                idempotency_key,
-                queue_status,
-                retry_count.max(0),
-                last_error,
-                next_retry_at,
-                retry_delay_ms,
-                now,
-                queue_id,
-            ],
-        )
-        .map_err(|e| format!("update canonical payment-adjustment queue row: {e}"))?;
-    } else {
-        conn.execute(
-            "INSERT INTO sync_queue (
-                 entity_type,
-                 entity_id,
-                 operation,
-                 payload,
-                 idempotency_key,
-                 status,
-                 retry_count,
-                 max_retries,
-                 last_error,
-                 next_retry_at,
-                 retry_delay_ms,
-                 created_at,
-                 updated_at,
-                 synced_at
-             ) VALUES (
-                 'payment_adjustment',
-                 ?1,
-                 'insert',
-                 ?2,
-                 ?3,
-                 ?4,
-                 ?5,
-                 5,
-                 ?6,
-                 ?7,
-                 ?8,
-                 ?9,
-                 ?9,
-                 CASE WHEN ?4 = 'synced' THEN ?9 ELSE NULL END
-             )",
-            params![
-                adjustment_id,
-                payload,
-                idempotency_key,
-                queue_status,
-                retry_count.max(0),
-                last_error,
-                next_retry_at,
-                retry_delay_ms,
-                now,
-            ],
-        )
-        .map_err(|e| format!("insert canonical payment-adjustment queue row: {e}"))?;
-    }
-
-    let (_, sync_state) = canonical_financial_local_state(queue_status);
-    conn.execute(
-        "UPDATE payment_adjustments
-         SET sync_state = ?1,
-             sync_retry_count = ?2,
-             sync_last_error = ?3,
-             sync_next_retry_at = ?4,
-             updated_at = ?5
-         WHERE id = ?6",
-        params![
-            sync_state,
-            retry_count.max(0),
-            last_error,
-            next_retry_at,
-            now,
-            adjustment_id,
-        ],
-    )
-    .map_err(|e| format!("align local payment-adjustment sync metadata: {e}"))?;
-
-    // No second UPDATE for `sync_state = 'applied'` here: the align step
-    // above already derives the sync_state via `canonical_financial_local_state`,
-    // which maps queue_status='synced' → sync_state='applied'. Previously
-    // this function issued a redundant UPDATE whenever queue_status was
-    // "synced", holding the write lock for an extra round-trip with no
-    // observable effect on the row.
-    Ok(())
-}
+// Wave 5 Session 7 PR 2: `upsert_payment_adjustment_sync_queue_row`
+// was retired together with migration v56's drop of `sync_queue`. PR 0
+// migrated the function's body to write to `parity_sync_queue`, but
+// the only production caller at the time (the reconcile bridge) was
+// gutted in the same PR — leaving the function dead except for its
+// own test. PR 2 removes both. If a future wave needs a direct
+// payment-adjustment producer, reinstate via `sync_queue::enqueue_payload_item`
+// under `(table_name = "payment_adjustments", record_id = ...)` —
+// same dispatcher routing `prepare_adjustment_request` → POST
+// /api/pos/payments/adjustments/sync.
 
 pub(crate) fn mark_local_payment_applied(
     conn: &Connection,
@@ -6304,28 +6531,44 @@ pub(crate) fn resolve_stale_local_payment_total_conflict_with_conn(
         return Ok(None);
     }
 
+    if has_outstanding_local_order_queue(conn, payment_context.order_id.as_str()) {
+        debug!(
+            payment_id = %payment_id,
+            order_id = %payment_context.order_id,
+            "Skipping stale local overpay auto-void while parent order updates are still queued"
+        );
+        return Ok(None);
+    }
+
     let order_total: f64 = conn
         .query_row(
-            "SELECT COALESCE(total_amount, 0)
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
              FROM orders
              WHERE id = ?1",
             params![payment_context.order_id.as_str()],
-            |row| row.get(0),
+            |row| {
+                row.get::<_, i64>(0)
+                    .map(|c| crate::money::Cents::new(c).to_f64_dp2())
+            },
         )
         .map_err(|e| format!("load stale payment conflict order total: {e}"))?;
 
     let other_net_paid: f64 = conn
         .query_row(
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
             "SELECT COALESCE(SUM(
                 CASE
-                    WHEN op.amount - COALESCE((
-                        SELECT SUM(pa.amount)
+                    WHEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                         - COALESCE((
+                        SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
                         FROM payment_adjustments pa
                         WHERE pa.payment_id = op.id
                           AND pa.adjustment_type = 'refund'
                     ), 0) > 0
-                    THEN op.amount - COALESCE((
-                        SELECT SUM(pa.amount)
+                    THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                         - COALESCE((
+                        SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
                         FROM payment_adjustments pa
                         WHERE pa.payment_id = op.id
                           AND pa.adjustment_type = 'refund'
@@ -6338,7 +6581,10 @@ pub(crate) fn resolve_stale_local_payment_total_conflict_with_conn(
                AND op.id != ?2
                AND op.status = 'completed'",
             params![payment_context.order_id.as_str(), payment_id],
-            |row| row.get(0),
+            |row| {
+                row.get::<_, i64>(0)
+                    .map(|c| crate::money::Cents::new(c).to_f64_dp2())
+            },
         )
         .unwrap_or(0.0);
 
@@ -6365,6 +6611,177 @@ pub(crate) fn resolve_stale_local_payment_total_conflict_with_conn(
         order_id: payment_context.order_id,
         amount: payment_context.amount,
         outstanding_before,
+    }))
+}
+
+#[derive(Debug, Clone)]
+struct TaxInflatedOrderTotalRepair {
+    order_id: String,
+    payment_id: String,
+    previous_total_cents: i64,
+    repaired_total_cents: i64,
+    voided_payment_cents: i64,
+}
+
+fn order_items_gross_total_cents(items_json: &str) -> Option<i64> {
+    let parsed: Value = serde_json::from_str(items_json).ok()?;
+    let items = parsed.as_array()?;
+    let mut total_cents = 0i64;
+    let mut saw_item = false;
+
+    for item in items {
+        let quantity = num_any(item, &["quantity"]).unwrap_or(1.0).max(0.0);
+        let line_total = num_any(item, &["total_price", "totalPrice"])
+            .or_else(|| {
+                num_any(item, &["unit_price", "unitPrice", "price"])
+                    .map(|unit_price| unit_price.max(0.0) * quantity)
+            })
+            .unwrap_or(0.0)
+            .max(0.0);
+
+        if line_total > 0.0 {
+            saw_item = true;
+        }
+        total_cents += Cents::round_half_even(line_total).as_i64();
+    }
+
+    if saw_item {
+        Some(total_cents)
+    } else {
+        None
+    }
+}
+
+fn repair_tax_inflated_local_order_total_for_payment_conflict(
+    conn: &Connection,
+    order_id: &str,
+    payment_id: &str,
+    repaired_at: &str,
+) -> Result<Option<TaxInflatedOrderTotalRepair>, String> {
+    let Some(payment_context) = load_local_payment_total_conflict_context(conn, payment_id)? else {
+        return Ok(None);
+    };
+    if payment_context.order_id != order_id
+        || !can_auto_void_local_payment_total_conflict(&payment_context)
+    {
+        return Ok(None);
+    }
+
+    let (
+        current_total_cents,
+        current_subtotal_cents,
+        current_tax_cents,
+        delivery_fee_cents,
+        discount_amount_cents,
+        tip_amount_cents,
+        items_json,
+    ): (i64, i64, i64, i64, i64, i64, String) = conn
+        .query_row(
+            "SELECT
+                 COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
+                 COALESCE(subtotal_cents, CAST(ROUND(subtotal * 100) AS INTEGER), 0),
+                 COALESCE(tax_amount_cents, CAST(ROUND(tax_amount * 100) AS INTEGER), 0),
+                 COALESCE(delivery_fee_cents, CAST(ROUND(delivery_fee * 100) AS INTEGER), 0),
+                 COALESCE(discount_amount_cents, CAST(ROUND(discount_amount * 100) AS INTEGER), 0),
+                 COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
+                 COALESCE(items, '[]')
+             FROM orders
+             WHERE id = ?1
+             LIMIT 1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load tax-inflated order total candidate: {e}"))?
+        .unwrap_or((0, 0, 0, 0, 0, 0, "[]".to_string()));
+
+    if current_total_cents <= 0 || current_tax_cents <= 0 {
+        return Ok(None);
+    }
+
+    let items_total_cents = order_items_gross_total_cents(&items_json)
+        .unwrap_or(current_subtotal_cents)
+        .max(0);
+    let repaired_total_cents =
+        (items_total_cents + delivery_fee_cents + tip_amount_cents - discount_amount_cents).max(0);
+
+    if repaired_total_cents <= 0 || current_total_cents <= repaired_total_cents + 1 {
+        return Ok(None);
+    }
+
+    let added_tax_matches_total =
+        (current_total_cents - repaired_total_cents - current_tax_cents).abs() <= 1;
+    if !added_tax_matches_total {
+        return Ok(None);
+    }
+
+    let other_completed_cents: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(
+                 COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0)
+             ), 0)
+             FROM order_payments
+             WHERE order_id = ?1
+               AND id != ?2
+               AND status = 'completed'",
+            params![order_id, payment_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let outstanding_cents = (repaired_total_cents - other_completed_cents).max(0);
+    let payment_amount_cents = Cents::round_half_even(payment_context.amount).as_i64();
+    if payment_amount_cents <= outstanding_cents + 1 {
+        return Ok(None);
+    }
+
+    let repaired_total = Cents::new(repaired_total_cents).to_f64_dp2();
+    let repaired_subtotal = Cents::new(items_total_cents).to_f64_dp2();
+    conn.execute(
+        "UPDATE orders
+         SET total_amount = ?1,
+             total_amount_cents = ?2,
+             subtotal = ?3,
+             subtotal_cents = ?4,
+             tax_amount = 0,
+             tax_amount_cents = 0,
+             sync_status = 'pending',
+             updated_at = ?5
+         WHERE id = ?6",
+        params![
+            repaired_total,
+            repaired_total_cents,
+            repaired_subtotal,
+            items_total_cents,
+            repaired_at,
+            order_id
+        ],
+    )
+    .map_err(|e| format!("repair tax-inflated local order total: {e}"))?;
+
+    let void_reason = format!(
+        "Auto-voided tax-inflated edit-settlement payment; order total corrected from {:.2} to {:.2}",
+        Cents::new(current_total_cents).to_f64_dp2(),
+        repaired_total
+    );
+    void_stale_local_payment_total_conflict(conn, payment_id, order_id, &void_reason, repaired_at)?;
+    let _ = enqueue_local_order_update_after_lagged_snapshot(conn, order_id)?;
+
+    Ok(Some(TaxInflatedOrderTotalRepair {
+        order_id: order_id.to_string(),
+        payment_id: payment_id.to_string(),
+        previous_total_cents: current_total_cents,
+        repaired_total_cents,
+        voided_payment_cents: payment_amount_cents,
     }))
 }
 
@@ -6397,6 +6814,15 @@ pub(crate) fn resolve_payment_total_conflict_with_server_hint_with_conn(
     };
 
     if !can_auto_void_local_payment_total_conflict(&payment_context) {
+        return Ok(None);
+    }
+
+    if has_outstanding_local_order_queue(conn, payment_context.order_id.as_str()) {
+        debug!(
+            payment_id = %payment_id,
+            order_id = %payment_context.order_id,
+            "Skipping server-hinted overpay auto-void while parent order updates are still queued"
+        );
         return Ok(None);
     }
 
@@ -6457,11 +6883,15 @@ fn recompute_local_order_payment_snapshot(
         .optional()
         .map_err(|e| format!("load local payment snapshot for order recompute: {e}"))?;
 
-    let Some((payment_id, method)) = payment_context else {
+    let Some((payment_id, _method)) = payment_context else {
+        // W6: `orders.payment_method` was dropped in v55. When the last
+        // completed payment is removed we only need to reset
+        // `payment_status` and clear the transaction reference; the
+        // method is derived on read and will return None → "pending"
+        // automatically once no completed rows remain.
         conn.execute(
             "UPDATE orders
              SET payment_status = 'pending',
-                 payment_method = 'pending',
                  payment_transaction_id = NULL,
                  updated_at = ?1
              WHERE id = ?2",
@@ -6473,39 +6903,7 @@ fn recompute_local_order_payment_snapshot(
         return Ok(());
     };
 
-    let has_item_assignments = match conn.query_row(
-        "SELECT COUNT(*)
-         FROM sqlite_master
-         WHERE type = 'table'
-           AND name = 'order_payment_items'",
-        [],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(table_count) if table_count > 0 => {
-            conn.query_row(
-                "SELECT EXISTS(
-                    SELECT 1
-                    FROM order_payment_items
-                    WHERE payment_id = ?1
-                    LIMIT 1
-                )",
-                params![payment_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-                != 0
-        }
-        _ => false,
-    };
-
-    payments::recompute_order_payment_state(
-        conn,
-        order_id,
-        &method,
-        has_item_assignments,
-        now,
-        &payment_id,
-    )
+    payments::recompute_order_payment_state(conn, order_id, now, &payment_id)
 }
 
 fn hydrate_local_payment_from_remote(
@@ -6521,17 +6919,24 @@ fn hydrate_local_payment_from_remote(
     created_at: &str,
     updated_at: &str,
 ) -> Result<usize, String> {
+    // W4c dual-write: the remote-payment-mirror UPDATE writes a new
+    // `amount` from the remote snapshot — its `amount_cents` sibling
+    // must follow, otherwise the COALESCE-with-real read shim shadows
+    // the new REAL with a stale cents value.
+    let amount_cents = Cents::round_half_even(amount).as_i64();
     conn.execute(
         "UPDATE order_payments
          SET method = ?1,
              amount = ?2,
-             currency = ?3,
-             transaction_ref = COALESCE(?4, transaction_ref),
-             updated_at = ?5
-         WHERE id = ?6",
+             amount_cents = ?3,
+             currency = ?4,
+             transaction_ref = COALESCE(?5, transaction_ref),
+             updated_at = ?6
+         WHERE id = ?7",
         params![
             method,
             amount,
+            amount_cents,
             currency,
             transaction_ref,
             updated_at,
@@ -6541,17 +6946,7 @@ fn hydrate_local_payment_from_remote(
     .map_err(|e| format!("update remote payment mirror: {e}"))?;
     mark_local_payment_applied(conn, local_payment_id, updated_at, Some(remote_payment_id))?;
     replace_local_payment_items(conn, local_payment_id, local_order_id, items, created_at)?;
-    payments::recompute_order_payment_state(
-        conn,
-        local_order_id,
-        method,
-        items
-            .and_then(Value::as_array)
-            .map(|rows| !rows.is_empty())
-            .unwrap_or(false),
-        updated_at,
-        local_payment_id,
-    )?;
+    payments::recompute_order_payment_state(conn, local_order_id, updated_at, local_payment_id)?;
 
     Ok(1)
 }
@@ -7009,11 +7404,19 @@ fn maybe_reconstruct_paid_remote_order_payment(
 
     let (order_total, local_status, is_ghost): (f64, String, i64) = conn
         .query_row(
-            "SELECT COALESCE(total_amount, 0), COALESCE(status, 'pending'), COALESCE(is_ghost, 0)
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
+                    COALESCE(status, 'pending'), COALESCE(is_ghost, 0)
              FROM orders
              WHERE id = ?1",
             params![local_order_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    crate::money::Cents::new(row.get::<_, i64>(0)?).to_f64_dp2(),
+                    row.get(1)?,
+                    row.get(2)?,
+                ))
+            },
         )
         .map_err(|e| format!("load local reconstruction context: {e}"))?;
 
@@ -7082,22 +7485,32 @@ fn remote_order_changed_at(remote_order: &Value) -> String {
 
 /// Returns true when the local order has any sync-queue rows that haven't
 /// reached a terminal state. The active queue is `parity_sync_queue` with
-/// `(table_name, record_id)` keys; the legacy `sync_queue` table this
-/// function used to read is no longer the live queue and was always
-/// returning false here, silently disabling the guard. Statuses that count
-/// as "still in flight" mirror the values the queue lifecycle uses
-/// elsewhere (`pending`, `processing`, `failed`, `conflict`).
+/// `(table_name, record_id)` keys. Some financial paths still use the legacy
+/// `sync_queue` table for payment rows, while order mutations are normally
+/// dispatched through `parity_sync_queue`; keep this guard over both queues so
+/// payment sync cannot race a pending order update.
 ///
 /// Callers use this to decide whether to skip remote→local snapshot
 /// overwrites: if local has unsynced edits, applying remote risks
 /// reverting fields the operator just changed (e.g. an in-flight
 /// pickup→delivery conversion).
-fn has_outstanding_local_order_queue(conn: &Connection, local_id: &str) -> bool {
+pub(crate) fn has_outstanding_local_order_queue(conn: &Connection, local_id: &str) -> bool {
     conn.query_row(
-        "SELECT COUNT(*) > 0 FROM parity_sync_queue
-         WHERE table_name = 'orders'
-           AND record_id = ?1
-           AND status IN ('pending', 'processing', 'failed', 'conflict')",
+        "SELECT
+            EXISTS(
+                SELECT 1
+                FROM parity_sync_queue
+                WHERE table_name = 'orders'
+                  AND record_id = ?1
+                  AND status IN ('pending', 'processing', 'failed', 'conflict')
+            )
+            OR EXISTS(
+                SELECT 1
+                FROM sync_queue
+                WHERE entity_type = 'order'
+                  AND entity_id = ?1
+                  AND status IN ('pending', 'in_progress', 'queued_remote', 'deferred', 'failed')
+            )",
         params![local_id],
         |row| row.get(0),
     )
@@ -7354,38 +7767,43 @@ async fn reconcile_remote_orders(
                             continue;
                         }
 
+                        // W6: `orders.payment_method` was dropped in v55.
+                        // The inbound `payment_method` from the remote is
+                        // still consumed elsewhere (sync payload,
+                        // downstream derivation) but is no longer
+                        // persisted on the local orders row. The
+                        // `?4` parameter slot was repurposed for
+                        // cancellation_reason (formerly `?8`).
+                        let _ = &payment_method;
                         let updated = conn
                             .execute(
                                 "UPDATE orders
                                  SET supabase_id = ?1,
                                      status = ?2,
                                      payment_status = ?3,
-                                     payment_method = COALESCE(?4, payment_method),
                                      payment_transaction_id = COALESCE(?5, payment_transaction_id),
                                      sync_status = 'synced',
                                      last_synced_at = datetime('now'),
                                      updated_at = ?6,
-                                     cancellation_reason = COALESCE(?8, cancellation_reason)
+                                     cancellation_reason = COALESCE(?4, cancellation_reason)
                                  WHERE id = ?7
                                    AND (
                                      COALESCE(supabase_id, '') != COALESCE(?1, '')
                                      OR COALESCE(status, '') != COALESCE(?2, '')
                                      OR COALESCE(payment_status, '') != COALESCE(?3, '')
-                                     OR COALESCE(payment_method, '') != COALESCE(?4, '')
                                      OR COALESCE(payment_transaction_id, '') != COALESCE(?5, '')
                                      OR COALESCE(sync_status, '') != 'synced'
                                      OR COALESCE(updated_at, '') != COALESCE(?6, '')
-                                     OR COALESCE(cancellation_reason, '') != COALESCE(?8, '')
+                                     OR COALESCE(cancellation_reason, '') != COALESCE(?4, '')
                                    )",
                                 params![
                                     remote_id,
                                     status,
                                     payment_status,
-                                    payment_method,
+                                    cancellation_reason.as_deref(),
                                     payment_transaction_id,
                                     updated_at,
                                     local_id,
-                                    cancellation_reason.as_deref()
                                 ],
                             )
                             .unwrap_or(0);
@@ -7782,6 +8200,204 @@ fn build_remote_order_repair_since_cursor(lookup: &LocalOrderRemoteLookup) -> St
     "1970-01-01T00:00:00Z".to_string()
 }
 
+fn remote_order_snapshot_is_older_than_local(
+    conn: &Connection,
+    local_order_id: &str,
+    remote_updated_at: &str,
+) -> Result<bool, String> {
+    let Some(remote_updated_at) = parse_remote_order_repair_timestamp(remote_updated_at) else {
+        return Ok(false);
+    };
+
+    let local_updated_at: Option<String> = conn
+        .query_row(
+            "SELECT NULLIF(TRIM(COALESCE(updated_at, '')), '')
+             FROM orders
+             WHERE id = ?1",
+            params![local_order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load local order updated_at for remote snapshot guard: {e}"))?
+        .flatten();
+
+    let Some(local_updated_at) = local_updated_at
+        .as_deref()
+        .and_then(parse_remote_order_repair_timestamp)
+    else {
+        return Ok(false);
+    };
+
+    Ok(remote_updated_at < local_updated_at)
+}
+
+fn json_i64_any(value: &Value, keys: &[&str]) -> Option<i64> {
+    for key in keys {
+        let Some(candidate) = value.get(*key) else {
+            continue;
+        };
+        if let Some(value) = candidate.as_i64() {
+            return Some(value);
+        }
+        if let Some(value) = candidate
+            .as_u64()
+            .and_then(|value| i64::try_from(value).ok())
+        {
+            return Some(value);
+        }
+        if let Some(value) = candidate
+            .as_str()
+            .and_then(|value| value.trim().parse().ok())
+        {
+            return Some(value);
+        }
+        if let Some(value) = candidate.as_f64() {
+            return Some(crate::money::Cents::round_half_even(value / 100.0).as_i64());
+        }
+    }
+
+    None
+}
+
+fn json_money_cents_any(value: &Value, cents_keys: &[&str], major_keys: &[&str]) -> Option<i64> {
+    json_i64_any(value, cents_keys).or_else(|| {
+        num_any(value, major_keys).map(|major| crate::money::Cents::round_half_even(major).as_i64())
+    })
+}
+
+fn remote_order_snapshot_lags_local_pending_payment_delta(
+    conn: &Connection,
+    local_order_id: &str,
+    remote_order: &Value,
+) -> Result<bool, String> {
+    let Some(remote_total_cents) = json_money_cents_any(
+        remote_order,
+        &["total_amount_cents", "totalAmountCents"],
+        &["total_amount", "totalAmount"],
+    ) else {
+        return Ok(false);
+    };
+
+    let remote_order_type = str_any(remote_order, &["order_type", "orderType"])
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    let remote_delivery_fee_cents = json_money_cents_any(
+        remote_order,
+        &["delivery_fee_cents", "deliveryFeeCents"],
+        &["delivery_fee", "deliveryFee"],
+    )
+    .unwrap_or(0);
+
+    let local_snapshot: Option<(String, i64, i64)> = conn
+        .query_row(
+            "SELECT
+                 LOWER(TRIM(COALESCE(order_type, ''))),
+                 COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
+                 COALESCE(delivery_fee_cents, CAST(ROUND(delivery_fee * 100) AS INTEGER), 0)
+             FROM orders
+             WHERE id = ?1
+             LIMIT 1",
+            params![local_order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load local order total for remote lag guard: {e}"))?;
+
+    let Some((local_order_type, local_total_cents, local_delivery_fee_cents)) = local_snapshot
+    else {
+        return Ok(false);
+    };
+
+    let pending_local_payment_cents: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0)), 0)
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'
+               AND NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NULL
+               AND (
+                   LOWER(COALESCE(sync_status, '')) != 'synced'
+                   OR LOWER(COALESCE(sync_state, '')) NOT IN ('applied', 'synced')
+               )",
+            params![local_order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load pending local payment delta for remote lag guard: {e}"))?;
+
+    if pending_local_payment_cents <= 0 || local_total_cents <= remote_total_cents {
+        return Ok(false);
+    }
+
+    let local_delta_cents = local_total_cents - remote_total_cents;
+    let pending_matches_delta = (pending_local_payment_cents - local_delta_cents).abs() <= 1;
+    let remote_type_lags = remote_order_type
+        .as_deref()
+        .map(|remote| remote != local_order_type)
+        .unwrap_or(false);
+    let delivery_fee_lags = local_delivery_fee_cents > remote_delivery_fee_cents;
+    let local_is_delivery_conversion = local_order_type == "delivery"
+        && (remote_type_lags || delivery_fee_lags || local_delivery_fee_cents > 0);
+
+    if pending_matches_delta && local_is_delivery_conversion {
+        info!(
+            order_id = %local_order_id,
+            local_total_cents,
+            remote_total_cents,
+            pending_local_payment_cents,
+            local_delivery_fee_cents,
+            remote_delivery_fee_cents,
+            local_order_type = %local_order_type,
+            remote_order_type = remote_order_type.as_deref().unwrap_or(""),
+            "Skipping remote order snapshot because local pending payment matches newer local order total"
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn enqueue_local_order_update_after_lagged_snapshot(
+    conn: &Connection,
+    local_order_id: &str,
+) -> Result<bool, String> {
+    if has_outstanding_local_order_queue(conn, local_order_id) {
+        return Ok(false);
+    }
+
+    let payload = serde_json::json!({
+        "id": local_order_id,
+        "orderId": local_order_id,
+        "syncRecoveryReason": "remote_snapshot_lags_local_delivery_payment_delta",
+    });
+    let queue_id = crate::sync_queue::enqueue_payload_item(
+        conn,
+        "orders",
+        local_order_id,
+        "UPDATE",
+        &payload,
+        Some(1),
+        Some("orders"),
+        Some("server-wins"),
+        Some(1),
+    )?;
+
+    conn.execute(
+        "UPDATE orders
+         SET sync_status = 'pending'
+         WHERE id = ?1",
+        params![local_order_id],
+    )
+    .map_err(|e| format!("mark lagged local order update pending: {e}"))?;
+
+    info!(
+        order_id = %local_order_id,
+        queue_id = %queue_id,
+        "Re-enqueued local order update because remote snapshot still lags local delivery/payment delta"
+    );
+
+    Ok(true)
+}
+
 fn select_remote_order_match<'a>(
     lookup: &LocalOrderRemoteLookup,
     remote_orders: &'a [Value],
@@ -7831,13 +8447,14 @@ fn attach_remote_order_identity_to_local_order(
 
     conn.execute(
         "UPDATE orders
-         SET supabase_id = ?1,
-             updated_at = ?2
-         WHERE id = ?3
+         SET supabase_id = ?1
+         WHERE id = ?2
            AND COALESCE(NULLIF(TRIM(COALESCE(supabase_id, '')), ''), '') != ?1",
-        params![remote_order_id, now, local_order_id],
+        params![remote_order_id, local_order_id],
     )
     .map_err(|e| format!("attach remote order identity for payment recovery: {e}"))?;
+
+    let _ = now;
 
     Ok(Some(remote_order_id))
 }
@@ -7864,6 +8481,14 @@ fn sync_remote_order_snapshot_into_local(
     let order_type = str_any(remote_order, &["order_type", "orderType"]);
     let table_number = str_any(remote_order, &["table_number", "tableNumber"]);
     let delivery_address = str_any(remote_order, &["delivery_address", "deliveryAddress"]);
+    let delivery_address_id = str_any(remote_order, &["delivery_address_id", "deliveryAddressId"]);
+    let delivery_latitude = num_any(remote_order, &["delivery_latitude", "deliveryLatitude"]);
+    let delivery_longitude = num_any(remote_order, &["delivery_longitude", "deliveryLongitude"]);
+    let delivery_address_fingerprint = str_any(
+        remote_order,
+        &["delivery_address_fingerprint", "deliveryAddressFingerprint"],
+    );
+    let delivery_zone_id = str_any(remote_order, &["delivery_zone_id", "deliveryZoneId"]);
     let delivery_city = str_any(remote_order, &["delivery_city", "deliveryCity"]);
     let delivery_postal_code = str_any(
         remote_order,
@@ -7878,6 +8503,43 @@ fn sync_remote_order_snapshot_into_local(
     );
     let updated_at = str_any(remote_order, &["updated_at", "updatedAt"])
         .unwrap_or_else(|| repaired_at.to_string());
+    if has_outstanding_local_order_queue(conn, local_order_id) {
+        let _ = attach_remote_order_identity_to_local_order(
+            conn,
+            local_order_id,
+            remote_order,
+            repaired_at,
+        )?;
+        debug!(
+            order_id = %local_order_id,
+            "Skipping remote order snapshot while local order update queue is still outstanding"
+        );
+        return Ok(0);
+    }
+    if remote_order_snapshot_lags_local_pending_payment_delta(conn, local_order_id, remote_order)? {
+        let _ = attach_remote_order_identity_to_local_order(
+            conn,
+            local_order_id,
+            remote_order,
+            repaired_at,
+        )?;
+        let _ = enqueue_local_order_update_after_lagged_snapshot(conn, local_order_id)?;
+        return Ok(0);
+    }
+    if remote_order_snapshot_is_older_than_local(conn, local_order_id, updated_at.as_str())? {
+        let _ = attach_remote_order_identity_to_local_order(
+            conn,
+            local_order_id,
+            remote_order,
+            repaired_at,
+        )?;
+        debug!(
+            order_id = %local_order_id,
+            remote_updated_at = %updated_at,
+            "Skipping stale remote order snapshot newer local edit exists"
+        );
+        return Ok(0);
+    }
     let estimated_time = i64_any(remote_order, &["estimated_time", "estimatedTime"]);
     let payment_status = remote_order
         .get("payment_status")
@@ -7929,6 +8591,14 @@ fn sync_remote_order_snapshot_into_local(
             Some(value.to_string())
         });
 
+    // W4c dual-write contract: when this UPDATE writes a REAL monetary
+    // column (?4=total_amount, ?5=tax_amount, ?6=subtotal, ?25=discount_amount,
+    // ?26=tip_amount, ?33=delivery_fee), it must also refresh the matching
+    // `*_cents` sibling. Otherwise the COALESCE-with-real read shim
+    // ([RM]:money.rs) prefers a stale cents value over the fresh REAL.
+    // The CAST(ROUND(?N * 100) AS INTEGER) is NULL when ?N is NULL, so
+    // the outer COALESCE keeps the existing cents value when no new
+    // REAL is provided.
     conn.execute(
         "UPDATE orders
          SET supabase_id = COALESCE(?1, supabase_id),
@@ -7936,8 +8606,11 @@ fn sync_remote_order_snapshot_into_local(
              display_order_number = COALESCE(NULLIF(TRIM(display_order_number), ''), COALESCE(?2, order_number)),
              items = COALESCE(?3, items),
              total_amount = COALESCE(?4, total_amount),
+             total_amount_cents = COALESCE(CAST(ROUND(?4 * 100) AS INTEGER), total_amount_cents),
              tax_amount = COALESCE(?5, tax_amount),
+             tax_amount_cents = COALESCE(CAST(ROUND(?5 * 100) AS INTEGER), tax_amount_cents),
              subtotal = COALESCE(?6, subtotal),
+             subtotal_cents = COALESCE(CAST(ROUND(?6 * 100) AS INTEGER), subtotal_cents),
              status = COALESCE(?7, status),
              order_type = COALESCE(?8, order_type),
              table_number = COALESCE(?9, table_number),
@@ -7950,29 +8623,36 @@ fn sync_remote_order_snapshot_into_local(
              special_instructions = COALESCE(?16, special_instructions),
              estimated_time = COALESCE(?17, estimated_time),
              payment_status = COALESCE(?18, payment_status),
-             payment_method = COALESCE(?19, payment_method),
-             payment_transaction_id = COALESCE(?20, payment_transaction_id),
-             staff_shift_id = COALESCE(?21, staff_shift_id),
-             staff_id = COALESCE(?22, staff_id),
-             driver_id = COALESCE(?23, driver_id),
-             driver_name = COALESCE(?24, driver_name),
-             discount_percentage = COALESCE(?25, discount_percentage),
-             discount_amount = COALESCE(?26, discount_amount),
-             tip_amount = COALESCE(?27, tip_amount),
-             version = COALESCE(?28, version),
-             terminal_id = COALESCE(?29, terminal_id),
-             branch_id = COALESCE(?30, branch_id),
-             plugin = COALESCE(?31, plugin),
-             external_plugin_order_id = COALESCE(?32, external_plugin_order_id),
-             tax_rate = COALESCE(?33, tax_rate),
-             delivery_fee = COALESCE(?34, delivery_fee),
-             is_ghost = COALESCE(?35, is_ghost),
-             ghost_source = COALESCE(?36, ghost_source),
-             ghost_metadata = COALESCE(?37, ghost_metadata),
-             sync_status = 'synced',
-             last_synced_at = datetime('now'),
-             updated_at = COALESCE(?38, updated_at, ?39)
-         WHERE id = ?40",
+             payment_transaction_id = COALESCE(?19, payment_transaction_id),
+             staff_shift_id = COALESCE(?20, staff_shift_id),
+             staff_id = COALESCE(?21, staff_id),
+             driver_id = COALESCE(?22, driver_id),
+             driver_name = COALESCE(?23, driver_name),
+             discount_percentage = COALESCE(?24, discount_percentage),
+             discount_amount = COALESCE(?25, discount_amount),
+             discount_amount_cents = COALESCE(CAST(ROUND(?25 * 100) AS INTEGER), discount_amount_cents),
+             tip_amount = COALESCE(?26, tip_amount),
+             tip_amount_cents = COALESCE(CAST(ROUND(?26 * 100) AS INTEGER), tip_amount_cents),
+             version = COALESCE(?27, version),
+             terminal_id = COALESCE(?28, terminal_id),
+             branch_id = COALESCE(?29, branch_id),
+             plugin = COALESCE(?30, plugin),
+             external_plugin_order_id = COALESCE(?31, external_plugin_order_id),
+             tax_rate = COALESCE(?32, tax_rate),
+             delivery_fee = COALESCE(?33, delivery_fee),
+             delivery_fee_cents = COALESCE(CAST(ROUND(?33 * 100) AS INTEGER), delivery_fee_cents),
+              is_ghost = COALESCE(?34, is_ghost),
+              ghost_source = COALESCE(?35, ghost_source),
+              ghost_metadata = COALESCE(?36, ghost_metadata),
+              delivery_address_id = COALESCE(?37, delivery_address_id),
+              delivery_latitude = COALESCE(?38, delivery_latitude),
+              delivery_longitude = COALESCE(?39, delivery_longitude),
+              delivery_address_fingerprint = COALESCE(?40, delivery_address_fingerprint),
+              delivery_zone_id = COALESCE(?41, delivery_zone_id),
+              sync_status = 'synced',
+              last_synced_at = datetime('now'),
+              updated_at = COALESCE(?42, updated_at, ?43)
+          WHERE id = ?44",
         params![
             remote_order_id,
             order_number,
@@ -7992,7 +8672,6 @@ fn sync_remote_order_snapshot_into_local(
             special_instructions,
             estimated_time,
             payment_status,
-            payment_method,
             payment_tx,
             staff_shift_id,
             staff_id,
@@ -8011,12 +8690,24 @@ fn sync_remote_order_snapshot_into_local(
             is_ghost,
             ghost_source,
             ghost_metadata,
+            delivery_address_id,
+            delivery_latitude,
+            delivery_longitude,
+            delivery_address_fingerprint,
+            delivery_zone_id,
             Some(updated_at.clone()),
             repaired_at,
             local_order_id,
         ],
     )
     .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))
+    .inspect(|_rows| {
+        // W6: inbound remote `payment_method` is consumed by sync
+        // payload construction upstream but is no longer persisted
+        // locally (column dropped in v55). Derived per read via
+        // `derive_payment_method`.
+        let _ = &payment_method;
+    })
 }
 
 fn extract_remote_orders_from_response(response: &Value) -> Vec<Value> {
@@ -8597,6 +9288,7 @@ async fn recover_payment_total_conflicts(
     let mut resolved_queue_blockers_from_remote_state = 0usize;
     let mut duplicate_resolved = 0usize;
     let mut stale_overpay_resolved = 0usize;
+    let mut tax_inflated_total_repaired = 0usize;
 
     for (payment_id, local_order_id) in pending_conflicts {
         let remote_outcome = reconcile_remote_payments_for_local_order_with_context(
@@ -8637,6 +9329,29 @@ async fn recover_payment_total_conflicts(
             continue;
         }
 
+        let repaired_tax_inflated_total = {
+            let repaired_at = Utc::now().to_rfc3339();
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            repair_tax_inflated_local_order_total_for_payment_conflict(
+                &conn,
+                &local_order_id,
+                &payment_id,
+                &repaired_at,
+            )?
+        };
+        if let Some(repair) = repaired_tax_inflated_total {
+            tax_inflated_total_repaired += 1;
+            info!(
+                payment_id = %repair.payment_id,
+                order_id = %repair.order_id,
+                previous_total_cents = repair.previous_total_cents,
+                repaired_total_cents = repair.repaired_total_cents,
+                voided_payment_cents = repair.voided_payment_cents,
+                "Corrected tax-inflated local order total after payment total conflict"
+            );
+            continue;
+        }
+
         if let Some(resolution) = resolve_stale_local_payment_total_conflict(db, &payment_id)? {
             stale_overpay_resolved += 1;
             info!(
@@ -8653,17 +9368,22 @@ async fn recover_payment_total_conflicts(
         || resolved_queue_blockers_from_remote_state > 0
         || duplicate_resolved > 0
         || stale_overpay_resolved > 0
+        || tax_inflated_total_repaired > 0
     {
         info!(
             remote_payments_mirrored,
             resolved_queue_blockers_from_remote_state,
             duplicate_resolved,
             stale_overpay_resolved,
+            tax_inflated_total_repaired,
             "Recovered stale payment total-conflict rows from canonical remote payments"
         );
     }
 
-    Ok(resolved_queue_blockers_from_remote_state + duplicate_resolved + stale_overpay_resolved)
+    Ok(resolved_queue_blockers_from_remote_state
+        + duplicate_resolved
+        + stale_overpay_resolved
+        + tax_inflated_total_repaired)
 }
 
 /// Execute one sync cycle: read pending queue items and POST to admin.
@@ -10274,9 +10994,20 @@ async fn sync_order_batch_via_direct_api(
             "coupon_discount_amount": num_any(&data, &["coupon_discount_amount"]),
             "delivery_fee": num_any(&data, &["delivery_fee"]),
             "notes": str_any(&data, &["notes"]),
+            "customer_id": str_any(&data, &["customer_id", "customerId"]),
             "customer_name": str_any(&data, &["customer_name"]),
+            "customer_email": str_any(&data, &["customer_email", "customerEmail"]),
             "customer_phone": str_any(&data, &["customer_phone"]),
-            "delivery_address": str_any(&data, &["delivery_address"]),
+            "delivery_address": str_any(&data, &["delivery_address", "deliveryAddress"]),
+            "delivery_address_id": str_any(&data, &["delivery_address_id", "deliveryAddressId"]),
+            "delivery_city": str_any(&data, &["delivery_city", "deliveryCity"]),
+            "delivery_postal_code": str_any(&data, &["delivery_postal_code", "deliveryPostalCode"]),
+            "delivery_floor": str_any(&data, &["delivery_floor", "deliveryFloor"]),
+            "delivery_notes": str_any(&data, &["delivery_notes", "deliveryNotes"]),
+            "delivery_latitude": num_any(&data, &["delivery_latitude", "deliveryLatitude"]),
+            "delivery_longitude": num_any(&data, &["delivery_longitude", "deliveryLongitude"]),
+            "delivery_address_fingerprint": str_any(&data, &["delivery_address_fingerprint", "deliveryAddressFingerprint"]),
+            "delivery_zone_id": str_any(&data, &["delivery_zone_id", "deliveryZoneId"]),
             "is_ghost": bool_any(&data, &["is_ghost"]).unwrap_or(false),
             "ghost_source": str_any(&data, &["ghost_source"]),
             "ghost_metadata": data.get("ghost_metadata").or_else(|| data.pointer("/data/ghost_metadata")),
@@ -10455,6 +11186,37 @@ async fn sync_order_batch_via_direct_api(
                 body.as_object_mut()
                     .unwrap()
                     .insert("notes".to_string(), notes.clone());
+            }
+        }
+
+        for &(camel, snake) in &[
+            ("orderType", "order_type"),
+            ("customerId", "customer_id"),
+            ("customerName", "customer_name"),
+            ("customerEmail", "customer_email"),
+            ("customerPhone", "customer_phone"),
+            ("deliveryAddress", "delivery_address"),
+            ("deliveryAddressId", "delivery_address_id"),
+            ("deliveryCity", "delivery_city"),
+            ("deliveryPostalCode", "delivery_postal_code"),
+            ("deliveryFloor", "delivery_floor"),
+            ("deliveryNotes", "delivery_notes"),
+            ("nameOnRinger", "name_on_ringer"),
+            ("deliveryLatitude", "delivery_latitude"),
+            ("deliveryLongitude", "delivery_longitude"),
+            (
+                "deliveryAddressFingerprint",
+                "delivery_address_fingerprint",
+            ),
+            ("deliveryZoneId", "delivery_zone_id"),
+        ] {
+            let value = payload_value.get(camel).or_else(|| payload_value.get(snake));
+            if let Some(value) = value {
+                if !value.is_null() {
+                    body.as_object_mut()
+                        .unwrap()
+                        .insert(snake.to_string(), value.clone());
+                }
             }
         }
 
@@ -10666,9 +11428,23 @@ async fn sync_shift_batch(
         .unwrap_or_default();
 
     if results.is_empty() {
-        // Old server or unexpected response — treat all as synced (legacy behavior)
-        outcome.synced_shift_ids = event_shift_ids;
-        return Ok(outcome);
+        // Wave 3 H7: the previous code treated an empty `results` array as
+        // "all synced (legacy server)". That's dangerous for a monetary
+        // entity — an HTTP 200 with `{ success: true, results: [] }` from
+        // a serialization bug or mis-routed handler used to silently stamp
+        // every submitted shift event as synced locally, unblocking
+        // downstream financial items (expenses, staff payments, driver
+        // earnings) to sync against an unconfirmed server record and
+        // producing FK failures.
+        //
+        // Treat empty-results as an ambiguous response: log + return a
+        // retryable error. The caller's retry machinery will re-attempt
+        // on the next cycle.
+        warn!(
+            submitted = event_shift_ids.len(),
+            "Shift sync: server returned 200 with empty `results`; treating as retryable (W3 H7)"
+        );
+        return Err("Shift sync: server response missing per-event results; retry".to_string());
     }
 
     for result in &results {
@@ -11161,9 +11937,21 @@ fn upsert_active_shift_insert_sync_row(
         )
         .map_err(|e| format!("update active shift queue row: {e}"))?;
     } else {
-        let idem_key = format!("shift:business-day-repair:{}:{}", shift_id, Uuid::new_v4());
+        // Wave 3 H9: the key is entity-stable — `shift:business-day-repair:<shift_id>`
+        // — so that a retried business-day repair for the same shift
+        // produces the same idempotency key the server already saw. The
+        // previous implementation appended `Uuid::new_v4()`, which meant
+        // each retry minted a fresh key and the server's dedup had no way
+        // to recognise it as the same logical operation.
+        //
+        // `INSERT OR IGNORE` protects against the rare case where a
+        // concurrent thread races to INSERT the same key between the
+        // `existing_queue_id` lookup above and this statement. Without
+        // `OR IGNORE`, the unique-constraint violation would roll back
+        // the enclosing transaction.
+        let idem_key = format!("shift:business-day-repair:{}", shift_id);
         conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+            "INSERT OR IGNORE INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
              VALUES ('shift', ?1, 'insert', ?2, ?3, 'pending')",
             params![shift_id, payload, idem_key],
         )
@@ -11259,9 +12047,15 @@ fn enqueue_reconstructed_shift_sync_row(
         return Ok(None);
     };
 
-    let idem_key = format!("shift:requeue:{}:{}", shift_id, Uuid::new_v4());
+    // Wave 3 H9: deterministic key so repeated reconstructions of the same
+    // shift re-use the same idempotency key the server has seen. The
+    // `operation` is folded into the key because the same shift may legitimately
+    // be requeued once as an `insert` (during onboarding reconstruction) and
+    // once as an `update` (on close) — those are distinct logical operations.
+    // `INSERT OR IGNORE` keeps the transaction alive if the key already exists.
+    let idem_key = format!("shift:requeue:{}:{}", shift_id, operation);
     conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+        "INSERT OR IGNORE INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
          VALUES ('shift', ?1, ?2, ?3, ?4, 'pending')",
         params![shift_id, operation, payload, idem_key],
     )
@@ -11795,7 +12589,7 @@ async fn sync_financial_batch(
             }
 
             // Fallback match: entity_type + entity_id + operation +
-            // amount (within MONEY_EPSILON) + created_at equality.
+            // amount (integer-cent equality) + created_at equality.
             let et_ok = result
                 .get("entity_type")
                 .and_then(Value::as_str)
@@ -11816,11 +12610,15 @@ async fn sync_financial_batch(
                     // preserves compatibility with older admin builds.
                     true,
                 );
-            let amount_ok = match (
-                local_amount,
-                result.get("amount").and_then(Value::as_f64),
-            ) {
-                (Some(l), Some(r)) => (l - r).abs() < crate::money::MONEY_EPSILON,
+            // W4e: convert both sides to integer cents and compare for
+            // equality. The half-cent epsilon is unnecessary once both
+            // sides are integers (they're either exactly equal or
+            // they're not).
+            let amount_ok = match (local_amount, result.get("amount").and_then(Value::as_f64)) {
+                (Some(l), Some(r)) => {
+                    crate::money::Cents::round_half_even(l).as_i64()
+                        == crate::money::Cents::round_half_even(r).as_i64()
+                }
                 // If either side omits amount, accept so older clients
                 // and servers interoperate.
                 _ => true,
@@ -11924,63 +12722,192 @@ async fn sync_payment_items(
         ) = item;
         let data: Value = serde_json::from_str(payload).unwrap_or(serde_json::json!({}));
 
-        // Extract the local order_id from the sync payload
-        let local_order_id = data
-            .get("orderId")
-            .or_else(|| data.get("order_id"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-
-        if local_order_id.is_empty() {
-            warn!(payment_id = %entity_id, "Payment sync: missing orderId in payload");
-            if let Ok(conn) = db.conn.lock() {
-                let _ = conn.execute(
-                    "UPDATE sync_queue SET status = 'failed', last_error = 'Missing orderId in payload', updated_at = datetime('now') WHERE id = ?1",
-                    params![id],
-                );
+        // Extract or resolve the local order_id.
+        //
+        // Wave 3 H10: a missing `orderId` in the serialized payload used to
+        // hard-fail the sync_queue row (`status = 'failed'`), which
+        // bypasses retry and is not operator-recoverable. But `order_id`
+        // is persisted on the `order_payments` row itself, so the row's
+        // own primary key (`entity_id`) lets us recover the link. Only
+        // hard-fail when that lookup also yields nothing.
+        let resolved_order_id: Option<String> = {
+            let from_payload = data
+                .get("orderId")
+                .or_else(|| data.get("order_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.is_empty());
+            match from_payload {
+                Some(s) => Some(s),
+                None => match db.conn.lock() {
+                    Ok(conn) => conn
+                        .query_row(
+                            "SELECT order_id FROM order_payments WHERE id = ?1",
+                            params![entity_id],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .ok()
+                        .flatten()
+                        .filter(|s: &String| !s.is_empty())
+                        .inspect(|resolved| {
+                            warn!(
+                                payment_id = %entity_id,
+                                resolved_order_id = %resolved,
+                                "Payment sync: orderId missing from payload; recovered via order_payments.order_id"
+                            );
+                        }),
+                    Err(_) => None,
+                },
             }
-            continue;
-        }
-
-        // Resolve the supabase_id for the order
-        let supabase_order_id: Option<String> = match db.conn.lock() {
-            Ok(conn) => conn
-                .query_row(
-                    "SELECT supabase_id FROM orders WHERE id = ?1",
-                    params![local_order_id],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten(),
-            Err(_) => None,
         };
 
-        // If order hasn't synced yet, move to deferred/waiting_parent
-        if supabase_order_id.is_none() {
-            info!(
-                payment_id = %entity_id,
-                order_id = %local_order_id,
-                "Payment sync deferred: order not yet synced (no supabase_id)"
-            );
-            if let Ok(conn) = db.conn.lock() {
-                let _ = conn.execute(
-                    "UPDATE sync_queue SET status = 'deferred', last_error = 'Order not yet synced', updated_at = datetime('now') WHERE id = ?1",
-                    params![id],
+        let local_order_id = match resolved_order_id {
+            Some(s) => s,
+            None => {
+                warn!(
+                    payment_id = %entity_id,
+                    "Payment sync: missing orderId in payload and no fallback on order_payments; marking failed"
                 );
-                let _ = conn.execute(
-                    "UPDATE order_payments SET sync_state = 'waiting_parent', updated_at = datetime('now') WHERE id = ?1",
-                    params![entity_id],
-                );
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = conn.execute(
+                        "UPDATE sync_queue SET status = 'failed', last_error = 'Missing orderId in payload (no fallback)', updated_at = datetime('now') WHERE id = ?1",
+                        params![id],
+                    );
+                }
+                continue;
             }
-            continue;
-        }
+        };
+        let local_order_id = local_order_id.as_str();
 
-        // SAFETY: the `is_none()` guard above `continue`s, so this branch only
-        // reaches here when `supabase_order_id` is `Some(_)`. `expect` documents
-        // that invariant for future readers instead of a bare `unwrap`.
-        let supabase_order_id =
-            supabase_order_id.expect("supabase_order_id guarded by is_none() check above");
-        let amount = data.get("amount").and_then(Value::as_f64).unwrap_or(0.0);
+        // Wave 3 H11: claim the payment atomically.
+        //
+        // Threat model: `reconcile_deferred_payments` promotes a payment
+        // from `deferred` → `pending` based on `orders.supabase_id IS NOT
+        // NULL`. `sync_payment_items` then re-reads `supabase_id` and
+        // marks the `order_payments` row `sync_state = 'syncing'` in TWO
+        // separate lock acquisitions. Between the read and the mark, a
+        // concurrent writer that clears `supabase_id` (e.g., a full local
+        // DB reset, a rollback, a remote rebuild restart) would allow the
+        // HTTP POST to send a null `supabase_order_id` to the server,
+        // which then errors and counts against the retry budget.
+        //
+        // The fix collapses (read supabase_id) + (demote-or-claim) into a
+        // single `BEGIN IMMEDIATE` → COMMIT block so both observations
+        // and mutations see a consistent view of the `orders` row.
+        enum PaymentClaimOutcome {
+            Deferred,
+            Ready(String),
+        }
+        let claim_outcome: Result<PaymentClaimOutcome, String> = db
+            .conn
+            .lock()
+            .map_err(|e| format!("lock: {e}"))
+            .and_then(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE")
+                    .map_err(|e| format!("begin payment claim: {e}"))?;
+                let result = (|| -> Result<PaymentClaimOutcome, String> {
+                    let supabase_order_id: Option<String> = conn
+                        .query_row(
+                            "SELECT supabase_id FROM orders WHERE id = ?1",
+                            params![local_order_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+                    match supabase_order_id {
+                        None => {
+                            conn.execute(
+                                "UPDATE sync_queue SET status = 'deferred', last_error = 'Order not yet synced', updated_at = datetime('now') WHERE id = ?1",
+                                params![id],
+                            )
+                            .map_err(|e| format!("demote queue to deferred: {e}"))?;
+                            conn.execute(
+                                "UPDATE order_payments SET sync_state = 'waiting_parent', updated_at = datetime('now') WHERE id = ?1",
+                                params![entity_id],
+                            )
+                            .map_err(|e| format!("mark payment waiting_parent: {e}"))?;
+                            Ok(PaymentClaimOutcome::Deferred)
+                        }
+                        Some(sid) => {
+                            if has_outstanding_local_order_queue(&conn, local_order_id) {
+                                conn.execute(
+                                    "UPDATE sync_queue
+                                     SET status = 'deferred',
+                                         last_error = 'Order update not yet synced',
+                                         updated_at = datetime('now')
+                                     WHERE id = ?1",
+                                    params![id],
+                                )
+                                .map_err(|e| {
+                                    format!("demote payment queue behind order update: {e}")
+                                })?;
+                                conn.execute(
+                                    "UPDATE order_payments
+                                     SET sync_state = 'waiting_parent',
+                                         sync_status = 'pending',
+                                         sync_last_error = 'Order update not yet synced',
+                                         updated_at = datetime('now')
+                                     WHERE id = ?1",
+                                    params![entity_id],
+                                )
+                                .map_err(|e| {
+                                    format!("mark payment waiting for order update: {e}")
+                                })?;
+                                Ok(PaymentClaimOutcome::Deferred)
+                            } else {
+                            conn.execute(
+                                "UPDATE order_payments SET sync_state = 'syncing', updated_at = datetime('now') WHERE id = ?1",
+                                params![entity_id],
+                            )
+                            .map_err(|e| format!("mark payment syncing: {e}"))?;
+                            Ok(PaymentClaimOutcome::Ready(sid))
+                            }
+                        }
+                    }
+                })();
+                match result {
+                    Ok(outcome) => {
+                        conn.execute_batch("COMMIT")
+                            .map_err(|e| format!("commit payment claim: {e}"))?;
+                        Ok(outcome)
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        Err(e)
+                    }
+                }
+            });
+
+        let supabase_order_id = match claim_outcome {
+            Ok(PaymentClaimOutcome::Ready(sid)) => sid,
+            Ok(PaymentClaimOutcome::Deferred) => {
+                info!(
+                    payment_id = %entity_id,
+                    order_id = %local_order_id,
+                    "Payment sync deferred until parent order sync catches up"
+                );
+                continue;
+            }
+            Err(err) => {
+                warn!(
+                    payment_id = %entity_id,
+                    error = %err,
+                    "Payment claim transaction failed; leaving row for next cycle"
+                );
+                continue;
+            }
+        };
+        // Wave 4d: prefer integer `amount_cents` from the sync payload; fall back to
+        // legacy float `amount` for any row enqueued before the wire-format cutover.
+        let amount_cents = data
+            .get("amount_cents")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                data.get("amount")
+                    .and_then(Value::as_f64)
+                    .map(|v| Cents::round_half_even(v).as_i64())
+            })
+            .unwrap_or(0);
         let payment_method = data
             .get("method")
             .or_else(|| data.get("paymentMethod"))
@@ -11990,25 +12917,39 @@ async fn sync_payment_items(
             .get("transactionRef")
             .or_else(|| data.get("transaction_ref"))
             .and_then(Value::as_str);
-        let tip_amount = data.get("tipAmount").and_then(Value::as_f64);
+        let tip_amount_cents = data
+            .get("tip_amount_cents")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                data.get("tipAmount")
+                    .and_then(Value::as_f64)
+                    .map(|v| Cents::round_half_even(v).as_i64())
+            });
         let currency = data.get("currency").and_then(Value::as_str);
         let payment_origin = data
             .get("paymentOrigin")
             .or_else(|| data.get("payment_origin"))
             .and_then(Value::as_str);
 
-        // Build the POST body for /api/pos/payments
+        // Build the POST body for /api/pos/payments.
+        // W4d-i: emit BOTH `amount`/`tip_amount` (legacy float, what the
+        // admin Zod schema currently requires) AND `amount_cents`/`tip_amount_cents`
+        // (forward-compat). Admin switches to cents preference in a follow-up.
+        let amount_f64 = crate::money::Cents::new(amount_cents).to_f64_dp2();
         let mut body = serde_json::json!({
             "order_id": supabase_order_id,
-            "amount": amount,
+            "amount": amount_f64,
+            "amount_cents": amount_cents,
             "payment_method": payment_method,
             "idempotency_key": idem_key,
         });
         if let Some(ext_id) = external_tx_id {
             body["external_transaction_id"] = Value::String(ext_id.to_string());
         }
-        if let Some(tip) = tip_amount {
-            body["tip_amount"] = serde_json::json!(tip);
+        if let Some(tip_cents) = tip_amount_cents {
+            body["tip_amount"] =
+                serde_json::json!(crate::money::Cents::new(tip_cents).to_f64_dp2());
+            body["tip_amount_cents"] = serde_json::json!(tip_cents);
         }
         if let Some(currency) = currency {
             body["currency"] = Value::String(currency.to_string());
@@ -12027,13 +12968,11 @@ async fn sync_payment_items(
             }
         }
 
-        // Mark as syncing before the HTTP call
-        if let Ok(conn) = db.conn.lock() {
-            let _ = conn.execute(
-                "UPDATE order_payments SET sync_state = 'syncing', updated_at = datetime('now') WHERE id = ?1",
-                params![entity_id],
-            );
-        }
+        // Wave 3 H11: the H11 claim transaction above already marked
+        // `order_payments.sync_state = 'syncing'` atomically with the
+        // `supabase_id` read. A second standalone `UPDATE … SET
+        // sync_state = 'syncing'` used to live here; it was redundant
+        // with the atomic claim and has been removed.
 
         match api::fetch_from_admin(admin_url, api_key, "/api/pos/payments", "POST", Some(body))
             .await
@@ -12050,22 +12989,48 @@ async fn sync_payment_items(
                             .map(|value| value.to_string())
                     });
                 let now = Utc::now().to_rfc3339();
-                if let Ok(conn) = db.conn.lock() {
-                    let _ = conn.execute(
-                        "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
-                        params![now, id],
+                // Wave 3 C4: both the `order_payments` row update and the
+                // `sync_queue` row update are routed through
+                // `mark_local_payment_applied`, which wraps them in a
+                // SAVEPOINT. Previously the two `conn.execute` calls were
+                // siblings with no savepoint — a process crash between
+                // them could leave the queue row at `status = 'synced'`
+                // while the payment's `sync_state` remained `'syncing'`,
+                // and stale-lease recovery would not pick up a row
+                // already marked synced. The payment was effectively
+                // stuck forever. SAVEPOINT makes the two writes atomic
+                // even when running without an enclosing transaction.
+                let local_apply_result = match db.conn.lock() {
+                    Ok(conn) => mark_local_payment_applied(
+                        &conn,
+                        entity_id,
+                        &now,
+                        remote_payment_id.as_deref(),
+                    ),
+                    Err(err) => Err(format!("db lock: {err}")),
+                };
+                if let Err(err) = local_apply_result {
+                    warn!(
+                        payment_id = %entity_id,
+                        queue_row_id = id,
+                        error = %err,
+                        "Payment sync: local apply failed after successful HTTP POST; keeping row retryable"
                     );
-                    let _ = conn.execute(
-                        "UPDATE order_payments
-                         SET sync_status = 'synced',
-                             sync_state = 'applied',
-                             remote_payment_id = COALESCE(?1, remote_payment_id),
-                             sync_retry_count = 0,
-                             sync_last_error = NULL,
-                             updated_at = ?2
-                         WHERE id = ?3",
-                        params![remote_payment_id, now, entity_id],
-                    );
+                    if let Ok(conn) = db.conn.lock() {
+                        let _ = conn.execute(
+                            "UPDATE sync_queue
+                             SET status = 'pending',
+                                 last_error = ?1,
+                                 next_retry_at = NULL,
+                                 updated_at = datetime('now')
+                             WHERE id = ?2",
+                            params![
+                                format!("Local apply failed after remote success: {err}"),
+                                id
+                            ],
+                        );
+                    }
+                    continue;
                 }
                 synced += 1;
             }
@@ -12418,28 +13383,76 @@ async fn sync_adjustment_items(
                 let now = Utc::now().to_rfc3339();
                 let resolved_canonical_order_id =
                     normalize_optional_uuid_str(str_any(&resp, &["order_id"]).as_deref());
-                if let Ok(conn) = db.conn.lock() {
-                    if let (Some(local_order_id), Some(canonical_order_id)) = (
-                        parent_order_id.as_deref(),
-                        resolved_canonical_order_id.as_deref(),
-                    ) {
+                let local_apply_result = match db.conn.lock() {
+                    Ok(conn) => (|| -> Result<(), String> {
+                        conn.execute_batch("SAVEPOINT sync_payment_adjustment_success")
+                            .map_err(|e| format!("savepoint adjustment success: {e}"))?;
+                        if let (Some(local_order_id), Some(canonical_order_id)) = (
+                            parent_order_id.as_deref(),
+                            resolved_canonical_order_id.as_deref(),
+                        ) {
+                            conn.execute(
+                                "UPDATE orders
+                                 SET supabase_id = ?1,
+                                     updated_at = ?2
+                                 WHERE id = ?3
+                                   AND COALESCE(NULLIF(TRIM(COALESCE(supabase_id, '')), ''), '') != ?1",
+                                params![canonical_order_id, now, local_order_id],
+                            )
+                            .map_err(|e| format!("update adjustment parent canonical order: {e}"))?;
+                        }
+                        conn.execute(
+                            "UPDATE sync_queue
+                             SET status = 'synced',
+                                 synced_at = ?1,
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            params![now, id],
+                        )
+                        .map_err(|e| format!("mark adjustment queue synced: {e}"))?;
+                        conn.execute(
+                            "UPDATE payment_adjustments
+                             SET sync_state = 'applied',
+                                 sync_retry_count = 0,
+                                 sync_last_error = NULL,
+                                 sync_next_retry_at = NULL,
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            params![now, entity_id],
+                        )
+                        .map_err(|e| format!("mark adjustment applied: {e}"))?;
+                        conn.execute_batch("RELEASE sync_payment_adjustment_success")
+                            .map_err(|e| format!("release adjustment success: {e}"))?;
+                        Ok(())
+                    })()
+                    .inspect_err(|_| {
+                        let _ = conn.execute_batch("ROLLBACK TO sync_payment_adjustment_success");
+                        let _ = conn.execute_batch("RELEASE sync_payment_adjustment_success");
+                    }),
+                    Err(err) => Err(format!("db lock: {err}")),
+                };
+                if let Err(err) = local_apply_result {
+                    warn!(
+                        adjustment_id = %entity_id,
+                        queue_row_id = id,
+                        error = %err,
+                        "Adjustment sync: local apply failed after successful HTTP POST; keeping row retryable"
+                    );
+                    if let Ok(conn) = db.conn.lock() {
                         let _ = conn.execute(
-                            "UPDATE orders
-                             SET supabase_id = ?1,
-                                 updated_at = ?2
-                             WHERE id = ?3
-                               AND COALESCE(NULLIF(TRIM(COALESCE(supabase_id, '')), ''), '') != ?1",
-                            params![canonical_order_id, now, local_order_id],
+                            "UPDATE sync_queue
+                             SET status = 'pending',
+                                 last_error = ?1,
+                                 next_retry_at = NULL,
+                                 updated_at = datetime('now')
+                             WHERE id = ?2",
+                            params![
+                                format!("Local apply failed after remote success: {err}"),
+                                id
+                            ],
                         );
                     }
-                    let _ = conn.execute(
-                        "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
-                        params![now, id],
-                    );
-                    let _ = conn.execute(
-                        "UPDATE payment_adjustments SET sync_state = 'applied', sync_retry_count = 0, sync_last_error = NULL, updated_at = ?1 WHERE id = ?2",
-                        params![now, entity_id],
-                    );
+                    continue;
                 }
                 synced += 1;
             }
@@ -12546,15 +13559,62 @@ async fn sync_z_report_items(
         {
             Ok(_resp) => {
                 let now = Utc::now().to_rfc3339();
-                if let Ok(conn) = db.conn.lock() {
-                    let _ = conn.execute(
-                        "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
-                        params![now, id],
+                let local_apply_result = match db.conn.lock() {
+                    Ok(conn) => (|| -> Result<(), String> {
+                        conn.execute_batch("SAVEPOINT sync_z_report_success")
+                            .map_err(|e| format!("savepoint z-report success: {e}"))?;
+                        conn.execute(
+                            "UPDATE sync_queue
+                             SET status = 'synced',
+                                 synced_at = ?1,
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            params![now, id],
+                        )
+                        .map_err(|e| format!("mark z-report queue synced: {e}"))?;
+                        conn.execute(
+                            "UPDATE z_reports
+                             SET sync_state = 'applied',
+                                 sync_retry_count = 0,
+                                 sync_last_error = NULL,
+                                 sync_next_retry_at = NULL,
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            params![now, entity_id],
+                        )
+                        .map_err(|e| format!("mark z-report applied: {e}"))?;
+                        conn.execute_batch("RELEASE sync_z_report_success")
+                            .map_err(|e| format!("release z-report success: {e}"))?;
+                        Ok(())
+                    })()
+                    .inspect_err(|_| {
+                        let _ = conn.execute_batch("ROLLBACK TO sync_z_report_success");
+                        let _ = conn.execute_batch("RELEASE sync_z_report_success");
+                    }),
+                    Err(err) => Err(format!("db lock: {err}")),
+                };
+                if let Err(err) = local_apply_result {
+                    warn!(
+                        z_report_id = %entity_id,
+                        queue_row_id = id,
+                        error = %err,
+                        "Z-report sync: local apply failed after successful HTTP POST; keeping row retryable"
                     );
-                    let _ = conn.execute(
-                        "UPDATE z_reports SET sync_state = 'applied', sync_retry_count = 0, sync_last_error = NULL, updated_at = ?1 WHERE id = ?2",
-                        params![now, entity_id],
-                    );
+                    if let Ok(conn) = db.conn.lock() {
+                        let _ = conn.execute(
+                            "UPDATE sync_queue
+                             SET status = 'pending',
+                                 last_error = ?1,
+                                 next_retry_at = NULL,
+                                 updated_at = datetime('now')
+                             WHERE id = ?2",
+                            params![
+                                format!("Local apply failed after remote success: {err}"),
+                                id
+                            ],
+                        );
+                    }
+                    continue;
                 }
                 synced += 1;
                 info!(z_report_id = %entity_id, "Z-report synced to admin");
@@ -12665,6 +13725,108 @@ async fn sync_loyalty_items(
     synced
 }
 
+// ---------------------------------------------------------------------------
+// Wave 7 test-only dispatch wrappers
+// ---------------------------------------------------------------------------
+//
+// The production orchestrator at sync.rs:8920+ loads every pending
+// `sync_queue` row, bucketizes by `SyncItemCategory`, and fans out to
+// per-type async dispatchers (`sync_payment_items`,
+// `sync_z_report_items`, etc.). The dispatchers themselves are file-
+// private because they take a hand-built `&[&SyncItem]` slice whose
+// shape only makes sense inside that orchestrator.
+//
+// Wave 7 parity-gate tests (G8 payment / G14 z-report) need to drive
+// each dispatcher in isolation — no order sync, no shift sync, no
+// adjustment sync on the side. The clean way is a tiny test-only
+// entry point that (a) loads just the relevant `sync_queue` rows with
+// the same SQL shape the orchestrator uses and (b) forwards to the
+// private dispatcher. `#[cfg(test)] pub(crate)` keeps the helpers out
+// of release builds and out of the public API surface entirely.
+
+/// Load pending `sync_queue` rows for a given `entity_type` as
+/// `SyncItem` tuples. Mirrors the production loader at sync.rs:9224
+/// (column order, COALESCE on `retry_delay_ms`) so tests hit the
+/// dispatcher with items indistinguishable from live rows.
+#[cfg(test)]
+fn load_pending_sync_items_for_test(db: &DbState, entity_type: &str) -> Vec<SyncItem> {
+    let conn = match db.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT id, entity_type, entity_id, operation, payload, idempotency_key,
+                retry_count, max_retries, next_retry_at,
+                COALESCE(retry_delay_ms, 5000), remote_receipt_id
+         FROM sync_queue
+         WHERE entity_type = ?1
+           AND status = 'pending'
+           AND retry_count < max_retries
+         ORDER BY id ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map([entity_type], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, i64>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, i64>(9)?,
+            row.get::<_, Option<String>>(10)?,
+        ))
+    });
+    match rows {
+        Ok(iter) => iter.flatten().collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Test-only entry point: load every pending `entity_type = 'payment'`
+/// row from `sync_queue` and forward to `sync_payment_items`. Wave 7
+/// parity gate G8 uses this to drive the payment exactly-once flow in
+/// isolation.
+#[cfg(test)]
+pub(crate) async fn dispatch_pending_payments_for_test(
+    admin_url: &str,
+    api_key: &str,
+    terminal_id: &str,
+    db: &DbState,
+) -> usize {
+    let items = load_pending_sync_items_for_test(db, "payment");
+    if items.is_empty() {
+        return 0;
+    }
+    let refs: Vec<&SyncItem> = items.iter().collect();
+    sync_payment_items(admin_url, api_key, terminal_id, db, &refs).await
+}
+
+/// Test-only entry point: load every pending `entity_type = 'z_report'`
+/// row from `sync_queue` and forward to `sync_z_report_items`. Wave 7
+/// parity gate G14 uses this to drive the z-report exactly-once flow
+/// in isolation.
+#[cfg(test)]
+pub(crate) async fn dispatch_pending_z_reports_for_test(
+    admin_url: &str,
+    api_key: &str,
+    terminal_id: &str,
+    branch_id: &str,
+    db: &DbState,
+) -> usize {
+    let items = load_pending_sync_items_for_test(db, "z_report");
+    if items.is_empty() {
+        return 0;
+    }
+    let refs: Vec<&SyncItem> = items.iter().collect();
+    sync_z_report_items(admin_url, api_key, terminal_id, branch_id, db, &refs).await
+}
+
 /// Sync a single loyalty transaction to the admin dashboard.
 ///
 /// Routes the transaction to `/api/pos/loyalty/earn` or `/api/pos/loyalty/redeem`
@@ -12692,10 +13854,24 @@ async fn sync_loyalty_transaction(
 
     let body = match tx_type {
         "earn" => {
+            // Wave 4d: prefer integer `amount_cents`; fall back to legacy float
+            // `amount` for any pre-cutover row still queued.
+            let amount_cents = payload
+                .get("amount_cents")
+                .and_then(|v| v.as_i64())
+                .or_else(|| {
+                    payload
+                        .get("amount")
+                        .and_then(|v| v.as_f64())
+                        .map(|v| Cents::round_half_even(v).as_i64())
+                })
+                .unwrap_or(0);
+            // W4d-i: emit BOTH float and cents keys for the loyalty/earn POST.
             serde_json::json!({
                 "customer_id": payload.get("customer_id").and_then(|v| v.as_str()).unwrap_or_default(),
                 "order_id": payload.get("order_id").and_then(|v| v.as_str()),
-                "amount": payload.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "amount": Cents::new(amount_cents).to_f64_dp2(),
+                "amount_cents": amount_cents,
                 "description": payload.get("description").and_then(|v| v.as_str()),
             })
         }
@@ -12851,6 +14027,13 @@ fn mark_batch_failed(
 
         // When an order is permanently failed, cascade to dependent payments
         // and adjustments so they don't sit in deferred/waiting_parent forever.
+        //
+        // Wave 3 H12: replaced `payload LIKE '%' || :id || '%'` with typed
+        // `json_extract` field checks on the known canonical order-id keys
+        // (`$.orderId`, `$.order_id`, `$.parentOrderId`). The substring
+        // match could cascade over unrelated rows whose JSON embedded the
+        // same UUID bytes in a different field, prematurely killing
+        // payments that had no dependency on the failed order.
         if exhausted {
             let entity_id_str: &str = &item.2;
             let cascade_error = format!("Parent order sync failed: {error}");
@@ -12860,9 +14043,13 @@ fn mark_batch_failed(
                      SET status = 'failed',
                          last_error = ?1,
                          updated_at = datetime('now')
-                     WHERE entity_type IN ('order_payment', 'payment_adjustment')
+                     WHERE entity_type IN ('payment', 'order_payment', 'order_payments', 'payment_adjustment')
                        AND status IN ('deferred', 'waiting_parent')
-                       AND payload LIKE '%' || ?2 || '%'",
+                       AND (
+                            json_extract(payload, '$.orderId')        = ?2
+                         OR json_extract(payload, '$.order_id')       = ?2
+                         OR json_extract(payload, '$.parentOrderId')  = ?2
+                       )",
                     params![cascade_error, entity_id_str],
                 )
                 .unwrap_or(0);
@@ -12922,9 +14109,13 @@ fn mark_order_item_retry_or_fail(db: &DbState, item: &SyncItem, error: &str) -> 
                  SET status = 'failed',
                      last_error = ?1,
                      updated_at = datetime('now')
-                 WHERE entity_type IN ('order_payment', 'payment_adjustment')
-                   AND status IN ('deferred', 'waiting_parent')
-                   AND payload LIKE '%' || ?2 || '%'",
+                  WHERE entity_type IN ('payment', 'order_payment', 'order_payments', 'payment_adjustment')
+                    AND status IN ('deferred', 'waiting_parent')
+                    AND (
+                         json_extract(payload, '$.orderId')        = ?2
+                      OR json_extract(payload, '$.order_id')       = ?2
+                      OR json_extract(payload, '$.parentOrderId')  = ?2
+                    )",
                 params![cascade_error, entity_id_str],
             )
             .unwrap_or(0);
@@ -13111,12 +14302,14 @@ fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bo
 // Payment reconciliation
 // ---------------------------------------------------------------------------
 
-/// Promote deferred payments whose parent order now has a supabase_id.
+/// Promote deferred payments whose parent order now has a supabase_id and no
+/// queued local order edits still waiting to apply remotely.
 ///
 /// This runs once per sync tick. It finds `order_payments` with
 /// `sync_state = 'waiting_parent'` where the parent order has a non-null
-/// `supabase_id`, and transitions them to `sync_state = 'pending'` while
-/// also promoting their `sync_queue` row from `deferred` to `pending`.
+/// `supabase_id` and no active order queue rows, and transitions them to
+/// `sync_state = 'pending'` while also promoting their `sync_queue` row from
+/// `deferred` to `pending`.
 ///
 /// This handles the case where the app restarts between order sync and
 /// payment sync — the periodic sweep picks them up.
@@ -13149,6 +14342,15 @@ pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String>
     let mut promoted = 0;
 
     for (payment_id, order_id) in &rows {
+        if has_outstanding_local_order_queue(&conn, order_id) {
+            debug!(
+                payment_id = %payment_id,
+                order_id = %order_id,
+                "Deferred payment remains blocked by pending parent order update"
+            );
+            continue;
+        }
+
         // Promote the payment record
         let _ = conn.execute(
             "UPDATE order_payments SET sync_state = 'pending', updated_at = ?1
@@ -13390,6 +14592,15 @@ fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
 
 /// Inline promotion: after a shift syncs successfully, immediately promote any
 /// deferred strict shift-bound financial items that reference that shift.
+///
+/// Wave 3 C5: the old match predicate was
+///     `payload LIKE '%' || :shift_id || '%'`
+/// which would also promote items whose JSON payload coincidentally embedded
+/// the same UUID in an unrelated field (e.g. a prior
+/// `transferred_to_cashier_shift_id` value). Substitutes a typed
+/// `json_extract(payload, '$.<field>')` check on the canonical shift-id
+/// keys. The OR chain accepts any of the three shift-id key spellings the
+/// payload builders use across subsystems.
 fn promote_financials_for_shift(conn: &rusqlite::Connection, shift_id: &str) {
     let now = Utc::now().to_rfc3339();
     let updated = conn
@@ -13398,7 +14609,11 @@ fn promote_financials_for_shift(conn: &rusqlite::Connection, shift_id: &str) {
              SET status = 'pending', updated_at = ?1
              WHERE entity_type IN ('shift_expense', 'shift_expenses', 'staff_payment', 'staff_payments')
                AND status = 'deferred'
-               AND payload LIKE '%' || ?2 || '%'",
+               AND (
+                    json_extract(payload, '$.cashierShiftId') = ?2
+                 OR json_extract(payload, '$.shiftId')        = ?2
+                 OR json_extract(payload, '$.staffShiftId')   = ?2
+               )",
             params![now, shift_id],
         )
         .unwrap_or(0);
@@ -13566,35 +14781,38 @@ fn ensure_canonical_local_z_report_queue_row(
     row: &LocalHistoricalZReportRow,
     now: &str,
 ) -> Result<(), String> {
-    let sync_payload = serde_json::json!({
+    // Wave 5 Session 7 PR 0: the historical-repair requeue path now
+    // writes to `parity_sync_queue` under `(table_name = "z_reports",
+    // record_id = row.id)` — same identity Session 6's
+    // `ensure_z_report_sync_queue_row` and `generate_z_report` use, so
+    // the dedup surface is single. The legacy explicit idempotency key
+    // `format!("zreport:{id}")` is no longer needed: parity dedup keys
+    // off `(table_name, record_id)` directly.
+    let sync_payload_value = serde_json::json!({
         "terminal_id": row.terminal_id,
         "branch_id": row.branch_id,
         "report_date": row.report_date,
         "report_data": row.report_json,
-    })
-    .to_string();
+    });
 
-    conn.execute(
-        "DELETE FROM sync_queue
-         WHERE entity_type = 'z_report'
-           AND entity_id = ?1",
-        params![row.id],
-    )
-    .map_err(|e| format!("clear canonical z-report queue row before requeue: {e}"))?;
+    sync_queue::clear_unsynced_items(conn, "z_reports", &row.id)
+        .map_err(|e| format!("clear stale parity z-report rows before requeue: {e}"))?;
 
-    conn.execute(
-        "INSERT INTO sync_queue (
-            entity_type, entity_id, operation, payload, idempotency_key,
-            status, retry_count, max_retries, last_error, next_retry_at,
-            created_at, updated_at
-         ) VALUES (
-            'z_report', ?1, 'insert', ?2, ?3,
-            'pending', 0, 5, NULL, NULL,
-            ?4, ?4
-         )",
-        params![row.id, sync_payload, format!("zreport:{}", row.id), now],
+    sync_queue::enqueue_payload_item(
+        conn,
+        "z_reports",
+        &row.id,
+        "INSERT",
+        &sync_payload_value,
+        Some(1),
+        Some("z_report"),
+        Some("manual"),
+        Some(1),
     )
-    .map_err(|e| format!("insert canonical z-report queue row: {e}"))?;
+    .map_err(|e| format!("enqueue canonical z-report parity row: {e}"))?;
+
+    // Wave 5 Session 7 PR 2: the transitional legacy drain removed
+    // alongside migration v56's DROP TABLE sync_queue.
 
     conn.execute(
         "UPDATE z_reports
@@ -14220,6 +15438,14 @@ pub(crate) async fn repair_orphaned_financial_queue_items(
 /// order. This provides low-latency sync for the common case (order + payment
 /// in the same sync cycle).
 pub(crate) fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: &str) {
+    if has_outstanding_local_order_queue(conn, order_id) {
+        debug!(
+            order_id = %order_id,
+            "Skipping inline payment promotion while order has outstanding sync queue rows"
+        );
+        return;
+    }
+
     let now = Utc::now().to_rfc3339();
 
     // Promote order_payments rows
@@ -14251,12 +15477,10 @@ pub(crate) fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: 
     }
 }
 
-fn canonical_status_from_legacy_parity(status: &str) -> &'static str {
-    match status.trim().to_ascii_lowercase().as_str() {
-        "failed" | "conflict" => "failed",
-        _ => "pending",
-    }
-}
+// Wave 5 Session 7 PR 2: `canonical_status_from_legacy_parity` deleted
+// alongside the reconcile stub + its call-site cascade. Every
+// post-v56 producer writes canonical parity rows directly; there is
+// no legacy-status→parity mapping step anymore.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClearLegacyFinancialParityOrphanResult {
@@ -14418,219 +15642,11 @@ pub(crate) fn clear_legacy_financial_parity_orphan(
     })
 }
 
-pub(crate) fn reconcile_legacy_financial_parity_rows(db: &DbState) -> Result<usize, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT
-                table_name,
-                record_id,
-                status,
-                COALESCE(attempts, 0),
-                error_message,
-                next_retry_at,
-                retry_delay_ms
-             FROM parity_sync_queue
-             WHERE table_name IN ('payments', 'payment_adjustments')
-             ORDER BY datetime(created_at) ASC, id ASC",
-        )
-        .map_err(|e| format!("prepare legacy financial parity selector: {e}"))?;
-
-    let rows: Vec<(
-        String,
-        String,
-        String,
-        i64,
-        Option<String>,
-        Option<String>,
-        i64,
-    )> = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        })
-        .map_err(|e| format!("query legacy financial parity rows: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
-    drop(stmt);
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let now = Utc::now().to_rfc3339();
-    let mut reconciled = 0usize;
-
-    for (
-        table_name,
-        record_id,
-        legacy_status,
-        attempts,
-        error_message,
-        next_retry_at,
-        retry_delay_ms,
-    ) in rows
-    {
-        match table_name.as_str() {
-            "payments" => {
-                let payment_context: Option<(String, String, Option<String>)> = conn
-                    .query_row(
-                        "SELECT
-                            COALESCE(op.sync_state, ''),
-                            COALESCE(o.supabase_id, ''),
-                            op.remote_payment_id
-                         FROM order_payments op
-                         JOIN orders o ON o.id = op.order_id
-                         WHERE op.id = ?1",
-                        params![record_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()
-                    .map_err(|e| format!("load local payment for legacy bridge: {e}"))?;
-
-                let Some((payment_sync_state, parent_supabase_id, remote_payment_id)) =
-                    payment_context
-                else {
-                    continue;
-                };
-
-                if payment_sync_state == "applied"
-                    || normalize_optional_uuid_str(remote_payment_id.as_deref()).is_some()
-                {
-                    mark_payment_queue_row_synced(&conn, &record_id, &now)?;
-                    if remove_legacy_financial_parity_rows(&conn, "payments", &record_id)? > 0 {
-                        reconciled += 1;
-                    }
-                    continue;
-                }
-
-                let payload = payments::build_payment_sync_payload_for_payment(&conn, &record_id)?;
-                let waiting_parent = parent_supabase_id.trim().is_empty()
-                    || payment_sync_state.trim() == "waiting_parent";
-                let queue_status = if waiting_parent {
-                    "deferred"
-                } else {
-                    canonical_status_from_legacy_parity(&legacy_status)
-                };
-                let queue_error = if waiting_parent {
-                    Some("Order not yet synced")
-                } else {
-                    error_message.as_deref()
-                };
-
-                upsert_payment_sync_queue_row(
-                    &conn,
-                    &record_id,
-                    &payload,
-                    queue_status,
-                    attempts,
-                    queue_error,
-                    next_retry_at.as_deref(),
-                    Some(retry_delay_ms),
-                    &now,
-                )?;
-                if remove_legacy_financial_parity_rows(&conn, "payments", &record_id)? > 0 {
-                    reconciled += 1;
-                }
-            }
-            "payment_adjustments" => {
-                let adjustment_context: Option<(String, Option<String>, String)> = conn
-                    .query_row(
-                        "SELECT
-                            COALESCE(op.sync_state, ''),
-                            op.remote_payment_id,
-                            COALESCE(pa.sync_state, '')
-                         FROM payment_adjustments pa
-                         LEFT JOIN order_payments op ON op.id = pa.payment_id
-                         WHERE pa.id = ?1",
-                        params![record_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()
-                    .map_err(|e| format!("load local payment adjustment for legacy bridge: {e}"))?;
-
-                let Some((parent_payment_sync_state, remote_payment_id, adjustment_sync_state)) =
-                    adjustment_context
-                else {
-                    continue;
-                };
-
-                if adjustment_sync_state == "applied" {
-                    let _ = conn.execute(
-                        "UPDATE sync_queue
-                         SET status = 'synced',
-                             synced_at = ?1,
-                             updated_at = ?1
-                         WHERE entity_type = 'payment_adjustment'
-                           AND entity_id = ?2
-                           AND status != 'synced'",
-                        params![now, record_id],
-                    );
-                    if remove_legacy_financial_parity_rows(
-                        &conn,
-                        "payment_adjustments",
-                        &record_id,
-                    )? > 0
-                    {
-                        reconciled += 1;
-                    }
-                    continue;
-                }
-
-                let payload =
-                    refunds::build_adjustment_sync_payload_for_adjustment(&conn, &record_id)?;
-                let parent_ready = parent_payment_sync_state.trim() == "applied"
-                    && normalize_optional_uuid_str(remote_payment_id.as_deref()).is_some();
-                let queue_status = if parent_ready {
-                    canonical_status_from_legacy_parity(&legacy_status)
-                } else {
-                    "deferred"
-                };
-                let queue_error = if parent_payment_sync_state.trim() != "applied" {
-                    Some("Parent payment not yet synced")
-                } else if normalize_optional_uuid_str(remote_payment_id.as_deref()).is_none() {
-                    Some("Parent payment missing canonical remote id")
-                } else {
-                    error_message.as_deref()
-                };
-
-                upsert_payment_adjustment_sync_queue_row(
-                    &conn,
-                    &record_id,
-                    &payload,
-                    queue_status,
-                    attempts,
-                    queue_error,
-                    next_retry_at.as_deref(),
-                    Some(retry_delay_ms),
-                    &now,
-                )?;
-                if remove_legacy_financial_parity_rows(&conn, "payment_adjustments", &record_id)?
-                    > 0
-                {
-                    reconciled += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if reconciled > 0 {
-        info!(
-            reconciled,
-            "Reconciled legacy financial parity rows into canonical sync_queue"
-        );
-    }
-
-    Ok(reconciled)
-}
+// Wave 5 Session 7 PR 2: `reconcile_legacy_financial_parity_rows`
+// deleted together with its 3 callers at commands/sync.rs:157,
+// commands/sync.rs:352, and sync.rs:2331. Legacy-shape parity rows
+// no longer exist because the `sync_queue` table itself is gone as
+// of migration v56.
 
 // ---------------------------------------------------------------------------
 // Adjustment reconciliation
@@ -14887,9 +15903,10 @@ mod tests {
 
     fn insert_minimal_order(db: &DbState, order_id: &str, sync_status: &str) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (10.0 → 1000).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES (?1, '[]', 10.0, 'pending', ?2, datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES (?1, '[]', 10.0, 1000, 'pending', ?2, datetime('now'), datetime('now'))",
             params![order_id, sync_status],
         )
         .unwrap();
@@ -15055,12 +16072,7 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_parity_sync_queue_row(
-        db: &DbState,
-        table_name: &str,
-        record_id: &str,
-        status: &str,
-    ) {
+    fn insert_parity_sync_queue_row(db: &DbState, table_name: &str, record_id: &str, status: &str) {
         let conn = db.conn.lock().unwrap();
         let id = format!("queue-{}-{}", record_id, Uuid::new_v4());
         conn.execute(
@@ -15108,6 +16120,18 @@ mod tests {
     }
 
     #[test]
+    fn has_outstanding_local_order_queue_returns_true_for_legacy_order_rows() {
+        let db = test_db();
+        insert_order_update_queue_row(&db, "ord-legacy-queue", "pending", None, None, None);
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            has_outstanding_local_order_queue(&conn, "ord-legacy-queue"),
+            "legacy sync_queue order rows must block dependent payment sync"
+        );
+    }
+
+    #[test]
     fn has_outstanding_local_order_queue_returns_false_when_queue_empty() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -15141,6 +16165,201 @@ mod tests {
             !has_outstanding_local_order_queue(&conn, "ord-mixed"),
             "payments-table rows must not be confused with orders-table rows"
         );
+    }
+
+    #[test]
+    fn lagged_remote_delivery_payment_delta_requeues_order_update() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "organization_id", "org-test").expect("set org setting");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, order_number, items,
+                 total_amount, total_amount_cents, subtotal, subtotal_cents,
+                 tax_amount, tax_amount_cents, delivery_fee, delivery_fee_cents,
+                 order_type, status, sync_status, payment_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-lag-delta', 'remote-order-lag-delta', 'ORD-LAG-DELTA',
+                 '[{\"name\":\"Chicken\",\"quantity\":1,\"unit_price\":6.4,\"total_price\":6.4}]',
+                 7.56, 756, 6.4, 640, 1.16, 116, 0, 0,
+                 'delivery', 'pending', 'synced', 'paid',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert lagged order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency,
+                 status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'payment-lag-delta', 'order-lag-delta', 'cash', 1.56, 156, 'EUR',
+                 'completed', 'pending', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert pending payment delta");
+
+        let remote_order = serde_json::json!({
+            "id": "remote-order-lag-delta",
+            "order_type": "pickup",
+            "total_amount": 6.0,
+            "total_amount_cents": 600,
+            "delivery_fee": 0,
+            "updated_at": "2026-04-27T22:05:00Z"
+        });
+
+        sync_remote_order_snapshot_into_local(
+            &conn,
+            "order-lag-delta",
+            &remote_order,
+            "2026-04-27T22:06:00Z",
+        )
+        .expect("snapshot guard should skip and requeue");
+
+        let (order_type, total_cents, sync_status): (String, i64, String) = conn
+            .query_row(
+                "SELECT order_type, total_amount_cents, sync_status
+                 FROM orders
+                 WHERE id = 'order-lag-delta'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(order_type, "delivery");
+        assert_eq!(total_cents, 756);
+        assert_eq!(sync_status, "pending");
+
+        let queue_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'order-lag-delta'
+                   AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queue_count, 1);
+        assert!(has_outstanding_local_order_queue(&conn, "order-lag-delta"));
+    }
+
+    #[test]
+    fn tax_inflated_payment_conflict_repairs_total_and_voids_bad_delta() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "organization_id", "org-test").expect("set org setting");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, order_number, items,
+                 total_amount, total_amount_cents, subtotal, subtotal_cents,
+                 tax_amount, tax_amount_cents, delivery_fee, delivery_fee_cents,
+                 order_type, status, sync_status, payment_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-tax-inflated', 'remote-order-tax-inflated', 'ORD-TAX-INFLATED',
+                 '[{\"name\":\"Chicken\",\"quantity\":1,\"unit_price\":6.4,\"total_price\":6.4}]',
+                 7.56, 756, 6.4, 640, 1.16, 116, 0, 0,
+                 'delivery', 'pending', 'synced', 'paid',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert tax-inflated order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency,
+                 status, sync_status, sync_state, sync_last_error,
+                 created_at, updated_at
+             ) VALUES (
+                 'payment-tax-inflated-base', 'order-tax-inflated', 'cash', 6.00, 600, 'EUR',
+                 'completed', 'synced', 'applied', NULL,
+                 datetime('now'), datetime('now')
+             ), (
+                 'payment-tax-inflated-extra', 'order-tax-inflated', 'cash', 1.56, 156, 'EUR',
+                 'completed', 'pending', 'failed', 'Payment exceeds order total',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert tax-inflated payments");
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, last_error, retry_delay_ms
+             ) VALUES (
+                 'payment', 'payment-tax-inflated-extra', 'insert', '{}',
+                 'payment-tax-inflated-extra-key', 'failed', 5, 5,
+                 'Payment exceeds order total', 1000
+             )",
+            [],
+        )
+        .expect("insert payment conflict queue row");
+
+        let repair = repair_tax_inflated_local_order_total_for_payment_conflict(
+            &conn,
+            "order-tax-inflated",
+            "payment-tax-inflated-extra",
+            "2026-04-27T22:10:00Z",
+        )
+        .expect("repair should succeed")
+        .expect("repair should apply");
+
+        assert_eq!(repair.previous_total_cents, 756);
+        assert_eq!(repair.repaired_total_cents, 640);
+        assert_eq!(repair.voided_payment_cents, 156);
+
+        let (total_cents, tax_cents, payment_status, sync_status): (i64, i64, String, String) =
+            conn.query_row(
+                "SELECT total_amount_cents, tax_amount_cents, payment_status, sync_status
+                 FROM orders
+                 WHERE id = 'order-tax-inflated'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(total_cents, 640);
+        assert_eq!(tax_cents, 0);
+        assert_eq!(payment_status, "partially_paid");
+        assert_eq!(sync_status, "pending");
+
+        let (payment_status, payment_sync_status): (String, String) = conn
+            .query_row(
+                "SELECT status, sync_status
+                 FROM order_payments
+                 WHERE id = 'payment-tax-inflated-extra'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_status, "voided");
+        assert_eq!(payment_sync_status, "synced");
+
+        let payment_queue_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_id = 'payment-tax-inflated-extra'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payment_queue_status, "synced");
+
+        let order_queue_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'order-tax-inflated'
+                   AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(order_queue_count, 1);
     }
 
     #[test]
@@ -15200,13 +16419,15 @@ mod tests {
     fn test_create_delivery_order_keeps_neutral_ownership_without_driver_assignment() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (20.0 → 2000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'driver-shift-create', 'driver-create', 'Driver Create', 'branch-create', 'terminal-create', 'driver',
-                datetime('now'), 20.0, 'active', 'pending', datetime('now'), datetime('now')
+                datetime('now'), 20.0, 2000, 'active', 'pending', datetime('now'), datetime('now')
             )",
             [],
         )
@@ -15403,13 +16624,14 @@ mod tests {
     fn test_order_number_match_can_attach_remote_identity_and_hydrate_payment() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (12.0 → 1200).
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, order_type,
-                payment_status, payment_method, sync_status, created_at, updated_at
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, sync_status, created_at, updated_at
              ) VALUES (
-                'ord-repair-by-number', 'ORD-REPAIR-100', '[]', 12.0, 'completed', 'pickup',
-                'partially_paid', 'split', 'failed', '2026-03-25T05:10:00Z', '2026-03-25T05:10:00Z'
+                'ord-repair-by-number', 'ORD-REPAIR-100', '[]', 12.0, 1200, 'completed', 'pickup',
+                'partially_paid', 'failed', '2026-03-25T05:10:00Z', '2026-03-25T05:10:00Z'
              )",
             [],
         )
@@ -15468,10 +16690,9 @@ mod tests {
             sync_remote_payment_into_local(&conn, &remote_payment).expect("sync remote payment");
         assert_eq!(changed, 1);
 
-        let (supabase_id, total_amount, payment_status, payment_method, payment_count): (
+        let (supabase_id, total_amount, payment_status, payment_count): (
             Option<String>,
             f64,
-            String,
             String,
             i64,
         ) = conn
@@ -15480,27 +16701,145 @@ mod tests {
                      supabase_id,
                      total_amount,
                      payment_status,
-                     payment_method,
                      (SELECT COUNT(*) FROM order_payments WHERE order_id = 'ord-repair-by-number')
                  FROM orders
                  WHERE id = 'ord-repair-by-number'",
                 [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(supabase_id.as_deref(), Some("remote-order-repair-100"));
         assert_eq!(total_amount, 6.0);
         assert_eq!(payment_status, "paid");
-        assert_eq!(payment_method, "cash");
+        // W6: derive from the hydrated payment row instead of the
+        // dropped stored column.
+        let payment_method = crate::payments::derive_payment_method(&conn, "ord-repair-by-number")
+            .expect("derive method");
+        assert_eq!(payment_method.as_deref(), Some("cash"));
         assert_eq!(payment_count, 1);
+    }
+
+    #[test]
+    fn sync_remote_order_snapshot_skips_stale_snapshot_after_local_edit() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, order_number, items,
+                total_amount, total_amount_cents, subtotal, subtotal_cents,
+                delivery_fee, delivery_fee_cents, status, order_type,
+                payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-stale-snapshot', 'remote-stale-snapshot', 'ORD-STale-1', '[]',
+                7.40, 740, 7.00, 700,
+                0.40, 40, 'pending', 'delivery',
+                'partially_paid', 'synced', '2026-04-27T19:00:00Z', '2026-04-27T19:10:02Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let remote_order = serde_json::json!({
+            "id": "remote-stale-snapshot",
+            "order_number": "ORD-STale-1",
+            "status": "pending",
+            "order_type": "pickup",
+            "total_amount": 7.0,
+            "subtotal": 7.0,
+            "delivery_fee": 0.0,
+            "payment_status": "paid",
+            "updated_at": "2026-04-27T19:09:00Z"
+        });
+
+        let rows = sync_remote_order_snapshot_into_local(
+            &conn,
+            "ord-stale-snapshot",
+            &remote_order,
+            "2026-04-27T19:10:30Z",
+        )
+        .expect("sync remote order snapshot");
+        assert_eq!(rows, 0);
+
+        let (order_type, total_amount, delivery_fee, payment_status): (String, f64, f64, String) =
+            conn.query_row(
+                "SELECT order_type, total_amount, delivery_fee, payment_status
+                 FROM orders
+                 WHERE id = 'ord-stale-snapshot'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(order_type, "delivery");
+        assert_eq!(total_amount, 7.4);
+        assert_eq!(delivery_fee, 0.4);
+        assert_eq!(payment_status, "partially_paid");
+    }
+
+    #[test]
+    fn sync_remote_order_snapshot_skips_remote_total_behind_pending_local_delta_payment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, order_number, items,
+                total_amount, total_amount_cents, subtotal, subtotal_cents,
+                delivery_fee, delivery_fee_cents, status, order_type,
+                payment_status, sync_status, created_at, updated_at, last_synced_at
+             ) VALUES (
+                'ord-pending-delta', 'remote-pending-delta', 'ORD-DELTA-1', '[]',
+                7.56, 756, 6.00, 600,
+                1.56, 156, 'pending', 'delivery',
+                'partially_paid', 'synced', '2026-04-27T20:00:00Z',
+                '2026-04-27T20:04:22Z', '2026-04-27T20:04:51Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status,
+                sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-pending-delta', 'ord-pending-delta', 'cash', 1.56, 156, 'completed',
+                'pending', 'pending', '2026-04-27T20:04:22Z', '2026-04-27T20:04:22Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let remote_order = serde_json::json!({
+            "id": "remote-pending-delta",
+            "order_number": "ORD-DELTA-1",
+            "status": "pending",
+            "order_type": "pickup",
+            "total_amount": 6.0,
+            "subtotal": 6.0,
+            "delivery_fee": 0.0,
+            "payment_status": "paid",
+            "updated_at": "2026-04-27T20:04:55Z"
+        });
+
+        let rows = sync_remote_order_snapshot_into_local(
+            &conn,
+            "ord-pending-delta",
+            &remote_order,
+            "2026-04-27T20:05:03Z",
+        )
+        .expect("sync remote order snapshot");
+        assert_eq!(rows, 0);
+
+        let (order_type, total_amount_cents, delivery_fee_cents): (String, i64, i64) = conn
+            .query_row(
+                "SELECT order_type, total_amount_cents, delivery_fee_cents
+                 FROM orders
+                 WHERE id = 'ord-pending-delta'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(order_type, "delivery");
+        assert_eq!(total_amount_cents, 756);
+        assert_eq!(delivery_fee_cents, 156);
     }
 
     #[test]
@@ -15508,14 +16847,15 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (10.0 → 1000).
         conn.execute(
             "INSERT INTO orders (
                 id, order_number, display_order_number, client_request_id, items,
-                total_amount, subtotal, status, order_type, sync_status, created_at, updated_at
+                total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type, sync_status, created_at, updated_at
              ) VALUES (
                 'ord-existing-client-request', 'ORD-LOCAL-CLIENT-1', 'ORD-LOCAL-CLIENT-1',
                 'client-request-remote-1', '[{\"name\":\"Manual Item\",\"quantity\":1,\"price\":10}]',
-                10.0, 10.0, 'completed', 'pickup', 'synced',
+                10.0, 1000, 10.0, 1000, 'completed', 'pickup', 'synced',
                 '2026-03-25T04:59:00Z', '2026-03-25T04:59:00Z'
              )",
             [],
@@ -15774,13 +17114,14 @@ mod tests {
     fn test_remote_payment_recovery_uses_local_supabase_id_when_order_search_misses() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (10.0 → 1000).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, order_number, items, total_amount, status, order_type,
-                payment_status, payment_method, sync_status, created_at, updated_at
+                id, supabase_id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, sync_status, created_at, updated_at
              ) VALUES (
                 'ord-direct-repair', 'remote-order-direct-repair', 'ORD-DIRECT-REPAIR', '[]',
-                10.0, 'completed', 'pickup', 'pending', 'pending', 'synced',
+                10.0, 1000, 'completed', 'pickup', 'pending', 'synced',
                 '2026-04-18T18:20:00Z', '2026-04-18T18:20:00Z'
              )",
             [],
@@ -15818,16 +17159,10 @@ mod tests {
         server_handle.join().expect("join mock sequence server");
 
         let conn = db.conn.lock().unwrap();
-        let (payment_status, payment_method, payment_count, remote_payment_id): (
-            String,
-            String,
-            i64,
-            Option<String>,
-        ) = conn
-            .query_row(
+        let (payment_status, payment_count, remote_payment_id): (String, i64, Option<String>) =
+            conn.query_row(
                 "SELECT
                      payment_status,
-                     payment_method,
                      (SELECT COUNT(*) FROM order_payments
                       WHERE order_id = 'ord-direct-repair' AND status = 'completed'),
                      (SELECT remote_payment_id FROM order_payments
@@ -15837,11 +17172,17 @@ mod tests {
                  FROM orders
                  WHERE id = 'ord-direct-repair'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(payment_status, "paid");
-        assert_eq!(payment_method, "split");
+        // W6: with a single recovered cash payment row, derive returns
+        // "cash" (not "split"). The pre-drop assertion leveraged the
+        // old stored-column stickiness; post-v55 we read the actual
+        // method from the hydrated payment row.
+        let payment_method = crate::payments::derive_payment_method(&conn, "ord-direct-repair")
+            .expect("derive method");
+        assert_eq!(payment_method.as_deref(), Some("cash"));
         assert_eq!(payment_count, 1);
         assert_eq!(
             remote_payment_id.as_deref(),
@@ -15870,12 +17211,13 @@ mod tests {
             .expect("materialize remote order")
             .expect("local order id");
 
+        // W4e Step 0: dual-populate (6.7 → 670).
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-meta-local', ?1, 'cash', 6.7, 'EUR', 'completed',
+                'pay-meta-local', ?1, 'cash', 6.7, 670, 'EUR', 'completed',
                 'failed', 'failed', '2026-03-20T11:00:01Z', '2026-03-20T11:00:01Z'
             )",
             params![local_order_id],
@@ -15941,11 +17283,12 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (13.4/6.7 → 1340/670).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, items, total_amount, status, sync_status, created_at, updated_at
+                id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
             ) VALUES (
-                'ord-payment-reconcile', 'remote-payment-reconcile', '[]', 13.4, 'completed', 'synced',
+                'ord-payment-reconcile', 'remote-payment-reconcile', '[]', 13.4, 1340, 'completed', 'synced',
                 datetime('now'), datetime('now')
             )",
             [],
@@ -15953,10 +17296,10 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 remote_payment_id, sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-applied-stale', 'ord-payment-reconcile', 'cash', 6.7, 'EUR', 'completed',
+                'pay-applied-stale', 'ord-payment-reconcile', 'cash', 6.7, 670, 'EUR', 'completed',
                 'remote-pay-applied', 'synced', 'applied', datetime('now'), datetime('now')
             )",
             [],
@@ -16020,23 +17363,24 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (6.0 → 600).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, items, total_amount, status, payment_status, payment_method,
+                id, supabase_id, items, total_amount, total_amount_cents, status, payment_status,
                 payment_transaction_id, sync_status, created_at, updated_at
             ) VALUES (
-                'ord-payment-duplicate', 'remote-payment-duplicate', '[]', 6.0, 'completed',
-                'partially_paid', 'split', 'pay-duplicate', 'synced', datetime('now'), datetime('now')
+                'ord-payment-duplicate', 'remote-payment-duplicate', '[]', 6.0, 600, 'completed',
+                'partially_paid', 'pay-duplicate', 'synced', datetime('now'), datetime('now')
             )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 remote_payment_id, sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-canonical', 'ord-payment-duplicate', 'cash', 6.0, 'EUR', 'completed',
+                'pay-canonical', 'ord-payment-duplicate', 'cash', 6.0, 600, 'EUR', 'completed',
                 'remote-pay-canonical', 'synced', 'applied', datetime('now'), datetime('now')
             )",
             [],
@@ -16044,10 +17388,10 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-duplicate', 'ord-payment-duplicate', 'cash', 6.0, 'EUR', 'completed',
+                'pay-duplicate', 'ord-payment-duplicate', 'cash', 6.0, 600, 'EUR', 'completed',
                 'failed', 'failed', datetime('now'), datetime('now')
             )",
             [],
@@ -16122,21 +17466,22 @@ mod tests {
             .unwrap();
         assert_eq!(synced_queue_rows, 2);
 
-        let (order_payment_status, order_payment_method, order_transaction_id): (
-            String,
-            Option<String>,
-            Option<String>,
-        ) = conn
+        let (order_payment_status, order_transaction_id): (String, Option<String>) = conn
             .query_row(
-                "SELECT payment_status, payment_method, payment_transaction_id
+                "SELECT payment_status, payment_transaction_id
                  FROM orders
                  WHERE id = 'ord-payment-duplicate'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(order_payment_status, "paid");
-        assert_eq!(order_payment_method.as_deref(), Some("split"));
+        // W6: derive from actual payment rows instead of reading the
+        // dropped column. The canonical cash payment survives → "cash".
+        let order_payment_method =
+            crate::payments::derive_payment_method(&conn, "ord-payment-duplicate")
+                .expect("derive method");
+        assert_eq!(order_payment_method.as_deref(), Some("cash"));
         assert_eq!(order_transaction_id.as_deref(), Some("pay-canonical"));
     }
 
@@ -16146,23 +17491,24 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (6.9/2.0/7.4 → 690/200/740).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, items, total_amount, status, payment_status, payment_method,
+                id, supabase_id, items, total_amount, total_amount_cents, status, payment_status,
                 payment_transaction_id, sync_status, created_at, updated_at
             ) VALUES (
-                'ord-payment-stale', 'remote-payment-stale', '[]', 6.9, 'completed',
-                'partially_paid', 'split', 'pay-stale', 'synced', datetime('now'), datetime('now')
+                'ord-payment-stale', 'remote-payment-stale', '[]', 6.9, 690, 'completed',
+                'partially_paid', 'pay-stale', 'synced', datetime('now'), datetime('now')
             )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 remote_payment_id, sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-valid', 'ord-payment-stale', 'cash', 2.0, 'EUR', 'completed',
+                'pay-valid', 'ord-payment-stale', 'cash', 2.0, 200, 'EUR', 'completed',
                 'remote-pay-valid', 'synced', 'applied', datetime('now'), datetime('now')
             )",
             [],
@@ -16170,10 +17516,10 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-stale', 'ord-payment-stale', 'cash', 7.4, 'EUR', 'completed',
+                'pay-stale', 'ord-payment-stale', 'cash', 7.4, 740, 'EUR', 'completed',
                 'failed', 'failed', datetime('now'), datetime('now')
             )",
             [],
@@ -16202,23 +17548,24 @@ mod tests {
         )
         .unwrap();
 
+        // W4e Step 0: dual-populate (9.5 → 950).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, items, total_amount, status, payment_status, payment_method,
+                id, supabase_id, items, total_amount, total_amount_cents, status, payment_status,
                 sync_status, created_at, updated_at
             ) VALUES (
-                'ord-payment-other', 'remote-payment-other', '[]', 9.5, 'completed',
-                'paid', 'cash', 'synced', datetime('now'), datetime('now')
+                'ord-payment-other', 'remote-payment-other', '[]', 9.5, 950, 'completed',
+                'paid', 'synced', datetime('now'), datetime('now')
             )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 remote_payment_id, sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-other', 'ord-payment-other', 'cash', 9.5, 'EUR', 'completed',
+                'pay-other', 'ord-payment-other', 'cash', 9.5, 950, 'EUR', 'completed',
                 'remote-pay-other', 'synced', 'applied', datetime('now'), datetime('now')
             )",
             [],
@@ -16274,21 +17621,22 @@ mod tests {
             .unwrap();
         assert_eq!(synced_queue_rows, 2);
 
-        let (order_payment_status, order_payment_method, order_transaction_id): (
-            String,
-            Option<String>,
-            Option<String>,
-        ) = conn
+        let (order_payment_status, order_transaction_id): (String, Option<String>) = conn
             .query_row(
-                "SELECT payment_status, payment_method, payment_transaction_id
+                "SELECT payment_status, payment_transaction_id
                  FROM orders
                  WHERE id = 'ord-payment-stale'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(order_payment_status, "partially_paid");
-        assert_eq!(order_payment_method.as_deref(), Some("split"));
+        // W6: after the stale overpay is voided, the remaining valid
+        // payment is a single cash row → derive returns "cash".
+        let order_payment_method =
+            crate::payments::derive_payment_method(&conn, "ord-payment-stale")
+                .expect("derive method");
+        assert_eq!(order_payment_method.as_deref(), Some("cash"));
         assert_eq!(order_transaction_id.as_deref(), Some("pay-valid"));
 
         let (other_status, other_remote_id): (String, Option<String>) = conn
@@ -16309,23 +17657,24 @@ mod tests {
     ) {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (9.5/4.79/0.55 → 950/479/55).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, items, total_amount, status, payment_status, payment_method,
+                id, supabase_id, items, total_amount, total_amount_cents, status, payment_status,
                 payment_transaction_id, sync_status, created_at, updated_at
             ) VALUES (
-                'ord-payment-server-hint', 'remote-payment-server-hint', '[]', 9.5, 'completed',
-                'paid', 'cash', 'pay-server-valid', 'synced', datetime('now'), datetime('now')
+                'ord-payment-server-hint', 'remote-payment-server-hint', '[]', 9.5, 950, 'completed',
+                'paid', 'pay-server-valid', 'synced', datetime('now'), datetime('now')
             )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 remote_payment_id, sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-server-valid', 'ord-payment-server-hint', 'cash', 4.79, 'EUR', 'completed',
+                'pay-server-valid', 'ord-payment-server-hint', 'cash', 4.79, 479, 'EUR', 'completed',
                 'remote-pay-server-valid', 'synced', 'applied', datetime('now'), datetime('now')
             )",
             [],
@@ -16333,10 +17682,10 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 sync_status, sync_state, created_at, updated_at
             ) VALUES (
-                'pay-server-stale', 'ord-payment-server-hint', 'cash', 0.55, 'EUR', 'completed',
+                'pay-server-stale', 'ord-payment-server-hint', 'cash', 0.55, 55, 'EUR', 'completed',
                 'failed', 'failed', datetime('now'), datetime('now')
             )",
             [],
@@ -16397,27 +17746,100 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_payment_total_conflict_does_not_void_while_order_update_is_pending() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents, status, payment_status,
+                payment_transaction_id, sync_status, created_at, updated_at
+            ) VALUES (
+                'ord-payment-pending-update', 'remote-payment-pending-update', '[]', 7.0, 700, 'completed',
+                'paid', 'pay-pending-update-valid', 'pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-pending-update-valid', 'ord-payment-pending-update', 'cash', 7.0, 700, 'EUR', 'completed',
+                'remote-pay-pending-update-valid', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-pending-update-extra', 'ord-payment-pending-update', 'cash', 0.5, 50, 'EUR', 'completed',
+                'failed', 'failed', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        insert_parity_sync_queue_row(&db, "orders", "ord-payment-pending-update", "pending");
+
+        let resolved_at = "2026-04-27T18:36:00Z";
+        let resolution = {
+            let conn = db.conn.lock().unwrap();
+            resolve_payment_total_conflict_with_server_hint_with_conn(
+                &conn,
+                "pay-pending-update-extra",
+                "HTTP 422: {\"success\":false,\"error\":\"Payment exceeds order total\",\"details\":\"Order total: 7, tip: 0, existing completed: 7, payment: 0.5\"}",
+                resolved_at,
+            )
+            .expect("server hint conflict resolver should not fail")
+        };
+
+        assert!(
+            resolution.is_none(),
+            "pending parent order update means the server total may be stale"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM order_payments WHERE id = 'pay-pending-update-extra'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+    }
+
+    #[test]
     fn test_recover_payment_total_conflicts_refreshes_remote_order_snapshot_before_voiding_stale_local_payment(
     ) {
         let db = test_db();
+        set_terminal_setting(&db, "terminal_id", "terminal-payment-refresh");
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (9.95/9.7/0.25 → 995/970/25).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, order_number, items, total_amount, status, payment_status, payment_method,
+                id, supabase_id, order_number, items, total_amount, total_amount_cents, status, payment_status,
                 payment_transaction_id, sync_status, created_at, updated_at
              ) VALUES (
-                'ord-payment-refresh', 'remote-order-refresh', 'ORD-REFRESH-1', '[]', 9.95, 'completed',
-                'partially_paid', 'split', 'pay-refresh-stale', 'synced', datetime('now'), datetime('now')
+                'ord-payment-refresh', 'remote-order-refresh', 'ORD-REFRESH-1', '[]', 9.95, 995, 'completed',
+                'partially_paid', 'pay-refresh-stale', 'synced',
+                '2026-04-16T09:00:00Z', '2026-04-16T09:00:00Z'
              )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 remote_payment_id, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-refresh-canonical', 'ord-payment-refresh', 'cash', 9.7, 'EUR', 'completed',
+                'pay-refresh-canonical', 'ord-payment-refresh', 'cash', 9.7, 970, 'EUR', 'completed',
                 'remote-pay-refresh-canonical', 'synced', 'applied', datetime('now'), datetime('now')
              )",
             [],
@@ -16425,10 +17847,10 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-refresh-stale', 'ord-payment-refresh', 'cash', 0.25, 'EUR', 'completed',
+                'pay-refresh-stale', 'ord-payment-refresh', 'cash', 0.25, 25, 'EUR', 'completed',
                 'failed', 'failed', datetime('now'), datetime('now')
              )",
             [],
@@ -16492,7 +17914,7 @@ mod tests {
         let recovered = tauri::async_runtime::block_on(recover_payment_total_conflicts(
             &db,
             &mock_url,
-            "test-api-key",
+            r#"{"key":"test-api-key","tid":"terminal-payment-refresh"}"#,
         ))
         .expect("recover stale payment total conflicts");
         assert_eq!(recovered, 1);
@@ -16532,23 +17954,24 @@ mod tests {
     ) {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (15.0/5.0 → 1500/500).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, order_number, items, total_amount, status, payment_status, payment_method,
+                id, supabase_id, order_number, items, total_amount, total_amount_cents, status, payment_status,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'ord-payment-mirror-only', 'remote-order-mirror-only', 'ORD-MIRROR-1', '[]', 15.0, 'completed',
-                'partially_paid', 'split', 'synced', datetime('now'), datetime('now')
+                'ord-payment-mirror-only', 'remote-order-mirror-only', 'ORD-MIRROR-1', '[]', 15.0, 1500, 'completed',
+                'partially_paid', 'synced', datetime('now'), datetime('now')
              )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-mirror-blocked', 'ord-payment-mirror-only', 'card', 5.0, 'EUR', 'completed',
+                'pay-mirror-blocked', 'ord-payment-mirror-only', 'card', 5.0, 500, 'EUR', 'completed',
                 'failed', 'failed', datetime('now'), datetime('now')
              )",
             [],
@@ -16879,19 +18302,31 @@ mod tests {
         .unwrap();
 
         for id in ["zr-a", "zr-b"] {
+            // W4e Step 0: dual-populate (10/0 → 1000/0).
             conn.execute(
                 "INSERT INTO z_reports (
                     id, shift_id, branch_id, terminal_id, report_date, generated_at,
-                    gross_sales, net_sales, total_orders, cash_sales, card_sales,
-                    refunds_total, voids_total, discounts_total, tips_total,
-                    expenses_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                    gross_sales, gross_sales_cents,
+                    net_sales, net_sales_cents,
+                    total_orders,
+                    cash_sales, cash_sales_cents,
+                    card_sales, card_sales_cents,
+                    refunds_total, refunds_total_cents,
+                    voids_total, voids_total_cents,
+                    discounts_total, discounts_total_cents,
+                    tips_total, tips_total_cents,
+                    expenses_total, expenses_total_cents,
+                    cash_variance, cash_variance_cents,
+                    opening_cash, opening_cash_cents,
+                    closing_cash, closing_cash_cents,
+                    expected_cash, expected_cash_cents,
                     payments_breakdown_json, report_json, sync_state, sync_last_error, sync_retry_count,
                     created_at, updated_at
                  ) VALUES (
                     ?1, 'shift-1', 'branch-1', 'terminal-1', '2026-03-24', '2026-03-25T04:17:02Z',
-                    10, 10, 1, 10, 0,
-                    0, 0, 0, 0,
-                    0, 0, 0, 0, 0,
+                    10, 1000, 10, 1000, 1, 10, 1000, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     '{}', ?2, 'failed', ?3, 5,
                     '2026-03-25T04:17:02Z', '2026-03-25T04:17:02Z'
                  )",
@@ -16986,19 +18421,31 @@ mod tests {
             ("zr-retry-a", "2026-03-25T04:17:02Z"),
             ("zr-retry-b", "2026-03-25T04:17:03Z"),
         ] {
+            // W4e Step 0: dual-populate (10/0 → 1000/0) on z_reports money cols.
             conn.execute(
                 "INSERT INTO z_reports (
                     id, shift_id, branch_id, terminal_id, report_date, generated_at,
-                    gross_sales, net_sales, total_orders, cash_sales, card_sales,
-                    refunds_total, voids_total, discounts_total, tips_total,
-                    expenses_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                    gross_sales, gross_sales_cents,
+                    net_sales, net_sales_cents,
+                    total_orders,
+                    cash_sales, cash_sales_cents,
+                    card_sales, card_sales_cents,
+                    refunds_total, refunds_total_cents,
+                    voids_total, voids_total_cents,
+                    discounts_total, discounts_total_cents,
+                    tips_total, tips_total_cents,
+                    expenses_total, expenses_total_cents,
+                    cash_variance, cash_variance_cents,
+                    opening_cash, opening_cash_cents,
+                    closing_cash, closing_cash_cents,
+                    expected_cash, expected_cash_cents,
                     payments_breakdown_json, report_json, sync_state, sync_last_error, sync_retry_count,
                     created_at, updated_at
                  ) VALUES (
                     ?1, 'shift-1', 'branch-1', 'terminal-1', '2026-03-24', ?2,
-                    10, 10, 1, 10, 0,
-                    0, 0, 0, 0,
-                    0, 0, 0, 0, 0,
+                    10, 1000, 10, 1000, 1, 10, 1000, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     '{}', ?3, 'failed', 'Admin dashboard server error (HTTP 500)', 5,
                     ?2, ?2
                  )",
@@ -17042,9 +18489,16 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        // Wave 5 Session 7 PR 0: canonical z-report queue rows live on
+        // `parity_sync_queue` (`ensure_canonical_local_z_report_queue_row`
+        // writes there). Any seeded legacy row is drained by the producer's
+        // transitional `DELETE FROM sync_queue` — so 0 legacy rows remain
+        // and 1 parity row should exist for the single deduplicated
+        // z_report the repair keeps.
         let queue_rows: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'z_report' AND status = 'pending'",
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'z_reports' AND status = 'pending'",
                 [],
                 |row| row.get(0),
             )
@@ -17424,15 +18878,16 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (42.0 → 4200).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-direct', '[]', 42.0, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-direct', '[]', 42.0, 4200, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-direct', 'ord-direct', 'card', 42.0, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-direct', 'ord-direct', 'card', 42.0, 4200, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -17492,18 +18947,17 @@ mod tests {
         let fallback_branch_id = Uuid::new_v4().to_string();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (12.0 → 1200).
         conn.execute(
             "INSERT INTO orders (
-                 id, items, total_amount, subtotal, status, payment_status, payment_method, order_type,
+                 id, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, payment_status, order_type,
                  sync_status, created_at, updated_at
              ) VALUES (
                  'ord-orphan-update',
                  ?1,
-                 12.0,
-                 12.0,
+                 12.0, 1200, 12.0, 1200,
                  'completed',
                  'paid',
-                 'cash',
                  'pickup',
                  'pending',
                  datetime('now'),
@@ -17514,12 +18968,12 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
                  'pay-orphan-update',
                  'ord-orphan-update',
                  'cash',
-                 12.0,
+                 12.0, 1200,
                  'completed',
                  'pending',
                  'waiting_parent',
@@ -17607,18 +19061,18 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
-        // Insert an order without supabase_id
+        // Insert an order without supabase_id — W4e Step 0: dual-populate (30.0 → 3000).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-a', '[]', 30.0, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-a', '[]', 30.0, 3000, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
 
         // Insert a payment in waiting_parent state
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-a', 'ord-a', 'cash', 30.0, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-a', 'ord-a', 'cash', 30.0, 3000, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -17678,94 +19132,60 @@ mod tests {
     }
 
     #[test]
-    fn test_reconcile_legacy_payment_parity_rows_migrates_to_canonical_queue() {
+    fn test_reconcile_keeps_payment_waiting_while_order_update_is_pending() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
         conn.execute(
-            "INSERT INTO orders (
-                id, items, total_amount, status, sync_status, created_at, updated_at
-             ) VALUES (
-                'ord-legacy-payment', '[]', 19.5, 'completed', 'pending', datetime('now'), datetime('now')
-             )",
+            "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-pending-update', 'remote-pending-update', '[]', 7.5, 750, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (
-                id, order_id, method, amount, sync_status, sync_state, created_at, updated_at
-             ) VALUES (
-                'pay-legacy-payment', 'ord-legacy-payment', 'cash', 19.5, 'pending', 'waiting_parent', datetime('now'), datetime('now')
-             )",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-pending-update', 'ord-pending-update', 'cash', 0.5, 50, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO parity_sync_queue (
-                id, table_name, record_id, operation, data, organization_id,
-                created_at, attempts, error_message, retry_delay_ms,
-                module_type, conflict_strategy, version, status
-             ) VALUES (
-                'legacy-payment-row',
-                'payments',
-                'pay-legacy-payment',
-                'INSERT',
-                '{\"orderId\":\"ord-legacy-payment\",\"paymentId\":\"pay-legacy-payment\"}',
-                'org-1',
-                '2026-04-19T10:00:00Z',
-                2,
-                'Waiting for parent order sync',
-                1000,
-                'financial',
-                'manual',
-                1,
-                'pending'
-             )",
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, last_error)
+             VALUES ('payment', 'pay-pending-update', 'insert', '{\"orderId\":\"ord-pending-update\"}', 'payment:pay-pending-update', 'deferred', 'Order update not yet synced')",
             [],
         )
         .unwrap();
         drop(conn);
 
-        let reconciled = reconcile_legacy_financial_parity_rows(&db).unwrap();
-        assert_eq!(reconciled, 1);
+        insert_parity_sync_queue_row(&db, "orders", "ord-pending-update", "pending");
+
+        let promoted = reconcile_deferred_payments(&db).unwrap();
+        assert_eq!(
+            promoted, 0,
+            "payment must remain blocked until the parent order update syncs"
+        );
 
         let conn = db.conn.lock().unwrap();
-        let (queue_status, retry_count): (String, i64) = conn
+        let (payment_state, queue_status): (String, String) = conn
             .query_row(
-                "SELECT status, retry_count
-                 FROM sync_queue
-                 WHERE entity_type = 'payment'
-                   AND entity_id = 'pay-legacy-payment'",
+                "SELECT
+                    (SELECT sync_state FROM order_payments WHERE id = 'pay-pending-update'),
+                    (SELECT status FROM sync_queue WHERE entity_id = 'pay-pending-update')",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
+        assert_eq!(payment_state, "waiting_parent");
         assert_eq!(queue_status, "deferred");
-        assert_eq!(retry_count, 2);
-
-        let local_state: String = conn
-            .query_row(
-                "SELECT sync_state
-                 FROM order_payments
-                 WHERE id = 'pay-legacy-payment'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(local_state, "waiting_parent");
-
-        let legacy_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*)
-                 FROM parity_sync_queue
-                 WHERE table_name = 'payments'
-                   AND record_id = 'pay-legacy-payment'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(legacy_count, 0);
     }
+
+    // Wave 5 Session 7 PR 0: `test_reconcile_legacy_payment_parity_rows_migrates_to_canonical_queue`
+    // was removed together with the reconcile function's bridging logic. The
+    // function is now a callable no-op (see `reconcile_legacy_financial_parity_rows`
+    // in sync.rs), so the test's expectations (a bridged legacy row produces
+    // a sync_queue row with status='deferred', retry_count=2) no longer map
+    // to the post-migration semantics. The reconcile surface retires
+    // completely in Session 7 PR 2 (v56 drop) along with every other
+    // transitional legacy read path.
 
     #[test]
     fn test_clear_legacy_financial_parity_orphan_removes_missing_payment_rows() {
@@ -17827,15 +19247,16 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (4.0 → 400).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-orphan-live', '[]', 4.0, 'completed', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-orphan-live', '[]', 4.0, 400, 'completed', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-orphan-live', 'ord-orphan-live', 'cash', 4.0, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-orphan-live', 'ord-orphan-live', 'cash', 4.0, 400, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -17892,20 +19313,20 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
-        // Insert order + payment (payment synced)
+        // Insert order + payment (payment synced) — W4e Step 0: dual-populate (50.0/10.0 → 5000/1000).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES ('ord-adj', '[]', 50.0, 'completed', 'synced', 'sup-adj', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj', '[]', 50.0, 5000, 'completed', 'synced', 'sup-adj', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, remote_payment_id, created_at, updated_at)
              VALUES (
                 'pay-adj',
                 'ord-adj',
                 'cash',
-                50.0,
+                50.0, 5000,
                 'synced',
                 'applied',
                 '51d7c864-772e-40ea-a440-55dbce8108f0',
@@ -17918,8 +19339,8 @@ mod tests {
 
         // Insert an adjustment in waiting_parent state
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-1', 'pay-adj', 'ord-adj', 'refund', 10.0, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-1', 'pay-adj', 'ord-adj', 'refund', 10.0, 1000, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -17966,24 +19387,24 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
-        // Insert order + payment (payment NOT synced)
+        // Insert order + payment (payment NOT synced) — W4e Step 0: dual-populate (30.0/5.0 → 3000/500).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-uns', '[]', 30.0, 'completed', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-uns', '[]', 30.0, 3000, 'completed', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-uns', 'ord-uns', 'cash', 30.0, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-uns', 'ord-uns', 'cash', 30.0, 3000, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
 
         // Insert an adjustment in waiting_parent state
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-uns', 'pay-uns', 'ord-uns', 'refund', 5.0, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-uns', 'pay-uns', 'ord-uns', 'refund', 5.0, 500, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -18025,21 +19446,22 @@ mod tests {
         })
         .to_string();
 
+        // W4e Step 0: dual-populate (40.0/8.0 → 4000/800).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES ('ord-adj-missing-remote', '[]', 40.0, 'completed', 'synced', 'sup-adj-missing-remote', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-missing-remote', '[]', 40.0, 4000, 'completed', 'synced', 'sup-adj-missing-remote', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-adj-missing-remote', 'ord-adj-missing-remote', 'cash', 40.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-missing-remote', 'ord-adj-missing-remote', 'cash', 40.0, 4000, 'synced', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-missing-remote', 'pay-adj-missing-remote', 'ord-adj-missing-remote', 'refund', 8.0, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-missing-remote', 'pay-adj-missing-remote', 'ord-adj-missing-remote', 'refund', 8.0, 800, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -18178,27 +19600,28 @@ mod tests {
         })
         .to_string();
 
+        // W4e Step 0: dual-populate (40.0/8.0 → 4000/800).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES ('ord-adj-duplicate-parent', '[]', 40.0, 'completed', 'synced', 'sup-adj-duplicate-parent', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-duplicate-parent', '[]', 40.0, 4000, 'completed', 'synced', 'sup-adj-duplicate-parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, transaction_ref, created_at, updated_at)
-             VALUES ('pay-adj-stale-parent', 'ord-adj-duplicate-parent', 'cash', 40.0, 'EUR', 'completed', 'failed', 'applied', 'txn-adj-dup', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, transaction_ref, created_at, updated_at)
+             VALUES ('pay-adj-stale-parent', 'ord-adj-duplicate-parent', 'cash', 40.0, 4000, 'EUR', 'completed', 'failed', 'applied', 'txn-adj-dup', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, transaction_ref, created_at, updated_at)
-             VALUES ('pay-adj-canonical-parent', 'ord-adj-duplicate-parent', 'cash', 40.0, 'EUR', 'completed', 'synced', 'applied', 'txn-adj-dup', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, transaction_ref, created_at, updated_at)
+             VALUES ('pay-adj-canonical-parent', 'ord-adj-duplicate-parent', 'cash', 40.0, 4000, 'EUR', 'completed', 'synced', 'applied', 'txn-adj-dup', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, sync_last_error, created_at, updated_at)
-             VALUES ('adj-duplicate-parent', 'pay-adj-stale-parent', 'ord-adj-duplicate-parent', 'refund', 8.0, 'Duplicate parent', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, sync_last_error, created_at, updated_at)
+             VALUES ('adj-duplicate-parent', 'pay-adj-stale-parent', 'ord-adj-duplicate-parent', 'refund', 8.0, 800, 'Duplicate parent', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
             params![ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID],
         )
         .unwrap();
@@ -18376,21 +19799,22 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (40.0/8.0 → 4000/800).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES ('ord-adj-missing-remote', '[]', 40.0, 'completed', 'synced', 'sup-adj-missing-remote', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-missing-remote', '[]', 40.0, 4000, 'completed', 'synced', 'sup-adj-missing-remote', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-adj-missing-remote', 'ord-adj-missing-remote', 'cash', 40.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-missing-remote', 'ord-adj-missing-remote', 'cash', 40.0, 4000, 'synced', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-missing-remote', 'pay-adj-missing-remote', 'ord-adj-missing-remote', 'refund', 8.0, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-missing-remote', 'pay-adj-missing-remote', 'ord-adj-missing-remote', 'refund', 8.0, 800, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -18449,33 +19873,34 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (40.0/8.0 → 4000/800).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES ('ord-adj-tie-parent', '[]', 40.0, 'completed', 'synced', 'sup-adj-tie-parent', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-tie-parent', '[]', 40.0, 4000, 'completed', 'synced', 'sup-adj-tie-parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-adj-tie-stale', 'ord-adj-tie-parent', 'cash', 40.0, 'EUR', 'completed', 'failed', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-tie-stale', 'ord-adj-tie-parent', 'cash', 40.0, 4000, 'EUR', 'completed', 'failed', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
-             VALUES ('pay-adj-tie-canonical-a', 'ord-adj-tie-parent', 'cash', 40.0, 'EUR', 'completed', 'synced', 'applied', '11111111-1111-1111-1111-111111111111', datetime('now', '-2 minutes'), datetime('now', '-2 minutes'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES ('pay-adj-tie-canonical-a', 'ord-adj-tie-parent', 'cash', 40.0, 4000, 'EUR', 'completed', 'synced', 'applied', '11111111-1111-1111-1111-111111111111', datetime('now', '-2 minutes'), datetime('now', '-2 minutes'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
-             VALUES ('pay-adj-tie-canonical-b', 'ord-adj-tie-parent', 'cash', 40.0, 'EUR', 'completed', 'synced', 'applied', '22222222-2222-2222-2222-222222222222', datetime('now', '-1 minutes'), datetime('now', '-1 minutes'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES ('pay-adj-tie-canonical-b', 'ord-adj-tie-parent', 'cash', 40.0, 4000, 'EUR', 'completed', 'synced', 'applied', '22222222-2222-2222-2222-222222222222', datetime('now', '-1 minutes'), datetime('now', '-1 minutes'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, sync_last_error, created_at, updated_at)
-             VALUES ('adj-tie-parent', 'pay-adj-tie-stale', 'ord-adj-tie-parent', 'refund', 8.0, 'Tie parent', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, sync_last_error, created_at, updated_at)
+             VALUES ('adj-tie-parent', 'pay-adj-tie-stale', 'ord-adj-tie-parent', 'refund', 8.0, 800, 'Tie parent', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
             params![ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID],
         )
         .unwrap();
@@ -18542,33 +19967,34 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (40.0/8.0 → 4000/800).
         conn.execute(
-            "INSERT INTO orders (id, order_number, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES ('ord-adj-live-shape', 'ORD-LIVE-SHAPE', '[]', 40.0, 'completed', 'synced', 'sup-live-shape', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-live-shape', 'ORD-LIVE-SHAPE', '[]', 40.0, 4000, 'completed', 'synced', 'sup-live-shape', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-adj-live-stale', 'ord-adj-live-shape', 'cash', 40.0, 'EUR', 'completed', 'failed', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-live-stale', 'ord-adj-live-shape', 'cash', 40.0, 4000, 'EUR', 'completed', 'failed', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
-             VALUES ('pay-adj-live-canonical-a', 'ord-adj-live-shape', 'cash', 40.0, 'EUR', 'completed', 'synced', 'applied', '33333333-3333-3333-3333-333333333333', datetime('now', '-2 minutes'), datetime('now', '-2 minutes'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES ('pay-adj-live-canonical-a', 'ord-adj-live-shape', 'cash', 40.0, 4000, 'EUR', 'completed', 'synced', 'applied', '33333333-3333-3333-3333-333333333333', datetime('now', '-2 minutes'), datetime('now', '-2 minutes'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
-             VALUES ('pay-adj-live-canonical-b', 'ord-adj-live-shape', 'cash', 40.0, 'EUR', 'completed', 'synced', 'applied', '44444444-4444-4444-4444-444444444444', datetime('now', '-1 minutes'), datetime('now', '-1 minutes'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES ('pay-adj-live-canonical-b', 'ord-adj-live-shape', 'cash', 40.0, 4000, 'EUR', 'completed', 'synced', 'applied', '44444444-4444-4444-4444-444444444444', datetime('now', '-1 minutes'), datetime('now', '-1 minutes'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, sync_last_error, created_at, updated_at)
-             VALUES ('adj-live-shape', 'pay-adj-live-stale', 'ord-adj-live-shape', 'refund', 8.0, 'Live shape', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, sync_last_error, created_at, updated_at)
+             VALUES ('adj-live-shape', 'pay-adj-live-stale', 'ord-adj-live-shape', 'refund', 8.0, 800, 'Live shape', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
             params![ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID],
         )
         .unwrap();
@@ -18649,21 +20075,22 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (18.0/3.0 → 1800/300).
         conn.execute(
-            "INSERT INTO orders (id, order_number, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-blocker-detail', 'ORD-BLOCKER-DETAIL', '[]', 18.0, 'completed', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-blocker-detail', 'ORD-BLOCKER-DETAIL', '[]', 18.0, 1800, 'completed', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, currency, status, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-blocker-detail', 'ord-blocker-detail', 'cash', 18.0, 'EUR', 'completed', 'pending', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-blocker-detail', 'ord-blocker-detail', 'cash', 18.0, 1800, 'EUR', 'completed', 'pending', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, sync_last_error, created_at, updated_at)
-             VALUES ('adj-blocker-detail', 'pay-blocker-detail', 'ord-blocker-detail', 'refund', 3.0, 'Blocker detail', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, sync_last_error, created_at, updated_at)
+             VALUES ('adj-blocker-detail', 'pay-blocker-detail', 'ord-blocker-detail', 'refund', 3.0, 300, 'Blocker detail', 'waiting_parent', ?1, datetime('now'), datetime('now'))",
             params![ADJUSTMENT_BLOCKER_PARENT_PAYMENT_MISSING_CANONICAL_REMOTE_ID],
         )
         .unwrap();
@@ -18697,33 +20124,34 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (65.0/30.0/35.0/10.0/5.0 → 6500/3000/3500/1000/500).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES ('ord-adj-batch', '[]', 65.0, 'completed', 'synced', 'sup-adj-batch', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-batch', '[]', 65.0, 6500, 'completed', 'synced', 'sup-adj-batch', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-adj-batch-1', 'ord-adj-batch', 'cash', 30.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-batch-1', 'ord-adj-batch', 'cash', 30.0, 3000, 'synced', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-adj-batch-2', 'ord-adj-batch', 'card', 35.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-batch-2', 'ord-adj-batch', 'card', 35.0, 3500, 'synced', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-batch-1', 'pay-adj-batch-1', 'ord-adj-batch', 'refund', 10.0, 'One', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-batch-1', 'pay-adj-batch-1', 'ord-adj-batch', 'refund', 10.0, 1000, 'One', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-batch-2', 'pay-adj-batch-2', 'ord-adj-batch', 'refund', 5.0, 'Two', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-batch-2', 'pay-adj-batch-2', 'ord-adj-batch', 'refund', 5.0, 500, 'Two', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -19183,32 +20611,52 @@ mod tests {
                 "end": "2026-04-01T23:38:24.403Z"
             }
         });
+        // W4e Step 0: dual-populate z_reports monetary cents (12/0 → 1200/0).
         conn.execute(
             "INSERT INTO z_reports (
                 id, shift_id, branch_id, terminal_id, report_date, generated_at,
-                gross_sales, net_sales, total_orders, cash_sales, card_sales,
-                refunds_total, voids_total, discounts_total, tips_total,
-                expenses_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                gross_sales, gross_sales_cents,
+                net_sales, net_sales_cents,
+                total_orders,
+                cash_sales, cash_sales_cents,
+                card_sales, card_sales_cents,
+                refunds_total, refunds_total_cents,
+                voids_total, voids_total_cents,
+                discounts_total, discounts_total_cents,
+                tips_total, tips_total_cents,
+                expenses_total, expenses_total_cents,
+                cash_variance, cash_variance_cents,
+                opening_cash, opening_cash_cents,
+                closing_cash, closing_cash_cents,
+                expected_cash, expected_cash_cents,
                 payments_breakdown_json, report_json, sync_state, sync_last_error, sync_retry_count,
                 created_at, updated_at
              ) VALUES (
                 'zr-business-date-repair', 'shift-z-report-repair', 'branch-1', 'term-1', '2026-03-31', '2026-04-01T23:40:00Z',
-                12, 12, 1, 12, 0,
-                0, 0, 0, 0,
-                0, 0, 0, 0, 0,
+                12, 1200, 12, 1200, 1, 12, 1200, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 '{}', ?1, 'failed', 'report_date must match the branch business date for periodStart (2026-04-02)', 5,
                 '2026-04-01T23:40:00Z', '2026-04-01T23:40:00Z'
              )",
             params![poisoned_report_json.to_string()],
         )
         .unwrap();
+        // Wave 5 Session 6: z-report repair now operates on parity_sync_queue,
+        // so the failed-state fixture is seeded there (with parity's schema:
+        // table_name/record_id/data/attempts/error_message) rather than on
+        // the legacy queue.
         conn.execute(
-            "INSERT INTO sync_queue (
-                 entity_type, entity_id, operation, payload, idempotency_key,
-                 status, retry_count, max_retries, last_error, next_retry_at
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status,
+                 error_message, next_retry_at
              ) VALUES (
-                 'z_report', 'zr-business-date-repair', 'insert', ?1, 'zreport:zr-business-date-repair',
-                 'failed', 5, 5, 'report_date must match the branch business date for periodStart (2026-04-02)',
+                 'parity-zr-repair-id', 'z_reports', 'zr-business-date-repair', 'INSERT', ?1,
+                 'org-1', '2026-04-01T23:40:00Z', 5, 1000, 1, 'z_report',
+                 'manual', 1, 'failed',
+                 'report_date must match the branch business date for periodStart (2026-04-02)',
                  '2026-04-02T00:00:00Z'
              )",
             params![serde_json::json!({
@@ -19242,10 +20690,10 @@ mod tests {
             String,
         ) = conn
             .query_row(
-                "SELECT status, retry_count, last_error, payload
-                 FROM sync_queue
-                 WHERE entity_type = 'z_report'
-                   AND entity_id = 'zr-business-date-repair'",
+                "SELECT status, attempts, error_message, data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'z_reports'
+                   AND record_id = 'zr-business-date-repair'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -19573,27 +21021,28 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (12.0/2.0 → 1200/200).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-adj-requeue', '[]', 12.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-adj-requeue', '[]', 12.0, 1200, 'completed', 'synced', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-adj-requeue', 'ord-adj-requeue', 'cash', 12.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+                'pay-adj-requeue', 'ord-adj-requeue', 'cash', 12.0, 1200, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
              )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO payment_adjustments (
-                id, payment_id, order_id, adjustment_type, amount, reason,
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
                 sync_state, sync_retry_count, sync_last_error, sync_next_retry_at, created_at, updated_at
              ) VALUES (
-                'adj-404', 'pay-adj-requeue', 'ord-adj-requeue', 'refund', 2.0, 'Missing endpoint',
+                'adj-404', 'pay-adj-requeue', 'ord-adj-requeue', 'refund', 2.0, 200, 'Missing endpoint',
                 'failed', 5, 'HTTP 404 /api/pos/payments/adjustments/sync not found', datetime('now', '+10 minutes'), datetime('now'), datetime('now')
              )",
             [],
@@ -19652,27 +21101,28 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (12.0/10.9 → 1200/1090).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-adj-legacy', '[]', 12.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-adj-legacy', '[]', 12.0, 1200, 'completed', 'synced', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-adj-legacy', 'ord-adj-legacy', 'card', 12.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+                'pay-adj-legacy', 'ord-adj-legacy', 'card', 12.0, 1200, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
              )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO payment_adjustments (
-                id, payment_id, order_id, adjustment_type, amount, reason,
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
                 sync_state, sync_retry_count, sync_last_error, sync_next_retry_at, created_at, updated_at
              ) VALUES (
-                'adj-legacy', 'pay-adj-legacy', 'ord-adj-legacy', 'refund', 10.9, 'Legacy payload',
+                'adj-legacy', 'pay-adj-legacy', 'ord-adj-legacy', 'refund', 10.9, 1090, 'Legacy payload',
                 'failed', 5, 'Validation failed (HTTP 400): [{\"field\":\"staff_id\",\"message\":\"Invalid uuid\"},{\"field\":\"remote_payment_id\",\"message\":\"Expected string, received null\"},{\"field\":\"canonical_payment_id\",\"message\":\"Expected string, received null\"}]', datetime('now', '+10 minutes'), datetime('now'), datetime('now')
              )",
             [],
@@ -19735,27 +21185,28 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (8.0/2.0 → 800/200).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-adj-retry', '[]', 8.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-adj-retry', '[]', 8.0, 800, 'completed', 'synced', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-adj-retry', 'ord-adj-retry', 'cash', 8.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+                'pay-adj-retry', 'ord-adj-retry', 'cash', 8.0, 800, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
              )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO payment_adjustments (
-                id, payment_id, order_id, adjustment_type, amount, reason,
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
                 sync_state, sync_retry_count, sync_last_error, sync_next_retry_at, created_at, updated_at
              ) VALUES (
-                'adj-retry', 'pay-adj-retry', 'ord-adj-retry', 'refund', 2.0, 'Retry me',
+                'adj-retry', 'pay-adj-retry', 'ord-adj-retry', 'refund', 2.0, 200, 'Retry me',
                 'failed', 4, 'Validation failed', datetime('now', '+5 minutes'), datetime('now'), datetime('now')
              )",
             [],
@@ -19821,14 +21272,15 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (8.0/2.0 → 800/200).
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, items, total_amount, status, sync_status, created_at, updated_at
+                id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
              ) VALUES (
                 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
                 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
                 '[]',
-                8.0,
+                8.0, 800,
                 'completed',
                 'synced',
                 datetime('now'),
@@ -19839,12 +21291,12 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
                 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
                 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
                 'cash',
-                8.0,
+                8.0, 800,
                 'completed',
                 'synced',
                 'applied',
@@ -19856,14 +21308,14 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO payment_adjustments (
-                id, payment_id, order_id, adjustment_type, amount, reason,
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
                 sync_state, sync_retry_count, sync_last_error, sync_next_retry_at, created_at, updated_at
              ) VALUES (
                 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
                 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
                 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
                 'refund',
-                2.0,
+                2.0, 200,
                 'Repair me',
                 'failed',
                 4,
@@ -19960,9 +21412,10 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (6.4 → 640).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-driver', '[]', 6.4, 'delivered', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-driver', '[]', 6.4, 640, 'delivered', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -20269,12 +21722,13 @@ mod tests {
             [],
         )
         .unwrap();
+        // W4e Step 0: dual-populate shift_expenses.amount + amount_cents (10.0 → 1000).
         conn.execute(
             "INSERT INTO shift_expenses (
-                 id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                 id, staff_shift_id, staff_id, branch_id, expense_type, amount, amount_cents, description,
                  sync_status, created_at, updated_at
              ) VALUES (
-                 'expense-failed-recovery', 'shift-parent-retryable-failed-child', 'cashier-1', 'branch-1', 'other', 10.0, 'Test expense',
+                 'expense-failed-recovery', 'shift-parent-retryable-failed-child', 'cashier-1', 'branch-1', 'other', 10.0, 1000, 'Test expense',
                  'failed', datetime('now'), datetime('now')
              )",
             [],
@@ -20487,24 +21941,24 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
-        // Insert an order
+        // Insert an order — W4e Step 0: dual-populate (25.0/15.0/10.0 → 2500/1500/1000).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES ('ord-b', '[]', 25.0, 'completed', 'synced', 'sup-456', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-b', '[]', 25.0, 2500, 'completed', 'synced', 'sup-456', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
 
         // Insert 2 payments in waiting_parent state
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-b1', 'ord-b', 'cash', 15.0, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-b1', 'ord-b', 'cash', 15.0, 1500, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-b2', 'ord-b', 'card', 10.0, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-b2', 'ord-b', 'card', 10.0, 1000, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -20595,9 +22049,10 @@ mod tests {
     fn test_move_receipt_back_to_pending_releases_queued_remote_receipt() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (11.1 → 1110).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-receipt', '[]', 11.1, 'out_for_delivery', 'queued', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-receipt', '[]', 11.1, 1110, 'out_for_delivery', 'queued', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -20880,9 +22335,10 @@ mod tests {
         // Insert a local order
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (20.0 → 2000).
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-                 VALUES ('ord-complete', '[]', 20.0, 'pending', 'synced', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-complete', '[]', 20.0, 2000, 'pending', 'synced', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -20919,9 +22375,10 @@ mod tests {
         // Insert a local order with a cancellation reason
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (15.0 → 1500).
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, status, sync_status, cancellation_reason, created_at, updated_at)
-                 VALUES ('ord-cancel', '[]', 15.0, 'cancelled', 'synced', 'Out of stock', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, cancellation_reason, created_at, updated_at)
+                 VALUES ('ord-cancel', '[]', 15.0, 1500, 'cancelled', 'synced', 'Out of stock', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -20971,9 +22428,10 @@ mod tests {
                 "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES ('receipt_actions', 'on_cancel', 'true')",
                 [],
             ).unwrap();
+            // W4e Step 0: dual-populate (10.0 → 1000).
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, status, sync_status, cancellation_reason, created_at, updated_at)
-                 VALUES ('ord-cancel2', '[]', 10.0, 'cancelled', 'synced', 'Customer request', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, cancellation_reason, created_at, updated_at)
+                 VALUES ('ord-cancel2', '[]', 10.0, 1000, 'cancelled', 'synced', 'Customer request', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
         }
@@ -21016,6 +22474,275 @@ mod tests {
         assert_eq!(
             count, 1,
             "expected one order_canceled_receipt print job when on_cancel is enabled"
+        );
+    }
+
+    /// Regression for `deterministic_jitter_ms`: when N sync_queue rows are
+    /// claimed in a burst, their rowids are sequential (id, id+1, id+2, …).
+    /// Before mixing in the golden-ratio constant the raw seed produced
+    /// jitter values like 50, 51, 52, … — adjacent rows rescheduled
+    /// near-simultaneously and the anti-stampede protection collapsed.
+    /// Mixing with `0x9E37_79B9_7F4A_7C15` (Knuth's golden-ratio multiplier)
+    /// must spread sequential seeds across (close to) the full 700-ms
+    /// bucket range so a burst of claims is genuinely distributed.
+    ///
+    /// Two assertions, each picked to FAIL for the broken raw-seed
+    /// implementation while PASSING for the hash-mixed fix:
+    ///
+    /// 1. **Spread test (the anti-clustering check)** — a 100-seed burst
+    ///    must span > 600 ms of the 700 ms range. The raw-seed
+    ///    implementation would span only ~99 ms for seeds 0..99
+    ///    (jitter 50..149), so this assertion was the actual bug.
+    ///
+    /// 2. **Coverage test** — over 5000 sequential seeds, > 90 % of the
+    ///    700-ms buckets must be hit. (1000 seeds was insufficient: by
+    ///    pigeonhole the best a uniform hash can achieve is
+    ///    `1 - (1 - 1/700)^1000 ≈ 76%`. Bumping to 5000 makes 90 %
+    ///    comfortably reachable while still small enough to stay
+    ///    deterministic and fast.)
+    #[test]
+    fn test_deterministic_jitter_ms_spreads_sequential_seeds() {
+        // Spread test: 100 sequential seeds must span > 600 ms.
+        const BURST_SIZE: i64 = 100;
+        let burst: Vec<i64> = (0..BURST_SIZE).map(deterministic_jitter_ms).collect();
+        let burst_min = *burst.iter().min().unwrap();
+        let burst_max = *burst.iter().max().unwrap();
+        let burst_range = burst_max - burst_min;
+        for &v in &burst {
+            assert!(
+                (50..=749).contains(&v),
+                "jitter {v} outside the documented 50..=749 range"
+            );
+        }
+        assert!(
+            burst_range > 600,
+            "deterministic_jitter_ms must spread a 100-seed burst across \
+             > 600 ms of the 700-ms range so adjacent rows do not cluster — \
+             actual spread {burst_range} ms (min {burst_min}, max {burst_max}). \
+             Raw-seed implementation would have spread = 99 ms (the bug)."
+        );
+
+        // Coverage test: 5000 sequential seeds must hit > 90% of buckets.
+        const SEED_COUNT: i64 = 5000;
+        const BUCKET_RANGE_MS: i64 = 700;
+        let mut hits = vec![false; BUCKET_RANGE_MS as usize];
+        for seed in 0..SEED_COUNT {
+            let bucket = (deterministic_jitter_ms(seed) - 50) as usize;
+            hits[bucket] = true;
+        }
+        let unique_buckets: usize = hits.iter().filter(|h| **h).count();
+        let coverage_pct = (unique_buckets as f64) / (BUCKET_RANGE_MS as f64) * 100.0;
+        assert!(
+            coverage_pct >= 90.0,
+            "deterministic_jitter_ms must hit >= 90% of the 700-ms buckets \
+             over 5000 sequential seeds — actual coverage {coverage_pct:.1}% \
+             ({unique_buckets} of {BUCKET_RANGE_MS} buckets hit)"
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // Wave 5 Session 7 PR 0 — dual-queue assertions for the three producers
+    // Session 6 missed in sync.rs (caught by the PR 1 legacy-producer seal).
+    // Each test seeds a stale legacy `sync_queue` row, calls the migrated
+    // function once, and asserts (a) the legacy row is drained by the
+    // transitional DELETE and (b) a canonical parity row lands under
+    // `(table_name, record_id)` with the right op / status / module_type.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn upsert_payment_sync_queue_row_writes_to_parity() {
+        // Wave 5 Session 7 PR 2a: the legacy-seed + legacy-count-==-0
+        // halves of this test were removed together with the producer's
+        // transitional `DELETE FROM sync_queue` drain. Producers no
+        // longer touch the legacy table; canonical writes land on
+        // `parity_sync_queue` under `(table_name='payments',
+        // record_id=payment_id)`.
+        let db = test_db();
+        let now = "2026-04-24T12:00:00Z";
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                     id, order_number, items, total_amount, status, payment_status,
+                     sync_status, created_at, updated_at
+                 ) VALUES (
+                     'ord-pr0-pay', 'ORD-PR0-1', '[]', 10.0, 'completed', 'partially_paid',
+                     'synced', ?1, ?1
+                 )",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (
+                     id, order_id, method, amount, status,
+                     sync_status, sync_state, created_at, updated_at
+                 ) VALUES (
+                     'pay-pr0', 'ord-pr0-pay', 'cash', 10.0, 'completed',
+                     'pending', 'pending', ?1, ?1
+                 )",
+                params![now],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({
+            "paymentId": "pay-pr0",
+            "orderId": "ord-pr0-pay",
+            "method": "cash",
+            "amount": 10.0,
+        })
+        .to_string();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            super::upsert_payment_sync_queue_row(
+                &conn, "pay-pr0", &payload, "pending", 0, None, None, None, now,
+            )
+            .expect("payment producer must migrate to parity");
+        }
+
+        let conn = db.conn.lock().unwrap();
+        let parity_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'payments' AND record_id = 'pay-pr0'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (op, status, module_type, data): (String, String, String, String) = conn
+            .query_row(
+                "SELECT operation, status, module_type, data FROM parity_sync_queue
+                 WHERE table_name = 'payments' AND record_id = 'pay-pr0'
+                 ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&data).expect("parity data is json");
+
+        assert_eq!(
+            parity_count, 1,
+            "single parity row expected on (payments, pay-pr0)"
+        );
+        assert_eq!(
+            op, "INSERT",
+            "producer enqueues with canonical uppercase op"
+        );
+        assert_eq!(status, "pending");
+        assert_eq!(module_type, "payment");
+        assert_eq!(parsed["paymentId"], "pay-pr0");
+        assert_eq!(parsed["orderId"], "ord-pr0-pay");
+    }
+
+    // Wave 5 Session 7 PR 2: the adjustment dual-queue test was
+    // retired together with the producer itself (see the retirement
+    // comment above `mark_local_payment_applied` in sync.rs). There is
+    // no production caller of the adjustment producer post-v56, and
+    // the legacy-seed half of the test can't run against a dropped
+    // `sync_queue` table anyway.
+
+    #[test]
+    fn ensure_canonical_local_z_report_queue_row_writes_to_parity() {
+        // Wave 5 Session 7 PR 2a: legacy-seed + legacy-count-==-0
+        // halves removed together with the producer's transitional
+        // `DELETE FROM sync_queue` drain. The canonical repair row
+        // lands on `parity_sync_queue` under `(table_name='z_reports',
+        // record_id=row.id)` with `sync_state='pending'` reset on the
+        // local `z_reports` row.
+        let db = test_db();
+        let now = "2026-04-24T12:00:00Z";
+
+        {
+            let conn = db.conn.lock().unwrap();
+            // staff_shift parent for z_reports.shift_id FK.
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                     id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                     opening_cash_amount, status, calculation_version, sync_status,
+                     created_at, updated_at
+                 ) VALUES (
+                     'shift-pr0-z', 'staff-pr0', 'cashier', 'branch-pr0', 'term-pr0', ?1,
+                     100.0, 'closed', 2, 'synced', ?1, ?1
+                 )",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO z_reports (
+                     id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                     report_json, sync_state, created_at, updated_at
+                 ) VALUES (
+                     'zr-pr0', 'shift-pr0-z', 'branch-pr0', 'term-pr0',
+                     '2026-04-24', ?1, '{\"gross_sales\":123.45}',
+                     'failed', ?1, ?1
+                 )",
+                params![now],
+            )
+            .unwrap();
+        }
+
+        let row = super::LocalHistoricalZReportRow {
+            id: "zr-pr0".to_string(),
+            branch_id: "branch-pr0".to_string(),
+            terminal_id: "term-pr0".to_string(),
+            report_date: "2026-04-24".to_string(),
+            report_json: serde_json::json!({"gross_sales": 123.45}),
+            sync_state: "failed".to_string(),
+            sort_key: "2026-04-24T12:00:00Z|zr-pr0".to_string(),
+        };
+
+        {
+            let conn = db.conn.lock().unwrap();
+            super::ensure_canonical_local_z_report_queue_row(&conn, &row, now)
+                .expect("z-report canonical requeue must migrate to parity");
+        }
+
+        let conn = db.conn.lock().unwrap();
+        let parity_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'z_reports' AND record_id = 'zr-pr0'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (op, status, module_type, data): (String, String, String, String) = conn
+            .query_row(
+                "SELECT operation, status, module_type, data FROM parity_sync_queue
+                 WHERE table_name = 'z_reports' AND record_id = 'zr-pr0'
+                 ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&data).expect("parity data is json");
+
+        // Local z_reports sync_state reset assertion — proves the
+        // downstream UPDATE still fires after the parity cutover.
+        let local_sync_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM z_reports WHERE id = 'zr-pr0'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            parity_count, 1,
+            "single parity row expected on (z_reports, zr-pr0)"
+        );
+        assert_eq!(op, "INSERT");
+        assert_eq!(status, "pending");
+        assert_eq!(module_type, "z_report");
+        assert_eq!(parsed["terminal_id"], "term-pr0");
+        assert_eq!(parsed["branch_id"], "branch-pr0");
+        assert_eq!(parsed["report_date"], "2026-04-24");
+        assert_eq!(parsed["report_data"]["gross_sales"], 123.45);
+        assert_eq!(
+            local_sync_state, "pending",
+            "z_reports.sync_state must be reset to 'pending' after canonical requeue"
         );
     }
 }

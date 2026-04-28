@@ -71,6 +71,7 @@ interface Customer {
     | { type: 'Point'; coordinates: [number, number] };
   latitude?: number | null;
   longitude?: number | null;
+  address_fingerprint?: string | null;
   version?: number;
   editAddressId?: string; // ID of address being edited
   addresses?: Array<{
@@ -88,6 +89,7 @@ interface Customer {
       | { type: 'Point'; coordinates: [number, number] };
     latitude?: number | null;
     longitude?: number | null;
+    address_fingerprint?: string | null;
     address_type: string;
     is_default: boolean;
     created_at: string;
@@ -95,6 +97,43 @@ interface Customer {
     is_legacy_fallback?: boolean;
   }>;
 }
+
+const toLatLngCoordinates = (
+  coordinates:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] }
+    | null
+    | undefined,
+  latitude?: number | null,
+  longitude?: number | null,
+): { lat: number; lng: number } | null => {
+  if (
+    coordinates &&
+    'lat' in coordinates &&
+    Number.isFinite(coordinates.lat) &&
+    Number.isFinite(coordinates.lng)
+  ) {
+    return { lat: Number(coordinates.lat), lng: Number(coordinates.lng) };
+  }
+  if (
+    coordinates &&
+    'type' in coordinates &&
+    coordinates.type === 'Point' &&
+    Array.isArray(coordinates.coordinates) &&
+    coordinates.coordinates.length >= 2 &&
+    Number.isFinite(coordinates.coordinates[1]) &&
+    Number.isFinite(coordinates.coordinates[0])
+  ) {
+    return {
+      lat: Number(coordinates.coordinates[1]),
+      lng: Number(coordinates.coordinates[0]),
+    };
+  }
+  if (Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))) {
+    return { lat: Number(latitude), lng: Number(longitude) };
+  }
+  return null;
+};
 
 /**
  * Complete Order Flow Component
@@ -601,6 +640,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       let zoneName = null;
       let estimatedDeliveryTime = null;
       const effectiveDeliveryZoneInfo = orderData.deliveryZoneInfo ?? deliveryZoneInfo;
+      const selectedAddressCoordinates = toLatLngCoordinates(
+        selectedAddress?.coordinates,
+        selectedAddress?.latitude,
+        selectedAddress?.longitude,
+      );
 
       if (selectedOrderType === 'delivery' && selectedAddress) {
         deliveryAddress = `${selectedAddress.street_address}, ${selectedAddress.city}`;
@@ -701,10 +745,15 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         ghost_source: ghostSource,
         ghost_metadata: ghostMetadata,
         delivery_address: deliveryAddress,
+        delivery_address_id: selectedAddress?.id || null,
         delivery_city: selectedAddress?.city || null,
         delivery_postal_code: selectedAddress?.postal_code || null,
         delivery_floor: selectedAddress?.floor_number || null,
         delivery_notes: selectedAddress?.notes || selectedAddress?.delivery_notes || null,
+        delivery_latitude: selectedAddressCoordinates?.lat ?? null,
+        delivery_longitude: selectedAddressCoordinates?.lng ?? null,
+        delivery_address_fingerprint:
+          selectedAddress?.address_fingerprint || selectedCustomer?.address_fingerprint || null,
         name_on_ringer: selectedCustomer?.name_on_ringer || selectedAddress?.name_on_ringer || null,
         notes: orderData.notes || null,
 

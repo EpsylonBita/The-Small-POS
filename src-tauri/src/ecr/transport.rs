@@ -8,6 +8,56 @@ use std::net::TcpStream;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+const STX: u8 = 0x02;
+const ETX: u8 = 0x03;
+const DLE: u8 = 0x10;
+const ACK: u8 = 0x06;
+const NAK: u8 = 0x15;
+
+fn complete_ecr_frame_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() == 1 && (buf[0] == ACK || buf[0] == NAK) {
+        return Some(1);
+    }
+
+    if let Some(dle_stx) = buf.windows(2).position(|w| w == [DLE, STX]) {
+        if let Some(rel_end) = buf[dle_stx + 2..].windows(2).position(|w| w == [DLE, ETX]) {
+            let frame_end = dle_stx + 2 + rel_end + 2;
+            if buf.len() >= frame_end + 2 {
+                return Some(frame_end + 2);
+            }
+        }
+        return None;
+    }
+
+    let stx = buf.iter().position(|&b| b == STX)?;
+
+    // Generic fiscal frames use STX LEN SEQ CMD ... LRC ETX, where LEN is
+    // offset by 0x20 and the LRC is before ETX. Prefer this exact length when
+    // it matches the buffer, so generic fiscal responses do not wait for a
+    // nonexistent byte after ETX.
+    if let Some(&len) = buf.get(stx + 1) {
+        if len >= 0x20 {
+            let expected_len = (len as usize).saturating_sub(0x20) + 5;
+            let expected_end = stx + expected_len;
+            if expected_len >= 6
+                && buf.len() >= expected_end
+                && buf.get(expected_end - 1) == Some(&ETX)
+            {
+                return Some(expected_end);
+            }
+        }
+    }
+
+    let etx = buf[stx + 1..].iter().position(|&b| b == ETX)? + stx + 1;
+
+    // PAX-style frames put LRC after ETX.
+    if buf.len() > etx + 1 {
+        return Some(etx + 2);
+    }
+
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Transport state
 // ---------------------------------------------------------------------------
@@ -117,12 +167,11 @@ impl EcrTransport for SerialTransport {
     fn send(&mut self, data: &[u8]) -> Result<usize, String> {
         let port = self.port.as_mut().ok_or("Serial port not connected")?;
         debug!("Serial TX ({} bytes): {:02X?}", data.len(), data);
-        let n = port
-            .write(data)
+        port.write_all(data)
             .map_err(|e| format!("Serial write error: {e}"))?;
         port.flush()
             .map_err(|e| format!("Serial flush error: {e}"))?;
-        Ok(n)
+        Ok(data.len())
     }
 
     fn receive(&mut self, timeout_ms: u64) -> Result<Vec<u8>, String> {
@@ -140,26 +189,48 @@ impl EcrTransport for SerialTransport {
         }
         // We must record the new timeout even if set_timeout was skipped
         // so a later call knows the cached value is accurate.
-        let mut buf = vec![0u8; 4096];
-        let result = port.read(&mut buf);
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let mut assembled = Vec::with_capacity(4096);
+
+        loop {
+            let mut buf = vec![0u8; 4096];
+            let result = port.read(&mut buf);
+            match result {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.truncate(n);
+                    debug!("Serial RX chunk ({n} bytes): {:02X?}", &buf);
+                    assembled.extend_from_slice(&buf);
+                    if let Some(frame_len) = complete_ecr_frame_len(&assembled) {
+                        assembled.truncate(frame_len);
+                        debug!(
+                            "Serial RX complete ({} bytes): {:02X?}",
+                            assembled.len(),
+                            &assembled
+                        );
+                        break;
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    debug!("Serial RX timeout after {timeout_ms}ms");
+                    break;
+                }
+                Err(e) => {
+                    self.state = TransportState::Error;
+                    return Err(format!("Serial read error: {e}"));
+                }
+            }
+
+            if std::time::Instant::now() >= deadline {
+                debug!("Serial RX timeout after {timeout_ms}ms");
+                break;
+            }
+        }
+
         if needs_timeout_update {
             self.current_timeout_ms = timeout_ms;
         }
-        match result {
-            Ok(n) => {
-                buf.truncate(n);
-                debug!("Serial RX ({n} bytes): {:02X?}", &buf);
-                Ok(buf)
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                debug!("Serial RX timeout after {timeout_ms}ms");
-                Ok(Vec::new())
-            }
-            Err(e) => {
-                self.state = TransportState::Error;
-                Err(format!("Serial read error: {e}"))
-            }
-        }
+        Ok(assembled)
     }
 
     fn is_connected(&self) -> bool {
@@ -257,22 +328,17 @@ impl EcrTransport for NetworkTransport {
     fn send(&mut self, data: &[u8]) -> Result<usize, String> {
         let stream = self.stream.as_mut().ok_or("TCP not connected")?;
         debug!("TCP TX ({} bytes): {:02X?}", data.len(), data);
-        let n = stream.write(data).map_err(|e| format!("TCP write: {e}"))?;
+        stream
+            .write_all(data)
+            .map_err(|e| format!("TCP write: {e}"))?;
         stream.flush().map_err(|e| format!("TCP flush: {e}"))?;
-        Ok(n)
+        Ok(data.len())
     }
 
     fn receive(&mut self, timeout_ms: u64) -> Result<Vec<u8>, String> {
-        // Wave 3: ECR responses use STX..ETX framing. The HEAD
-        // implementation did a single `stream.read()` call — for a
-        // slow network or a fragmented TCP delivery, that returned
-        // before the ETX byte arrived and the caller parsed a partial
-        // frame as a complete response. We now loop: accumulate
-        // received bytes until we see `ETX` (0x03), the connection
-        // closes, or the caller's total timeout elapses. Per-read
-        // timeouts are scheduled against the remaining budget so the
-        // overall call still honours the caller's deadline.
-        const ETX: u8 = 0x03;
+        // ECR responses are framed; some protocols put the checksum before
+        // ETX while others put it after. Accumulate until the frame boundary
+        // includes the checksum bytes, not just the first ETX byte.
         const CHUNK: usize = 4096;
 
         let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
@@ -297,12 +363,10 @@ impl EcrTransport for NetworkTransport {
             let mut chunk = vec![0u8; CHUNK];
             match stream.read(&mut chunk) {
                 Ok(0) => {
-                    // Peer closed the connection. If we already accumulated
-                    // a full ETX-terminated frame, that is the caller's
-                    // response; otherwise treat as failure.
                     warn!("TCP connection closed by peer");
                     self.state = TransportState::Error;
-                    if assembled.contains(&ETX) {
+                    if let Some(frame_len) = complete_ecr_frame_len(&assembled) {
+                        assembled.truncate(frame_len);
                         return Ok(assembled);
                     }
                     return Err("Connection closed by peer".into());
@@ -311,16 +375,20 @@ impl EcrTransport for NetworkTransport {
                     chunk.truncate(n);
                     debug!("TCP RX chunk ({n} bytes): {:02X?}", &chunk);
                     assembled.extend_from_slice(&chunk);
-                    if assembled.contains(&ETX) {
+                    if let Some(frame_len) = complete_ecr_frame_len(&assembled) {
+                        assembled.truncate(frame_len);
                         return Ok(assembled);
                     }
-                    // Otherwise keep reading until ETX or timeout.
+                    // Otherwise keep reading until the complete frame or timeout.
                 }
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::TimedOut
                         || e.kind() == std::io::ErrorKind::WouldBlock =>
                 {
-                    debug!("TCP RX timeout after {timeout_ms}ms (partial {} bytes)", assembled.len());
+                    debug!(
+                        "TCP RX timeout after {timeout_ms}ms (partial {} bytes)",
+                        assembled.len()
+                    );
                     return Ok(assembled);
                 }
                 Err(e) => {

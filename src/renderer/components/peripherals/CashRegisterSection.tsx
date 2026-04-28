@@ -293,11 +293,11 @@ const invokeIPC = async (command: string, args?: unknown): Promise<any> => {
     }
     case 'ecr_test_connection': {
       const payload = (args as Record<string, any>) || {}
-      return bridge.invoke('ecr:test-connection', payload.device_id)
+      return bridge.ecr.testConnection(payload.device_id)
     }
     case 'ecr_test_print': {
       const payload = (args as Record<string, any>) || {}
-      return bridge.invoke('ecr:test-print', payload.device_id)
+      return bridge.ecr.testPrint(payload.device_id)
     }
     default:
       return bridge.invoke(command, args)

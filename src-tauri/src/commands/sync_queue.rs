@@ -4,6 +4,7 @@
 //! them to the renderer via `@tauri-apps/api/core::invoke()`.
 
 use tauri::{Emitter, State};
+use zeroize::Zeroizing;
 
 use crate::db::DbState;
 use crate::sync_queue;
@@ -107,9 +108,8 @@ pub fn sync_queue_list_conflicts(
 pub async fn sync_queue_process(
     db: State<'_, DbState>,
     app: tauri::AppHandle,
-    api_base_url: String,
-    api_key: String,
 ) -> Result<sync_queue::SyncResult, String> {
+    let (api_base_url, api_key) = resolve_sync_queue_credentials(&db)?;
     let result = sync_queue::process_queue(&db.conn, &api_base_url, &api_key).await?;
 
     // Wave 4 H: emit an operator-visible alarm for every monetary
@@ -122,4 +122,65 @@ pub async fn sync_queue_process(
     }
 
     Ok(result)
+}
+
+fn resolve_sync_queue_credentials(db: &DbState) -> Result<(String, Zeroizing<String>), String> {
+    crate::hydrate_terminal_credentials_from_local_settings(db);
+
+    let mut raw_api_key = Zeroizing::new(
+        crate::storage::get_credential("pos_api_key")
+            .or_else(|| crate::read_local_setting(db, "terminal", "pos_api_key"))
+            .or_else(|| crate::read_local_setting(db, "terminal", "api_key"))
+            .ok_or_else(|| "Terminal not configured: missing API key".to_string())?,
+    );
+    let api_key_source = raw_api_key.clone();
+
+    if let Some(decoded_api_key) =
+        crate::api::extract_api_key_from_connection_string(&api_key_source)
+    {
+        if *decoded_api_key != **raw_api_key {
+            let _ = crate::storage::set_credential("pos_api_key", decoded_api_key.trim());
+            if let Ok(conn) = db.conn.lock() {
+                let _ = crate::db::set_setting(
+                    &conn,
+                    "terminal",
+                    "pos_api_key",
+                    decoded_api_key.trim(),
+                );
+            }
+            *raw_api_key = decoded_api_key;
+        }
+    }
+
+    if let Some(decoded_tid) =
+        crate::api::extract_terminal_id_from_connection_string(&api_key_source)
+    {
+        let _ = crate::storage::set_credential("terminal_id", decoded_tid.trim());
+        if let Ok(conn) = db.conn.lock() {
+            let _ = crate::db::set_setting(&conn, "terminal", "terminal_id", decoded_tid.trim());
+        }
+    }
+
+    let mut admin_url = crate::storage::get_credential("admin_dashboard_url")
+        .or_else(|| crate::read_local_setting(db, "terminal", "admin_dashboard_url"))
+        .or_else(|| crate::read_local_setting(db, "terminal", "admin_url"))
+        .unwrap_or_default();
+    if admin_url.trim().is_empty() {
+        if let Some(decoded_url) =
+            crate::api::extract_admin_url_from_connection_string(&api_key_source)
+        {
+            admin_url = decoded_url;
+        }
+    }
+    let normalized_admin_url = crate::api::normalize_admin_url(&admin_url);
+    if normalized_admin_url.trim().is_empty() {
+        return Err("Terminal not configured: missing admin URL".to_string());
+    }
+
+    let api_key = Zeroizing::new(raw_api_key.trim().to_string());
+    if api_key.is_empty() {
+        return Err("Terminal not configured: missing API key".to_string());
+    }
+
+    Ok((normalized_admin_url, api_key))
 }

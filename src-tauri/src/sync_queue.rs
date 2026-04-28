@@ -23,9 +23,10 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::money::Cents;
 use crate::{db, storage, sync};
 
 // ---------------------------------------------------------------------------
@@ -77,9 +78,19 @@ fn compute_next_retry_delay_ms(retry_delay_ms: i64, module_type: &str) -> i64 {
     } else {
         MAX_RETRY_DELAY_MS
     };
-    // `timestamp_subsec_nanos` changes every call; using its ms slice as
-    // a cheap per-call jitter source avoids adding `rand` as a dep.
-    let jitter = (Utc::now().timestamp_subsec_nanos() as i64 / 1_000_000) % JITTER_CAP_MS;
+    // Wave 10 medium: the previous `timestamp_subsec_nanos / 1_000_000 %
+    // JITTER_CAP_MS` jitter bottoms out at the nearest millisecond — two
+    // consecutive calls within the same millisecond produced identical
+    // jitter values, defeating the anti-stampede purpose when many rows
+    // retry together. Mixing the nanosecond value with Knuth's
+    // multiplicative constant spreads even same-millisecond calls across
+    // the `[0, JITTER_CAP_MS)` range. Rather than introduce a `rand`
+    // crate dependency just for this helper, we re-use the deterministic
+    // mix — the entropy is still per-call because the nanosecond source
+    // rotates at every invocation.
+    let nanos = Utc::now().timestamp_subsec_nanos() as u64;
+    let mixed = nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let jitter = (mixed % (JITTER_CAP_MS as u64)) as i64;
     (retry_delay_ms.saturating_mul(2).saturating_add(jitter)).min(cap)
 }
 
@@ -134,6 +145,10 @@ pub struct SyncQueueItem {
     pub module_type: String,
     pub conflict_strategy: String,
     pub version: i64,
+    /// Wave 10 H8: per-claim generation counter. The caller MUST pass
+    /// this value back to `mark_success` — a mismatch means the row was
+    /// reclaimed (lease expired) and the success ack is silently dropped.
+    pub claim_generation: i64,
     pub status: String,
 }
 
@@ -277,6 +292,14 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
             module_type     TEXT NOT NULL DEFAULT 'orders',
             conflict_strategy TEXT NOT NULL DEFAULT 'server-wins',
             version         INTEGER NOT NULL DEFAULT 1,
+            -- Wave 10 H8: per-claim generation counter. Incremented on
+            -- every claim (`dequeue`) and on every stale-reclaim
+            -- (`recover_stale_processing_items`). `mark_success` only
+            -- accepts a caller's success-mark when the generation matches
+            -- the row's current generation — preventing a late ack from a
+            -- worker whose lease expired from polluting a fresh in-flight
+            -- claim. See `project_w10_h8_claim_generation_deferred.md`.
+            claim_generation INTEGER NOT NULL DEFAULT 0,
             status          TEXT NOT NULL DEFAULT 'pending'
                 CHECK (status IN ('pending', 'processing', 'failed', 'conflict'))
         );
@@ -1095,6 +1118,11 @@ fn load_local_order_insert_fallback(
     conn: &Connection,
     order_id: &str,
 ) -> Result<Option<Value>, String> {
+    // W6: `orders.payment_method` was dropped in v55; the sync-payload
+    // `payment_method` field is derived below via
+    // `payments::derive_payment_method` so the admin-dashboard row still
+    // receives a value that matches on-the-wire semantics.
+    let derived_method = crate::payments::derive_payment_method(conn, order_id)?;
     conn.query_row(
         "SELECT
             order_number,
@@ -1104,30 +1132,40 @@ fn load_local_order_insert_fallback(
             customer_id,
             items,
             total_amount,
+            total_amount_cents,
             tax_amount,
+            tax_amount_cents,
             subtotal,
+            subtotal_cents,
             status,
             order_type,
             table_number,
             delivery_address,
+            delivery_address_id,
             delivery_city,
             delivery_postal_code,
             delivery_floor,
             delivery_notes,
+            delivery_latitude,
+            delivery_longitude,
+            delivery_address_fingerprint,
+            delivery_zone_id,
             name_on_ringer,
             special_instructions,
             estimated_time,
             payment_status,
-            payment_method,
             driver_id,
             driver_name,
             discount_percentage,
             discount_amount,
+            discount_amount_cents,
             tip_amount,
+            tip_amount_cents,
             terminal_id,
             branch_id,
             tax_rate,
             delivery_fee,
+            delivery_fee_cents,
             client_request_id,
             is_ghost,
             ghost_source,
@@ -1187,15 +1225,30 @@ fn load_local_order_insert_fallback(
                 "total_amount",
                 row.get::<_, Option<f64>>("total_amount")?,
             );
+            insert_integer(
+                &mut object,
+                "total_amount_cents",
+                row.get::<_, Option<i64>>("total_amount_cents")?,
+            );
             insert_number(
                 &mut object,
                 "tax_amount",
                 row.get::<_, Option<f64>>("tax_amount")?,
             );
+            insert_integer(
+                &mut object,
+                "tax_amount_cents",
+                row.get::<_, Option<i64>>("tax_amount_cents")?,
+            );
             insert_number(
                 &mut object,
                 "subtotal",
                 row.get::<_, Option<f64>>("subtotal")?,
+            );
+            insert_integer(
+                &mut object,
+                "subtotal_cents",
+                row.get::<_, Option<i64>>("subtotal_cents")?,
             );
             insert_string(
                 &mut object,
@@ -1219,6 +1272,11 @@ fn load_local_order_insert_fallback(
             );
             insert_string(
                 &mut object,
+                "delivery_address_id",
+                row.get::<_, Option<String>>("delivery_address_id")?,
+            );
+            insert_string(
+                &mut object,
                 "delivery_city",
                 row.get::<_, Option<String>>("delivery_city")?,
             );
@@ -1236,6 +1294,26 @@ fn load_local_order_insert_fallback(
                 &mut object,
                 "delivery_notes",
                 row.get::<_, Option<String>>("delivery_notes")?,
+            );
+            insert_number(
+                &mut object,
+                "delivery_latitude",
+                row.get::<_, Option<f64>>("delivery_latitude")?,
+            );
+            insert_number(
+                &mut object,
+                "delivery_longitude",
+                row.get::<_, Option<f64>>("delivery_longitude")?,
+            );
+            insert_string(
+                &mut object,
+                "delivery_address_fingerprint",
+                row.get::<_, Option<String>>("delivery_address_fingerprint")?,
+            );
+            insert_string(
+                &mut object,
+                "delivery_zone_id",
+                row.get::<_, Option<String>>("delivery_zone_id")?,
             );
             insert_string(
                 &mut object,
@@ -1257,11 +1335,7 @@ fn load_local_order_insert_fallback(
                 "payment_status",
                 row.get::<_, Option<String>>("payment_status")?,
             );
-            insert_string(
-                &mut object,
-                "payment_method",
-                row.get::<_, Option<String>>("payment_method")?,
-            );
+            insert_string(&mut object, "payment_method", derived_method.clone());
             insert_string(
                 &mut object,
                 "driver_id",
@@ -1282,10 +1356,20 @@ fn load_local_order_insert_fallback(
                 "discount_amount",
                 row.get::<_, Option<f64>>("discount_amount")?,
             );
+            insert_integer(
+                &mut object,
+                "discount_amount_cents",
+                row.get::<_, Option<i64>>("discount_amount_cents")?,
+            );
             insert_number(
                 &mut object,
                 "tip_amount",
                 row.get::<_, Option<f64>>("tip_amount")?,
+            );
+            insert_integer(
+                &mut object,
+                "tip_amount_cents",
+                row.get::<_, Option<i64>>("tip_amount_cents")?,
             );
             insert_string(
                 &mut object,
@@ -1306,6 +1390,11 @@ fn load_local_order_insert_fallback(
                 &mut object,
                 "delivery_fee",
                 row.get::<_, Option<f64>>("delivery_fee")?,
+            );
+            insert_integer(
+                &mut object,
+                "delivery_fee_cents",
+                row.get::<_, Option<i64>>("delivery_fee_cents")?,
             );
             insert_string(
                 &mut object,
@@ -1478,6 +1567,9 @@ fn build_order_insert_body(
                 )
             },
         );
+    let delivery_address_id =
+        string_field_from_sources(&sources, &["delivery_address_id", "deliveryAddressId"])
+            .filter(|candidate| Uuid::parse_str(candidate).is_ok());
     let delivery_city = string_field_from_sources(&sources, &["delivery_city", "deliveryCity"])
         .or_else(|| nested_string_field_from_sources(&sources, &[&["address", "city"]]));
     let delivery_postal_code =
@@ -1513,12 +1605,31 @@ fn build_order_insert_body(
                 &[&["address", "name_on_ringer"], &["address", "nameOnRinger"]],
             )
         });
+    let delivery_latitude =
+        number_field_from_sources(&sources, &["delivery_latitude", "deliveryLatitude", "latitude"])
+            .filter(|value| value.is_finite() && (-90.0..=90.0).contains(value));
+    let delivery_longitude =
+        number_field_from_sources(&sources, &["delivery_longitude", "deliveryLongitude", "longitude"])
+            .filter(|value| value.is_finite() && (-180.0..=180.0).contains(value));
+    let delivery_address_fingerprint = string_field_from_sources(
+        &sources,
+        &["delivery_address_fingerprint", "deliveryAddressFingerprint", "address_fingerprint"],
+    );
+    let delivery_zone_id =
+        string_field_from_sources(&sources, &["delivery_zone_id", "deliveryZoneId"])
+            .filter(|candidate| Uuid::parse_str(candidate).is_ok());
     let ghost_metadata = json_field_from_sources(&sources, &["ghost_metadata", "ghostMetadata"])
         .and_then(|value| match value {
             Value::Object(_) => Some(value),
             _ => None,
         });
 
+    // W4d-iv additive emission: every monetary float key gets a `_cents`
+    // sibling so admin-dashboard can read either shape during the bake
+    // window. coupon_discount_amount and manual_discount_value are
+    // included; manual_discount_mode is a string so no cents needed.
+    let tip_amount =
+        number_field_from_sources(&sources, &["tip_amount", "tipAmount"]).unwrap_or(0.0);
     Ok(serde_json::json!({
         "client_order_id": string_field_from_sources(&sources, &["client_order_id", "clientOrderId"])
             .unwrap_or_else(|| record_id.to_string()),
@@ -1528,19 +1639,25 @@ fn build_order_insert_body(
         "payment_status": payment_status,
         "payment_method": payment_method,
         "total_amount": total_amount,
+        "total_amount_cents": Cents::round_half_even(total_amount).as_i64(),
         "subtotal": subtotal,
+        "subtotal_cents": Cents::round_half_even(subtotal).as_i64(),
         "tax_amount": tax_amount,
+        "tax_amount_cents": Cents::round_half_even(tax_amount).as_i64(),
         "tax_rate": number_field_from_sources(&sources, &["tax_rate", "taxRate"]),
         "delivery_fee": delivery_fee,
+        "delivery_fee_cents": Cents::round_half_even(delivery_fee).as_i64(),
         "discount_percentage": discount_percentage,
         "discount_amount": discount_amount,
+        "discount_amount_cents": Cents::round_half_even(discount_amount).as_i64(),
         "manual_discount_mode": manual_discount_mode,
         "manual_discount_value": manual_discount_value,
         "coupon_id": string_field_from_sources(&sources, &["coupon_id", "couponId"]),
         "coupon_code": string_field_from_sources(&sources, &["coupon_code", "couponCode"]),
         "coupon_discount_amount": coupon_discount_amount,
-        "tip_amount": number_field_from_sources(&sources, &["tip_amount", "tipAmount"])
-            .unwrap_or(0.0),
+        "coupon_discount_amount_cents": Cents::round_half_even(coupon_discount_amount).as_i64(),
+        "tip_amount": tip_amount,
+        "tip_amount_cents": Cents::round_half_even(tip_amount).as_i64(),
         "country_code": string_field_from_sources(&sources, &["country_code", "countryCode"])
             .map(|value| value.trim().to_ascii_uppercase()),
         "pricing_mode": string_field_from_sources(&sources, &["pricing_mode", "pricingMode"]),
@@ -1553,10 +1670,15 @@ fn build_order_insert_body(
             .unwrap_or_else(|| "pending".to_string()),
         "table_number": integer_field_from_sources(&sources, &["table_number", "tableNumber"]),
         "delivery_address": delivery_address,
+        "delivery_address_id": delivery_address_id,
         "delivery_city": delivery_city,
         "delivery_postal_code": delivery_postal_code,
         "delivery_floor": delivery_floor,
         "delivery_notes": delivery_notes,
+        "delivery_latitude": delivery_latitude,
+        "delivery_longitude": delivery_longitude,
+        "delivery_address_fingerprint": delivery_address_fingerprint,
+        "delivery_zone_id": delivery_zone_id,
         "name_on_ringer": name_on_ringer,
         "notes": string_field_from_sources(&sources, &["notes", "orderNotes", "order_notes"])
             .or_else(|| string_field_from_sources(&sources, &["special_instructions", "specialInstructions"])),
@@ -1670,7 +1792,19 @@ fn resolve_payment_total_conflict_parity_row_with_conn(
     )?
     .is_some()
     {
-        mark_success(conn, queue_id)?;
+        // Wave 10 H8: this conflict-resolution path is the
+        // authoritative actor (not a worker ack), so read the row's
+        // current generation and pass it to mark_success. The generation
+        // check then trivially passes — we are claiming the row's
+        // current state regardless of any concurrent recover_stale.
+        let current_generation: i64 = conn
+            .query_row(
+                "SELECT claim_generation FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        mark_success(conn, queue_id, current_generation)?;
         return Ok(true);
     }
 
@@ -1693,7 +1827,15 @@ fn resolve_payment_total_conflict_parity_row_with_conn(
     }
 
     let order_id = extract_payment_payload_order_id(&payload);
-    mark_success(conn, queue_id)?;
+    // Wave 10 H8: same authoritative-actor pattern as the branch above.
+    let current_generation: i64 = conn
+        .query_row(
+            "SELECT claim_generation FROM parity_sync_queue WHERE id = ?1",
+            params![queue_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    mark_success(conn, queue_id, current_generation)?;
     info!(
         queue_id = %queue_id,
         payment_id = %payment_id,
@@ -2088,7 +2230,8 @@ pub fn dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
         .query_row(
             "SELECT id, table_name, record_id, operation, data, organization_id,
                     created_at, attempts, last_attempt, error_message, next_retry_at,
-                    retry_delay_ms, priority, module_type, conflict_strategy, version, status
+                    retry_delay_ms, priority, module_type, conflict_strategy, version,
+                    claim_generation, status
              FROM parity_sync_queue
              WHERE status = 'pending'
                AND (next_retry_at IS NULL OR next_retry_at <= ?1)
@@ -2113,23 +2256,33 @@ pub fn dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
                     module_type: row.get(13)?,
                     conflict_strategy: row.get(14)?,
                     version: row.get(15)?,
-                    status: row.get(16)?,
+                    claim_generation: row.get(16)?,
+                    status: row.get(17)?,
                 })
             },
         )
         .optional()
         .map_err(|e| format!("sync_queue dequeue: {e}"))?;
 
-    if let Some(ref item) = item {
-        // Mark as processing and stamp the claim time so abandoned rows can be recovered.
-        conn.execute(
-            "UPDATE parity_sync_queue
-             SET status = 'processing',
-                 last_attempt = ?1
-             WHERE id = ?2",
-            params![now, item.id],
-        )
-        .map_err(|e| format!("sync_queue mark processing: {e}"))?;
+    if let Some(mut item) = item {
+        // Wave 10 H8: bump claim_generation on every claim. The
+        // generation we read above is now stale; the row's authoritative
+        // generation is the post-bump value. Use UPDATE … RETURNING so
+        // the read-then-write pair is one statement.
+        let new_generation: i64 = conn
+            .query_row(
+                "UPDATE parity_sync_queue
+                 SET status = 'processing',
+                     last_attempt = ?1,
+                     claim_generation = claim_generation + 1
+                 WHERE id = ?2
+                 RETURNING claim_generation",
+                params![now, item.id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("sync_queue mark processing: {e}"))?;
+        item.claim_generation = new_generation;
+        return Ok(Some(item));
     }
 
     Ok(item)
@@ -2145,11 +2298,17 @@ fn recover_stale_processing_items(conn: &Connection) -> Result<i64, String> {
     // statements. `RETURNING` gives us the rows we actually mutated,
     // atomically, so the audit log cannot drift from reality.
     let lease_modifier = format!("-{} seconds", PROCESSING_LEASE_SECS);
+    // Wave 10 H8: bump claim_generation atomically with the recovery.
+    // The in-flight worker that owned the prior generation will fail
+    // the WHERE-claim_generation guard in `mark_success` when its late
+    // ack lands. attempts is INTENTIONALLY not bumped — a stale claim
+    // does not consume a retry slot.
     let mut stmt = conn
         .prepare(
             "UPDATE parity_sync_queue
              SET status = 'pending',
-                 next_retry_at = NULL
+                 next_retry_at = NULL,
+                 claim_generation = claim_generation + 1
              WHERE status = 'processing'
                AND julianday(COALESCE(last_attempt, created_at))
                    <= julianday('now', ?1)
@@ -2186,7 +2345,8 @@ pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
     conn.query_row(
         "SELECT id, table_name, record_id, operation, data, organization_id,
                 created_at, attempts, last_attempt, error_message, next_retry_at,
-                retry_delay_ms, priority, module_type, conflict_strategy, version, status
+                retry_delay_ms, priority, module_type, conflict_strategy, version,
+                claim_generation, status
          FROM parity_sync_queue
          WHERE status = 'pending'
            AND (next_retry_at IS NULL OR next_retry_at <= ?1)
@@ -2211,7 +2371,8 @@ pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
                 module_type: row.get(13)?,
                 conflict_strategy: row.get(14)?,
                 version: row.get(15)?,
-                status: row.get(16)?,
+                claim_generation: row.get(16)?,
+                status: row.get(17)?,
             })
         },
     )
@@ -2305,7 +2466,8 @@ pub fn list_actionable_items(
     {
         "SELECT id, table_name, record_id, operation, data, organization_id,
                 created_at, attempts, last_attempt, error_message, next_retry_at,
-                retry_delay_ms, priority, module_type, conflict_strategy, version, status
+                retry_delay_ms, priority, module_type, conflict_strategy, version,
+                claim_generation, status
          FROM parity_sync_queue
          WHERE status IN ('pending', 'processing', 'failed', 'conflict')
            AND module_type = ?1
@@ -2322,7 +2484,8 @@ pub fn list_actionable_items(
     } else {
         "SELECT id, table_name, record_id, operation, data, organization_id,
                 created_at, attempts, last_attempt, error_message, next_retry_at,
-                retry_delay_ms, priority, module_type, conflict_strategy, version, status
+                retry_delay_ms, priority, module_type, conflict_strategy, version,
+                claim_generation, status
          FROM parity_sync_queue
          WHERE status IN ('pending', 'processing', 'failed', 'conflict')
          ORDER BY
@@ -2359,7 +2522,8 @@ pub fn list_actionable_items(
             module_type: row.get(13)?,
             conflict_strategy: row.get(14)?,
             version: row.get(15)?,
-            status: row.get(16)?,
+            claim_generation: row.get(16)?,
+            status: row.get(17)?,
         })
     };
 
@@ -2457,12 +2621,41 @@ pub fn list_conflict_audit_entries(
 }
 
 /// Mark an item as successfully processed and remove it from the queue.
-pub fn mark_success(conn: &Connection, item_id: &str) -> Result<(), String> {
-    conn.execute(
-        "DELETE FROM parity_sync_queue WHERE id = ?1",
-        params![item_id],
-    )
-    .map_err(|e| format!("sync_queue mark_success: {e}"))?;
+///
+/// Wave 10 H8: takes the caller's `expected_generation` (the
+/// `claim_generation` from the `SyncQueueItem` returned by `dequeue`)
+/// and only deletes the row when the caller's generation matches the
+/// row's current generation. A late ack from a worker whose lease
+/// expired (and whose generation was bumped by
+/// `recover_stale_processing_items`) is silently dropped — the row
+/// stays in its current state (already reclaimed by another worker,
+/// or already success-deleted by the worker that owned the new
+/// generation).
+///
+/// Returns `Ok(())` in BOTH cases (deleted and no-op). Callers do not
+/// need to distinguish — the only relevant invariant is "this caller's
+/// success ack will not corrupt a fresh in-flight claim". A debug log
+/// records the no-op for observability.
+pub fn mark_success(
+    conn: &Connection,
+    item_id: &str,
+    expected_generation: i64,
+) -> Result<(), String> {
+    let rows_affected = conn
+        .execute(
+            "DELETE FROM parity_sync_queue
+             WHERE id = ?1 AND claim_generation = ?2",
+            params![item_id, expected_generation],
+        )
+        .map_err(|e| format!("sync_queue mark_success: {e}"))?;
+
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "Wave 10 H8: mark_success no-op — claim_generation mismatch (row reclaimed by another worker or already deleted)"
+        );
+    }
 
     Ok(())
 }
@@ -2481,6 +2674,7 @@ pub fn mark_failure(
     conn: &Connection,
     item_id: &str,
     error_message: &str,
+    expected_generation: i64,
 ) -> Result<Option<MonetaryDeadLetter>, String> {
     let now = Utc::now().to_rfc3339();
 
@@ -2497,15 +2691,36 @@ pub fn mark_failure(
     let new_attempts = attempts + 1;
 
     if new_attempts >= MAX_RETRY_ATTEMPTS {
-        // Max retries exhausted -- mark as permanently failed
-        conn.execute(
-            "UPDATE parity_sync_queue
-             SET status = 'failed', attempts = ?1, last_attempt = ?2,
-                 error_message = ?3
-             WHERE id = ?4",
-            params![new_attempts, now, error_message, item_id],
-        )
-        .map_err(|e| format!("sync_queue mark_failed: {e}"))?;
+        // Max retries exhausted -- mark as permanently failed.
+        // Wave 10 H8 sub-follow-up: the guard predicate
+        // `claim_generation = ?N` mirrors the `mark_success` shape.
+        // If the row was reclaimed (generation bumped beneath us)
+        // the UPDATE affects 0 rows, we skip the dead-letter path
+        // entirely, and return Ok(None) — the fresh claimer's own
+        // ack determines the row's terminal state.
+        let rows_affected = conn
+            .execute(
+                "UPDATE parity_sync_queue
+                 SET status = 'failed', attempts = ?1, last_attempt = ?2,
+                     error_message = ?3
+                 WHERE id = ?4 AND claim_generation = ?5",
+                params![
+                    new_attempts,
+                    now,
+                    error_message,
+                    item_id,
+                    expected_generation
+                ],
+            )
+            .map_err(|e| format!("sync_queue mark_failed: {e}"))?;
+        if rows_affected == 0 {
+            debug!(
+                item_id = %item_id,
+                expected_generation,
+                "Wave 10 H8: mark_failure (terminal) no-op — claim_generation mismatch"
+            );
+            return Ok(None);
+        }
 
         // Wave 4 H: log at ERROR for monetary items so the audit log
         // has a specific searchable marker. Non-monetary items stay at
@@ -2556,22 +2771,37 @@ pub fn mark_failure(
         let new_delay = compute_next_retry_delay_ms(retry_delay_ms, &module_type);
         let next_retry = Utc::now() + ChronoDuration::milliseconds(new_delay);
 
-        conn.execute(
-            "UPDATE parity_sync_queue
-             SET status = 'pending', attempts = ?1, last_attempt = ?2,
-                 error_message = ?3, retry_delay_ms = ?4,
-                 next_retry_at = ?5
-             WHERE id = ?6",
-            params![
-                new_attempts,
-                now,
-                error_message,
-                new_delay,
-                next_retry.to_rfc3339(),
-                item_id,
-            ],
-        )
-        .map_err(|e| format!("sync_queue schedule_retry: {e}"))?;
+        // Wave 10 H8 sub-follow-up: same `claim_generation` guard
+        // as the terminal-failed branch above. If a stale claimer's
+        // failure ack lands after recover_stale bumped the
+        // generation, the UPDATE affects 0 rows and we drop the
+        // attempts bump silently — the fresh claimer's `attempts`
+        // counter is preserved.
+        let rows_affected = conn
+            .execute(
+                "UPDATE parity_sync_queue
+                 SET status = 'pending', attempts = ?1, last_attempt = ?2,
+                     error_message = ?3, retry_delay_ms = ?4,
+                     next_retry_at = ?5
+                 WHERE id = ?6 AND claim_generation = ?7",
+                params![
+                    new_attempts,
+                    now,
+                    error_message,
+                    new_delay,
+                    next_retry.to_rfc3339(),
+                    item_id,
+                    expected_generation,
+                ],
+            )
+            .map_err(|e| format!("sync_queue schedule_retry: {e}"))?;
+        if rows_affected == 0 {
+            debug!(
+                item_id = %item_id,
+                expected_generation,
+                "Wave 10 H8: mark_failure (schedule-retry) no-op — claim_generation mismatch"
+            );
+        }
     }
 
     Ok(None)
@@ -2582,6 +2812,7 @@ pub fn mark_rate_limited(
     item_id: &str,
     error_message: &str,
     retry_after_secs: i64,
+    expected_generation: i64,
 ) -> Result<(), String> {
     let now = Utc::now();
     let retry_after_secs = retry_after_secs.max(1);
@@ -2589,28 +2820,45 @@ pub fn mark_rate_limited(
         (retry_after_secs * 1000).clamp(DEFAULT_INITIAL_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
     let next_retry = now + ChronoDuration::seconds(retry_after_secs);
 
-    conn.execute(
-        "UPDATE parity_sync_queue
-         SET status = 'pending',
-             last_attempt = ?1,
-             error_message = ?2,
-             retry_delay_ms = ?3,
-             next_retry_at = ?4
-         WHERE id = ?5",
-        params![
-            now.to_rfc3339(),
-            error_message,
-            retry_delay_ms,
-            next_retry.to_rfc3339(),
-            item_id,
-        ],
-    )
-    .map_err(|e| format!("sync_queue mark_rate_limited: {e}"))?;
+    // Wave 10 H8 sub-follow-up: claim_generation guard mirrors the
+    // mark_success / mark_failure shape. A stale claimer's
+    // rate-limit ack must NOT clobber the fresh claimer's row state.
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 last_attempt = ?1,
+                 error_message = ?2,
+                 retry_delay_ms = ?3,
+                 next_retry_at = ?4
+             WHERE id = ?5 AND claim_generation = ?6",
+            params![
+                now.to_rfc3339(),
+                error_message,
+                retry_delay_ms,
+                next_retry.to_rfc3339(),
+                item_id,
+                expected_generation,
+            ],
+        )
+        .map_err(|e| format!("sync_queue mark_rate_limited: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "Wave 10 H8: mark_rate_limited no-op — claim_generation mismatch"
+        );
+    }
 
     Ok(())
 }
 
-pub fn mark_deferred(conn: &Connection, item_id: &str, reason: &str) -> Result<(), String> {
+pub fn mark_deferred(
+    conn: &Connection,
+    item_id: &str,
+    reason: &str,
+    expected_generation: i64,
+) -> Result<(), String> {
     // Wave 4: increment `attempts` so deferral cannot loop forever.
     // Before this fix a row deferred with e.g. "Waiting for parent
     // order sync" would re-enter `pending` with a 5s retry and no
@@ -2628,21 +2876,34 @@ pub fn mark_deferred(conn: &Connection, item_id: &str, reason: &str) -> Result<(
     let new_attempts = current_attempts + 1;
 
     if new_attempts >= MAX_DEFERRAL_CYCLES {
-        conn.execute(
-            "UPDATE parity_sync_queue
-             SET status = 'conflict',
-                 attempts = ?1,
-                 error_message = ?2
-             WHERE id = ?3",
-            params![
-                new_attempts,
-                format!(
-                    "Deferred too many times ({new_attempts}× \"{reason}\"); escalated to conflict"
-                ),
-                item_id
-            ],
-        )
-        .map_err(|e| format!("sync_queue mark_deferred escalate: {e}"))?;
+        // Wave 10 H8 sub-follow-up: claim_generation guard. A stale
+        // claimer must not escalate the row to 'conflict' if the
+        // fresh claimer has already taken over.
+        let rows_affected = conn
+            .execute(
+                "UPDATE parity_sync_queue
+                 SET status = 'conflict',
+                     attempts = ?1,
+                     error_message = ?2
+                 WHERE id = ?3 AND claim_generation = ?4",
+                params![
+                    new_attempts,
+                    format!(
+                        "Deferred too many times ({new_attempts}× \"{reason}\"); escalated to conflict"
+                    ),
+                    item_id,
+                    expected_generation,
+                ],
+            )
+            .map_err(|e| format!("sync_queue mark_deferred escalate: {e}"))?;
+        if rows_affected == 0 {
+            debug!(
+                item_id = %item_id,
+                expected_generation,
+                "Wave 10 H8: mark_deferred (escalate-to-conflict) no-op — claim_generation mismatch"
+            );
+            return Ok(());
+        }
         warn!(
             id = %item_id,
             attempts = new_attempts,
@@ -2653,27 +2914,59 @@ pub fn mark_deferred(conn: &Connection, item_id: &str, reason: &str) -> Result<(
     }
 
     let next_retry = Utc::now() + ChronoDuration::seconds(5);
-    conn.execute(
-        "UPDATE parity_sync_queue
-         SET status = 'pending',
-             attempts = ?1,
-             error_message = ?2,
-             next_retry_at = ?3
-         WHERE id = ?4",
-        params![new_attempts, reason, next_retry.to_rfc3339(), item_id],
-    )
-    .map_err(|e| format!("sync_queue mark_deferred: {e}"))?;
+    // Wave 10 H8 sub-follow-up: same guard for the reschedule branch.
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 attempts = ?1,
+                 error_message = ?2,
+                 next_retry_at = ?3
+             WHERE id = ?4 AND claim_generation = ?5",
+            params![
+                new_attempts,
+                reason,
+                next_retry.to_rfc3339(),
+                item_id,
+                expected_generation,
+            ],
+        )
+        .map_err(|e| format!("sync_queue mark_deferred: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "Wave 10 H8: mark_deferred (reschedule) no-op — claim_generation mismatch"
+        );
+    }
 
     Ok(())
 }
 
 /// Mark an item as having a conflict.
-pub fn mark_conflict(conn: &Connection, item_id: &str) -> Result<(), String> {
-    conn.execute(
-        "UPDATE parity_sync_queue SET status = 'conflict' WHERE id = ?1",
-        params![item_id],
-    )
-    .map_err(|e| format!("sync_queue mark_conflict: {e}"))?;
+pub fn mark_conflict(
+    conn: &Connection,
+    item_id: &str,
+    expected_generation: i64,
+) -> Result<(), String> {
+    // Wave 10 H8 sub-follow-up: claim_generation guard. A stale
+    // claimer's HTTP-409 ack must not flip a row already reclaimed
+    // by a fresh worker into 'conflict'.
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'conflict'
+             WHERE id = ?1 AND claim_generation = ?2",
+            params![item_id, expected_generation],
+        )
+        .map_err(|e| format!("sync_queue mark_conflict: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "Wave 10 H8: mark_conflict no-op — claim_generation mismatch"
+        );
+    }
 
     Ok(())
 }
@@ -2780,9 +3073,11 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         "payment_adjustments" => {
             prepare_adjustment_request(conn, item, &payload, terminal_id.as_str())
         }
+        "staff_shifts" => prepare_shift_request(conn, item, &payload, terminal_id.as_str()),
         "driver_earnings" | "driver_earning" | "shift_expenses" | "staff_payments" => {
             prepare_financial_request(conn, item, &payload, terminal_id.as_str())
         }
+        "loyalty_transactions" => prepare_loyalty_request(item, &payload, terminal_id.as_str()),
         "housekeeping_tasks" => prepare_housekeeping_request(item, &payload, terminal_id.as_str()),
         "customer_addresses" => {
             prepare_customer_address_request(conn, item, &payload, terminal_id.as_str())
@@ -2798,6 +3093,161 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             terminal_id,
         })),
     }
+}
+
+fn shift_event_type(item: &SyncQueueItem, payload: &Value) -> &'static str {
+    if item.operation == "INSERT" {
+        return "shift_open";
+    }
+
+    let is_transfer_update = payload.get("isTransferPending").is_some()
+        || payload.get("is_transfer_pending").is_some()
+        || payload.get("transferredToCashierShiftId").is_some()
+        || payload.get("transferred_to_cashier_shift_id").is_some();
+    if is_transfer_update {
+        return "shift_transfer";
+    }
+
+    "shift_close"
+}
+
+fn prepare_shift_request(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    let (_, runtime_branch_id, _) = resolve_runtime_context(conn, payload);
+    let branch_id = string_field(payload, &["branchId", "branch_id"])
+        .or_else(|| {
+            let trimmed = runtime_branch_id.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .unwrap_or_default();
+    if branch_id.is_empty() {
+        return Ok(RequestPreparation::Failed {
+            reason: "Shift sync request is missing branch_id context".to_string(),
+        });
+    }
+
+    let shift_id = string_field(payload, &["shiftId", "shift_id"])
+        .unwrap_or_else(|| item.record_id.trim().to_string());
+    if shift_id.is_empty() {
+        return Ok(RequestPreparation::Failed {
+            reason: "Shift sync request is missing shift_id".to_string(),
+        });
+    }
+
+    let idempotency_key = string_field(payload, &["idempotencyKey", "idempotency_key"])
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}",
+                crate::idempotency::make_entity_key(
+                    conn,
+                    item.table_name.as_str(),
+                    &item.record_id
+                ),
+                item.operation.to_ascii_lowercase()
+            )
+        });
+
+    let body = serde_json::json!({
+        "terminal_id": terminal_id,
+        "branch_id": branch_id,
+        "events": [{
+            "event_type": shift_event_type(item, payload),
+            "shift_id": shift_id,
+            "idempotency_key": idempotency_key,
+            "data": payload,
+        }],
+    });
+
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: "/api/pos/shifts/sync".to_string(),
+        method: Method::POST,
+        body: Some(body.to_string()),
+        terminal_id: terminal_id.to_string(),
+    }))
+}
+
+/// Wave 5 Session 6: loyalty dispatcher. The admin loyalty API exposes two
+/// distinct endpoints (`/api/pos/loyalty/earn` and `/api/pos/loyalty/redeem`)
+/// with narrow payload shapes — a raw pass-through of the producer payload
+/// would hit neither. This function mirrors the legacy `sync_loyalty_transaction`
+/// at `sync.rs:13015` exactly: inspects `transaction_type`, selects the
+/// endpoint, and reshapes the body (extracts the fields admin expects;
+/// flips `points` sign for redeem because the local row stores the redemption
+/// as a negative delta).
+fn prepare_loyalty_request(
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    let tx_type = payload
+        .get("transaction_type")
+        .and_then(Value::as_str)
+        .unwrap_or("earn");
+
+    let endpoint = match tx_type {
+        "earn" => "/api/pos/loyalty/earn",
+        "redeem" => "/api/pos/loyalty/redeem",
+        other => {
+            return Ok(RequestPreparation::Failed {
+                reason: format!("Unknown loyalty transaction type: {other}"),
+            });
+        }
+    };
+
+    let body = match tx_type {
+        "earn" => {
+            // Wave 4d: prefer integer `amount_cents`; fall back to legacy
+            // float `amount` for any pre-cutover payload still in-flight.
+            let amount_cents = payload
+                .get("amount_cents")
+                .and_then(Value::as_i64)
+                .or_else(|| {
+                    payload
+                        .get("amount")
+                        .and_then(Value::as_f64)
+                        .map(|v| Cents::round_half_even(v).as_i64())
+                })
+                .unwrap_or(0);
+            serde_json::json!({
+                "customer_id": payload.get("customer_id").and_then(Value::as_str).unwrap_or_default(),
+                "order_id": payload.get("order_id").and_then(Value::as_str),
+                "amount_cents": amount_cents,
+                "description": payload.get("description").and_then(Value::as_str),
+            })
+        }
+        "redeem" => {
+            // Local row stores redemption as negative points; admin expects
+            // positive. Take absolute value so server-side validation holds.
+            let points = payload
+                .get("points")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .abs();
+            serde_json::json!({
+                "customer_id": payload.get("customer_id").and_then(Value::as_str).unwrap_or_default(),
+                "points": points,
+                "order_id": payload.get("order_id").and_then(Value::as_str),
+                "description": payload.get("description").and_then(Value::as_str),
+            })
+        }
+        _ => unreachable!("tx_type validated above"),
+    };
+
+    // record_id is in scope if the admin ever needs to log which local
+    // loyalty_transactions row this came from; the body itself does not
+    // carry it because the admin dedup is on (customer_id, order_id).
+    let _ = item.record_id.as_str();
+
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: endpoint.to_string(),
+        method: Method::POST,
+        body: Some(body.to_string()),
+        terminal_id: terminal_id.to_string(),
+    }))
 }
 
 fn prepare_customer_address_request(
@@ -2917,7 +3367,17 @@ fn prepare_order_request(
         });
     };
 
-    let mut status = string_field(payload, &["status"]).unwrap_or_default();
+    let local_order_fallback = load_local_order_insert_fallback(conn, item.record_id.as_str())?;
+    let mut sources = Vec::new();
+    if let Some(local_order_fallback) = local_order_fallback.as_ref() {
+        sources.push(local_order_fallback);
+    }
+    sources.push(payload);
+
+    let mut status = sources
+        .iter()
+        .find_map(|source| string_field(source, &["status"]))
+        .unwrap_or_default();
     if status.is_empty() {
         status = conn
             .query_row(
@@ -2939,24 +3399,195 @@ fn prepare_order_request(
     body.insert("id".to_string(), Value::String(remote_id));
     body.insert("status".to_string(), Value::String(status));
 
-    if let Some(value) = payload
-        .get("estimatedTime")
-        .or_else(|| payload.get("estimated_time"))
-    {
-        if !value.is_null() {
-            body.insert("estimated_time".to_string(), value.clone());
+    fn copy_payload_field(
+        body: &mut Map<String, Value>,
+        payload: &Value,
+        sources: &[&str],
+        target: &str,
+        include_null: bool,
+    ) {
+        for source_key in sources {
+            if let Some(value) = payload.get(*source_key) {
+                if include_null || !value.is_null() {
+                    body.insert(target.to_string(), value.clone());
+                }
+                return;
+            }
         }
     }
-    if let Some(value) = payload
-        .get("notes")
-        .or_else(|| payload.get("reason"))
-        .or_else(|| payload.get("orderNotes"))
-        .or_else(|| payload.get("order_notes"))
-    {
-        if !value.is_null() {
-            body.insert("notes".to_string(), value.clone());
+
+    fn copy_source_field(
+        body: &mut Map<String, Value>,
+        sources: &[&Value],
+        source_keys: &[&str],
+        target: &str,
+        include_null: bool,
+    ) {
+        for source in sources {
+            for source_key in source_keys {
+                if let Some(value) = source.get(*source_key) {
+                    if include_null || !value.is_null() {
+                        body.insert(target.to_string(), value.clone());
+                    }
+                    return;
+                }
+            }
         }
     }
+
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["estimatedTime", "estimated_time"],
+        "estimated_time",
+        false,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &[
+            "notes",
+            "reason",
+            "orderNotes",
+            "order_notes",
+            "special_instructions",
+        ],
+        "notes",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["orderType", "order_type"],
+        "order_type",
+        false,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["customerId", "customer_id"],
+        "customer_id",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["customerName", "customer_name"],
+        "customer_name",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["customerPhone", "customer_phone"],
+        "customer_phone",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["customerEmail", "customer_email"],
+        "customer_email",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryAddress", "delivery_address"],
+        "delivery_address",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryAddressId", "delivery_address_id"],
+        "delivery_address_id",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryCity", "delivery_city"],
+        "delivery_city",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryPostalCode", "delivery_postal_code"],
+        "delivery_postal_code",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryFloor", "delivery_floor"],
+        "delivery_floor",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryNotes", "delivery_notes"],
+        "delivery_notes",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryLatitude", "delivery_latitude"],
+        "delivery_latitude",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryLongitude", "delivery_longitude"],
+        "delivery_longitude",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryAddressFingerprint", "delivery_address_fingerprint"],
+        "delivery_address_fingerprint",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["deliveryZoneId", "delivery_zone_id"],
+        "delivery_zone_id",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["nameOnRinger", "name_on_ringer"],
+        "name_on_ringer",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["tableNumber", "table_number"],
+        "table_number",
+        true,
+    );
+    copy_payload_field(
+        &mut body,
+        payload,
+        &["driverId", "driver_id"],
+        "driver_id",
+        false,
+    );
+    copy_payload_field(
+        &mut body,
+        payload,
+        &["driverName", "driver_name"],
+        "driver_name",
+        false,
+    );
     for (camel, snake) in [
         ("totalAmount", "total_amount"),
         ("subtotal", "subtotal"),
@@ -2968,25 +3599,49 @@ fn prepare_order_request(
         ("paymentStatus", "payment_status"),
         ("paymentMethod", "payment_method"),
     ] {
-        if let Some(value) = payload.get(camel).or_else(|| payload.get(snake)) {
-            if !value.is_null() {
-                body.insert(snake.to_string(), value.clone());
+        for source in &sources {
+            if let Some(value) = source.get(camel).or_else(|| source.get(snake)) {
+                if !value.is_null() {
+                    body.insert(snake.to_string(), value.clone());
+                }
+                break;
             }
         }
     }
-    if let Some(items) = payload.get("items") {
-        if !items.is_null() {
-            body.insert("items".to_string(), items.clone());
+    for (camel, snake) in [
+        ("totalAmountCents", "total_amount_cents"),
+        ("subtotalCents", "subtotal_cents"),
+        ("discountAmountCents", "discount_amount_cents"),
+        ("taxAmountCents", "tax_amount_cents"),
+        ("deliveryFeeCents", "delivery_fee_cents"),
+        ("tipAmountCents", "tip_amount_cents"),
+        ("couponDiscountAmountCents", "coupon_discount_amount_cents"),
+        ("manualDiscountValueCents", "manual_discount_value_cents"),
+    ] {
+        for source in &sources {
+            if let Some(value) = source.get(camel).or_else(|| source.get(snake)) {
+                if !value.is_null() {
+                    body.insert(snake.to_string(), value.clone());
+                }
+                break;
+            }
         }
     }
-    if let Some(order_notes) = payload
-        .get("orderNotes")
-        .or_else(|| payload.get("order_notes"))
-    {
-        if !order_notes.is_null() {
-            body.insert("order_notes".to_string(), order_notes.clone());
+    for source in &sources {
+        if let Some(items) = source.get("items") {
+            if !items.is_null() {
+                body.insert("items".to_string(), items.clone());
+            }
+            break;
         }
     }
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["orderNotes", "order_notes", "special_instructions"],
+        "order_notes",
+        true,
+    );
 
     Ok(RequestPreparation::Ready(RequestSpec {
         endpoint: "/api/pos/orders".to_string(),
@@ -3036,6 +3691,21 @@ fn prepare_payment_request(
         });
     };
 
+    if sync::has_outstanding_local_order_queue(conn, local_order_id.as_str()) {
+        let _ = conn.execute(
+            "UPDATE order_payments
+             SET sync_state = 'waiting_parent',
+                 sync_status = 'pending',
+                 sync_last_error = 'Order update not yet synced',
+                 updated_at = datetime('now')
+             WHERE id = ?1",
+            params![item.record_id.as_str()],
+        );
+        return Ok(RequestPreparation::Deferred {
+            reason: "Waiting for parent order update sync".to_string(),
+        });
+    }
+
     let amount = payload
         .get("amount")
         .and_then(Value::as_f64)
@@ -3048,9 +3718,13 @@ fn prepare_payment_request(
     let payment_method = string_field(payload, &["method", "paymentMethod", "payment_method"])
         .unwrap_or_else(|| "other".to_string());
 
+    // W4d-iv additive emission: payment-sync POST body now ships `amount_cents`
+    // alongside the legacy `amount` float. tip_amount gets the same treatment
+    // when present.
     let mut body = serde_json::json!({
         "order_id": remote_order_id,
         "amount": amount,
+        "amount_cents": Cents::round_half_even(amount).as_i64(),
         "payment_method": payment_method,
         "idempotency_key": format!("payment:{}", item.record_id),
         "metadata": {
@@ -3064,6 +3738,7 @@ fn prepare_payment_request(
     }
     if let Some(value) = payload.get("tipAmount").and_then(Value::as_f64) {
         body["tip_amount"] = Value::from(value);
+        body["tip_amount_cents"] = Value::from(Cents::round_half_even(value).as_i64());
     }
     if let Some(value) = string_field(payload, &["currency"]) {
         body["currency"] = Value::String(value);
@@ -3215,6 +3890,15 @@ fn prepare_financial_request(
     terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
     let (_, branch_id, _) = resolve_runtime_context(conn, payload);
+    // Wave 5 C17: the idempotency key is anchored on the entity row's own
+    // `idempotency_key` column (populated by migration v47+ / trigger v49)
+    // instead of the volatile `parity_sync_queue.id`. That way, a re-enqueue
+    // after a failed retry produces the SAME key the server already saw,
+    // and its dedup can recognise the two submissions as one logical op.
+    // The previous key — `parity:{item.id}` — was stamped from the queue
+    // row's UUID which rotates on every re-enqueue, defeating exactly-once.
+    let idempotency_key =
+        crate::idempotency::make_entity_key(conn, item.table_name.as_str(), &item.record_id);
     let body = serde_json::json!({
         "terminal_id": terminal_id,
         "branch_id": branch_id,
@@ -3222,7 +3906,7 @@ fn prepare_financial_request(
             "entity_type": financial_entity_type(item.table_name.as_str()),
             "entity_id": item.record_id,
             "operation": financial_operation(item.operation.as_str()),
-            "idempotency_key": format!("parity:{}", item.id),
+            "idempotency_key": idempotency_key,
             "payload": payload,
         }],
     });
@@ -3281,6 +3965,32 @@ fn extract_response_string(response: Option<&Value>, paths: &[&str]) -> Option<S
     None
 }
 
+fn extract_response_number(response: Option<&Value>, paths: &[&str]) -> Option<f64> {
+    for path in paths {
+        let mut current = response?;
+        let mut found = true;
+        for segment in path.split('.') {
+            current = match current.get(segment) {
+                Some(value) => value,
+                None => {
+                    found = false;
+                    break;
+                }
+            };
+        }
+
+        if found {
+            if let Some(value) = current.as_f64() {
+                if value.is_finite() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn apply_success(
     conn: &Connection,
     item: &SyncQueueItem,
@@ -3290,6 +4000,63 @@ fn apply_success(
 
     match item.table_name.as_str() {
         "orders" => {
+            let response_customer_id = extract_response_string(
+                response,
+                &[
+                    "data.customer_id",
+                    "data.customerId",
+                    "data.customer.id",
+                    "customer_id",
+                    "customerId",
+                    "customer.id",
+                ],
+            );
+            let response_delivery_address_id = extract_response_string(
+                response,
+                &[
+                    "data.delivery_address_id",
+                    "data.deliveryAddressId",
+                    "delivery_address_id",
+                    "deliveryAddressId",
+                ],
+            );
+            let response_delivery_latitude = extract_response_number(
+                response,
+                &[
+                    "data.delivery_latitude",
+                    "data.deliveryLatitude",
+                    "delivery_latitude",
+                    "deliveryLatitude",
+                ],
+            );
+            let response_delivery_longitude = extract_response_number(
+                response,
+                &[
+                    "data.delivery_longitude",
+                    "data.deliveryLongitude",
+                    "delivery_longitude",
+                    "deliveryLongitude",
+                ],
+            );
+            let response_delivery_address_fingerprint = extract_response_string(
+                response,
+                &[
+                    "data.delivery_address_fingerprint",
+                    "data.deliveryAddressFingerprint",
+                    "delivery_address_fingerprint",
+                    "deliveryAddressFingerprint",
+                ],
+            );
+            let response_delivery_zone_id = extract_response_string(
+                response,
+                &[
+                    "data.delivery_zone_id",
+                    "data.deliveryZoneId",
+                    "delivery_zone_id",
+                    "deliveryZoneId",
+                ],
+            );
+
             if item.operation == "INSERT" {
                 let remote_id = extract_response_string(
                     response,
@@ -3300,9 +4067,25 @@ fn apply_success(
                      SET sync_status = 'synced',
                          last_synced_at = ?1,
                          supabase_id = COALESCE(NULLIF(supabase_id, ''), ?2),
+                         customer_id = COALESCE(?3, customer_id),
+                         delivery_address_id = COALESCE(?4, delivery_address_id),
+                         delivery_latitude = COALESCE(?5, delivery_latitude),
+                         delivery_longitude = COALESCE(?6, delivery_longitude),
+                         delivery_address_fingerprint = COALESCE(?7, delivery_address_fingerprint),
+                         delivery_zone_id = COALESCE(?8, delivery_zone_id),
                          updated_at = ?1
-                     WHERE id = ?3",
-                    params![now, remote_id, item.record_id.as_str()],
+                     WHERE id = ?9",
+                    params![
+                        now,
+                        remote_id,
+                        response_customer_id,
+                        response_delivery_address_id,
+                        response_delivery_latitude,
+                        response_delivery_longitude,
+                        response_delivery_address_fingerprint,
+                        response_delivery_zone_id,
+                        item.record_id.as_str()
+                    ],
                 )
                 .map_err(|e| format!("sync_queue apply_success order insert: {e}"))?;
                 sync::promote_payments_for_order(conn, item.record_id.as_str());
@@ -3311,9 +4094,23 @@ fn apply_success(
                     "UPDATE orders
                      SET sync_status = 'synced',
                          last_synced_at = ?1,
-                         updated_at = ?1
-                     WHERE id = ?2",
-                    params![now, item.record_id.as_str()],
+                         customer_id = COALESCE(?2, customer_id),
+                         delivery_address_id = COALESCE(?3, delivery_address_id),
+                         delivery_latitude = COALESCE(?4, delivery_latitude),
+                         delivery_longitude = COALESCE(?5, delivery_longitude),
+                         delivery_address_fingerprint = COALESCE(?6, delivery_address_fingerprint),
+                         delivery_zone_id = COALESCE(?7, delivery_zone_id)
+                     WHERE id = ?8",
+                    params![
+                        now,
+                        response_customer_id,
+                        response_delivery_address_id,
+                        response_delivery_latitude,
+                        response_delivery_longitude,
+                        response_delivery_address_fingerprint,
+                        response_delivery_zone_id,
+                        item.record_id.as_str()
+                    ],
                 )
                 .map_err(|e| format!("sync_queue apply_success order update: {e}"))?;
             }
@@ -3360,6 +4157,19 @@ fn apply_success(
                 }
             }
         }
+        "z_reports" => {
+            conn.execute(
+                "UPDATE z_reports
+                 SET sync_state = 'applied',
+                     sync_retry_count = 0,
+                     sync_last_error = NULL,
+                     sync_next_retry_at = NULL,
+                     updated_at = ?1
+                 WHERE id = ?2",
+                params![now, item.record_id.as_str()],
+            )
+            .map_err(|e| format!("sync_queue apply_success z_report: {e}"))?;
+        }
         "customer_addresses" => {
             update_customer_address_cache_after_sync(conn, item, response)?;
         }
@@ -3385,6 +4195,20 @@ fn apply_success(
                     params![remote_id, now, item.record_id.as_str()],
                 );
             }
+        }
+        "loyalty_transactions" => {
+            // Wave 5 Session 6: mirror legacy `sync_loyalty_items`
+            // (sync.rs:12875) which flipped `sync_state='applied'` on
+            // success. Without this case, successfully-synced loyalty
+            // rows would silently remain `sync_state='pending'` and
+            // parity gates would keep surfacing them as unsynced.
+            conn.execute(
+                "UPDATE loyalty_transactions
+                 SET sync_state = 'applied'
+                 WHERE id = ?1",
+                params![item.record_id.as_str()],
+            )
+            .map_err(|e| format!("sync_queue apply_success loyalty_transaction: {e}"))?;
         }
         _ => {}
     }
@@ -3467,17 +4291,19 @@ pub async fn process_queue(
             RequestPreparation::Ready(spec) => spec,
             RequestPreparation::Deferred { reason } => {
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                mark_deferred(&db, &item.id, &reason)?;
+                mark_deferred(&db, &item.id, &reason, item.claim_generation)?;
                 continue;
             }
             RequestPreparation::Failed { reason } => {
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                if let Some(dl) = mark_failure(&db, &item.id, &reason)? {
+                if let Some(dl) = mark_failure(&db, &item.id, &reason, item.claim_generation)? {
                     monetary_dead_letters.push(dl);
                 }
                 db.execute(
-                    "UPDATE parity_sync_queue SET status = 'failed' WHERE id = ?1",
-                    params![item.id],
+                    "UPDATE parity_sync_queue
+                     SET status = 'failed'
+                     WHERE id = ?1 AND claim_generation = ?2",
+                    params![item.id, item.claim_generation],
                 )
                 .map_err(|e| format!("mark parity item permanently failed: {e}"))?;
                 failed += 1;
@@ -3526,9 +4352,26 @@ pub async fn process_queue(
                 if is_success {
                     // Success -- remove from queue
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    apply_success(&db, &item, response_json.as_ref())?;
-                    mark_success(&db, &item.id)?;
-                    processed += 1;
+                    let generation_matches = db
+                        .query_row(
+                            "SELECT claim_generation = ?2
+                             FROM parity_sync_queue
+                             WHERE id = ?1",
+                            params![item.id.as_str(), item.claim_generation],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false);
+                    if generation_matches {
+                        apply_success(&db, &item, response_json.as_ref())?;
+                        mark_success(&db, &item.id, item.claim_generation)?;
+                        processed += 1;
+                    } else {
+                        debug!(
+                            item_id = %item.id,
+                            expected_generation = item.claim_generation,
+                            "Skipping stale parity success ack before local apply"
+                        );
+                    }
                 } else if status == 409 {
                     let server_record = fetch_server_record(
                         &client,
@@ -3565,7 +4408,7 @@ pub async fn process_queue(
                     )?;
 
                     if requires_operator_review {
-                        mark_conflict(&db, &item.id)?;
+                        mark_conflict(&db, &item.id, item.claim_generation)?;
                         conflicts += 1;
                         errors.push(SyncError {
                             item_id: item.id.clone(),
@@ -3578,13 +4421,19 @@ pub async fn process_queue(
                             http_status: Some(status),
                         });
                     } else {
-                        mark_success(&db, &item.id)?;
+                        mark_success(&db, &item.id, item.claim_generation)?;
                         processed += 1;
                     }
                 } else if status == 429 {
                     let error_message = format!("HTTP {status}: {response_body}");
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    mark_rate_limited(&db, &item.id, &error_message, retry_after_secs)?;
+                    mark_rate_limited(
+                        &db,
+                        &item.id,
+                        &error_message,
+                        retry_after_secs,
+                        item.claim_generation,
+                    )?;
                     failed += 1;
                     errors.push(SyncError {
                         item_id: item.id.clone(),
@@ -3619,13 +4468,17 @@ pub async fn process_queue(
                         processed += 1;
                         continue;
                     }
-                    if let Some(dl) = mark_failure(&db, &item.id, &error_message)? {
+                    if let Some(dl) =
+                        mark_failure(&db, &item.id, &error_message, item.claim_generation)?
+                    {
                         monetary_dead_letters.push(dl);
                     }
                     // Force to failed status since client errors won't recover
                     db.execute(
-                        "UPDATE parity_sync_queue SET status = 'failed' WHERE id = ?1",
-                        params![item.id],
+                        "UPDATE parity_sync_queue
+                         SET status = 'failed'
+                         WHERE id = ?1 AND claim_generation = ?2",
+                        params![item.id, item.claim_generation],
                     )
                     .map_err(|e| format!("mark client error failed: {e}"))?;
                     failed += 1;
@@ -3643,6 +4496,7 @@ pub async fn process_queue(
                         &db,
                         &item.id,
                         &format!("HTTP {status}: {response_body}"),
+                        item.claim_generation,
                     )? {
                         monetary_dead_letters.push(dl);
                     }
@@ -3659,9 +4513,12 @@ pub async fn process_queue(
             Err(e) => {
                 // Network error (retriable)
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                if let Some(dl) =
-                    mark_failure(&db, &item.id, &format!("Network error: {e}"))?
-                {
+                if let Some(dl) = mark_failure(
+                    &db,
+                    &item.id,
+                    &format!("Network error: {e}"),
+                    item.claim_generation,
+                )? {
                     monetary_dead_letters.push(dl);
                 }
                 failed += 1;
@@ -3982,6 +4839,7 @@ mod tests {
             module_type: "customers".to_string(),
             conflict_strategy: "manual".to_string(),
             version: 1,
+            claim_generation: 0,
             status: "pending".to_string(),
         }
     }
@@ -4339,13 +5197,14 @@ mod tests {
                 "city": "Athens"
             }),
         );
+        // W4e Step 0: dual-populate (12.5 → 1250).
         conn.execute(
             "INSERT INTO orders (
-                id, customer_id, items, total_amount, status, sync_status,
+                id, customer_id, items, total_amount, total_amount_cents, status, sync_status,
                 delivery_address, delivery_city, delivery_postal_code, delivery_floor,
                 delivery_notes, name_on_ringer, created_at, updated_at
              ) VALUES (
-                'ord-address-fallback', 'cust-order-fallback', '[]', 12.5, 'completed', 'synced',
+                'ord-address-fallback', 'cust-order-fallback', '[]', 12.5, 1250, 'completed', 'synced',
                 'Order Street 9', 'Athens', '11742', '2', 'Use side door', 'Papadopoulos',
                 datetime('now'), datetime('now')
              )",
@@ -4403,12 +5262,13 @@ mod tests {
                 "city": "Athens"
             }),
         );
+        // W4e Step 0: dual-populate (8.4 → 840).
         conn.execute(
             "INSERT INTO orders (
-                id, customer_id, items, total_amount, status, sync_status,
+                id, customer_id, items, total_amount, total_amount_cents, status, sync_status,
                 delivery_address, delivery_city, delivery_postal_code, created_at, updated_at
              ) VALUES (
-                'ord-address-fallback-2', 'cust-order-fallback', '[]', 8.4, 'completed', 'synced',
+                'ord-address-fallback-2', 'cust-order-fallback', '[]', 8.4, 840, 'completed', 'synced',
                 'Retry Street 5', 'Athens', '11743', datetime('now'), datetime('now')
              )",
             [],
@@ -4513,6 +5373,54 @@ mod tests {
     }
 
     #[test]
+    fn apply_success_marks_z_report_applied() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, status, created_at, updated_at
+             )
+             VALUES ('shift-z', 'staff-z', 'Staff Z', 'cashier', 'branch-1', 'term-1',
+                datetime('now'), 'closed', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed shift");
+        conn.execute(
+            "INSERT INTO z_reports (
+                id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                sync_state, sync_retry_count, created_at, updated_at
+             )
+             VALUES ('z-local-1', 'shift-z', 'branch-1', 'term-1', '2026-04-27',
+                datetime('now'), 'syncing', 2, datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed z report");
+
+        let item = queue_item(
+            "z_reports",
+            "INSERT",
+            "z-local-1",
+            json!({ "id": "z-local-1" }),
+        );
+        apply_success(&conn, &item, Some(&json!({ "success": true })))
+            .expect("apply z-report success");
+
+        let (sync_state, retry_count, last_error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT sync_state, sync_retry_count, sync_last_error
+                 FROM z_reports
+                 WHERE id = 'z-local-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load z report");
+
+        assert_eq!(sync_state, "applied");
+        assert_eq!(retry_count, 0);
+        assert!(last_error.is_none());
+    }
+
+    #[test]
     fn resolve_financial_endpoints_use_live_pos_routes() {
         let mut payment_item = queue_item(
             "payments",
@@ -4544,6 +5452,97 @@ mod tests {
             "/api/pos/payments/adjustments/sync"
         );
         assert_eq!(resolve_endpoint(&driver_item), "/api/pos/financial/sync");
+    }
+
+    #[test]
+    fn prepare_shift_request_wraps_staff_shift_payload_for_admin_sync_endpoint() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let mut item = queue_item(
+            "staff_shifts",
+            "INSERT",
+            "shift-1",
+            json!({
+                "shiftId": "shift-1",
+                "staffId": "staff-1",
+                "branchId": TEST_BRANCH_ID,
+                "terminalId": TEST_TERMINAL_ID,
+                "roleType": "driver",
+                "openingCash": 100.0,
+                "checkInTime": "2026-04-27T16:01:35Z"
+            }),
+        );
+        item.module_type = "shifts".to_string();
+
+        let prepared = prepare_request(&conn, &item).expect("prepare shift request");
+        let RequestPreparation::Ready(spec) = prepared else {
+            panic!("shift request should be ready");
+        };
+        assert_eq!(spec.endpoint, "/api/pos/shifts/sync");
+        assert_eq!(spec.method, Method::POST);
+
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("json body");
+        assert_eq!(body["terminal_id"], TEST_TERMINAL_ID);
+        assert_eq!(body["branch_id"], TEST_BRANCH_ID);
+        assert_eq!(body["events"][0]["event_type"], "shift_open");
+        assert_eq!(body["events"][0]["shift_id"], "shift-1");
+        assert_eq!(body["events"][0]["data"]["roleType"], "driver");
+        assert!(
+            body["events"][0]["idempotency_key"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with(":insert"),
+            "idempotency key should be operation-specific: {body}"
+        );
+    }
+
+    #[test]
+    fn prepare_shift_request_classifies_close_and_transfer_updates() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let mut close_item = queue_item(
+            "staff_shifts",
+            "UPDATE",
+            "shift-close",
+            json!({
+                "shiftId": "shift-close",
+                "branchId": TEST_BRANCH_ID,
+                "terminalId": TEST_TERMINAL_ID,
+                "checkOutTime": "2026-04-27T18:01:35Z"
+            }),
+        );
+        close_item.module_type = "shifts".to_string();
+        let close_body: Value = match prepare_request(&conn, &close_item).expect("prepare close") {
+            RequestPreparation::Ready(spec) => {
+                serde_json::from_str(spec.body.as_deref().expect("close body")).unwrap()
+            }
+            other => panic!("unexpected close prep: {other:?}"),
+        };
+        assert_eq!(close_body["events"][0]["event_type"], "shift_close");
+
+        let mut transfer_item = queue_item(
+            "staff_shifts",
+            "UPDATE",
+            "shift-transfer",
+            json!({
+                "shiftId": "shift-transfer",
+                "branchId": TEST_BRANCH_ID,
+                "terminalId": TEST_TERMINAL_ID,
+                "isTransferPending": true
+            }),
+        );
+        transfer_item.module_type = "shifts".to_string();
+        let transfer_body: Value =
+            match prepare_request(&conn, &transfer_item).expect("prepare transfer") {
+                RequestPreparation::Ready(spec) => {
+                    serde_json::from_str(spec.body.as_deref().expect("transfer body")).unwrap()
+                }
+                other => panic!("unexpected transfer prep: {other:?}"),
+            };
+        assert_eq!(transfer_body["events"][0]["event_type"], "shift_transfer");
     }
 
     #[test]
@@ -4852,6 +5851,297 @@ mod tests {
             body.get("client_order_id").and_then(Value::as_str),
             Some("order-legacy-3")
         );
+    }
+
+    #[test]
+    fn prepare_order_request_forwards_delivery_conversion_update_fields() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents,
+                customer_name, customer_phone, delivery_address, order_type,
+                delivery_fee, delivery_fee_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'order-convert-1', 'remote-order-convert-1',
+                '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"quantity\":1,\"unit_price\":12.0,\"total_price\":12.0,\"name\":\"Crepe\"}]',
+                12.80, 1280,
+                'Anon', '6974011314', 'Xenofontos 36', 'delivery',
+                0.80, 80, 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced order");
+
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-convert-1",
+            json!({
+                "orderId": "order-convert-1",
+                "orderType": "delivery",
+                "customerId": "33333333-3333-3333-3333-333333333333",
+                "customerName": "Anon",
+                "customerPhone": "6974011314",
+                "customerEmail": Value::Null,
+                "deliveryAddress": "Xenofontos 36",
+                "deliveryCity": "Athens",
+                "deliveryPostalCode": "10557",
+                "deliveryFloor": "1",
+                "deliveryNotes": "Ring",
+                "nameOnRinger": "Anon",
+                "deliveryFee": 0.8,
+                "delivery_fee_cents": 80,
+                "totalAmount": 12.8,
+                "total_amount_cents": 1280,
+                "driverId": Value::Null,
+                "driverName": Value::Null,
+                "items": [{
+                    "menu_item_id": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "unit_price": 12.0,
+                    "name": "Crepe"
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        assert_eq!(request.endpoint, "/api/pos/orders");
+        assert_eq!(request.method, Method::PATCH);
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some("remote-order-convert-1")
+        );
+        assert_eq!(body.get("status").and_then(Value::as_str), Some("pending"));
+        assert_eq!(
+            body.get("order_type").and_then(Value::as_str),
+            Some("delivery")
+        );
+        assert_eq!(
+            body.get("customer_id").and_then(Value::as_str),
+            Some("33333333-3333-3333-3333-333333333333")
+        );
+        assert_eq!(
+            body.get("delivery_address").and_then(Value::as_str),
+            Some("Xenofontos 36")
+        );
+        assert_eq!(body.get("delivery_fee").and_then(Value::as_f64), Some(0.8));
+        assert_eq!(
+            body.get("delivery_fee_cents").and_then(Value::as_i64),
+            Some(80)
+        );
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(12.8));
+        assert_eq!(
+            body.get("total_amount_cents").and_then(Value::as_i64),
+            Some(1280)
+        );
+        assert!(body.get("driver_id").is_none());
+        assert!(body.get("driver_name").is_none());
+        assert_eq!(
+            body.get("items").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn prepare_order_request_hydrates_sparse_update_from_local_order() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents,
+                subtotal, subtotal_cents, delivery_fee, delivery_fee_cents,
+                customer_name, customer_phone, delivery_address, order_type,
+                status, payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                'order-sparse-update', 'remote-order-sparse-update',
+                '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"quantity\":1,\"unit_price\":7.0,\"total_price\":7.0,\"name\":\"Crepe\"}]',
+                7.40, 740, 7.00, 700, 0.40, 40,
+                'Anon', '6974011314', 'Xenofontos 36', 'delivery',
+                'pending', 'partially_paid', 'pending', datetime('now'), '2026-04-27T19:10:02Z'
+             )",
+            [],
+        )
+        .expect("seed local delivery order");
+
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-sparse-update",
+            json!({
+                "orderId": "order-sparse-update",
+                "status": "pending"
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(
+            body.get("order_type").and_then(Value::as_str),
+            Some("delivery")
+        );
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(7.4));
+        assert_eq!(
+            body.get("total_amount_cents").and_then(Value::as_i64),
+            Some(740)
+        );
+        assert_eq!(body.get("delivery_fee").and_then(Value::as_f64), Some(0.4));
+        assert_eq!(
+            body.get("delivery_fee_cents").and_then(Value::as_i64),
+            Some(40)
+        );
+        assert_eq!(
+            body.get("items").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn prepare_order_request_prefers_current_local_order_over_stale_payload() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents,
+                subtotal, subtotal_cents, delivery_fee, delivery_fee_cents,
+                customer_name, customer_phone, delivery_address, order_type,
+                status, payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                'order-stale-payload', 'remote-order-stale-payload',
+                '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"quantity\":1,\"unit_price\":6.0,\"total_price\":6.0,\"name\":\"Chicken\"}]',
+                7.56, 756, 6.00, 600, 1.56, 156,
+                'Mparoutas', '2310840576', 'Asklipiou 10', 'delivery',
+                'pending', 'partially_paid', 'pending', datetime('now'), '2026-04-27T20:04:22Z'
+             )",
+            [],
+        )
+        .expect("seed local delivery order");
+
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-stale-payload",
+            json!({
+                "orderId": "order-stale-payload",
+                "status": "pending",
+                "orderType": "pickup",
+                "totalAmount": 6.0,
+                "total_amount_cents": 600,
+                "deliveryFee": 0.0,
+                "delivery_fee_cents": 0
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(
+            body.get("order_type").and_then(Value::as_str),
+            Some("delivery")
+        );
+        assert_eq!(
+            body.get("total_amount_cents").and_then(Value::as_i64),
+            Some(756)
+        );
+        assert_eq!(
+            body.get("delivery_fee_cents").and_then(Value::as_i64),
+            Some(156)
+        );
+        assert_eq!(
+            body.get("delivery_address").and_then(Value::as_str),
+            Some("Asklipiou 10")
+        );
+    }
+
+    #[test]
+    fn prepare_payment_request_defers_while_parent_order_update_is_pending() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-payment-waits', 'remote-order-payment-waits', '[]', 7.5, 750, 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'pay-waits-for-order-update', 'order-payment-waits', 'cash', 0.5, 50, 'completed', 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed payment");
+        enqueue_test_item(
+            &conn,
+            "orders",
+            "UPDATE",
+            "order-payment-waits",
+            json!({
+                "orderId": "order-payment-waits",
+                "orderType": "delivery",
+                "totalAmount": 7.5,
+            }),
+        );
+
+        let payload = json!({
+            "orderId": "order-payment-waits",
+            "amount": 0.5,
+            "method": "cash",
+        });
+        let item = queue_item(
+            "payments",
+            "INSERT",
+            "pay-waits-for-order-update",
+            payload.clone(),
+        );
+        let request = prepare_payment_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare payment request");
+
+        match request {
+            RequestPreparation::Deferred { reason } => {
+                assert_eq!(reason, "Waiting for parent order update sync");
+            }
+            other => panic!("expected deferred payment request, got {other:?}"),
+        }
+
+        let (sync_state, sync_error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT sync_state, sync_last_error
+                 FROM order_payments
+                 WHERE id = 'pay-waits-for-order-update'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read payment state");
+        assert_eq!(sync_state, "waiting_parent");
+        assert_eq!(sync_error.as_deref(), Some("Order update not yet synced"));
     }
 
     #[test]
@@ -5190,12 +6480,13 @@ mod tests {
         let conn = test_connection();
         seed_terminal_context(&conn);
 
+        // W4e Step 0: dual-populate (9.50 → 950, 4.79 → 479, 0.55 → 55).
         conn.execute(
             "INSERT INTO orders (
-                id, items, total_amount, status, payment_status, payment_method,
+                id, items, total_amount, total_amount_cents, status, payment_status,
                 payment_transaction_id, sync_status, created_at, updated_at
              ) VALUES (
-                'ord-payment-stale', '[]', 9.50, 'completed', 'paid', 'cash',
+                'ord-payment-stale', '[]', 9.50, 950, 'completed', 'paid',
                 'pay-valid', 'synced', datetime('now'), datetime('now')
              )",
             [],
@@ -5203,10 +6494,10 @@ mod tests {
         .expect("seed order");
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 remote_payment_id, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-valid', 'ord-payment-stale', 'cash', 4.79, 'EUR', 'completed',
+                'pay-valid', 'ord-payment-stale', 'cash', 4.79, 479, 'EUR', 'completed',
                 'remote-pay-valid', 'synced', 'applied', datetime('now'), datetime('now')
              )",
             [],
@@ -5214,10 +6505,10 @@ mod tests {
         .expect("seed canonical payment");
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
+                id, order_id, method, amount, amount_cents, currency, status,
                 sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-stale', 'ord-payment-stale', 'cash', 0.55, 'EUR', 'completed',
+                'pay-stale', 'ord-payment-stale', 'cash', 0.55, 55, 'EUR', 'completed',
                 'failed', 'failed', datetime('now'), datetime('now')
              )",
             [],
@@ -5872,5 +7163,397 @@ mod tests {
             remaining, 0,
             "resolved row should be deleted from parity queue"
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // Wave 5 C17 — prepare_financial_request uses entity-stable idempotency
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn prepare_financial_request_uses_entity_idempotency_key_not_queue_row_id() {
+        let conn = test_connection();
+
+        // Parent order to satisfy the FK constraint on order_payments.order_id.
+        // W4e Step 0: dual-populate (12.34 → 1234).
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-1', '[]', 12.34, 1234, 'completed', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed parent order");
+
+        // Seed an order_payments row with a known idempotency_key (the
+        // v49 trigger populates this on INSERT in production; we assert
+        // the value directly so the test is self-contained).
+        conn.execute(
+            "INSERT INTO order_payments
+                (id, order_id, method, amount, amount_cents, status, idempotency_key, sync_status, created_at, updated_at)
+             VALUES
+                ('pay-w5-c17', 'ord-1', 'cash', 12.34, 1234, 'completed',
+                 'rnd-stable-key-abc123',
+                 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed order_payments row");
+
+        let item = queue_item(
+            "order_payments",
+            "INSERT",
+            "pay-w5-c17",
+            serde_json::json!({"amount": 12.34}),
+        );
+
+        let prep = prepare_financial_request(
+            &conn,
+            &item,
+            &serde_json::json!({"amount": 12.34}),
+            "terminal-test",
+        )
+        .expect("prepare_financial_request succeeds");
+
+        let RequestPreparation::Ready(spec) = prep else {
+            panic!("expected RequestPreparation::Ready");
+        };
+        let body: serde_json::Value = serde_json::from_str(
+            spec.body
+                .as_deref()
+                .expect("financial request must have a body"),
+        )
+        .expect("body is JSON");
+        let idem = body
+            .pointer("/items/0/idempotency_key")
+            .and_then(serde_json::Value::as_str)
+            .expect("idempotency_key is a JSON string");
+        assert_eq!(
+            idem, "rnd-stable-key-abc123",
+            "W5 C17: idempotency_key MUST come from the entity row's persisted column, \
+             not from the transient queue-row id. Got: {idem}"
+        );
+    }
+
+    #[test]
+    fn prepare_financial_request_falls_back_to_synthetic_when_entity_missing() {
+        let conn = test_connection();
+
+        // No order_payments row exists for `pay-w5-c17-missing`; the
+        // fallback must produce the deterministic synthetic key so the
+        // server still has SOME stable token rather than a rotating
+        // queue-row UUID.
+        let item = queue_item(
+            "order_payments",
+            "INSERT",
+            "pay-w5-c17-missing",
+            serde_json::json!({"amount": 5.00}),
+        );
+
+        let prep = prepare_financial_request(
+            &conn,
+            &item,
+            &serde_json::json!({"amount": 5.00}),
+            "terminal-test",
+        )
+        .expect("prepare_financial_request succeeds");
+
+        let RequestPreparation::Ready(spec) = prep else {
+            panic!("expected RequestPreparation::Ready");
+        };
+        let body: serde_json::Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+        let idem = body
+            .pointer("/items/0/idempotency_key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert_eq!(idem, "entity:order_payments:pay-w5-c17-missing");
+    }
+
+    /// Helper for the H8 tests: insert one parity_sync_queue row with
+    /// the supplied id and a defaulted (zero) claim_generation. Returns
+    /// the row id so callers can re-use it.
+    fn seed_h8_test_row(conn: &Connection, id: &str) {
+        // The schema's CHECK constraint requires `operation IN ('INSERT',
+        // 'UPDATE', 'DELETE')` and the `data` column is NOT NULL — supply
+        // both. attempts defaults to 0; claim_generation defaults to 0.
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, status
+             ) VALUES (
+                ?1, 'orders', 'order-h8', 'INSERT', '{}', 'org-h8',
+                datetime('now', '-10 minutes'), 'pending'
+             )",
+            params![id],
+        )
+        .expect("seed parity_sync_queue row");
+    }
+
+    /// Wave 10 H8 regression #1: a stale claim that gets recovered does
+    /// NOT consume an attempt slot. The deferred memo's spec lists this
+    /// as the first required test.
+    ///
+    /// Sequence:
+    ///   1. Seed a row, status='pending', attempts=0, claim_generation=0.
+    ///   2. Manually mark it 'processing' with a stale `last_attempt`
+    ///      (older than the lease).
+    ///   3. Call `recover_stale_processing_items`.
+    ///   4. Assert the row is back to 'pending' with attempts STILL 0
+    ///      (the recovery does not bump retry slots) and
+    ///      claim_generation incremented to 1.
+    #[test]
+    fn h8_recover_stale_does_not_burn_attempt_slot() {
+        let conn = test_connection();
+        seed_h8_test_row(&conn, "h8-recover");
+
+        // Force the row into 'processing' with a last_attempt older
+        // than the lease window. Use raw SQL so we don't depend on
+        // dequeue's own generation bump for this fixture.
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'processing',
+                 last_attempt = datetime('now', '-1 hour')
+             WHERE id = 'h8-recover'",
+            [],
+        )
+        .unwrap();
+
+        let recovered = recover_stale_processing_items(&conn).unwrap();
+        assert_eq!(recovered, 1, "exactly one stale row should be recovered");
+
+        let (status, attempts, generation): (String, i64, i64) = conn
+            .query_row(
+                "SELECT status, attempts, claim_generation
+                 FROM parity_sync_queue WHERE id = 'h8-recover'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "row must return to pending");
+        assert_eq!(
+            attempts, 0,
+            "stale-reclaim must NOT bump attempts (a stale claim is not a worker failure)"
+        );
+        assert_eq!(
+            generation, 1,
+            "stale-reclaim must bump claim_generation so any late ack from the prior worker is rejected"
+        );
+    }
+
+    /// Wave 10 H8 regression #2: a late `mark_success` from a worker
+    /// whose claim was reclaimed (generation bumped beneath them) is
+    /// silently dropped. The row is NOT deleted; the next dequeue can
+    /// still claim it.
+    ///
+    /// Sequence:
+    ///   1. Seed row, claim_generation=0.
+    ///   2. Bump generation directly (simulating recover_stale).
+    ///   3. Call `mark_success(conn, id, expected_generation=0)` —
+    ///      passing the STALE generation the original worker had.
+    ///   4. Assert mark_success returns Ok(()) (no-op, not error).
+    ///   5. Assert the row STILL exists in parity_sync_queue.
+    #[test]
+    fn h8_mark_success_with_stale_generation_is_a_noop() {
+        let conn = test_connection();
+        seed_h8_test_row(&conn, "h8-stale-ack");
+
+        // Simulate recover_stale's generation bump after the original
+        // worker's lease expired.
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET claim_generation = 7
+             WHERE id = 'h8-stale-ack'",
+            [],
+        )
+        .unwrap();
+
+        // Original worker thinks it claimed at generation 0; calls
+        // mark_success with that stale value.
+        let result = mark_success(&conn, "h8-stale-ack", 0);
+        assert!(
+            result.is_ok(),
+            "mark_success with a stale generation must return Ok(()) — silent no-op, not an error"
+        );
+
+        let still_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'h8-stale-ack'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            still_present, 1,
+            "row must NOT be deleted by a stale-generation success ack"
+        );
+        let unchanged_generation: i64 = conn
+            .query_row(
+                "SELECT claim_generation FROM parity_sync_queue WHERE id = 'h8-stale-ack'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unchanged_generation, 7,
+            "claim_generation must remain at the post-recovery value"
+        );
+
+        // Sanity: the matching-generation success-mark DOES delete.
+        let result_ok = mark_success(&conn, "h8-stale-ack", 7);
+        assert!(result_ok.is_ok());
+        let after_correct: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'h8-stale-ack'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after_correct, 0,
+            "matching-generation mark_success must delete the row as before"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // W10 H8 sub-follow-up: mirror the mark_success guard regression
+    // tests for the four sibling terminal-state functions
+    // (mark_failure / mark_rate_limited / mark_deferred / mark_conflict).
+    //
+    // Each test seeds a row with claim_generation = 0, bumps the row's
+    // generation to 7 (simulating recover_stale running between the
+    // original worker's claim and its terminal-state ack), and then
+    // calls the mark_* function with the STALE expected_generation = 0.
+    // Assertions:
+    //   1. The function returns Ok (silent no-op — matches the
+    //      mark_success canonical pattern; no error variant exists).
+    //   2. The row's status is unchanged from its post-bump state.
+    //   3. attempts is unchanged (a stale claim must not consume a
+    //      retry slot — same invariant as recover_stale's
+    //      "no attempts bump" rule).
+    //   4. claim_generation is unchanged (no stale-side write).
+    // -------------------------------------------------------------------
+
+    /// Seed a parity_sync_queue row with the supplied id, status, and
+    /// attempts. Sets module_type to 'orders' (non-monetary, so
+    /// MonetaryDeadLetter side-effects are off the test path).
+    fn seed_h8_sibling_test_row(conn: &Connection, id: &str, status: &str, attempts: i64) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status
+             ) VALUES (
+                ?1, 'orders', 'order-h8-sib', 'INSERT', '{}', 'org-h8',
+                datetime('now', '-10 minutes'), ?2, ?3
+             )",
+            params![id, attempts, status],
+        )
+        .expect("seed parity_sync_queue row");
+    }
+
+    /// Set the row's claim_generation directly. Simulates
+    /// recover_stale_processing_items bumping the generation between
+    /// the original worker's claim and its terminal-state ack.
+    fn bump_h8_generation(conn: &Connection, id: &str, generation: i64) {
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET claim_generation = ?1
+             WHERE id = ?2",
+            params![generation, id],
+        )
+        .expect("bump claim_generation");
+    }
+
+    /// Read the post-call state for assertions.
+    fn read_h8_state(conn: &Connection, id: &str) -> (String, i64, i64) {
+        conn.query_row(
+            "SELECT status, attempts, claim_generation
+             FROM parity_sync_queue WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read row state")
+    }
+
+    #[test]
+    fn h8_mark_failure_with_stale_generation_is_a_noop() {
+        let conn = test_connection();
+        seed_h8_sibling_test_row(&conn, "h8-mf", "processing", 0);
+        bump_h8_generation(&conn, "h8-mf", 7);
+
+        // Stale claimer (generation 0) calls mark_failure after the
+        // row was reclaimed (generation 7).
+        let result = mark_failure(&conn, "h8-mf", "stale fail", 0);
+        assert!(
+            result.is_ok(),
+            "mark_failure with stale generation must be a silent no-op (matches mark_success pattern); got {result:?}"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "stale-generation mark_failure must NOT emit a MonetaryDeadLetter"
+        );
+
+        let (status, attempts, generation) = read_h8_state(&conn, "h8-mf");
+        assert_eq!(
+            status, "processing",
+            "row status must remain 'processing' (stale fail must not flip it to 'failed' or 'pending')"
+        );
+        assert_eq!(
+            attempts, 0,
+            "attempts must NOT bump on a stale-generation failure ack"
+        );
+        assert_eq!(
+            generation, 7,
+            "claim_generation must remain at the post-recovery value"
+        );
+    }
+
+    #[test]
+    fn h8_mark_rate_limited_with_stale_generation_is_a_noop() {
+        let conn = test_connection();
+        seed_h8_sibling_test_row(&conn, "h8-mrl", "processing", 0);
+        bump_h8_generation(&conn, "h8-mrl", 7);
+
+        let result = mark_rate_limited(&conn, "h8-mrl", "stale 429", 30, 0);
+        assert!(result.is_ok(), "mark_rate_limited stale must be Ok no-op");
+
+        let (status, attempts, generation) = read_h8_state(&conn, "h8-mrl");
+        assert_eq!(
+            status, "processing",
+            "row status must remain 'processing' (stale rate-limit must not flip to 'pending')"
+        );
+        assert_eq!(attempts, 0, "attempts must NOT bump");
+        assert_eq!(generation, 7, "claim_generation must remain at 7");
+    }
+
+    #[test]
+    fn h8_mark_deferred_with_stale_generation_is_a_noop() {
+        let conn = test_connection();
+        seed_h8_sibling_test_row(&conn, "h8-md", "processing", 0);
+        bump_h8_generation(&conn, "h8-md", 7);
+
+        let result = mark_deferred(&conn, "h8-md", "waiting on parent", 0);
+        assert!(result.is_ok(), "mark_deferred stale must be Ok no-op");
+
+        let (status, attempts, generation) = read_h8_state(&conn, "h8-md");
+        assert_eq!(
+            status, "processing",
+            "row status must remain 'processing' (stale defer must not flip to 'pending' or 'conflict')"
+        );
+        assert_eq!(attempts, 0, "attempts must NOT bump");
+        assert_eq!(generation, 7, "claim_generation must remain at 7");
+    }
+
+    #[test]
+    fn h8_mark_conflict_with_stale_generation_is_a_noop() {
+        let conn = test_connection();
+        seed_h8_sibling_test_row(&conn, "h8-mc", "processing", 0);
+        bump_h8_generation(&conn, "h8-mc", 7);
+
+        let result = mark_conflict(&conn, "h8-mc", 0);
+        assert!(result.is_ok(), "mark_conflict stale must be Ok no-op");
+
+        let (status, attempts, generation) = read_h8_state(&conn, "h8-mc");
+        assert_eq!(
+            status, "processing",
+            "row status must remain 'processing' (stale 409 must not flip to 'conflict')"
+        );
+        assert_eq!(attempts, 0, "attempts must NOT bump");
+        assert_eq!(generation, 7, "claim_generation must remain at 7");
     }
 }

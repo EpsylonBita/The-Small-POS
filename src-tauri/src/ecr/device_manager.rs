@@ -109,9 +109,7 @@ impl DeviceManager {
             // Wave 3: recover from a poisoned mutex. A panic inside a
             // prior transaction would otherwise block cleanup forever.
             let mut dev = handle.lock().unwrap_or_else(|poisoned| {
-                warn!(
-                    "ManagedDevice mutex poisoned during disconnect; recovering guard"
-                );
+                warn!("ManagedDevice mutex poisoned during disconnect; recovering guard");
                 poisoned.into_inner()
             });
             let _ = dev.protocol.abort();
@@ -195,7 +193,21 @@ impl DeviceManager {
         let handle = self
             .handle_for(device_id)?
             .ok_or_else(|| format!("Device {device_id} not connected"))?;
-        let mut dev = handle.lock().map_err(|e| e.to_string())?;
+        // Wave 2 H24: recover from a poisoned device mutex instead of
+        // returning an error. Every other call site in this file uses this
+        // pattern — if a prior `process_transaction` on the same device
+        // panicked mid-I/O, the mutex is poisoned and the operator would
+        // otherwise be blocked from closing out the day. Recovering the
+        // inner guard is safe here because the invariants `settlement()`
+        // cares about live in the ECR device itself (serial/TCP state),
+        // not in Rust-managed poisoning metadata.
+        let mut dev = handle.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                device_id = device_id,
+                "ECR device mutex was poisoned; recovering for settlement"
+            );
+            poisoned.into_inner()
+        });
         dev.protocol.settlement()
     }
 

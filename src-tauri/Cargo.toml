@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.3.89"
+version = "1.3.90"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -73,11 +73,29 @@ thiserror = "2"
 anyhow = "1"
 webbrowser = "1.0"
 
+# URL encoding (W11 Item 7 deferred follow-up). Replaces the hand-rolled
+# `.replace()` chain in `core_helpers::build_admin_query::enc()` with the
+# RFC 3986-compliant `url::form_urlencoded::byte_serialize`. Already present
+# transitively via reqwest; this declares it as a direct dep so we can `use`
+# it without depending on reqwest's transitive surface.
+url = "2"
+
 [dev-dependencies]
 # Test-level serialization for tests that touch process-global state (OS keyring
 # via storage::set_credential, etc.). Prevents flaky failures caused by parallel
 # test threads racing on the same global resource.
 serial_test = "3"
+
+# Wave 5 Session 7 PR 1 — AST walker for the legacy-producer seal test at
+# tests/w5_s7_legacy_producer_seal.rs. `syn` parses each `src/**/*.rs` file so
+# the seal can skip `#[cfg(test)]` / `#[test]` subtrees instead of
+# false-positiving on the test fixtures that deliberately seed the legacy
+# `sync_queue` table (those fixtures pin the dual-queue transitional-reader
+# contract during the bake window before migration v56 drops the table).
+# `proc-macro2` with `span-locations` makes `Span::start().line` return real
+# source positions so failure messages are actionable.
+syn = { version = "2", features = ["full", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [profile.dev]
 incremental = true

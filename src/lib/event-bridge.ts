@@ -8,7 +8,14 @@
 import { isTauri } from './platform-detect';
 
 type UnlistenFn = () => void;
-type EventCallback = (data: any) => void;
+/**
+ * Wave 11 L: generic over the payload type so call sites can declare
+ * what they expect without an `as T` cast at the use site. Defaults
+ * to `any` to remain backward-compatible with the prior signature
+ * (changing the default to `unknown` would require every existing
+ * `(data) => data.foo` site to add a narrow guard).
+ */
+type EventCallback<T = any> = (data: T) => void;
 
 /**
  * Maps Tauri event names (snake_case) to renderer channel names.
@@ -222,22 +229,38 @@ export function stopEventBridge(): void {
   pendingAttachByChannel.clear();
 }
 
-export function onEvent(channel: string, callback: EventCallback): void {
+/**
+ * Wave 11 L: generic so callers can declare the payload type:
+ *
+ *     onEvent<{ orderId: string }>('order-created', ({ orderId }) => …)
+ *
+ * Defaults to `any` so existing call sites compile unchanged. The
+ * underlying listener storage is type-erased — the generic is
+ * compile-time only and the cast at the dispatch boundary
+ * (`callback as EventCallback`) is the price of that flexibility.
+ */
+export function onEvent<T = any>(
+  channel: string,
+  callback: EventCallback<T>,
+): void {
   let listeners = listenersByChannel.get(channel);
   if (!listeners) {
     listeners = new Set<EventCallback>();
     listenersByChannel.set(channel, listeners);
   }
 
-  listeners.add(callback);
+  listeners.add(callback as EventCallback);
   void attachChannelListener(channel);
 }
 
-export function offEvent(channel: string, callback: EventCallback): void {
+export function offEvent<T = any>(
+  channel: string,
+  callback: EventCallback<T>,
+): void {
   const listeners = listenersByChannel.get(channel);
   if (!listeners) return;
 
-  listeners.delete(callback);
+  listeners.delete(callback as EventCallback);
   if (listeners.size > 0) return;
 
   listenersByChannel.delete(channel);

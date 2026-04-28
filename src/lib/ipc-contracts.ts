@@ -68,6 +68,12 @@ export interface SettingsConfiguredResponse {
   reason?: string;
 }
 
+export interface SettingsCredentialStatus {
+  hasAdminUrl: boolean;
+  hasApiKey: boolean;
+  hasTerminalId: boolean;
+}
+
 export interface ResetStartResponse {
   success: boolean;
   started?: boolean;

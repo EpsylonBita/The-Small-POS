@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tracing::{info, warn};
@@ -62,6 +62,14 @@ struct StaffSession {
 
 impl StaffSession {
     /// Check whether this session has expired (inactivity or max duration).
+    ///
+    /// Wave 9 medium: a single `Utc::now()` sample is shared across both
+    /// checks. Previously the function called `Utc::now()` twice (once
+    /// at line 66, once inline on the inactivity check) — the wall clock
+    /// can advance between calls, so a session expiring at the exact
+    /// deadline could be observed as "not expired" by the first check
+    /// and "expired" by the second within the same invocation. The
+    /// cached `now` removes that unlikely but possible race.
     fn is_expired(&self) -> bool {
         let now = Utc::now();
         if now >= self.expires_at {
@@ -128,13 +136,13 @@ struct StaffAuthDirectoryCache {
 #[derive(Debug, Clone, Deserialize)]
 struct StaffAuthCacheEntry {
     id: String,
-    #[serde(default)]
+    #[serde(default, alias = "canLoginPos", alias = "canLoginPOS")]
     can_login_pos: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "hasPin")]
     has_pin: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "pinHash")]
     pin_hash: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "isActive")]
     is_active: Option<bool>,
     /// Present when this staff has an open shift on any terminal in the
     /// organization. Used to gray-out the staff on the check-in UI of every
@@ -306,7 +314,118 @@ fn load_staff_auth_cache(
         return Err("missing staff auth cache".to_string());
     };
 
-    serde_json::from_str(&raw).map_err(|e| format!("invalid staff auth cache: {e}"))
+    parse_staff_auth_cache(&raw)
+}
+
+fn value_string_alias(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn value_bool_alias(value: &Value, keys: &[&str]) -> Option<bool> {
+    let mut saw_true = false;
+    for key in keys {
+        let Some(value) = value.get(*key).and_then(Value::as_bool) else {
+            continue;
+        };
+        if !value {
+            return Some(false);
+        }
+        saw_true = true;
+    }
+    saw_true.then_some(true)
+}
+
+fn parse_staff_auth_current_shift(value: &Value) -> Option<StaffAuthCacheCurrentShift> {
+    let shift_id = value_string_alias(value, &["shift_id", "shiftId"])?;
+    Some(StaffAuthCacheCurrentShift {
+        shift_id,
+        terminal_id: value_string_alias(value, &["terminal_id", "terminalId"]),
+        terminal_name: value_string_alias(value, &["terminal_name", "terminalName"]),
+        role: value_string_alias(value, &["role"]),
+        checked_in_at: value_string_alias(value, &["checked_in_at", "checkedInAt"]),
+    })
+}
+
+fn parse_staff_auth_entry(value: &Value) -> Option<StaffAuthCacheEntry> {
+    let id = value_string_alias(value, &["id"])?;
+    let current_shift = value
+        .get("current_shift")
+        .or_else(|| value.get("currentShift"))
+        .and_then(parse_staff_auth_current_shift);
+
+    Some(StaffAuthCacheEntry {
+        id,
+        can_login_pos: value_bool_alias(value, &["can_login_pos", "canLoginPos", "canLoginPOS"]),
+        has_pin: value_bool_alias(value, &["has_pin", "hasPin"]),
+        pin_hash: value_string_alias(value, &["pin_hash", "pinHash"]),
+        is_active: value_bool_alias(value, &["is_active", "isActive"]),
+        current_shift,
+    })
+}
+
+fn parse_staff_auth_cache(raw: &str) -> Result<StaffAuthDirectoryCache, String> {
+    let payload: Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid staff auth cache: {e}"))?;
+    let branch_id = value_string_alias(&payload, &["branch_id", "branchId"]).unwrap_or_default();
+    let staff = payload
+        .get("staff")
+        .and_then(Value::as_array)
+        .map(|entries| entries.iter().filter_map(parse_staff_auth_entry).collect())
+        .unwrap_or_default();
+
+    Ok(StaffAuthDirectoryCache { branch_id, staff })
+}
+
+fn canonicalize_staff_auth_entry(entry_obj: &mut Map<String, Value>) {
+    let entry_value = Value::Object(entry_obj.clone());
+
+    if let Some(value) = value_bool_alias(
+        &entry_value,
+        &["can_login_pos", "canLoginPos", "canLoginPOS"],
+    ) {
+        entry_obj.insert("canLoginPos".to_string(), Value::Bool(value));
+    }
+    if let Some(value) = value_bool_alias(&entry_value, &["has_pin", "hasPin"]) {
+        entry_obj.insert("hasPin".to_string(), Value::Bool(value));
+    }
+    if let Some(value) = value_string_alias(&entry_value, &["pin_hash", "pinHash"]) {
+        entry_obj.insert("pinHash".to_string(), Value::String(value));
+        entry_obj
+            .entry("hasPin".to_string())
+            .or_insert(Value::Bool(true));
+    }
+    if let Some(value) = value_bool_alias(&entry_value, &["is_active", "isActive"]) {
+        entry_obj.insert("isActive".to_string(), Value::Bool(value));
+    }
+    if !entry_obj.contains_key("currentShift") {
+        if let Some(value) = entry_obj.get("current_shift").cloned() {
+            entry_obj.insert("currentShift".to_string(), value);
+        }
+    }
+
+    entry_obj.remove("can_login_pos");
+    entry_obj.remove("has_pin");
+    entry_obj.remove("pin_hash");
+    entry_obj.remove("is_active");
+    entry_obj.remove("current_shift");
+}
+
+fn redact_staff_auth_hashes(staff_entries: &Value) -> Value {
+    let mut public_entries = staff_entries.clone();
+    let Some(entries) = public_entries.as_array_mut() else {
+        return public_entries;
+    };
+    for entry in entries {
+        if let Some(obj) = entry.as_object_mut() {
+            obj.remove("pin_hash");
+            obj.remove("pinHash");
+        }
+    }
+    public_entries
 }
 
 /// Persist a staff auth directory payload (as returned by
@@ -318,13 +437,59 @@ fn persist_staff_auth_cache(
     branch_id: &str,
     staff_entries: &Value,
 ) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let existing_staff = db::get_setting(
+        &conn,
+        STAFF_AUTH_CACHE_CATEGORY,
+        &staff_auth_cache_key(branch_id),
+    )
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .and_then(|cache| cache.get("staff").and_then(Value::as_array).cloned())
+    .unwrap_or_default();
+
+    let mut merged_staff = staff_entries.as_array().cloned().unwrap_or_default();
+    for entry in &mut merged_staff {
+        let Some(entry_obj) = entry.as_object_mut() else {
+            continue;
+        };
+        let Some(staff_id) = entry_obj
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let incoming_hash =
+            value_string_alias(&Value::Object(entry_obj.clone()), &["pin_hash", "pinHash"]);
+        let incoming_has_pin =
+            value_bool_alias(&Value::Object(entry_obj.clone()), &["has_pin", "hasPin"]);
+        if incoming_hash.is_none() && incoming_has_pin != Some(false) {
+            let existing_hash = existing_staff
+                .iter()
+                .find(|existing| {
+                    existing.get("id").and_then(Value::as_str).map(str::trim)
+                        == Some(staff_id.as_str())
+                })
+                .and_then(|existing| value_string_alias(existing, &["pin_hash", "pinHash"]));
+
+            if let Some(hash) = existing_hash {
+                entry_obj.insert("pinHash".to_string(), Value::String(hash));
+                entry_obj
+                    .entry("hasPin".to_string())
+                    .or_insert(Value::Bool(true));
+            }
+        }
+        canonicalize_staff_auth_entry(entry_obj);
+    }
+
     let payload = serde_json::json!({
         "version": 1,
         "branch_id": branch_id,
         "synced_at": Utc::now().to_rfc3339(),
-        "staff": staff_entries,
+        "staff": merged_staff,
     });
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     db::set_setting(
         &conn,
         STAFF_AUTH_CACHE_CATEGORY,
@@ -364,9 +529,17 @@ pub async fn refresh_staff_auth_directory(
         return Err("branch_id is empty".into());
     }
 
-    // branch_id is a UUID in practice — no URL-encoding needed for valid
-    // values. If a non-UUID ever slips through, the admin endpoint will
-    // reject it with a 400, which bubbles up as a clean error here.
+    // Wave 9 medium: branch_id is a UUID in practice, but defensive
+    // validation here rejects anything that isn't UUID-shaped BEFORE the
+    // request fires. Previously a non-UUID value (corrupted keyring, a
+    // test fixture that slipped through, an admin response with a new
+    // shape) would interpolate raw into the query string and produce a
+    // malformed URL that could bypass the admin-side path allowlist.
+    // `validate_terminal_id_path_safe` enforces the same 8-4-4-4-12 hex
+    // shape used for terminal_id (C2/C3 in W1); reusing it avoids a
+    // duplicate validator.
+    let branch_id = crate::core_helpers::validate_terminal_id_path_safe(&branch_id)
+        .map_err(|e| format!("branch_id: {e}"))?;
     let path = format!("/api/pos/staff-directory?branchId={branch_id}");
     let response = api::fetch_from_admin(&admin_url, &api_key, &path, "GET", None).await?;
 
@@ -384,7 +557,8 @@ pub async fn refresh_staff_auth_directory(
         .unwrap_or(Value::Array(Vec::new()));
     let staff_count = staff_entries.as_array().map(|arr| arr.len()).unwrap_or(0);
 
-    persist_staff_auth_cache(db, &branch_id, &staff_entries)?;
+    persist_staff_auth_cache(db, branch_id, &staff_entries)?;
+    let public_staff_entries = redact_staff_auth_hashes(&staff_entries);
 
     // Surface the set of staff IDs that are busy on some OTHER terminal.
     // This is a convenience for the check-in UI so it doesn't need to know
@@ -419,7 +593,7 @@ pub async fn refresh_staff_auth_directory(
         "success": true,
         "branchId": branch_id,
         "currentTerminalId": current_terminal_id,
-        "staff": staff_entries,
+        "staff": public_staff_entries,
         "busyElsewhereStaffIds": busy_elsewhere_ids,
         "staffCount": staff_count,
         "syncedAt": Utc::now().to_rfc3339(),
@@ -538,25 +712,63 @@ fn current_terminal_has_cash_drawer_role(db: &db::DbState) -> Result<bool, Strin
     Ok(matches!(role.as_deref(), Some("cashier" | "manager")))
 }
 
-fn verify_pin_for_role(pin: &str, role: &str, db: &db::DbState) -> Result<bool, String> {
+fn verify_privileged_pin_with_lockout(
+    pin: &str,
+    role: &str,
+    db: &db::DbState,
+    auth: &AuthState,
+) -> Result<bool, String> {
+    let mut lockout = auth
+        .lockout
+        .lock()
+        .map_err(|e| format!("mutex poisoned: {e}"))?;
     let key = if role == "admin" {
         "admin_pin_hash"
     } else {
         "staff_pin_hash"
     };
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let Some(hash) = db::get_setting(&conn, "staff", key) else {
-        return Ok(false);
-    };
-    bcrypt::verify(pin, &hash).map_err(|e| format!("Failed to verify PIN: {e}"))
-}
 
-fn verify_pin_for_session(
-    pin: &str,
-    session: &StaffSession,
-    db: &db::DbState,
-) -> Result<bool, String> {
-    verify_pin_for_role(pin, &session.role, db)
+    let hash = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("begin privileged lockout check: {e}"))?;
+        let persisted_lockout = load_lockout_from_db(&conn);
+        if let Err(e) = check_lockout(&persisted_lockout) {
+            let _ = conn.execute_batch("ROLLBACK");
+            *lockout = persisted_lockout;
+            return Err(e);
+        }
+        let hash = db::get_setting(&conn, "staff", key);
+        conn.execute_batch("COMMIT").map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            format!("commit privileged lockout check: {e}")
+        })?;
+        *lockout = persisted_lockout;
+        hash
+    };
+
+    let pin_ok = match hash.as_deref() {
+        Some(hash) => {
+            bcrypt::verify(pin, hash).map_err(|e| format!("Failed to verify PIN: {e}"))?
+        }
+        None => false,
+    };
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin privileged lockout persist: {e}"))?;
+    if pin_ok {
+        reset_lockout(&mut lockout);
+    } else {
+        record_failure(&mut lockout);
+    }
+    persist_lockout_to_db(&conn, &lockout);
+    conn.execute_batch("COMMIT").map_err(|e| {
+        let _ = conn.execute_batch("ROLLBACK");
+        format!("commit privileged lockout persist: {e}")
+    })?;
+
+    Ok(pin_ok)
 }
 
 /// Check whether the terminal is currently locked out.
@@ -603,8 +815,7 @@ fn load_lockout_from_db(conn: &rusqlite::Connection) -> LockoutEntry {
         .and_then(|v| chrono::DateTime::parse_from_rfc3339(&v).ok())
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|| {
-            chrono::DateTime::<Utc>::from_timestamp(0, 0)
-                .expect("UNIX_EPOCH is a valid timestamp")
+            chrono::DateTime::<Utc>::from_timestamp(0, 0).expect("UNIX_EPOCH is a valid timestamp")
         });
 
     LockoutEntry {
@@ -746,18 +957,28 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| format!("begin auth phase-1 transaction: {e}"))?;
 
+        // Wave 9 H3: `*lockout` is mutated ONLY after Phase-1 COMMIT
+        // succeeds. Previously the assignment happened before COMMIT —
+        // a rare COMMIT failure (disk full, SQLITE_BUSY) left the
+        // in-memory guard out of sync with the aborted DB transaction.
+        // The lockout-check failure path still mutates `*lockout` because
+        // the check itself is authoritative and the rollback doesn't
+        // change what was persisted.
         let persisted_lockout = load_lockout_from_db(&conn);
-        *lockout = persisted_lockout;
-        if let Err(e) = check_lockout(&lockout) {
+        if let Err(e) = check_lockout(&persisted_lockout) {
             let _ = conn.execute_batch("ROLLBACK");
+            *lockout = persisted_lockout;
             return Err(e);
         }
 
         let admin_hash = db::get_setting(&conn, "staff", "admin_pin_hash");
         let staff_hash = db::get_setting(&conn, "staff", "staff_pin_hash");
 
-        conn.execute_batch("COMMIT")
-            .map_err(|e| format!("commit auth phase-1 transaction: {e}"))?;
+        if let Err(e) = conn.execute_batch("COMMIT") {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(format!("commit auth phase-1 transaction: {e}"));
+        }
+        *lockout = persisted_lockout;
         (admin_hash, staff_hash)
         // MutexGuard dropped here — DB is free for other operations during bcrypt.
     };
@@ -812,8 +1033,19 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
         Err("Invalid PIN".to_string())
     };
 
-    conn.execute_batch("COMMIT")
-        .map_err(|e| format!("commit auth phase-3 transaction: {e}"))?;
+    // Wave 1 C1: if COMMIT fails, the Phase-3 transaction has to be explicitly
+    // ROLLBACK'd so SQLite doesn't leave the connection in a half-open
+    // transactional state (SQLITE_BUSY on COMMIT does NOT auto-rollback).
+    // `reset_lockout` / `record_failure` already mutated `*lockout` in memory
+    // at this point; that divergence is repaired on the next login's Phase-1
+    // because Phase-1 always re-reads `persisted_lockout` from the DB, so
+    // there is no extra work to undo here — only the SQL transaction. The
+    // `let _ =` on ROLLBACK mirrors the Phase-1 lockout-check path at
+    // line 751.
+    conn.execute_batch("COMMIT").map_err(|e| {
+        let _ = conn.execute_batch("ROLLBACK");
+        format!("commit auth phase-3 transaction: {e}")
+    })?;
     // Release the lockout mutex before creating the session
     drop(lockout);
 
@@ -864,10 +1096,7 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
     // upstream bugs where staff_id is not normalised and could conceivably
     // be exploited if an attacker controls the input casing in a system
     // that treats the two forms differently elsewhere.
-    let maybe_staff = cache
-        .staff
-        .iter()
-        .find(|entry| entry.id.trim() == staff_id);
+    let maybe_staff = cache.staff.iter().find(|entry| entry.id.trim() == staff_id);
 
     let Some(staff) = maybe_staff else {
         return Ok(check_in_verify_failure(
@@ -876,14 +1105,31 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
         ));
     };
 
-    if staff.is_active == Some(false) || staff.can_login_pos == Some(false) {
+    // Wave 9 H6: default-deny for missing / `None` fields.
+    //
+    // The previous checks were `is_active == Some(false) || can_login_pos
+    // == Some(false)` — which permits login when either field is `None`.
+    // If an older admin-server cache entry omits `can_login_pos` (a newer
+    // field not yet populated on that release), a deactivated staff row
+    // with a missing flag would pass the guard.
+    //
+    // New semantics: both flags must be explicitly `Some(true)` to allow
+    // login. A missing or `None` flag counts as "deny" so a schema drift
+    // fails closed instead of open.
+    let is_active = staff.is_active.unwrap_or(false);
+    let can_login_pos = staff.can_login_pos.unwrap_or(false);
+    if !is_active || !can_login_pos {
         return Ok(check_in_verify_failure(
             "pos_login_disabled",
             "This staff member is not allowed to log in on POS.",
         ));
     }
 
-    if staff.has_pin == Some(false) {
+    // Wave 9 H6 continued: `has_pin != Some(true)` means "PIN not
+    // confirmed present" rather than "PIN confirmed absent". Same
+    // default-deny rationale — an older cache without this field must
+    // not permit login through a stale hash lookup.
+    if staff.has_pin != Some(true) {
         return Ok(check_in_verify_failure(
             "pin_not_configured",
             "No POS PIN is configured for this staff member.",
@@ -1160,45 +1406,22 @@ fn confirm_privileged_action_at(
     let scope = extract_scope(&payload)
         .ok_or_else(|| PrivilegedActionError::unauthorized(None, "Invalid privileged scope"))?;
 
-    // `pin_already_verified` lets the SystemControl-no-session branch verify
-    // the PIN *before* creating any temporary session (otherwise a wrong PIN
-    // leaves a persistent admin session in auth.sessions). Other branches
-    // verify through the normal flow below.
-    let mut pin_already_verified = false;
-
     let session = match scope {
-        PrivilegedActionScope::SystemControl => {
-            match get_current_session(auth) {
-                Some(session) if session.role == "admin" => session,
-                Some(_) => {
-                    return Err(PrivilegedActionError::unauthorized(
-                        Some(scope),
-                        "Active admin session required",
-                    ));
-                }
-                None => {
-                    // Verify the PIN against admin_pin_hash BEFORE creating a
-                    // session. Previous order created the session first, so a
-                    // wrong PIN left a privileged session hanging in memory.
-                    let admin_ok = verify_pin_for_role(&pin, "admin", db)
-                        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
-                    if !admin_ok {
-                        return Err(PrivilegedActionError::unauthorized(
-                            Some(scope),
-                            "Invalid PIN",
-                        ));
-                    }
-                    pin_already_verified = true;
-                    let _ = create_session(auth, "admin", "system-control");
-                    get_current_session(auth).ok_or_else(|| {
-                        PrivilegedActionError::unauthorized(
-                            Some(scope),
-                            "Failed to create temporary session",
-                        )
-                    })?
-                }
+        PrivilegedActionScope::SystemControl => match get_current_session(auth) {
+            Some(session) if session.role == "admin" => session,
+            Some(_) => {
+                return Err(PrivilegedActionError::unauthorized(
+                    Some(scope),
+                    "Active admin session required",
+                ));
             }
-        }
+            None => {
+                return Err(PrivilegedActionError::unauthorized(
+                    Some(scope),
+                    "Active admin session required",
+                ));
+            }
+        },
         PrivilegedActionScope::CashDrawerControl => {
             let Some(session) = get_current_session(auth) else {
                 return Err(PrivilegedActionError::unauthorized(
@@ -1221,15 +1444,13 @@ fn confirm_privileged_action_at(
         }
     };
 
-    if !pin_already_verified {
-        let pin_ok = verify_pin_for_session(&pin, &session, db)
-            .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
-        if !pin_ok {
-            return Err(PrivilegedActionError::unauthorized(
-                Some(scope),
-                "Invalid PIN",
-            ));
-        }
+    let pin_ok = verify_privileged_pin_with_lockout(&pin, &session.role, db, auth)
+        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+    if !pin_ok {
+        return Err(PrivilegedActionError::unauthorized(
+            Some(scope),
+            "Invalid PIN",
+        ));
     }
 
     let expires_at = record_privileged_grant_at(auth, &session.session_id, scope, now)
@@ -1470,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_staff_check_in_pin_rejects_wrong_pin() {
+    fn verify_staff_check_in_pin_accepts_camel_case_staff_directory_cache() {
         let db_state = test_db_state();
         let hash = bcrypt::hash("4321", 4).expect("hash test pin");
         set_staff_auth_cache(
@@ -1479,6 +1700,146 @@ mod tests {
             serde_json::json!([
                 {
                     "id": "staff-1",
+                    "canLoginPos": true,
+                    "hasPin": true,
+                    "pinHash": hash,
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let result = verify_staff_check_in_pin(
+            Some(serde_json::json!({
+                "staffId": "staff-1",
+                "branchId": "branch-1",
+                "pin": "4321"
+            })),
+            &db_state,
+        )
+        .expect("verification should succeed");
+
+        assert_eq!(
+            result.get("success").and_then(Value::as_bool),
+            Some(true),
+            "result={result:?}"
+        );
+    }
+
+    #[test]
+    fn staff_auth_directory_refresh_preserves_existing_pin_hash_when_omitted() {
+        let db_state = test_db_state();
+        let hash = bcrypt::hash("4321", 4).expect("hash test pin");
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([
+                {
+                    "id": "staff-1",
+                    "can_login_pos": true,
+                    "has_pin": true,
+                    "pin_hash": hash,
+                    "is_active": true
+                }
+            ]),
+        );
+
+        persist_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            &serde_json::json!([
+                {
+                    "id": "staff-1",
+                    "canLoginPos": true,
+                    "hasPin": true,
+                    "isActive": true
+                }
+            ]),
+        )
+        .expect("refresh should preserve hash");
+
+        let raw_cache = {
+            let conn = db_state.conn.lock().expect("db lock");
+            db::get_setting(
+                &conn,
+                STAFF_AUTH_CACHE_CATEGORY,
+                &staff_auth_cache_key("branch-1"),
+            )
+            .expect("raw cache")
+        };
+        assert!(raw_cache.contains("pinHash"), "raw_cache={raw_cache}");
+        let loaded_cache =
+            load_staff_auth_cache(&db_state, "branch-1").expect("cache should deserialize");
+        assert_eq!(
+            loaded_cache.branch_id, "branch-1",
+            "loaded cache branch mismatch"
+        );
+        assert_eq!(loaded_cache.staff.len(), 1, "loaded cache staff count");
+        assert_eq!(
+            loaded_cache.staff[0].pin_hash.as_deref(),
+            Some(hash.as_str()),
+            "loaded cache pin hash"
+        );
+
+        let result = verify_staff_check_in_pin(
+            Some(serde_json::json!({
+                "staffId": "staff-1",
+                "branchId": "branch-1",
+                "pin": "4321"
+            })),
+            &db_state,
+        )
+        .expect("verification should succeed");
+
+        assert_eq!(
+            result.get("success").and_then(Value::as_bool),
+            Some(true),
+            "result={result:?}"
+        );
+    }
+
+    #[test]
+    fn staff_auth_refresh_response_redacts_pin_hashes() {
+        let redacted = redact_staff_auth_hashes(&serde_json::json!([
+            {
+                "id": "staff-1",
+                "pinHash": "secret-hash",
+                "pin_hash": "legacy-secret-hash",
+                "hasPin": true,
+                "currentShift": {
+                    "shiftId": "shift-1",
+                    "terminalId": "terminal-1"
+                }
+            }
+        ]));
+
+        let entry = redacted
+            .as_array()
+            .and_then(|entries| entries.first())
+            .and_then(Value::as_object)
+            .expect("redacted staff entry");
+        assert!(!entry.contains_key("pinHash"));
+        assert!(!entry.contains_key("pin_hash"));
+        assert_eq!(entry.get("hasPin").and_then(Value::as_bool), Some(true));
+        assert!(entry.contains_key("currentShift"));
+    }
+
+    #[test]
+    fn verify_staff_check_in_pin_rejects_wrong_pin() {
+        let db_state = test_db_state();
+        let hash = bcrypt::hash("4321", 4).expect("hash test pin");
+        // Wave 9 H6: fixture now sets both `is_active` and `can_login_pos`
+        // explicitly. Under default-deny semantics, either field being
+        // absent / `None` means the staff member cannot log in, so a
+        // test that wants the PIN-verification branch to run must seed
+        // both flags as `true` (matching what a live admin cache payload
+        // looks like).
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([
+                {
+                    "id": "staff-1",
+                    "is_active": true,
                     "can_login_pos": true,
                     "has_pin": true,
                     "pin_hash": hash
@@ -1506,12 +1867,15 @@ mod tests {
     #[test]
     fn verify_staff_check_in_pin_rejects_missing_pin_configuration() {
         let db_state = test_db_state();
+        // Wave 9 H6: see the pin-wrong test above for the rationale on
+        // seeding `is_active` explicitly.
         set_staff_auth_cache(
             &db_state,
             "branch-1",
             serde_json::json!([
                 {
                     "id": "staff-1",
+                    "is_active": true,
                     "can_login_pos": true,
                     "has_pin": false,
                     "pin_hash": null

@@ -38,6 +38,7 @@ import type {
   ScreenCaptureGetSourcesResponse,
   ScreenCaptureSignalPollingResponse,
   SettingsConfiguredResponse,
+  SettingsCredentialStatus,
   SettingsGetRequest,
   SettingsSetRequest,
   SettingsUpdateLocalRequest,
@@ -123,8 +124,101 @@ export interface SessionValidationResponse {
 
 // -- Settings / Terminal Config ----------------------------------------------
 
+/**
+ * Terminal settings as observed by the renderer.
+ *
+ * Field-by-field parity with the Rust side (Wave 8 H28). The Rust admin-API
+ * response is a loose JSON bag — there is no Rust struct to mirror — so this
+ * interface enumerates every key either side actually reads:
+ *   - Top-level admin-API keys extracted in `pos-tauri/src-tauri/src/terminal_helpers.rs`
+ *     (`extract_*_from_terminal_settings_response`, lines 79-310).
+ *   - Local-only peripheral keys enumerated in the same file's
+ *     `is_local_only_terminal_setting` allowlist (lines 171-198).
+ *   - Renderer-only convenience keys read by hooks (`useScale`, `useCustomerDisplay`)
+ *     and pages (`App.tsx` flat-map / nested fallbacks).
+ *
+ * The catch-all index signature is `unknown` (NOT `any`) so accessing an
+ * undeclared key forces narrowing at the call site instead of silent widening.
+ * To extend, add the field here AND update the matching Rust extractor or
+ * allowlist in `terminal_helpers.rs`.
+ */
 export interface TerminalSettings {
-  [key: string]: any;
+  // -- Admin-API top-level keys (Rust extractor coverage) --------------------
+  branch_id?: string;
+  branchId?: string;
+  organization_id?: string;
+  organizationId?: string;
+  terminal_id?: string;
+  terminalId?: string;
+  terminal_type?: string;          // Rust: extract_terminal_type_from_terminal_settings_response
+  business_type?: string;          // Renderer-side alias for terminal_type
+  businessType?: string;
+  ghost_mode_feature_enabled?: boolean;
+  ghostModeFeatureEnabled?: boolean;
+  pos_operating_mode?: string;     // Rust: extract_pos_operating_mode_from_terminal_settings_response
+  operating_mode?: string;         // Renderer-side alias
+  operatingMode?: string;
+  owner_terminal_id?: string;
+  owner_terminal_db_id?: string;
+  parent_terminal_id?: string;
+  source_terminal_id?: string;
+  source_terminal_db_id?: string;
+  enabled_features?: string[] | Record<string, unknown>;
+  enabledFeatures?: string[] | Record<string, unknown>;
+
+  // -- Local-only peripheral keys (Rust allowlist; never synced to admin) ----
+  display_brightness?: number;
+  screen_timeout?: number;
+  touch_sensitivity?: number;
+  audio_enabled?: boolean;
+  receipt_auto_print?: boolean;
+  auto_print_receipts?: boolean;
+  cash_drawer_enabled?: boolean;
+  cash_drawer_port?: string;
+  barcode_scanner_enabled?: boolean;
+  barcode_scanner_port?: string;
+  scanner_baud_rate?: number;
+  customer_display_enabled?: boolean;
+  display_connection_type?: string;
+  display_port?: string;
+  display_baud_rate?: number;
+  display_tcp_port?: number;
+  card_reader_enabled?: boolean;
+  scale_enabled?: boolean;
+  scale_port?: string;
+  scale_baud_rate?: number;
+  scale_protocol?: string;
+  loyalty_card_reader?: boolean;
+  wifi_ssid?: string;
+  ethernet_enabled?: boolean;
+
+  // -- Syncable system keys --------------------------------------------------
+  business_day_start_hour?: number;
+  business_day_start?: number;
+
+  // -- Nested `terminal` section (App.tsx fallback shape) --------------------
+  terminal?: {
+    terminal_id?: string;
+    branch_id?: string;
+    organization_id?: string;
+    terminal_type?: string;
+    [key: string]: unknown;
+  };
+
+  // -- Flat-map dotted keys (App.tsx + terminal-credentials.ts read these) --
+  // The admin API sometimes returns terminal identity nested AND sometimes
+  // flat-keyed as 'terminal.<field>'. Bracket access on these keys would
+  // otherwise fall through to the catch-all index signature and return
+  // `unknown`, breaking the `||` fallback chains in App.tsx:283-294.
+  'terminal.terminal_id'?: string;
+  'terminal.branch_id'?: string;
+  'terminal.organization_id'?: string;
+
+  // Escape hatch tightened from `any` to `unknown` (Wave 8 H28). Bracket
+  // access for legacy flat-map keys (e.g. `settings['terminal.terminal_id']`,
+  // `settings['hardware.scale_port']`) returns `unknown` and must be narrowed
+  // at the call site.
+  [key: string]: unknown;
 }
 
 export interface UpdateTerminalCredentialsPayload {
@@ -615,12 +709,17 @@ export interface EditSettlementOrderUpdates {
 
 export interface OrderCustomerInfoUpdateParams {
   orderId: string;
+  customerId?: string | null;
   customerName: string;
   customerPhone: string;
   customerEmail?: string | null;
   deliveryAddress: string;
+  deliveryAddressId?: string | null;
   deliveryPostalCode?: string | null;
   deliveryNotes?: string | null;
+  deliveryLatitude?: number | null;
+  deliveryLongitude?: number | null;
+  deliveryAddressFingerprint?: string | null;
 }
 
 export interface PickupToDeliveryConversionParams {
@@ -630,11 +729,16 @@ export interface PickupToDeliveryConversionParams {
   customerPhone: string;
   customerEmail?: string | null;
   deliveryAddress: string;
+  deliveryAddressId?: string | null;
   deliveryCity?: string | null;
   deliveryPostalCode?: string | null;
   deliveryFloor?: string | null;
   deliveryNotes?: string | null;
   nameOnRinger?: string | null;
+  deliveryLatitude?: number | null;
+  deliveryLongitude?: number | null;
+  deliveryAddressFingerprint?: string | null;
+  deliveryZoneId?: string | null;
   deliveryFee: number;
   totalAmount: number;
 }
@@ -827,8 +931,13 @@ export interface OpenShiftParams {
   staffId: string;
   staffName?: string;
   openingCash?: number;
+  // Wave 8 FE-medium (W5 C15 follow-up): `organizationId` is accepted by
+  // the Rust side (see `shifts.rs::open_shift` tenant-mismatch guard) but
+  // was missing from the TypeScript shape. Callers that DO send it (e.g.
+  // `StaffShiftModal`) lose type safety without the declaration.
   branchId: string;
   terminalId: string;
+  organizationId?: string;
   roleType?: string;
   startingAmount?: number;
 }
@@ -1293,6 +1402,7 @@ export interface PlatformBridge {
     setLanguage(lang: string): Promise<IpcResult>;
     getAdminUrl(): Promise<string | null>;
     getPosApiKey(): Promise<string | null>;
+    getCredentialStatus(): Promise<SettingsCredentialStatus>;
     clearConnection(): Promise<IpcResult>;
     updateTerminalCredentials(
       payload: UpdateTerminalCredentialsPayload,
@@ -1908,6 +2018,15 @@ export const CHANNEL_MAP: Record<string, string> = {
   "auth:get-session-stats": "auth.getSessionStats",
   "auth:setup-pin": "auth.setupPin",
   "auth:confirm-privileged-action": "auth.confirmPrivilegedAction",
+  // Wave 11 L: `auth:secure-session-*` channels were invoked from the
+  // `secureSession.get/set/clear` typed bridge (lines ~2475–2479) but
+  // were missing from CHANNEL_MAP. `check-parity-contract.mjs` walks the
+  // map to verify every renderer-used channel has a Rust command; the
+  // missing entries would surface as "unmapped channels" in any future
+  // tooling that walks the map, even though the Rust commands exist.
+  "auth:secure-session-get": "auth.secureSession.get",
+  "auth:secure-session-set": "auth.secureSession.set",
+  "auth:secure-session-clear": "auth.secureSession.clear",
 
   // Staff auth
   "staff-auth:authenticate-pin": "staffAuth.authenticatePin",
@@ -2024,6 +2143,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "settings:set-language": "settings.setLanguage",
   "settings:get-admin-url": "settings.getAdminUrl",
   "settings:get-pos-api-key": "settings.getPosApiKey",
+  "settings:get-credential-status": "settings.getCredentialStatus",
   "settings:get-reset-status": "settings.getResetStatus",
   "settings:clear-connection": "settings.clearConnection",
   "settings:update-terminal-credentials": "settings.updateTerminalCredentials",
@@ -2274,6 +2394,7 @@ export const CHANNEL_MAP: Record<string, string> = {
 
   // Refunds / Adjustments
   "refund:payment": "refunds.refundPayment",
+  "refund:void-payment": "refunds.voidPayment", // W8 H26: was missing — the method existed on the typed bridge (this.inv at line ~3166) but the `CHANNEL_MAP` entry was not there, so `check-parity-contract.mjs` and any tooling that walks the map missed this channel.
   "refund:list-order-adjustments": "refunds.listOrderAdjustments",
   "refund:get-payment-balance": "refunds.getPaymentBalance",
 
@@ -2350,6 +2471,27 @@ export class TauriBridge implements PlatformBridge {
     "callerid:test": "callerid_test_connection",
   };
 
+  /**
+   * Convert a renderer-side channel name to its Rust command name.
+   *
+   * Wave 11 L: documented restriction. The regex `[:\-]` accepts the two
+   * separator characters this codebase actually uses on the renderer
+   * side: `:` (e.g. `auth:login`) and `-` (e.g. `terminal-config:get-settings`).
+   * Both map to `_` so the result is a valid Rust function identifier
+   * (`auth_login`, `terminal_config_get_settings`).
+   *
+   * Dot-notation (`'orders.create'`) is intentionally NOT accepted — a
+   * `.` would survive the replace and produce an invalid Rust command
+   * name. Verified at the time of writing: no `bridge.invoke('x.y')`
+   * call sites exist anywhere under `src/renderer/`. If a future caller
+   * needs dot-notation, EITHER:
+   *   - extend the regex to `[:\-.]` (and add a unit test exercising
+   *     the new form), OR
+   *   - add an entry to `COMMAND_OVERRIDES` for the specific channel.
+   * Don't reach for dot-notation just because it looks tidier — the
+   * typed `bridge.<namespace>.<method>()` form is the canonical
+   * replacement for raw dotted invokes.
+   */
   private toCmd(channel: string): string {
     return (
       TauriBridge.COMMAND_OVERRIDES[channel] ?? channel.replace(/[:\-]/g, "_")
@@ -2638,6 +2780,7 @@ export class TauriBridge implements PlatformBridge {
     setLanguage: (l: string) => this.inv("settings:set-language", l),
     getAdminUrl: () => this.inv("settings:get-admin-url"),
     getPosApiKey: () => this.inv("settings:get-pos-api-key"),
+    getCredentialStatus: () => this.inv("settings:get-credential-status"),
     clearConnection: () => this.inv("settings:clear-connection"),
     updateTerminalCredentials: (p: UpdateTerminalCredentialsPayload) =>
       this.inv("settings:update-terminal-credentials", p),

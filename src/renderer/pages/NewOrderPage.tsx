@@ -55,6 +55,7 @@ interface Customer {
     | { type: 'Point'; coordinates: [number, number] };
   latitude?: number | null;
   longitude?: number | null;
+  address_fingerprint?: string | null;
   selected_address_id?: string | null;
   addresses?: any[];
   version?: number;
@@ -70,6 +71,7 @@ interface CustomerInfo {
   email?: string;
   notes?: string;
   address?: {
+    id?: string;
     street: string;
     street_address?: string;
     city: string;
@@ -82,6 +84,7 @@ interface CustomerInfo {
     coordinates?: { lat: number; lng: number };
     latitude?: number | null;
     longitude?: number | null;
+    address_fingerprint?: string | null;
   };
 }
 
@@ -144,6 +147,7 @@ const buildCustomerInfoFromCustomer = (customer: Customer): CustomerInfo => {
     notes: resolvedAddress?.notes || normalizedCustomer.notes || '',
     address: {
       street: resolvedAddress?.street_address || normalizedCustomer.address || '',
+      id: resolvedAddress?.id,
       street_address:
         resolvedAddress?.street_address || normalizedCustomer.address || '',
       city: resolvedAddress?.city || normalizedCustomer.city || '',
@@ -163,6 +167,10 @@ const buildCustomerInfoFromCustomer = (customer: Customer): CustomerInfo => {
         coordinates?.lng ??
         resolvedAddress?.longitude ??
         normalizedCustomer.longitude ??
+        null,
+      address_fingerprint:
+        resolvedAddress?.address_fingerprint ||
+        normalizedCustomer.address_fingerprint ||
         null,
     },
   };
@@ -418,6 +426,11 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       let zoneName = null;
       let estimatedDeliveryTime = null;
       const effectiveDeliveryZoneInfo = orderData.deliveryZoneInfo ?? null;
+      const currentAddressCoordinates = toLatLngCoordinates(
+        currentAddress?.coordinates,
+        currentAddress?.latitude,
+        currentAddress?.longitude,
+      );
 
       if (currentOrderType === 'delivery' && currentAddress) {
         const streetAddress = currentAddress.street_address || currentAddress.street || '';
@@ -529,10 +542,15 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         ghost_source: ghostSource,
         ghost_metadata: ghostMetadata,
         delivery_address: deliveryAddress,
+        delivery_address_id: currentAddress?.id || null,
         delivery_city: currentAddress?.city || null,
         delivery_postal_code: currentAddress?.postal_code || null,
         delivery_floor: currentAddress?.floor_number || currentAddress?.floor || null,
         delivery_notes: currentAddress?.notes || currentAddress?.delivery_notes || null,
+        delivery_latitude: currentAddressCoordinates?.lat ?? null,
+        delivery_longitude: currentAddressCoordinates?.lng ?? null,
+        delivery_address_fingerprint:
+          currentAddress?.address_fingerprint || currentCustomer?.address_fingerprint || null,
         name_on_ringer: currentCustomer?.name_on_ringer || currentAddress?.name_on_ringer || null,
         notes: orderData.notes || null,
         driver_id: undefined,

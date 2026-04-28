@@ -62,7 +62,16 @@ pub fn start(port: &str, baud_rate: u32, app: tauri::AppHandle) -> Result<Value,
         let mut line_buf = String::new();
 
         while SCANNER_RUNNING.load(Ordering::SeqCst) {
-            match crate::serial::read_port(&handle_clone, 256) {
+            // Wave 2 C11: see scale.rs for rationale — wrap blocking serial
+            // read in `spawn_blocking` so the Tokio worker thread is not
+            // held hostage for the full read timeout on every poll.
+            let handle_for_read = handle_clone.clone();
+            let read_outcome = tokio::task::spawn_blocking(move || {
+                crate::serial::read_port(&handle_for_read, 256)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("scanner read join error: {e}")));
+            match read_outcome {
                 Ok(result) => {
                     if let Some(data) = result["data"].as_str() {
                         if !data.is_empty() {

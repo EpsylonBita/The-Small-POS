@@ -611,8 +611,15 @@ fn normalize_customer_for_cache(mut customer: serde_json::Value) -> serde_json::
             .unwrap_or_else(|| serde_json::json!(now.clone()));
         obj.insert("createdAt".to_string(), created_at);
         obj.insert("updatedAt".to_string(), updated_at);
-        obj.entry("addresses".to_string())
-            .or_insert(serde_json::json!([]));
+        let addresses = obj
+            .get("addresses")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(normalize_address_for_cache)
+            .collect::<Vec<_>>();
+        obj.insert("addresses".to_string(), serde_json::Value::Array(addresses));
     }
     customer
 }
@@ -853,53 +860,231 @@ async fn sync_customer_update_remote(
     Ok(remote_customer)
 }
 
-/// Fetch all customers for the organization via Supabase RPC and replace the local cache.
-/// Calls `get_customers_for_pos_terminal` which validates terminal credentials server-side.
-async fn sync_customer_fetch_all(db: &db::DbState) -> Result<Vec<serde_json::Value>, String> {
-    let supabase_url =
-        crate::storage::get_credential("supabase_url").ok_or("Missing supabase_url")?;
-    let anon_key =
-        crate::storage::get_credential("supabase_anon_key").ok_or("Missing supabase_anon_key")?;
-    let org_id =
-        crate::storage::get_credential("organization_id").ok_or("Missing organization_id")?;
-    let terminal_id = crate::storage::get_credential("terminal_id").ok_or("Missing terminal_id")?;
-    let api_key = crate::storage::get_credential("pos_api_key").ok_or("Missing pos_api_key")?;
-
-    let base = supabase_url.trim_end_matches('/');
-    let url = format!("{base}/rest/v1/rpc/get_customers_for_pos_terminal");
-
-    let body = serde_json::json!({
-        "p_organization_id": org_id,
-        "p_terminal_id": terminal_id,
-        "p_api_key": api_key,
-    });
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-    let resp = client
-        .post(&url)
-        .header("apikey", &anon_key)
-        .header("Authorization", format!("Bearer {anon_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Supabase RPC request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Supabase customers RPC error ({status}): {body}"));
+fn extract_customers_from_pos_response(response: &serde_json::Value) -> Vec<serde_json::Value> {
+    if response
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .is_some_and(|success| !success)
+        && is_not_found_error(
+            response
+                .get("error")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+        )
+    {
+        return Vec::new();
     }
 
-    let rows: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("JSON parse error: {e}"))?;
-    let customers = rows.as_array().cloned().unwrap_or_default();
+    if let Some(customers) = response.get("customers").and_then(|value| value.as_array()) {
+        return customers.clone();
+    }
+    if let Some(customers) = response
+        .pointer("/data/customers")
+        .and_then(|value| value.as_array())
+    {
+        return customers.clone();
+    }
+    if let Some(customer) = response.get("customer").cloned() {
+        if !customer.is_null() {
+            return vec![customer];
+        }
+    }
+    if let Some(customer) = response.pointer("/data/customer").cloned() {
+        if !customer.is_null() {
+            return vec![customer];
+        }
+    }
+    Vec::new()
+}
+
+fn extract_privacy_tombstones(response: &serde_json::Value) -> Vec<serde_json::Value> {
+    response
+        .get("privacy_tombstones")
+        .or_else(|| response.get("tombstones"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn sqlite_table_columns(conn: &rusqlite::Connection, table: &str) -> std::collections::HashSet<String> {
+    let mut columns = std::collections::HashSet::new();
+    let pragma = format!("PRAGMA table_info({table})");
+    if let Ok(mut statement) = conn.prepare(&pragma) {
+        if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(1)) {
+            for column in rows.flatten() {
+                columns.insert(column);
+            }
+        }
+    }
+    columns
+}
+
+fn scrub_order_customer_snapshot(
+    db: &db::DbState,
+    target_id: &str,
+    action: &str,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let columns = sqlite_table_columns(&conn, "orders");
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    let mut updates: Vec<&str> = Vec::new();
+    if columns.contains("customer_name") {
+        updates.push("customer_name = 'Privacy restricted'");
+    }
+    if columns.contains("customer_phone") {
+        updates.push("customer_phone = NULL");
+    }
+    if columns.contains("customer_email") {
+        updates.push("customer_email = NULL");
+    }
+    if columns.contains("delivery_address") {
+        updates.push("delivery_address = NULL");
+    }
+    if columns.contains("delivery_notes") {
+        updates.push("delivery_notes = NULL");
+    }
+    if columns.contains("delivery_latitude") {
+        updates.push("delivery_latitude = NULL");
+    }
+    if columns.contains("delivery_longitude") {
+        updates.push("delivery_longitude = NULL");
+    }
+    if columns.contains("delivery_address_id") {
+        updates.push("delivery_address_id = NULL");
+    }
+    if columns.contains("delivery_address_fingerprint") {
+        updates.push("delivery_address_fingerprint = NULL");
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    let mut where_parts = vec!["id = ?1".to_string()];
+    if columns.contains("customer_id") {
+        where_parts.push("customer_id = ?1".to_string());
+    }
+    if columns.contains("customer_phone") && action != "remove" {
+        where_parts.push("customer_phone = ?1".to_string());
+    }
+
+    let sql = format!(
+        "UPDATE orders SET {} WHERE {}",
+        updates.join(", "),
+        where_parts.join(" OR ")
+    );
+    let _ = conn.execute(&sql, rusqlite::params![target_id]);
+    Ok(())
+}
+
+fn apply_privacy_tombstones_to_cache(
+    db: &db::DbState,
+    tombstones: &[serde_json::Value],
+) -> Result<Vec<String>, String> {
+    if tombstones.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut cache = read_local_json_array(db, "customer_cache_v1")?;
+    let mut applied_ids: Vec<String> = Vec::new();
+
+    for tombstone in tombstones {
+        let tombstone_id = value_str(tombstone, &["id"]).unwrap_or_default();
+        let target_type = value_str(tombstone, &["target_type", "targetType"]).unwrap_or_default();
+        let target_id = value_str(tombstone, &["target_id", "targetId"]).unwrap_or_default();
+        let action = value_str(tombstone, &["action"]).unwrap_or_else(|| "restrict".to_string());
+        if tombstone_id.is_empty() || target_id.is_empty() {
+            continue;
+        }
+
+        match target_type.as_str() {
+            "customer" | "customers" => {
+                cache.retain(|entry| {
+                    value_str(entry, &["id", "customerId"])
+                        .map(|id| id != target_id)
+                        .unwrap_or(true)
+                });
+                scrub_order_customer_snapshot(db, &target_id, &action)?;
+            }
+            "customer_address" | "customer_addresses" | "address" => {
+                for entry in &mut cache {
+                    if let Some(obj) = entry.as_object_mut() {
+                        if let Some(addresses) = obj.get_mut("addresses").and_then(|v| v.as_array_mut()) {
+                            addresses.retain(|address| {
+                                value_str(address, &["id", "addressId"])
+                                    .map(|id| id != target_id)
+                                    .unwrap_or(true)
+                            });
+                        }
+                    }
+                }
+                scrub_order_customer_snapshot(db, &target_id, &action)?;
+            }
+            "order_customer_snapshot" | "order" | "orders" => {
+                scrub_order_customer_snapshot(db, &target_id, &action)?;
+            }
+            _ => {
+                continue;
+            }
+        }
+
+        applied_ids.push(tombstone_id);
+    }
+
+    write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+    Ok(applied_ids)
+}
+
+async fn acknowledge_privacy_tombstones(
+    db: &db::DbState,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let terminal_id = storage::get_credential("terminal_id")
+        .or_else(|| read_local_setting(db, "terminal", "terminal_id"))
+        .unwrap_or_else(|| "pos-tauri".to_string());
+    crate::admin_fetch(
+        Some(db),
+        "/api/pos/privacy/tombstones/consume",
+        "POST",
+        Some(serde_json::json!({
+            "ids": ids,
+            "consumed_by": terminal_id,
+        })),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn sync_customer_privacy_tombstones(db: &db::DbState) -> Result<usize, String> {
+    let response = crate::admin_fetch(Some(db), "/api/pos/privacy/tombstones", "GET", None).await?;
+    let tombstones = extract_privacy_tombstones(&response);
+    let applied_ids = apply_privacy_tombstones_to_cache(db, &tombstones)?;
+    let applied_count = applied_ids.len();
+    acknowledge_privacy_tombstones(db, applied_ids).await?;
+    Ok(applied_count)
+}
+
+/// Fetch all customers through the trusted POS admin API and replace the local cache.
+async fn sync_customer_fetch_all(db: &db::DbState) -> Result<Vec<serde_json::Value>, String> {
+    let _ = sync_customer_privacy_tombstones(db).await;
+    let response = crate::admin_fetch(Some(db), "/api/pos/customers", "GET", None).await?;
+    let customers = extract_customers_from_pos_response(&response)
+        .into_iter()
+        .map(normalize_customer_for_cache)
+        .collect::<Vec<_>>();
     write_local_json(db, "customer_cache_v1", &serde_json::json!(customers))?;
+    let tombstones = extract_privacy_tombstones(&response);
+    let applied_ids = apply_privacy_tombstones_to_cache(db, &tombstones)?;
+    let _ = acknowledge_privacy_tombstones(db, applied_ids).await;
+    if !tombstones.is_empty() {
+        return read_local_json_array(db, "customer_cache_v1");
+    }
     Ok(customers)
 }
 
@@ -1057,6 +1242,7 @@ pub async fn customer_lookup_by_phone(
     let payload = parse_phone_payload(arg0)?;
     let phone = payload.phone;
     let phone_norm = normalize_phone(&phone);
+    let _ = sync_customer_privacy_tombstones(&db).await;
     let cache = read_local_json_array(&db, "customer_cache_v1")?;
     if let Some(found) = cache.into_iter().find(|entry| {
         value_str(entry, &["phone", "customerPhone", "mobile", "telephone"])
@@ -1107,6 +1293,7 @@ pub async fn customer_lookup_by_id(
 ) -> Result<serde_json::Value, String> {
     let payload = parse_lookup_payload(arg0, "Missing customerId")?;
     let customer_id = payload.customer_id;
+    let _ = sync_customer_privacy_tombstones(&db).await;
     let cache = read_local_json_array(&db, "customer_cache_v1")?;
     let found = cache.into_iter().find(|entry| {
         value_str(entry, &["id", "customerId"])
@@ -1133,6 +1320,7 @@ pub async fn customer_search(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let query = parse_search_payload(arg0).query.to_lowercase();
+    let _ = sync_customer_privacy_tombstones(&db).await;
     if query.is_empty() {
         // Fetch all customers from admin API and refresh local cache
         match sync_customer_fetch_all(&db).await {
@@ -1160,6 +1348,31 @@ pub async fn customer_search(
             name.contains(&query) || phone.contains(&query) || email.contains(&query)
         })
         .collect();
+    if matches.is_empty() {
+        let path = format!(
+            "/api/pos/customers?search={}",
+            percent_encode_component(&query)
+        );
+        match crate::admin_fetch(Some(&db), &path, "GET", None).await {
+            Ok(response) => {
+                let remote_matches = extract_customers_from_pos_response(&response)
+                    .into_iter()
+                    .map(normalize_customer_for_cache)
+                    .collect::<Vec<_>>();
+                if !remote_matches.is_empty() {
+                    let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+                    for customer in remote_matches.iter().cloned() {
+                        upsert_customer_cache_entry(&mut cache, customer);
+                    }
+                    write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+                    return Ok(serde_json::json!(remote_matches));
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "Remote customer search unavailable, using cache result");
+            }
+        }
+    }
     Ok(serde_json::json!(matches))
 }
 

@@ -177,10 +177,36 @@ impl ZvtProtocol {
         Ok(raw)
     }
 
-    /// Check if a response indicates positive completion (0x80 0x00).
+    fn extract_framed_apdu(raw: &[u8]) -> Option<&[u8]> {
+        let frame_start = raw.windows(2).position(|w| w == [DLE, STX])?;
+        let apdu_start = frame_start + 2;
+        let frame_end_rel = raw[apdu_start..].windows(2).position(|w| w == [DLE, ETX])?;
+        let apdu_end = apdu_start + frame_end_rel;
+        let crc_start = apdu_end + 2;
+        if raw.len() < crc_start + 2 {
+            warn!("Truncated ZVT frame: missing CRC bytes after DLE/ETX");
+            return None;
+        }
+
+        let apdu = &raw[apdu_start..apdu_end];
+        let expected_crc = u16::from_le_bytes([raw[crc_start], raw[crc_start + 1]]);
+        let computed_crc = Self::crc16(apdu);
+        if computed_crc != expected_crc {
+            warn!(
+                "ZVT frame CRC mismatch: expected 0x{expected_crc:04X}, computed 0x{computed_crc:04X}"
+            );
+            return None;
+        }
+
+        Some(apdu)
+    }
+
+    /// Check if a framed response indicates positive completion (0x80 0x00).
     fn is_positive_completion(raw: &[u8]) -> bool {
-        // Look for 80 00 anywhere in response (skip framing)
-        raw.windows(2).any(|w| w[0] == ACK_POSITIVE && w[1] == 0x00)
+        let Some(apdu) = Self::extract_framed_apdu(raw) else {
+            return false;
+        };
+        apdu.len() >= 2 && apdu[0] == ACK_POSITIVE && apdu[1] == 0x00
     }
 
     /// Collect receipt print lines from intermediate responses.
@@ -214,7 +240,13 @@ impl ZvtProtocol {
                 return Err("Transaction timeout".into());
             }
 
-            let raw = self.transport.receive(remaining.min(2000))?;
+            // Wave 2 H20: clamp the receive window to `[1, 2000]` ms so a
+            // near-boundary `remaining` (where a single `.min(2000)` alone
+            // could bottom out at 0 on some platforms / transports) still
+            // issues a real read instead of a zero-ms spin. Upper bound
+            // caps any single receive at 2 s so the overall transaction
+            // timeout check above continues to tick.
+            let raw = self.transport.receive(remaining.clamp(1, 2000))?;
             if raw.is_empty() {
                 continue;
             }
@@ -279,9 +311,29 @@ impl ZvtProtocol {
                     _ => Some(format!("Card(0x{:02X})", raw[i + 1])),
                 };
             }
-            // BMP 23: card PAN (last 4)
-            if i + 5 < raw.len() && raw[i] == 0x23 {
-                card_last_four = Some(format!("{:02X}{:02X}", raw[i + 3], raw[i + 4]));
+            // BMP 23: card PAN (last 4).
+            //
+            // Wave 2 H23: ZVT BMP 23 is a variable-length field. The
+            // structure is:
+            //   raw[i]     = tag (0x23)
+            //   raw[i+1]   = length byte (`len`, in BCD-bytes)
+            //   raw[i+2..] = PAN encoded in BCD, `len` bytes long
+            //
+            // The previous implementation read `raw[i+3]` and `raw[i+4]`
+            // unconditionally — that is 2 bytes INTO the PAN, not the last
+            // two bytes, so for any PAN longer than 8 digits the "last 4"
+            // were reporting middle-of-PAN digits.
+            //
+            // For BCD bytes whose nibbles are all decimal (0x00..=0x99),
+            // `{:02X}` prints the same glyphs as decimal, so we keep that
+            // format; any unexpected nibble value > 9 is preserved as hex
+            // so the raw byte stays visible for debugging.
+            if i + 1 < raw.len() && raw[i] == 0x23 {
+                let len = raw[i + 1] as usize;
+                if len >= 2 && i + 2 + len <= raw.len() {
+                    let end = i + 2 + len;
+                    card_last_four = Some(format!("{:02X}{:02X}", raw[end - 2], raw[end - 1]));
+                }
             }
             // BMP 87: terminal reference
             if i + 1 < raw.len() && raw[i] == 0x87 {
@@ -365,10 +417,26 @@ impl EcrProtocol for ZvtProtocol {
             Some(self.receipt_lines.clone())
         };
 
+        // Wave 2 C13: classify the transaction outcome from the actual
+        // completion bytes instead of hard-coding Approved. `wait_for_completion`
+        // currently only returns Ok(raw) when `is_positive_completion(raw)` was
+        // already satisfied inside the loop, so in the common case this is
+        // redundant — but the defensive recheck closes the case where
+        // `wait_for_completion` (or a future refactor of it) ever returns
+        // an Ok that does NOT contain the 0x80 0x00 positive-completion
+        // marker. A declined card that reaches this branch used to be
+        // reported as Approved, which is the single highest-dollar-impact
+        // bug in the review (cashier hands over goods on a declined card).
+        let status = if Self::is_positive_completion(&completion) {
+            TransactionStatus::Approved
+        } else {
+            TransactionStatus::Declined
+        };
+
         let completed = Utc::now().to_rfc3339();
         Ok(TransactionResponse {
             transaction_id: request.transaction_id.clone(),
-            status: TransactionStatus::Approved,
+            status,
             authorization_code: auth_code,
             terminal_reference: terminal_ref,
             fiscal_receipt_number: None,
@@ -536,8 +604,20 @@ mod tests {
 
     #[test]
     fn test_positive_completion_detection() {
-        assert!(ZvtProtocol::is_positive_completion(&[0x80, 0x00, 0x00]));
-        assert!(!ZvtProtocol::is_positive_completion(&[0x84, 0x01, 0x00]));
+        let proto = ZvtProtocol::new(
+            Box::new(crate::ecr::transport::BluetoothTransport::new("", 0)),
+            &serde_json::json!({}),
+        );
+        let approved = proto.frame_apdu(&[0x80, 0x00, 0x00]);
+        let declined = proto.frame_apdu(&[0x84, 0x01, 0x00]);
+        let mut corrupt_crc = approved.clone();
+        let last = corrupt_crc.len() - 1;
+        corrupt_crc[last] ^= 0xFF;
+
+        assert!(ZvtProtocol::is_positive_completion(&approved));
+        assert!(!ZvtProtocol::is_positive_completion(&declined));
+        assert!(!ZvtProtocol::is_positive_completion(&[0x80, 0x00, 0x00]));
+        assert!(!ZvtProtocol::is_positive_completion(&corrupt_crc));
         assert!(!ZvtProtocol::is_positive_completion(&[]));
     }
 }

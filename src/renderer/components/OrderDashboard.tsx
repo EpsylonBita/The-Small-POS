@@ -1423,6 +1423,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }
 
           const deliveryFee = resolveDeliveryFee(validationResult);
+          const validatedCoordinates =
+            toLatLngCoordinates(validationResult?.coordinates, null, null) ||
+            addressCoordinates;
+          const deliveryZoneId =
+            validationResult?.selectedZone?.id ||
+            validationResult?.zone?.id ||
+            validationResult?.zoneId ||
+            resolvedAddress.deliveryZoneId ||
+            undefined;
           const totalAmount = calculatePickupToDeliveryTotal(
             targetOrder,
             deliveryFee,
@@ -1434,11 +1443,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             customerPhone: customer.phone,
             customerEmail: customer.email || undefined,
             deliveryAddress: resolvedAddress.streetAddress,
+            deliveryAddressId: resolvedAddress.addressId || undefined,
             deliveryCity: resolvedAddress.city || undefined,
             deliveryPostalCode: resolvedAddress.postalCode || undefined,
             deliveryFloor: resolvedAddress.floor || undefined,
             deliveryNotes: resolvedAddress.notes || undefined,
             nameOnRinger: resolvedAddress.nameOnRinger || undefined,
+            deliveryLatitude:
+              validatedCoordinates?.lat ?? resolvedAddress.latitude ?? undefined,
+            deliveryLongitude:
+              validatedCoordinates?.lng ?? resolvedAddress.longitude ?? undefined,
+            deliveryAddressFingerprint:
+              resolvedAddress.addressFingerprint || undefined,
+            deliveryZoneId,
             deliveryFee,
             totalAmount,
           };
@@ -2670,6 +2687,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         order: Order | undefined,
         nextItems: OrderItem[],
         targetOrderType: EditableOrderType,
+        nextTotal?: number,
       ): {
         financials?: Partial<OrderFinancialsUpdateParams>;
         orderUpdates?: Partial<EditSettlementOrderUpdates>;
@@ -2682,11 +2700,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           nextItems
             .reduce((sum, item) => {
               const quantity = Number(item.quantity || 0);
-              const explicitTotal =
+              const explicitTotal = Number(
                 (item as any).total_price ??
                 (item as any).totalPrice ??
-                null;
-              if (typeof explicitTotal === "number") {
+                NaN,
+              );
+              if (Number.isFinite(explicitTotal)) {
                 return sum + explicitTotal;
               }
               return sum + Number(item.unit_price ?? item.price ?? 0) * quantity;
@@ -2700,16 +2719,44 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           (order as any).discount_percentage ?? (order as any).discountPercentage ?? 0,
         );
         const tipAmount = Number((order as any).tip_amount ?? (order as any).tipAmount ?? 0);
-        const taxRate = Number((order as any).tax_rate ?? 24);
+        const taxRate = Number((order as any).tax_rate ?? (order as any).taxRate ?? 0);
         const deliveryFee =
           targetOrderType === "delivery"
             ? Number((order as any).delivery_fee ?? order.deliveryFee ?? 0)
             : 0;
         const taxableSubtotal = Math.max(0, itemsSubtotal - discountAmount);
-        const taxAmount = Number((taxableSubtotal * (taxRate / 100)).toFixed(2));
-        const totalAmount = Number(
-          (taxableSubtotal + taxAmount + deliveryFee + tipAmount).toFixed(2),
-        );
+        const explicitTotal = Number(nextTotal);
+        const hasExplicitTotal =
+          Number.isFinite(explicitTotal) && explicitTotal >= 0;
+        const totalAmount = hasExplicitTotal
+          ? Number(explicitTotal.toFixed(2))
+          : Number(
+              (taxableSubtotal +
+                (Number.isFinite(taxRate) && taxRate > 0
+                  ? taxableSubtotal * (taxRate / 100)
+                  : Number(
+                      (order as any).tax_amount ??
+                        (order as any).taxAmount ??
+                        0,
+                    )) +
+                deliveryFee +
+                tipAmount).toFixed(2),
+            );
+        const taxAmount = hasExplicitTotal
+          ? Math.max(
+              0,
+              Number(
+                (
+                  totalAmount -
+                  taxableSubtotal -
+                  deliveryFee -
+                  tipAmount
+                ).toFixed(2),
+              ),
+            )
+          : Number.isFinite(taxRate) && taxRate > 0
+            ? Number((taxableSubtotal * (taxRate / 100)).toFixed(2))
+            : Number((order as any).tax_amount ?? (order as any).taxAmount ?? 0);
 
         const orderUpdates: Partial<EditSettlementOrderUpdates> = {
           orderType: targetOrderType,
@@ -4094,18 +4141,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           deliveryAddress: customerInfo.address.trim(),
           deliveryPostalCode: customerInfo.postal_code?.trim() || null,
           deliveryNotes: customerInfo.notes?.trim() || null,
+          deliveryLatitude: customerInfo.latitude ?? customerInfo.coordinates?.lat ?? null,
+          deliveryLongitude: customerInfo.longitude ?? customerInfo.coordinates?.lng ?? null,
+          deliveryAddressFingerprint: customerInfo.addressFingerprint ?? null,
         };
-        const submitCustomerInfoUpdate = (
-          payload: { orderId: string } & typeof updatePayload,
-        ) => {
-          if (typeof bridge.orders.updateCustomerInfo === "function") {
-            return bridge.orders.updateCustomerInfo(payload);
-          }
-          return bridge.invoke("order:update-customer-info", payload);
-        };
-
         for (const orderId of targetOrderIds) {
-          const result = await submitCustomerInfoUpdate({
+          const result = await bridge.orders.updateCustomerInfo({
             orderId,
             ...updatePayload,
           });
@@ -4199,6 +4240,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           targetOrder,
           normalizeEditOrderItems(orderData.items),
           targetOrderType,
+          orderData.total,
         );
 
         await applySettlementAwareOrderEdit([
@@ -4252,15 +4294,23 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           "",
         coordinates: toLatLngCoordinates(
           firstOrder?.coordinates,
-          firstOrder?.latitude,
-          firstOrder?.longitude,
+          firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude ?? firstOrder?.latitude,
+          firstOrder?.deliveryLongitude ?? firstOrder?.delivery_longitude ?? firstOrder?.longitude,
         ),
         latitude:
-          typeof firstOrder?.latitude === "number" ? firstOrder.latitude : null,
+          typeof (firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude) === "number"
+            ? firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude
+            : typeof firstOrder?.latitude === "number" ? firstOrder.latitude : null,
         longitude:
-          typeof firstOrder?.longitude === "number"
-            ? firstOrder.longitude
-            : null,
+          typeof (firstOrder?.deliveryLongitude ?? firstOrder?.delivery_longitude) === "number"
+            ? firstOrder?.deliveryLongitude ?? firstOrder?.delivery_longitude
+            : typeof firstOrder?.longitude === "number"
+              ? firstOrder.longitude
+              : null,
+        addressFingerprint:
+          firstOrder?.deliveryAddressFingerprint ||
+          firstOrder?.delivery_address_fingerprint ||
+          null,
       };
     };
 
@@ -4361,7 +4411,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           <BulkActionsBar
             selectedCount={selectedOrders.length}
             selectionType={selectionType}
-            canConvertPickupToDelivery={Boolean(selectedSinglePickupOrder)}
             deliverySelectionCanBeCompleted={deliverySelectionCanBeCompleted}
             activeTab={activeTab}
             onBulkAction={handleBulkAction}

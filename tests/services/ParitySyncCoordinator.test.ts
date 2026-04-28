@@ -11,7 +11,10 @@ import {
   runParitySyncCycle,
 } from '../../src/renderer/services/ParitySyncCoordinator';
 import { setSyncQueueBridgeInstanceForTests } from '../../src/renderer/services/SyncQueueBridge';
-import { clearTerminalCredentialCache } from '../../src/renderer/services/terminal-credentials';
+import {
+  clearTerminalCredentialCache,
+  updateTerminalCredentialCache,
+} from '../../src/renderer/services/terminal-credentials';
 
 function createMockBridge(overrides?: {
   syncFromAdmin?: () => Promise<unknown>;
@@ -23,6 +26,8 @@ function createMockBridge(overrides?: {
   listStaffSchedule?: (range: { start_date: string; end_date: string }) => Promise<unknown>;
   syncLoyaltySettings?: () => Promise<unknown>;
   syncLoyaltyCustomers?: () => Promise<unknown>;
+  posApiKey?: string;
+  terminalSettings?: Record<string, unknown> | null;
 }) {
   const calls = {
     syncFromAdmin: 0,
@@ -34,6 +39,16 @@ function createMockBridge(overrides?: {
     staffSchedule: [] as Array<{ start_date: string; end_date: string }>,
     loyaltySyncSettings: 0,
     loyaltySyncCustomers: 0,
+    // W8 follow-up: the parity coordinator now resolves credentials via
+    // `terminal-credentials.ts` (which calls `terminalConfig.{getTerminalId,
+    // getBranchId, getOrganizationId}` and `settings.getPosApiKey`) AND
+    // persists snapshots via `settings.updateLocal`. Track each.
+    getTerminalId: 0,
+    getBranchId: 0,
+    getOrganizationId: 0,
+    getSettings: 0,
+    getPosApiKey: 0,
+    settingsUpdateLocal: [] as Array<{ request: unknown; value?: unknown }>,
   };
 
   const bridge = {
@@ -58,6 +73,22 @@ function createMockBridge(overrides?: {
         }
         return key === 'pos_api_key' ? 'pos-key' : '';
       },
+      getSettings: async () => {
+        calls.getSettings += 1;
+        return overrides?.terminalSettings ?? null;
+      },
+      getTerminalId: async () => {
+        calls.getTerminalId += 1;
+        return 'terminal-1';
+      },
+      getBranchId: async () => {
+        calls.getBranchId += 1;
+        return 'branch-1';
+      },
+      getOrganizationId: async () => {
+        calls.getOrganizationId += 1;
+        return 'org-1';
+      },
     },
     sync: {
       getStatus: async () => {
@@ -73,6 +104,16 @@ function createMockBridge(overrides?: {
       },
       force: async () => {
         calls.forceSync += 1;
+        return { success: true };
+      },
+    },
+    settings: {
+      getPosApiKey: async () => {
+        calls.getPosApiKey += 1;
+        return overrides?.posApiKey ?? 'pos-key';
+      },
+      updateLocal: async (request: unknown, value?: unknown) => {
+        calls.settingsUpdateLocal.push({ request, value });
         return { success: true };
       },
     },
@@ -154,6 +195,18 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
 
   setBridge(bridge);
   setSyncQueueBridgeInstanceForTests(mockQueue);
+  // Pre-populate the credential cache. `terminal-credentials.ts` is
+  // window-guarded and a no-op in node tests, so without this seed the
+  // coordinator's `resolveParitySyncCredentials` would fall back to
+  // `readString(config, 'pos_api_key', 'api_key')` and only populate the
+  // key if it appears in `getFullConfig`. Pre-populating mirrors the
+  // realistic state where credentials were resolved during a prior boot.
+  updateTerminalCredentialCache({
+    terminalId: 'terminal-1',
+    branchId: 'branch-1',
+    organizationId: 'org-1',
+    apiKey: 'pos-key',
+  });
   onEvent(PARITY_QUEUE_STATUS_EVENT, handleQueueEvent);
   onEvent('terminal-config-updated', handleConfigEvent);
 
@@ -162,7 +215,29 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
 
     assert.equal(calls.syncFromAdmin, 1);
     assert.equal(calls.forceSync, 1);
-    assert.deepEqual(calls.getSetting, ['terminal.pos_api_key', 'terminal.api_key']);
+    // Credential resolution refactored away from `getSetting('terminal',
+    // 'pos_api_key' | 'api_key')`. The new path goes through
+    // `terminal-credentials.ts`, but every accessor there is window-guarded
+    // (`if (typeof window === 'undefined') return ''`) and therefore a no-op
+    // in node-test runs. The coordinator's fallback `readString(config,
+    // 'pos_api_key', 'api_key')` is what actually resolves the key in this
+    // test — see the `pos_api_key: 'pos-key'` field on the mock's
+    // getFullConfig return. So `getSetting` is never called from the
+    // credential path here.
+    assert.deepEqual(calls.getSetting, []);
+    // The coordinator persists a snapshot via settings.updateLocal both at
+    // sync-start (initial) and sync-end (completed). Assert at least one
+    // update was made and that it carried the diagnostics setting type.
+    // This call IS reachable in tests — `persistParitySyncSnapshot` has no
+    // window guard.
+    assert.ok(
+      calls.settingsUpdateLocal.length >= 1,
+      'settings.updateLocal must be called for snapshot persistence',
+    );
+    const firstSettingsUpdate = calls.settingsUpdateLocal[0]?.request as {
+      settingType?: string;
+    } | undefined;
+    assert.equal(firstSettingsUpdate?.settingType, 'diagnostics');
     assert.deepEqual(calls.adminFetches, [
       '/api/pos/settings/terminal-1',
       '/api/pos/settings/terminal-1?category=menu',
@@ -207,21 +282,25 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
       },
     ]);
     assert.deepEqual(queueEvents, [queueStatus]);
-    assert.deepEqual(configEvents, [
-      {
-        terminal_id: 'terminal-1',
-        admin_url: 'https://admin.example',
-      },
-    ]);
-    assert.deepEqual(result, {
-      config: {
-        terminal_id: 'terminal-1',
-        admin_url: 'https://admin.example',
-      },
-      queueStatus,
-      paritySyncResult: parityResult,
-      legacySyncTriggered: true,
+    // `terminal-config-updated` was previously emitted by the coordinator
+    // after `terminalConfig.syncFromAdmin`. It is now emitted by the Rust
+    // side (see `event-bridge.ts:103` — `terminal_config_updated` →
+    // `terminal-config-updated`). In a node-only test there is no Rust
+    // process to emit it, so `configEvents` is empty. The renderer-side
+    // listener wiring is unchanged and remains exercised by the consumer
+    // hooks (`useFeatures`, `useResolvedPosIdentity`, etc.).
+    assert.deepEqual(configEvents, []);
+    // The result shape grew over time — it now also carries
+    // `credentialState` and `paritySyncStatus` (with a dynamic
+    // `finishedAt` timestamp). Assert per-field on the parts this test
+    // actually cares about, rather than `deepEqual` on the whole object.
+    assert.deepEqual(result.config, {
+      terminal_id: 'terminal-1',
+      admin_url: 'https://admin.example',
     });
+    assert.deepEqual(result.queueStatus, queueStatus);
+    assert.deepEqual(result.paritySyncResult, parityResult);
+    assert.equal(result.legacySyncTriggered, true);
   } finally {
     offEvent(PARITY_QUEUE_STATUS_EVENT, handleQueueEvent);
     offEvent('terminal-config-updated', handleConfigEvent);
@@ -271,6 +350,14 @@ test('runParitySyncCycle deduplicates concurrent sync requests', async () => {
 
   setBridge(bridge);
   setSyncQueueBridgeInstanceForTests(mockQueue);
+  // Same rationale as the first test — pre-populate the credential cache
+  // because `terminal-credentials.ts` is window-guarded in node tests.
+  updateTerminalCredentialCache({
+    terminalId: 'terminal-1',
+    branchId: 'branch-1',
+    organizationId: 'org-1',
+    apiKey: 'pos-key',
+  });
 
   try {
     const first = runParitySyncCycle();

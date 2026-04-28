@@ -12,7 +12,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -21,13 +21,46 @@ use uuid::Uuid;
 // Connection pool
 // ---------------------------------------------------------------------------
 
-/// Global pool of open serial ports.  Key is a UUID handle string.
-static PORT_POOL: Mutex<Option<HashMap<String, Box<dyn serialport::SerialPort>>>> =
-    Mutex::new(None);
+/// Handle to a single open serial port.
+///
+/// Wave 2 H21: each port lives behind its OWN `Mutex`, wrapped in `Arc` so
+/// the pool lock can be released after a cheap clone. The previous design
+/// held the pool lock for the entire duration of every `read`/`write`
+/// call, serialising all serial I/O across every peripheral through one
+/// global lock — a 200 ms scale poll could block a barcode-scanner read,
+/// an ECR status query, or a customer-display update.
+///
+/// The new ownership chain is:
+///   1. Lock `PORT_POOL` briefly → clone the `PortHandle` for the key.
+///   2. Release `PORT_POOL` lock.
+///   3. Lock that port's own `Mutex` → perform I/O.
+///
+/// Step 3 still serialises access to the SAME port (correct — a half-read
+/// followed by another read on the same serial handle would corrupt the
+/// stream), but now allows I/O on OTHER ports to run in parallel.
+type PortHandle = Arc<Mutex<Box<dyn serialport::SerialPort>>>;
 
-fn pool() -> std::sync::MutexGuard<'static, Option<HashMap<String, Box<dyn serialport::SerialPort>>>>
-{
+/// Global pool of open serial ports. Key is a UUID handle string.
+static PORT_POOL: Mutex<Option<HashMap<String, PortHandle>>> = Mutex::new(None);
+
+fn pool() -> std::sync::MutexGuard<'static, Option<HashMap<String, PortHandle>>> {
     PORT_POOL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Look up a port handle by its UUID, returning an `Arc` clone so callers
+/// can do I/O without holding the pool lock. Returns `None` if the handle
+/// is unknown (never opened, or already closed).
+fn get_port_handle(handle: &str) -> Option<PortHandle> {
+    pool().as_ref()?.get(handle).cloned()
+}
+
+/// Lock a single port's mutex, recovering from poisoning by taking the
+/// inner guard — consistent with how `pool()` handles a poisoned pool
+/// lock above. A poisoned port mutex means a prior I/O call panicked;
+/// the underlying OS handle is still valid, so accepting the guard is
+/// the pragmatic recovery.
+fn lock_port(port: &PortHandle) -> std::sync::MutexGuard<'_, Box<dyn serialport::SerialPort>> {
+    port.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +130,7 @@ pub fn open_port(port: &str, baud_rate: u32, timeout_ms: Option<u64>) -> Result<
     {
         let mut guard = pool();
         let map = guard.get_or_insert_with(HashMap::new);
-        map.insert(handle.clone(), serial);
+        map.insert(handle.clone(), Arc::new(Mutex::new(serial)));
     }
 
     info!(port = port, baud = baud_rate, handle = %handle, "Serial port opened");
@@ -111,12 +144,14 @@ pub fn open_port(port: &str, baud_rate: u32, timeout_ms: Option<u64>) -> Result<
 }
 
 /// Write data to an open serial port.
+///
+/// Wave 2 H21: the pool lock is released before the blocking `write` /
+/// `flush` so other ports' I/O can proceed in parallel. Per-port
+/// serialisation is preserved via the port's own mutex.
 pub fn write_port(handle: &str, data: &[u8]) -> Result<Value, String> {
-    let mut guard = pool();
-    let map = guard.get_or_insert_with(HashMap::new);
-    let port = map
-        .get_mut(handle)
-        .ok_or_else(|| format!("No open port with handle {handle}"))?;
+    let port_handle =
+        get_port_handle(handle).ok_or_else(|| format!("No open port with handle {handle}"))?;
+    let mut port = lock_port(&port_handle);
 
     let written = port
         .write(data)
@@ -133,12 +168,13 @@ pub fn write_port(handle: &str, data: &[u8]) -> Result<Value, String> {
 /// Read data from an open serial port.
 ///
 /// Returns up to `max_bytes` bytes. Returns empty if timeout expires with no data.
+///
+/// Wave 2 H21: the pool lock is released before the blocking `read` so a
+/// slow 200 ms scale poll no longer blocks reads on other peripherals.
 pub fn read_port(handle: &str, max_bytes: usize) -> Result<Value, String> {
-    let mut guard = pool();
-    let map = guard.get_or_insert_with(HashMap::new);
-    let port = map
-        .get_mut(handle)
-        .ok_or_else(|| format!("No open port with handle {handle}"))?;
+    let port_handle =
+        get_port_handle(handle).ok_or_else(|| format!("No open port with handle {handle}"))?;
+    let mut port = lock_port(&port_handle);
 
     let mut buf = vec![0u8; max_bytes.min(4096)];
     match port.read(&mut buf) {
@@ -164,6 +200,12 @@ pub fn read_port(handle: &str, max_bytes: usize) -> Result<Value, String> {
 }
 
 /// Close an open serial port and remove it from the pool.
+///
+/// Removing the `PortHandle` (the `Arc`) from the pool drops the
+/// `Arc`-local reference. Any background thread still holding the
+/// `Arc` from a previous `get_port_handle` call keeps the port alive
+/// until its guard drops — correct, because an in-flight I/O call
+/// must finish before the port is actually destroyed.
 pub fn close_port(handle: &str) -> Result<Value, String> {
     let mut guard = pool();
     let map = guard.get_or_insert_with(HashMap::new);

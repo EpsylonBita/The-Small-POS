@@ -6,7 +6,7 @@
  * the SyncQueue interface from shared/pos/sync-queue-types.ts.
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { getBridge } from '../../lib';
 import type {
   SyncQueueItem,
   SyncResult,
@@ -16,6 +16,8 @@ import type {
   SyncOperation,
   ConflictAuditEntry,
 } from '../../../../shared/pos/sync-queue-types';
+
+type InvokeFn = <T = unknown>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 // =============================================
 // ENQUEUE INPUT (matches Rust EnqueueInput)
@@ -47,11 +49,11 @@ interface RetryItemsResult {
 // =============================================
 
 export class SyncQueueBridge implements SyncQueue {
-  private readonly invokeFn: typeof invoke;
+  private readonly invokeFn: InvokeFn;
   private _pendingCount = 0;
   private _listeners: Set<(count: number) => void> = new Set();
 
-  constructor(invokeFn: typeof invoke = invoke) {
+  constructor(invokeFn: InvokeFn = (command, args) => getBridge().invoke(command, args)) {
     this.invokeFn = invokeFn;
   }
 
@@ -125,11 +127,8 @@ export class SyncQueueBridge implements SyncQueue {
   /**
    * Process all pending items by syncing to the admin API.
    */
-  async processQueue(apiBaseUrl: string, apiKey: string): Promise<SyncResult> {
-    const result = await this.invokeFn<SyncResult>('sync_queue_process', {
-      apiBaseUrl,
-      apiKey,
-    });
+  async processQueue(): Promise<SyncResult> {
+    const result = await this.invokeFn<SyncResult>('sync_queue_process');
     await this.refreshPendingCount();
     return result;
   }

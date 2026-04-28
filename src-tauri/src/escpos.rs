@@ -10,6 +10,22 @@ const ESC: u8 = 0x1B;
 const GS: u8 = 0x1D;
 const LF: u8 = 0x0A;
 
+/// ESC/POS cash-drawer pulse command: `ESC p m t1 t2`.
+///
+/// - `0x1B` (ESC)
+/// - `0x70` (`p`) — generate pulse
+/// - `0x00` — pin 2 (connector pin)
+/// - `0x19` — on time  (25 × 2 ms = 50 ms)
+/// - `0xFA` — off time (250 × 2 ms = 500 ms)
+///
+/// Wave 2 H22: this is the single source of truth for the drawer-kick
+/// byte sequence. Every code path that opens a cash drawer over ESC/POS
+/// (the `EscPosBuilder` in this module and the TCP-kick path in
+/// `drawer.rs`) MUST reference this constant rather than re-inlining
+/// the bytes, otherwise the two sites can drift and produce different
+/// pulse widths on slow-solenoid drawers.
+pub(crate) const ESCPOS_DRAWER_KICK: [u8; 5] = [ESC, 0x70, 0x00, 0x19, 0xFA];
+
 /// Paper width in characters.
 #[derive(Debug, Clone, Copy)]
 pub enum PaperWidth {
@@ -63,12 +79,28 @@ pub struct EscPosBuilder {
 }
 
 impl EscPosBuilder {
+    /// Wave 11 L: explicit default for `active_code_page`.
+    ///
+    /// CP737 (page 14) is the Greek code page used by the receipt-Greek
+    /// path that dominates this POS. The previous default of `0` worked
+    /// only because the inline-restore path at `text()` runs only after
+    /// a `€` split — for pure ASCII / pure Greek text, no command is
+    /// ever emitted, and the buffer's notion of "active code page"
+    /// matches the printer-side default of CP437 anyway. Explicitly
+    /// defaulting to CP737 makes the inline `restore` after a `€` split
+    /// land on the right code page in the common case where the caller
+    /// has already issued a `code_page(14)` or `greek_mode()` outside
+    /// the visible API.
+    ///
+    /// Callers that want a different default should call `code_page(n)`
+    /// or `star_code_page(n)` immediately after `new()` — the explicit
+    /// setter wins over the default.
     pub fn new() -> Self {
         Self {
             buffer: Vec::with_capacity(512),
             paper: PaperWidth::Mm80,
             greek_mode: false,
-            active_code_page: 0,
+            active_code_page: 14, // CP737 (Greek)
             star_line_mode: false,
         }
     }
@@ -339,7 +371,21 @@ impl EscPosBuilder {
             return self;
         }
 
-        let payload = data.as_bytes();
+        // Wave 11 L: clamp QR payload to a length that fits in the 16-bit
+        // length field (`p_l` + `p_h`) after the +3 overhead bytes. A
+        // payload > 65_532 bytes would overflow `store_len` when packed
+        // into two u8s, producing a length field that doesn't match the
+        // actual data and causing the printer to hang waiting for the
+        // rest of a frame that never arrives. QR codes realistically
+        // encode URLs or receipt identifiers far smaller than this, so
+        // the truncation is defensive — real receipts won't hit it.
+        const QR_MAX_PAYLOAD_BYTES: usize = 65_530;
+        let payload_all = data.as_bytes();
+        let payload = if payload_all.len() > QR_MAX_PAYLOAD_BYTES {
+            &payload_all[..QR_MAX_PAYLOAD_BYTES]
+        } else {
+            payload_all
+        };
         let store_len = payload.len() + 3;
         let p_l = (store_len & 0xFF) as u8;
         let p_h = ((store_len >> 8) & 0xFF) as u8;
@@ -477,10 +523,16 @@ impl EscPosBuilder {
     // Cash drawer
     // -----------------------------------------------------------------------
 
-    /// ESC p m t1 t2 — Kick cash drawer (pin 2, 200ms pulse).
+    /// ESC p m t1 t2 — Kick cash drawer (pin 2, 50 ms on / 500 ms off).
+    ///
+    /// Wave 2 H22: uses the shared [`ESCPOS_DRAWER_KICK`] constant so the
+    /// `EscPosBuilder` and the TCP-kick path in `drawer.rs` stay in sync.
+    /// The previous hard-coded value used `0x78` (240 ms off), while
+    /// `drawer.rs` used `0xFA` (500 ms off) — on slow-solenoid drawers
+    /// the shorter off-time could let a mis-timed second kick fire
+    /// before the first latch had released.
     pub fn open_drawer(&mut self) -> &mut Self {
-        self.buffer
-            .extend_from_slice(&[ESC, 0x70, 0x00, 0x19, 0x78]);
+        self.buffer.extend_from_slice(&ESCPOS_DRAWER_KICK);
         self
     }
 
@@ -827,7 +879,11 @@ mod tests {
             b.open_drawer();
             b.build()
         };
-        assert_eq!(data, vec![0x1B, 0x70, 0x00, 0x19, 0x78]);
+        // Wave 2 H22: drawer kick now uses a 500 ms off-time (`0xFA`)
+        // shared with `drawer.rs` via the `ESCPOS_DRAWER_KICK` constant,
+        // replacing the previous inconsistent `0x78` (240 ms).
+        assert_eq!(data, vec![0x1B, 0x70, 0x00, 0x19, 0xFA]);
+        assert_eq!(data.as_slice(), ESCPOS_DRAWER_KICK);
     }
 
     #[test]
@@ -871,5 +927,18 @@ mod tests {
         // Ends with cut command
         let tail = &data[data.len() - 4..];
         assert_eq!(tail, &[0x1D, 0x56, 0x41, 0x10]);
+    }
+
+    /// Wave 11 L: regression test for the explicit `active_code_page = 14`
+    /// default. CP737 is the Greek code page; the prior `0` default left
+    /// the inline-restore logic at `text()`'s `€`-split path emitting
+    /// `code_page(0)` (page-not-set) instead of restoring to a real page.
+    #[test]
+    fn test_default_active_code_page_is_cp737() {
+        let b = EscPosBuilder::new();
+        assert_eq!(
+            b.active_code_page, 14,
+            "EscPosBuilder::new() must default active_code_page to 14 (CP737, Greek)"
+        );
     }
 }

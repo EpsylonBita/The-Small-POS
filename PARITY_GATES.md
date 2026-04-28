@@ -27,20 +27,20 @@ This document defines the active parity gate set for `pos-tauri` after native-on
 | G4 | Auth lockout behavior | Failed PIN attempts lock and recover by policy | PASS (local) |
 | G5 | Shift lifecycle integrity | Open/close flow and variance remain correct | PASS (local) |
 | G6 | Shift offline persistence + exactly-once sync | Offline shift events queue and sync once on reconnect | PASS (local) |
-| G7 | Factory reset round-trip | Wipe all credentials, re-provision from onboarding, confirm no pre-reset state survives (keyring, localStorage, local_settings, sync queues) | PENDING |
-| G8 | Payment offline persistence + exactly-once sync | Payment queue behavior remains durable/idempotent | PASS (local) |
+| G7 | Factory reset round-trip | Wipe all credentials, re-provision from onboarding, confirm no pre-reset state survives (keyring, localStorage, local_settings, sync queues) | PASS (local) — `cargo test --lib parity_g7` (see `src-tauri/src/tests/parity_g7.rs`) |
+| G8 | Payment offline persistence + exactly-once sync | Payment queue behavior remains durable/idempotent | PASS (local) — `cargo test --lib parity_g8` (see `src-tauri/src/tests/parity_g8.rs`) |
 | G9 | Deferred payment reconciliation | Parent/child sync ordering resolves deferred states correctly | PASS (local) |
 | G10 | Print pipeline offline safety + idempotency | Receipt job durability and duplicate suppression hold | PASS (local) |
 | G11 | Hardware print resilience | Print failures do not corrupt payment/order state | PASS (local) |
 | G12 | Cash drawer resilience | Drawer errors remain non-blocking and rate-limited | PASS (local) |
-| G13 | Refund/void offline persistence + exactly-once sync | Financial adjustments persist and reconcile correctly | PASS (local) |
-| G14 | End-of-day close + z-report offline behavior | Shift close and z-report remain durable offline | PASS (local) |
+| G13 | Refund/void offline persistence + exactly-once sync | Financial adjustments persist and reconcile correctly | PASS (local) — `cargo test --lib parity_g13` (see `src-tauri/src/tests/parity_g13.rs`) |
+| G14 | End-of-day close + z-report offline behavior | Shift close and z-report remain durable offline, including queue blocker clearance evidence | PENDING production-path evidence — `cargo test --lib parity_g14` is regression coverage only |
 
 ## Outstanding Release Gate
 
 | Gate | Description | Evidence required | Status |
 |---|---|---|---|
-| S1 | 24-hour staging soak (forced offline/online toggles) | `staging-soak-report.json` + log/admin evidence per runbook | PENDING |
+| S1 | 24-hour staging soak (forced offline/online toggles) | `staging-soak-report.json`, exported POS logs, DB snapshots, and admin-side sync evidence per runbook | PENDING |
 
 ## How To Execute Gates
 

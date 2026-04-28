@@ -206,7 +206,10 @@ const OnboardingPage: React.FC = () => {
                 <RecoveryPanel compact />
             </div>
 
-            <Toaster position="top-center" />
+            <Toaster
+                position="top-center"
+                containerStyle={{ zIndex: 2147483647 }}
+            />
         </div>
     );
 };

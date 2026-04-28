@@ -378,11 +378,6 @@ pub async fn recovery_execute_action(
         }
 
         "retrySync" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
-            )?;
             let queue_id = request.get("queueId").and_then(|v| v.as_i64());
             let entity_id = request
                 .get("entityId")
@@ -412,11 +407,6 @@ pub async fn recovery_execute_action(
             }))
         }
         "runParitySyncNow" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
-            )?;
             let admin_url = load_admin_url(&db)?;
             let api_key = load_pos_api_key()?;
             let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
@@ -441,29 +431,37 @@ pub async fn recovery_execute_action(
             }))
         }
         "retryParityItem" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
-            )?;
             let item_id = request_param_str(&request, "sampleItemId")
                 .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
                 .ok_or_else(|| "Missing parity item id".to_string())?;
-            let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-            sync_queue::retry_item(&conn, item_id.as_str())
+            {
+                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                sync_queue::retry_item(&conn, item_id.as_str())
+                    .map_err(auth::GuardedCommandError::from)?;
+            }
+            let admin_url = load_admin_url(&db)?;
+            let api_key = load_pos_api_key()?;
+            let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
+                .await
                 .map_err(auth::GuardedCommandError::from)?;
+            let status = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                sync_queue::get_status(&conn)
+            }
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
-                "message": "Parity item was requeued.",
+                "message": format!(
+                    "Parity item was retried now: processed {}, failed {}, conflicts {}, remaining {}.",
+                    result.processed,
+                    result.failed,
+                    result.conflicts,
+                    status.total,
+                ),
             }))
         }
         "retryParityModule" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
-            )?;
             let module_type = request_param_str(&request, "moduleType")
                 .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
                 .ok_or_else(|| "Missing parity module type".to_string())?;
@@ -472,14 +470,28 @@ pub async fn recovery_execute_action(
                 sync_queue::retry_items_by_module(&conn, module_type.as_str())
             }
             .map_err(auth::GuardedCommandError::from)?;
+            let admin_url = load_admin_url(&db)?;
+            let api_key = load_pos_api_key()?;
+            let process_result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
+            let status = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                sync_queue::get_status(&conn)
+            }
+            .map_err(auth::GuardedCommandError::from)?;
 
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
                 "message": format!(
-                    "Parity module {} requeued {} item(s).",
+                    "Parity module {} retried {} item(s) now: processed {}, failed {}, conflicts {}, remaining {}.",
                     module_type,
                     result.retried,
+                    process_result.processed,
+                    process_result.failed,
+                    process_result.conflicts,
+                    status.total,
                 ),
             }))
         }

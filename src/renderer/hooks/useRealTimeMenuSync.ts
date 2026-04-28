@@ -3,6 +3,7 @@ import { getSupabaseClient } from '../../shared/supabase-config'
 import { RealtimeChannel } from '@supabase/supabase-js'
 import { subscriptionManager } from '../services/SubscriptionManager'
 import { emitCompatEvent, getBridge } from '../../lib'
+import { getSecureSessionSync } from '../lib/secure-session-cache'
 
 interface MenuSyncState {
   isConnected: boolean
@@ -188,9 +189,36 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
     if (branchId) {
       ;(async () => {
         try {
+          // Wave 8 H30: multi-tenant safety — every org-scoped query MUST
+          // filter by `organization_id`. The menu_synchronization table
+          // lives in Supabase and is shared across tenants; without the
+          // explicit filter, a branch_id collision (however unlikely)
+          // would expose another tenant's menu overrides. We derive the
+          // org id from the hydrated secure session. If it's missing
+          // (pre-hydrate, or corrupted session), we skip the query
+          // entirely rather than emitting an un-scoped one.
+          //
+          // TODO (follow-up session): Route this preload through a Rust
+          // command (e.g. `menu:get-sync-overrides`) instead of calling
+          // Supabase directly from the renderer. CLAUDE.md guardrail
+          // prefers all org-scoped reads go through Rust where session
+          // identity is enforced server-side; this `.eq` filter is the
+          // defence-in-depth fallback chosen for Wave 8 H30 because the
+          // alternative requires a new Tauri command + Rust handler +
+          // parity:contract entry, which is out of scope for this wave.
+          const session = getSecureSessionSync()
+          const organizationId = session?.organizationId
+          if (!organizationId) {
+            console.warn(
+              '[useRealTimeMenuSync] skipping menu_synchronization preload — no organizationId in session'
+            )
+            return
+          }
+
           let query = supabaseRef.current
             .from('menu_synchronization')
             .select('*')
+            .eq('organization_id', organizationId)
             .eq('branch_id', branchId)
             .in('app_name', ['pos-tauri', 'pos-system'])
 

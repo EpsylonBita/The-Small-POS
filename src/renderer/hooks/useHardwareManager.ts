@@ -52,7 +52,7 @@ export function useHardwareManager(autoRefresh = false, intervalMs = 30000): Use
     try {
       setLoading(true);
       setError(null);
-      const result = (await bridge.invoke('hardware:get-status')) as HardwareStatus;
+      const result = (await bridge.hardware.getStatus()) as HardwareStatus;
       setStatus(result || DEFAULT_STATUS);
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -65,7 +65,7 @@ export function useHardwareManager(autoRefresh = false, intervalMs = 30000): Use
   const reconnect = useCallback(async (deviceType: string) => {
     try {
       setError(null);
-      await bridge.invoke('hardware:reconnect', deviceType);
+      await bridge.hardware.reconnect(deviceType);
       // Refresh status after reconnect
       await refresh();
     } catch (e: any) {

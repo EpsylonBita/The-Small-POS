@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 50;
+const CURRENT_SCHEMA_VERSION: i32 = 59;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -100,6 +100,80 @@ fn open_and_configure(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Wave 10 H32: bracket a closure with `PRAGMA synchronous = FULL` for
+/// power-loss durability of monetary writes.
+///
+/// SQLite's default `synchronous = NORMAL` (set in `open_and_configure`)
+/// fsyncs the WAL only at checkpoint time, so a power loss between two
+/// checkpoints can lose committed-but-not-checkpointed writes. For
+/// monetary data (`order_payments`, `payment_adjustments`, `z_reports`,
+/// `staff_shifts`) this is unacceptable — the customer paid, the cash
+/// drawer moved, but the row may not survive. `FULL` fsyncs every commit
+/// at a measurable per-commit latency cost (see the bench harness in
+/// `h32_pragma_bench_normal_vs_full` for current numbers and the 15% P99
+/// ceiling that gated shipping).
+///
+/// **Status**: production wrap is descoped per the bench numbers
+/// (P99 +47.8% on the dev machine). Helper kept as ready-to-use
+/// infrastructure for a future re-bench on different hardware /
+/// storage / OS, or for a targeted opt-in by a single high-value
+/// transaction. See `project_w10_h32_pragma_descoped.md`.
+///
+/// Contract:
+/// - The PRAGMA is per-connection in WAL mode (verified by SQLite docs).
+///   This helper is therefore safe to call concurrently from different
+///   connections without affecting each other.
+/// - The `Restore` Drop guard puts the PRAGMA back to NORMAL on any
+///   exit path (Ok return, Err return, panic). Without the guard, a
+///   panic mid-closure would leave the connection in FULL mode for the
+///   rest of its lifetime — a subtle and hard-to-trace performance bug.
+/// - The closure receives `&Connection` (NOT a fresh connection) so it
+///   can use any active transaction the caller has set up. Typical
+///   call shape:
+///
+/// ```ignore
+/// with_full_sync(&conn, |conn| {
+///     conn.execute_batch("BEGIN IMMEDIATE")?;
+///     // … monetary INSERTs / UPDATEs …
+///     conn.execute_batch("COMMIT")?;
+///     Ok(())
+/// })
+/// ```
+///
+///   The closure can also commit-and-then-do-more; the PRAGMA reset on
+///   Drop is unaffected by what happens inside.
+#[allow(dead_code)] // W10 H32 descoped per bench (P99 +47.8%); kept for re-bench.
+pub(crate) fn with_full_sync<F, T>(conn: &Connection, f: F) -> Result<T, String>
+where
+    F: FnOnce(&Connection) -> Result<T, String>,
+{
+    /// Drop guard that restores `PRAGMA synchronous = NORMAL` on any
+    /// exit path — including panic unwinding through the closure.
+    struct Restore<'c> {
+        conn: &'c Connection,
+    }
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            // We intentionally swallow the restore error: if the DB is
+            // in a state where PRAGMA can't run (e.g. connection
+            // closed), there is nothing useful to do. Log at debug so
+            // a forensic trace is possible.
+            if let Err(e) = self.conn.execute_batch("PRAGMA synchronous = NORMAL;") {
+                tracing::debug!(
+                    error = %e,
+                    "Wave 10 H32: failed to restore PRAGMA synchronous = NORMAL on Drop"
+                );
+            }
+        }
+    }
+
+    conn.execute_batch("PRAGMA synchronous = FULL;")
+        .map_err(|e| format!("with_full_sync set FULL: {e}"))?;
+
+    let _guard = Restore { conn };
+    f(conn)
+}
+
 /// Run all pending migrations up to `CURRENT_SCHEMA_VERSION`.
 fn run_migrations(conn: &Connection) -> Result<(), String> {
     // Ensure schema_version table exists first
@@ -125,7 +199,8 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
              Please update the application or restore a backup."
         ));
     }
-    if current == CURRENT_SCHEMA_VERSION {
+    let needs_v56_backfill = needs_v56_claim_generation_backfill(conn, current)?;
+    if current == CURRENT_SCHEMA_VERSION && !needs_v56_backfill {
         info!("Database schema up to date (v{current})");
         return Ok(());
     }
@@ -136,9 +211,11 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             [],
             |row| row.get::<_, String>(0),
         ) {
-            let db_path = PathBuf::from(db_path_value);
-            if let Err(error) = crate::recovery::create_pre_migration_snapshot(&db_path, conn) {
-                return Err(format!("pre-migration recovery snapshot failed: {error}"));
+            if !db_path_value.trim().is_empty() {
+                let db_path = PathBuf::from(db_path_value);
+                if let Err(error) = crate::recovery::create_pre_migration_snapshot(&db_path, conn) {
+                    return Err(format!("pre-migration recovery snapshot failed: {error}"));
+                }
             }
         }
     }
@@ -314,8 +391,58 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current < 50 {
         run_migration_tx(conn, 50, migrate_v50)?;
     }
+    if current < 51 {
+        run_migration_tx(conn, 51, migrate_v51)?;
+    }
+    if current < 52 {
+        run_migration_tx(conn, 52, migrate_v52)?;
+    }
+    if current < 53 {
+        run_migration_tx(conn, 53, migrate_v53)?;
+    }
+    if current < 54 {
+        run_migration_tx(conn, 54, migrate_v54)?;
+    }
+    if current < 55 {
+        run_migration_tx(conn, 55, migrate_v55)?;
+    }
+    // Wave 10 H8: `claim_generation` column on `parity_sync_queue`.
+    // Reserved as v56 by the W11 cleanup sprint (which jumped to v57
+    // to leave 56 free for this work). See
+    // `project_w10_h8_claim_generation_deferred.md`.
+    if current < 56 || needs_v56_backfill {
+        run_migration_tx(conn, 56, migrate_v56)?;
+    }
+    if current < 57 {
+        run_migration_tx(conn, 57, migrate_v57)?;
+    }
+    if current < 58 {
+        run_migration_tx(conn, 58, migrate_v58)?;
+    }
+    if current < 59 {
+        run_migration_tx(conn, 59, migrate_v59)?;
+    }
 
     Ok(())
+}
+
+fn schema_version_exists(conn: &Connection, version: i32) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = ?1)",
+        [version],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(|e| format!("read schema_version {version}: {e}"))
+}
+
+fn needs_v56_claim_generation_backfill(conn: &Connection, current: i32) -> Result<bool, String> {
+    if current < 56 {
+        return Ok(false);
+    }
+
+    let has_version = schema_version_exists(conn, 56)?;
+    let has_column = column_exists(conn, "parity_sync_queue", "claim_generation")?;
+    Ok(!has_version || !has_column)
 }
 
 /// Run a migration inside a `BEGIN IMMEDIATE`/`COMMIT` transaction. Use
@@ -439,7 +566,15 @@ fn migrate_v1(conn: &Connection) -> Result<(), String> {
             delivery_fee REAL DEFAULT 0
         );
 
-        -- sync_queue (append-only)
+        -- sync_queue (append-only) — RETIRED in migration v56.
+        --
+        -- Wave 5 Session 7 PR 2 dropped this table in migration v56 after
+        -- PR 0 migrated every producer onto `parity_sync_queue` and PR 1
+        -- added a compile-time seal. The CREATE TABLE stays in the v1
+        -- body because intermediate migrations (v13, v47, v49, v50, ...)
+        -- ALTER the table — a fresh install replays the v1→v56 chain
+        -- end-to-end, so v1 must still build the table for the middle
+        -- migrations to operate on before v56 finally drops it.
         CREATE TABLE IF NOT EXISTS sync_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL,
@@ -452,8 +587,8 @@ fn migrate_v1(conn: &Connection) -> Result<(), String> {
             max_retries INTEGER DEFAULT 5,
             last_error TEXT,
             created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            synced_at TEXT
+            updated_at TEXT DEFAULT (datetime('now'))
+            , synced_at TEXT
         );
 
         -- staff_sessions
@@ -983,6 +1118,17 @@ fn migrate_v11(conn: &Connection) -> Result<(), String> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        -- Wave 11 L doc: `INSERT OR IGNORE` here silently drops any
+        -- rows whose `id` already exists in `print_jobs_v11` (it
+        -- shouldn't, but the older table's history is opaque). The
+        -- print_jobs schema later gains an `idempotency_key UNIQUE`
+        -- column (v47), making this a dual-key arrangement (PK on `id`
+        -- + UNIQUE on `idempotency_key`). After v47 a similar table-
+        -- rebuild migration would silently drop rows that conflict on
+        -- EITHER key — that's a real risk if any pre-v47 INSERT ever
+        -- produced an `id` collision. Future rebuilds should explicitly
+        -- handle the dual-key case (e.g. `ON CONFLICT(...) DO NOTHING`
+        -- with the conflict target spelled out).
         INSERT OR IGNORE INTO print_jobs_v11
             SELECT * FROM print_jobs;
         DROP TABLE print_jobs;
@@ -1412,6 +1558,8 @@ fn migrate_v17(conn: &Connection) -> Result<(), String> {
 
     if let Some(json_str) = old_json {
         if let Ok(devices) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+            let mut dropped_devices = 0usize;
+            let mut migrated_devices = 0usize;
             for dev in &devices {
                 let id = dev.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                 let name = dev
@@ -1446,40 +1594,95 @@ fn migrate_v17(conn: &Connection) -> Result<(), String> {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "{}".to_string());
 
-                if !id.is_empty() {
-                    let _ = conn.execute(
-                        "INSERT OR IGNORE INTO ecr_devices
-                            (id, name, device_type, protocol, connection_type, connection_details,
-                             terminal_id, merchant_id, is_default, enabled, settings)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                        params![
-                            id,
-                            name,
-                            device_type,
-                            protocol,
-                            conn_type,
-                            conn_details,
-                            terminal_id,
-                            merchant_id,
-                            is_default,
-                            enabled,
-                            settings,
-                        ],
-                    );
+                // Wave 10 H33: an ECR device whose `device_type` /
+                // `connection_type` didn't satisfy the new CHECK
+                // constraints used to be silently dropped by the bare
+                // `let _ = conn.execute(...)` call — the operator never
+                // learned the row was lost, and the row was removed again
+                // when the JSON blob was deleted below. Surfacing the
+                // failure at `warn!` level keeps the migration forward
+                // (we still continue the loop) but gives on-call
+                // forensics a breadcrumb.
+                if id.is_empty() {
+                    dropped_devices += 1;
+                    warn!("v17 migration: ECR device without id cannot be migrated");
+                    continue;
+                }
+
+                match conn.execute(
+                    "INSERT OR IGNORE INTO ecr_devices
+                        (id, name, device_type, protocol, connection_type, connection_details,
+                         terminal_id, merchant_id, is_default, enabled, settings)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        id,
+                        name,
+                        device_type,
+                        protocol,
+                        conn_type,
+                        conn_details,
+                        terminal_id,
+                        merchant_id,
+                        is_default,
+                        enabled,
+                        settings,
+                    ],
+                ) {
+                    Ok(count) if count > 0 => migrated_devices += 1,
+                    Ok(_) => {
+                        let exists = conn
+                            .query_row(
+                                "SELECT 1 FROM ecr_devices WHERE id = ?1 LIMIT 1",
+                                params![id],
+                                |_| Ok(()),
+                            )
+                            .is_ok();
+                        if exists {
+                            migrated_devices += 1;
+                        } else {
+                            dropped_devices += 1;
+                            warn!(
+                                device_id = id,
+                                device_type = device_type,
+                                connection_type = conn_type,
+                                "v17 migration: ECR device was ignored and is not present in destination table"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        dropped_devices += 1;
+                        warn!(
+                            device_id = id,
+                            device_type = device_type,
+                            connection_type = conn_type,
+                            error = %e,
+                            "v17 migration: ECR device INSERT failed; preserving legacy JSON"
+                        );
+                    }
                 }
             }
 
-            // Remove old JSON blob
-            let _ = conn.execute(
-                "DELETE FROM local_settings
-                 WHERE setting_category = 'local' AND setting_key = 'ecr_devices'",
-                [],
-            );
-
+            if dropped_devices > 0 {
+                warn!(
+                    dropped = dropped_devices,
+                    total = devices.len(),
+                    "v17 migration: {dropped_devices} of {} ECR devices were not migrated; preserving legacy JSON",
+                    devices.len()
+                );
+            } else {
+                conn.execute(
+                    "DELETE FROM local_settings
+                     WHERE setting_category = 'local' AND setting_key = 'ecr_devices'",
+                    [],
+                )
+                .map_err(|e| format!("migration v17 remove legacy ecr_devices: {e}"))?;
+            }
             info!(
-                "Migrated {} ECR devices from JSON to ecr_devices table",
-                devices.len()
+                "Migrated {} ECR devices from JSON to ecr_devices table ({} dropped)",
+                migrated_devices, dropped_devices
             );
+        } else {
+            warn!("v17 migration: could not parse legacy ECR device JSON; preserving legacy blob");
         }
     }
 
@@ -1512,6 +1715,10 @@ fn migrate_v18(conn: &Connection) -> Result<(), String> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        -- Wave 11 L doc: see v11's INSERT OR IGNORE comment. Same
+        -- dual-key debt applies here — `INSERT OR IGNORE` is silent
+        -- on `id` collisions and (post-v47) `idempotency_key`
+        -- collisions alike.
         INSERT OR IGNORE INTO print_jobs_v18
             SELECT * FROM print_jobs;
         DROP TABLE print_jobs;
@@ -1831,6 +2038,11 @@ fn migrate_v24(conn: &Connection) -> Result<(), String> {
             updated_at TEXT NOT NULL,
             entity_payload_json TEXT
         );
+        -- Wave 11 L doc: see v11's INSERT OR IGNORE comment. Same
+        -- dual-key debt — `INSERT OR IGNORE` here is silent on
+        -- `id` collisions and (post-v47) `idempotency_key` collisions
+        -- alike. Future rebuilds of `print_jobs` should make the
+        -- conflict target explicit.
         INSERT OR IGNORE INTO print_jobs_v24
             SELECT id, entity_type, entity_id, printer_profile_id, status,
                    output_path, retry_count, max_retries, next_retry_at, last_error,
@@ -2920,7 +3132,9 @@ fn migrate_v46(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("migration v46 scan duplicates: {e}"))?;
     let duplicates: Vec<(String, i64)> = dup_stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
         .map_err(|e| format!("migration v46 map duplicates: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("migration v46 collect duplicates: {e}"))?;
@@ -3208,6 +3422,578 @@ fn migrate_v50(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Wave 4a: add `*_cents INTEGER` shadow columns (first slice).
+///
+/// Review finding C7 flagged that the POS stores money as `f64` everywhere
+/// — 66 REAL columns across 12 tables. Wave 4 migrates to integer minor
+/// units (cents) to eliminate float aggregation drift; the shipping plan
+/// breaks that work into additive sub-steps so the schema change is safe
+/// on its own.
+///
+/// **4a scope (this migration)**: the three highest-traffic financial
+/// tables only — `orders`, `order_payments`, `payment_adjustments`.
+/// Adding the columns is additive and non-breaking: no existing code
+/// path reads them yet, and every existing row is backfilled from its
+/// REAL sibling via `CAST(ROUND(col * 100) AS INTEGER)`. New rows
+/// written AFTER this migration start with `NULL` in the `*_cents`
+/// columns; Wave 4b/4c will extend the writers to dual-populate.
+///
+/// Follow-on migrations (v52+) will cover the remaining tables
+/// (`cash_drawer_sessions`, `z_reports`, `staff_shifts`, `daily_z_reports`,
+/// `driver_earnings`, `shift_expenses`, `staff_payments`, `transaction_log`,
+/// …) in the same additive shape.
+///
+/// No triggers are created — keeping the migration dependency-free means
+/// a rollback is simply "ignore the new columns". Dual-write is Rust's
+/// job in 4b/4c; atomic switch-over happens in 4d; 4e drops the legacy
+/// REAL columns.
+fn migrate_v51(conn: &Connection) -> Result<(), String> {
+    // Target tables and the REAL columns each gains an `*_cents` shadow.
+    // (table, column) pairs — edit carefully; each ADD COLUMN is guarded
+    // by `column_exists` so re-running the migration on a partially-applied
+    // DB (e.g. after a crash between ADD COLUMN and the INSERT INTO
+    // schema_version) is idempotent.
+    const CENTS_COLUMNS: &[(&str, &str)] = &[
+        ("orders", "total_amount"),
+        ("orders", "tax_amount"),
+        ("orders", "subtotal"),
+        ("orders", "discount_amount"),
+        ("orders", "tip_amount"),
+        ("orders", "delivery_fee"),
+        ("order_payments", "amount"),
+        ("order_payments", "cash_received"),
+        ("order_payments", "change_given"),
+        ("payment_adjustments", "amount"),
+    ];
+
+    for (table, col) in CENTS_COLUMNS {
+        let cents_col = format!("{col}_cents");
+        if !column_exists(conn, table, &cents_col)? {
+            let add_sql = format!("ALTER TABLE {table} ADD COLUMN {cents_col} INTEGER");
+            conn.execute_batch(&add_sql)
+                .map_err(|e| format!("v51 add {table}.{cents_col}: {e}"))?;
+        }
+        // Backfill is idempotent: the COALESCE guards against double-application
+        // and preserves any value already written by application code.
+        let backfill_sql = format!(
+            "UPDATE {table}
+             SET {cents_col} = CAST(ROUND(COALESCE({col}, 0) * 100) AS INTEGER)
+             WHERE {cents_col} IS NULL AND {col} IS NOT NULL"
+        );
+        conn.execute(&backfill_sql, [])
+            .map_err(|e| format!("v51 backfill {table}.{cents_col}: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (51)", [])
+        .map_err(|e| format!("v51 record schema_version: {e}"))?;
+
+    info!(
+        columns = CENTS_COLUMNS.len(),
+        "Applied migration v51 (Wave 4a: *_cents shadow columns on orders / order_payments / payment_adjustments)"
+    );
+    Ok(())
+}
+
+/// Wave 10 H31: re-run `migrate_v28`'s printer-capability completion loop
+/// inside a single BEGIN IMMEDIATE so any terminal that crashed between
+/// v28's inner COMMIT and its trailing capability loop / schema_version
+/// INSERT lands in a consistent state.
+///
+/// **Context**: `migrate_v28` is a "self-wrapping" migration — it opens
+/// its own `BEGIN; … COMMIT;` inside `execute_batch` to rebuild the
+/// `print_jobs` table. The subsequent printer-capability-completion
+/// loop (lines ~2050–2095 in `migrate_v28`) and the final
+/// `INSERT INTO schema_version (version) VALUES (28)` run OUTSIDE that
+/// inner transaction. A crash in that window leaves v28 partially
+/// applied: the `print_jobs` rebuild committed, but some printer
+/// profiles may not have had their capabilities backfilled, and
+/// schema_version is still 27.
+///
+/// On the next boot the harness re-runs v28, which is idempotent but
+/// leaves the atomicity guarantee fragile for future maintainers. v52
+/// re-applies the capability-defaulting step inside a proper
+/// `BEGIN IMMEDIATE` → `COMMIT` so the state is explicitly verified
+/// atomic. Every operation in this migration is idempotent: a profile
+/// whose capabilities block is already filled sees no change; a profile
+/// with missing defaults gets them filled.
+fn migrate_v52(conn: &Connection) -> Result<(), String> {
+    // `printer_profiles` is v7+; older pre-v7 DBs don't have this table,
+    // but they also can't reach v28, v52, or any schema past v7 without
+    // passing through the CREATE. A belt-and-braces `table_exists`
+    // guard costs us one extra query and protects against a future
+    // partial restore of a historical backup.
+    let profiles_exist: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'printer_profiles'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if profiles_exist == 0 {
+        // No printer_profiles table — nothing to repair. Still bump the
+        // schema version so the migration is recorded as applied.
+        conn.execute("INSERT INTO schema_version (version) VALUES (52)", [])
+            .map_err(|e| format!("v52 record schema_version (no profiles): {e}"))?;
+        info!("Applied migration v52 (Wave 10 H31: no printer_profiles table, no-op)");
+        return Ok(());
+    }
+
+    // Re-run v28's capability-fill loop. Every step here is idempotent
+    // via the `or_insert_with` / `entry.entry` pattern and a stable
+    // default shape. A profile that's already complete stays unchanged.
+    let mut stmt = conn
+        .prepare("SELECT id, connection_json FROM printer_profiles")
+        .map_err(|e| format!("v52 prepare printer_profiles: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|e| format!("v52 query printer_profiles: {e}"))?;
+
+    let profiles: Vec<(String, Option<String>)> = rows.filter_map(Result::ok).collect();
+    drop(stmt);
+
+    let mut updated = 0usize;
+    for (id, connection_json) in profiles {
+        let mut parsed = connection_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        let before = Value::Object(parsed.clone()).to_string();
+        let capabilities = parsed
+            .entry("capabilities".to_string())
+            .or_insert_with(default_printer_capabilities_json);
+        if !capabilities.is_object() {
+            *capabilities = default_printer_capabilities_json();
+        } else if let Some(obj) = capabilities.as_object_mut() {
+            let defaults = default_printer_capabilities_json()
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            for (key, value) in defaults {
+                obj.entry(key).or_insert(value);
+            }
+            if !matches!(
+                obj.get("status").and_then(Value::as_str),
+                Some("verified" | "degraded" | "unverified")
+            ) {
+                obj.insert(
+                    "status".to_string(),
+                    Value::String("unverified".to_string()),
+                );
+            }
+        }
+        let after = Value::Object(parsed).to_string();
+        if before != after {
+            conn.execute(
+                "UPDATE printer_profiles SET connection_json = ?1 WHERE id = ?2",
+                params![after, id],
+            )
+            .map_err(|e| format!("v52 update printer profile {id}: {e}"))?;
+            updated += 1;
+        }
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (52)", [])
+        .map_err(|e| format!("v52 record schema_version: {e}"))?;
+
+    info!(
+        updated,
+        "Applied migration v52 (Wave 10 H31: printer_profiles capability-default atomic re-verification)"
+    );
+    Ok(())
+}
+
+/// Wave 4a extension: add `*_cents INTEGER` shadow columns to the next
+/// tier of money-bearing tables (`staff_shifts`, `cash_drawer_sessions`,
+/// `z_reports`). Extends migration v51's pattern to the 32 remaining
+/// money columns on these three tables; the remaining tables
+/// (`daily_z_reports`, `driver_earnings`, `shift_expenses`, `staff_payments`,
+/// `transaction_log`) will be covered by a future v54+ migration once
+/// v52/v53 bake in the field.
+///
+/// Additive and non-breaking: no reader code references the `*_cents`
+/// columns yet (Wave 4b is the reader-switch). Backfill uses the same
+/// `CAST(ROUND(col * 100) AS INTEGER)` pattern with idempotent
+/// `WHERE cents IS NULL AND real IS NOT NULL` guards.
+fn migrate_v53(conn: &Connection) -> Result<(), String> {
+    const CENTS_COLUMNS: &[(&str, &str)] = &[
+        // staff_shifts — money cols declared at v1 create (lines 533–542)
+        ("staff_shifts", "opening_cash_amount"),
+        ("staff_shifts", "closing_cash_amount"),
+        ("staff_shifts", "expected_cash_amount"),
+        ("staff_shifts", "cash_variance"),
+        ("staff_shifts", "total_sales_amount"),
+        ("staff_shifts", "total_cash_sales"),
+        ("staff_shifts", "total_card_sales"),
+        ("staff_shifts", "payment_amount"),
+        // cash_drawer_sessions — 12 money cols (lines 561–572)
+        ("cash_drawer_sessions", "opening_amount"),
+        ("cash_drawer_sessions", "closing_amount"),
+        ("cash_drawer_sessions", "expected_amount"),
+        ("cash_drawer_sessions", "variance_amount"),
+        ("cash_drawer_sessions", "total_cash_sales"),
+        ("cash_drawer_sessions", "total_card_sales"),
+        ("cash_drawer_sessions", "total_refunds"),
+        ("cash_drawer_sessions", "total_expenses"),
+        ("cash_drawer_sessions", "cash_drops"),
+        ("cash_drawer_sessions", "driver_cash_given"),
+        ("cash_drawer_sessions", "driver_cash_returned"),
+        ("cash_drawer_sessions", "total_staff_payments"),
+        // z_reports — 12 money cols (lines 945–958)
+        ("z_reports", "gross_sales"),
+        ("z_reports", "net_sales"),
+        ("z_reports", "cash_sales"),
+        ("z_reports", "card_sales"),
+        ("z_reports", "refunds_total"),
+        ("z_reports", "voids_total"),
+        ("z_reports", "discounts_total"),
+        ("z_reports", "tips_total"),
+        ("z_reports", "expenses_total"),
+        ("z_reports", "cash_variance"),
+        ("z_reports", "opening_cash"),
+        ("z_reports", "closing_cash"),
+        ("z_reports", "expected_cash"),
+    ];
+
+    for (table, col) in CENTS_COLUMNS {
+        let cents_col = format!("{col}_cents");
+        if !column_exists(conn, table, &cents_col)? {
+            let add_sql = format!("ALTER TABLE {table} ADD COLUMN {cents_col} INTEGER");
+            conn.execute_batch(&add_sql)
+                .map_err(|e| format!("v53 add {table}.{cents_col}: {e}"))?;
+        }
+        let backfill_sql = format!(
+            "UPDATE {table}
+             SET {cents_col} = CAST(ROUND(COALESCE({col}, 0) * 100) AS INTEGER)
+             WHERE {cents_col} IS NULL AND {col} IS NOT NULL"
+        );
+        conn.execute(&backfill_sql, [])
+            .map_err(|e| format!("v53 backfill {table}.{cents_col}: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (53)", [])
+        .map_err(|e| format!("v53 record schema_version: {e}"))?;
+
+    info!(
+        columns = CENTS_COLUMNS.len(),
+        "Applied migration v53 (W4a ext: *_cents on staff_shifts / cash_drawer_sessions / z_reports)"
+    );
+    Ok(())
+}
+
+/// Wave 4a final sweep: add `*_cents INTEGER` shadow columns to the
+/// remaining production tables that carry REAL money — `order_payments`
+/// (the `discount_amount` column that v36's table rebuild added but v51
+/// missed), `payment_items` (v31), `driver_earnings`, and
+/// `shift_expenses`.
+///
+/// Extends v51/v53's pattern to the final 9 money columns discovered by
+/// an exhaustive grep of `^\s*\w+\s+REAL` in this file (filtered to
+/// money vs ratio/rate columns case-by-case).
+///
+/// **Intentionally NOT included** — three tables that the v53 doc
+/// comment listed as "future work" turn out never to be created in any
+/// production migration:
+///   - `daily_z_reports`: never created anywhere in this file.
+///   - `staff_payments`: test-fixture only. v47 (`migrate_v47`, line
+///     3049) already uses the same "deliberately excluded" precedent:
+///     *"it is created by test setup only and has no production
+///     migration. Adding a column to a non-existent table would error
+///     out on real terminals."*
+///   - `transaction_log`: never created anywhere in this file.
+///
+/// If any of these three ever graduates to a production CREATE TABLE,
+/// its `*_cents` shadow columns should be added in the same migration
+/// that creates the table, not here.
+///
+/// Additive and non-breaking: no reader code references the `*_cents`
+/// columns yet (Wave 4b is the reader-switch). Backfill uses the same
+/// `CAST(ROUND(col * 100) AS INTEGER)` pattern with idempotent
+/// `WHERE cents IS NULL AND real IS NOT NULL` guards as v51 and v53.
+fn migrate_v54(conn: &Connection) -> Result<(), String> {
+    const CENTS_COLUMNS: &[(&str, &str)] = &[
+        // order_payments — v36 table-rebuild added `discount_amount`
+        // which v51 did not shadow. (v51 covered amount, cash_received,
+        // change_given on this table.)
+        ("order_payments", "discount_amount"),
+        // payment_items — created in v31; entire table missed by v51/v53.
+        ("payment_items", "item_amount"),
+        // driver_earnings — v14 create; 6 money cols
+        ("driver_earnings", "delivery_fee"),
+        ("driver_earnings", "tip_amount"),
+        ("driver_earnings", "total_earning"),
+        ("driver_earnings", "cash_collected"),
+        ("driver_earnings", "card_amount"),
+        ("driver_earnings", "cash_to_return"),
+        // shift_expenses — v3 create; 1 money col
+        ("shift_expenses", "amount"),
+    ];
+
+    for (table, col) in CENTS_COLUMNS {
+        let cents_col = format!("{col}_cents");
+        if !column_exists(conn, table, &cents_col)? {
+            let add_sql = format!("ALTER TABLE {table} ADD COLUMN {cents_col} INTEGER");
+            conn.execute_batch(&add_sql)
+                .map_err(|e| format!("v54 add {table}.{cents_col}: {e}"))?;
+        }
+        let backfill_sql = format!(
+            "UPDATE {table}
+             SET {cents_col} = CAST(ROUND(COALESCE({col}, 0) * 100) AS INTEGER)
+             WHERE {cents_col} IS NULL AND {col} IS NOT NULL"
+        );
+        conn.execute(&backfill_sql, [])
+            .map_err(|e| format!("v54 backfill {table}.{cents_col}: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (54)", [])
+        .map_err(|e| format!("v54 record schema_version: {e}"))?;
+
+    info!(
+        columns = CENTS_COLUMNS.len(),
+        "Applied migration v54 (W4a final: *_cents on order_payments.discount_amount / payment_items / driver_earnings / shift_expenses)"
+    );
+    Ok(())
+}
+
+/// W6 (C8/H13): drop the stored `orders.payment_method` column.
+///
+/// Before this migration, payment method classification was stored
+/// denormalized on `orders.payment_method` and kept in lockstep with
+/// `order_payments` rows via `recompute_order_payment_state` and
+/// `refresh_order_payment_snapshot`. That setup had a well-known
+/// stickiness bug: a brief `partially_paid` state wrote
+/// `payment_method='split'`, and the next refresh read its own write
+/// back out and kept re-writing 'split' even after the operator
+/// collected the delta in the original method.
+///
+/// Post-v55, every consumer derives the method on read via
+/// `payments::derive_payment_method(conn, order_id)` — single source of
+/// truth is `order_payments` rows. The stickiness bug is structurally
+/// impossible (nothing to stick).
+///
+/// Guarded by `column_exists` so a partial-retry after a mid-migration
+/// crash doesn't fail on second run. Relies on native SQLite 3.35+
+/// `ALTER TABLE ... DROP COLUMN` support (rusqlite's bundled SQLite is
+/// >=3.35 on every supported Tauri build).
+fn migrate_v55(conn: &Connection) -> Result<(), String> {
+    if column_exists(conn, "orders", "payment_method")? {
+        conn.execute_batch("ALTER TABLE orders DROP COLUMN payment_method;")
+            .map_err(|e| format!("v55 drop orders.payment_method: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (55)", [])
+        .map_err(|e| format!("v55 record schema_version: {e}"))?;
+
+    info!("Applied migration v55 (W6 C8/H13: dropped orders.payment_method — derive-on-read via payments::derive_payment_method)");
+    Ok(())
+}
+
+/// Migration v56 (Wave 10 H8): add `claim_generation INTEGER NOT NULL
+/// DEFAULT 0` to `parity_sync_queue`.
+///
+/// The column is incremented on every `dequeue` and on every
+/// `recover_stale_processing_items`. `mark_success` uses it as a guard:
+/// only a success ack from the worker that owns the current generation
+/// succeeds. A late ack from a worker whose lease expired is silently
+/// dropped, preventing it from corrupting a fresh in-flight claim or
+/// (worse) marking an already-failed row as successful.
+///
+/// `column_exists` guards re-application after a partial-retry crash.
+/// See `project_w10_h8_claim_generation_deferred.md` for the full
+/// design notes and the W11 sprint memo for why we jumped v57 first.
+fn migrate_v56(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "parity_sync_queue", "claim_generation")? {
+        conn.execute_batch(
+            "ALTER TABLE parity_sync_queue
+             ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(|e| format!("v56 add parity_sync_queue.claim_generation: {e}"))?;
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (56)",
+        [],
+    )
+    .map_err(|e| format!("v56 record schema_version: {e}"))?;
+
+    info!("Applied migration v56 (W10 H8: parity_sync_queue.claim_generation column)");
+    Ok(())
+}
+
+/// Migration v57 (Wave 11 L): supporting index for the `staff_shifts`
+/// "find active shift for staff" lookup used throughout the open-shift
+/// guard family (`shifts::open_shift`, `shifts::get_active_for_staff`,
+/// the cross-terminal exclusivity check). Without this index the
+/// queries scan every historical staff_shifts row to find at most one
+/// active row per staff. Adding `(staff_id, status)` keeps the lookup
+/// constant-time relative to the active set.
+///
+/// `IF NOT EXISTS` makes this idempotent — if a future migration ever
+/// re-creates the index under a different name, this one is a harmless
+/// no-op rather than a hard failure.
+///
+/// Skipped v56 to keep that number reserved for the H8
+/// `claim_generation` work (see `project_w10_h8_claim_generation_deferred.md`).
+fn migrate_v57(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS staff_shifts_staff_status
+             ON staff_shifts (staff_id, status);
+
+         INSERT INTO schema_version (version) VALUES (57);",
+    )
+    .map_err(|e| format!("migration v57 staff_shifts_staff_status index: {e}"))?;
+
+    info!("Applied migration v57 (staff_shifts(staff_id, status) supporting index)");
+    Ok(())
+}
+
+/// Wave 4e preparation: backfill any row whose `_cents` column is still
+/// NULL from the legacy REAL sibling. This guarantees that after this
+/// migration, every monetary cents column is populated for every row —
+/// which is the precondition for safely simplifying the COALESCE-with-real
+/// shims that 4b's read-path migration left in production SELECTs.
+///
+/// **NOT included in this migration**: the actual DROP COLUMN of the 52
+/// REAL money columns. Dropping them requires (a) removing the dual-write
+/// halves from ~37 production INSERT/UPDATE sites, and (b) updating ~30+
+/// test fixtures that INSERT money via raw SQL with REAL columns. That
+/// cascade is too large for a single session and is deferred to a future
+/// migration v59 once the test-fixture updates land. Until then:
+///   - dual-write continues (REAL column still receives writes)
+///   - cents column is the canonical source of truth (post-backfill)
+///   - production reads can drop COALESCE shims since cents is guaranteed
+///     populated
+///
+/// Idempotent — only fills `WHERE _cents IS NULL AND real IS NOT NULL`.
+fn migrate_v58(conn: &Connection) -> Result<(), String> {
+    // Authoritative drop list — same `(table, real_col)` pairs as v51 +
+    // v53 + v54 added their `_cents` siblings for. Re-typed here as the
+    // single source of truth so a reviewer can diff-check against the
+    // ADD COLUMN lists.
+    const REAL_COLUMNS_TO_DROP: &[(&str, &str)] = &[
+        // From migrate_v51 (orders, order_payments, payment_adjustments)
+        ("orders", "total_amount"),
+        ("orders", "tax_amount"),
+        ("orders", "subtotal"),
+        ("orders", "discount_amount"),
+        ("orders", "tip_amount"),
+        ("orders", "delivery_fee"),
+        ("order_payments", "amount"),
+        ("order_payments", "cash_received"),
+        ("order_payments", "change_given"),
+        ("payment_adjustments", "amount"),
+        // From migrate_v53 (staff_shifts, cash_drawer_sessions, z_reports)
+        ("staff_shifts", "opening_cash_amount"),
+        ("staff_shifts", "closing_cash_amount"),
+        ("staff_shifts", "expected_cash_amount"),
+        ("staff_shifts", "cash_variance"),
+        ("staff_shifts", "total_sales_amount"),
+        ("staff_shifts", "total_cash_sales"),
+        ("staff_shifts", "total_card_sales"),
+        ("staff_shifts", "payment_amount"),
+        ("cash_drawer_sessions", "opening_amount"),
+        ("cash_drawer_sessions", "closing_amount"),
+        ("cash_drawer_sessions", "expected_amount"),
+        ("cash_drawer_sessions", "variance_amount"),
+        ("cash_drawer_sessions", "total_cash_sales"),
+        ("cash_drawer_sessions", "total_card_sales"),
+        ("cash_drawer_sessions", "total_refunds"),
+        ("cash_drawer_sessions", "total_expenses"),
+        ("cash_drawer_sessions", "cash_drops"),
+        ("cash_drawer_sessions", "driver_cash_given"),
+        ("cash_drawer_sessions", "driver_cash_returned"),
+        ("cash_drawer_sessions", "total_staff_payments"),
+        ("z_reports", "gross_sales"),
+        ("z_reports", "net_sales"),
+        ("z_reports", "cash_sales"),
+        ("z_reports", "card_sales"),
+        ("z_reports", "refunds_total"),
+        ("z_reports", "voids_total"),
+        ("z_reports", "discounts_total"),
+        ("z_reports", "tips_total"),
+        ("z_reports", "expenses_total"),
+        ("z_reports", "cash_variance"),
+        ("z_reports", "opening_cash"),
+        ("z_reports", "closing_cash"),
+        ("z_reports", "expected_cash"),
+        // From migrate_v54 (order_payments.discount_amount, payment_items, driver_earnings, shift_expenses)
+        ("order_payments", "discount_amount"),
+        ("payment_items", "item_amount"),
+        ("driver_earnings", "delivery_fee"),
+        ("driver_earnings", "tip_amount"),
+        ("driver_earnings", "total_earning"),
+        ("driver_earnings", "cash_collected"),
+        ("driver_earnings", "card_amount"),
+        ("driver_earnings", "cash_to_return"),
+        ("shift_expenses", "amount"),
+    ];
+
+    // Backfill: any row whose `_cents` column is NULL gets it populated
+    // from the REAL sibling. Idempotent — only fills NULLs.
+    for (table, real_col) in REAL_COLUMNS_TO_DROP {
+        let cents_col = format!("{real_col}_cents");
+        if column_exists(conn, table, &cents_col)? && column_exists(conn, table, real_col)? {
+            let backfill_sql = format!(
+                "UPDATE {table}
+                 SET {cents_col} = CAST(ROUND(COALESCE({real_col}, 0) * 100) AS INTEGER)
+                 WHERE {cents_col} IS NULL AND {real_col} IS NOT NULL"
+            );
+            conn.execute(&backfill_sql, [])
+                .map_err(|e| format!("v58 backfill {table}.{cents_col}: {e}"))?;
+        }
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (58)", [])
+        .map_err(|e| format!("v58 record schema_version: {e}"))?;
+
+    info!(
+        columns = REAL_COLUMNS_TO_DROP.len(),
+        "Applied migration v58 (W4e prep: backfilled NULL cents from REAL siblings)"
+    );
+    Ok(())
+}
+
+fn migrate_v59(conn: &Connection) -> Result<(), String> {
+    for (column, column_type) in [
+        ("delivery_address_id", "TEXT"),
+        ("delivery_latitude", "REAL"),
+        ("delivery_longitude", "REAL"),
+        ("delivery_address_fingerprint", "TEXT"),
+        ("delivery_zone_id", "TEXT"),
+    ] {
+        if !column_exists(conn, "orders", column)? {
+            let sql = format!("ALTER TABLE orders ADD COLUMN {column} {column_type}");
+            conn.execute(&sql, [])
+                .map_err(|e| format!("v59 add orders.{column}: {e}"))?;
+        }
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_orders_delivery_address_id
+          ON orders(delivery_address_id)
+          WHERE delivery_address_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_orders_delivery_zone_id
+          ON orders(delivery_zone_id)
+          WHERE delivery_zone_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_orders_delivery_coordinates
+          ON orders(delivery_latitude, delivery_longitude)
+          WHERE delivery_latitude IS NOT NULL AND delivery_longitude IS NOT NULL;
+        ",
+    )
+    .map_err(|e| format!("v59 order delivery destination indexes: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (59)", [])
+        .map_err(|e| format!("v59 record schema_version: {e}"))?;
+
+    info!("Applied migration v59 (order delivery destination snapshots)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -3233,7 +4019,9 @@ fn migrate_v50(conn: &Connection) -> Result<(), String> {
 /// `shift_expenses`, `driver_earnings`). The function validates that
 /// at compile time via a debug_assert; production builds accept any
 /// plain identifier and simply return `None` on lookup miss.
-#[allow(dead_code)] // Added ahead of consumers; see Wave 4 follow-up.
+// Wave 5 C17: consumer wired in `sync_queue.rs::prepare_financial_request`
+// via the `idempotency::make_entity_key` facade; `#[allow(dead_code)]`
+// gate removed.
 pub fn get_entity_idempotency_key(
     conn: &Connection,
     table: &str,
@@ -3247,6 +4035,7 @@ pub fn get_entity_idempotency_key(
                 | "staff_shifts"
                 | "shift_expenses"
                 | "driver_earnings"
+                | "staff_payments"
         ),
         "get_entity_idempotency_key: unexpected table '{table}'"
     );
@@ -3255,9 +4044,11 @@ pub fn get_entity_idempotency_key(
         "get_entity_idempotency_key: table '{table}' must be a plain identifier"
     );
     let sql = format!("SELECT idempotency_key FROM {table} WHERE id = ?1");
-    conn.query_row(&sql, params![entity_id], |row| row.get::<_, Option<String>>(0))
-        .ok()
-        .flatten()
+    conn.query_row(&sql, params![entity_id], |row| {
+        row.get::<_, Option<String>>(0)
+    })
+    .ok()
+    .flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -3984,6 +4775,93 @@ mod tests {
     }
 
     #[test]
+    fn test_migrate_v55_drops_payment_method_column() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        // Column must be gone.
+        assert!(
+            !column_exists(&conn, "orders", "payment_method").expect("column_exists probe"),
+            "orders.payment_method should be dropped after v55"
+        );
+
+        // Derive helper still returns consistent results (no panic when
+        // reading from a schema that never had the column).
+        let derived = crate::payments::derive_payment_method(&conn, "any-nonexistent-id");
+        assert!(
+            derived.is_ok(),
+            "derive_payment_method must tolerate the column being gone"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v55_column_exists_guard_tolerates_rerun() {
+        // The `column_exists` guard inside `migrate_v55` is what protects
+        // against partial-retry after a mid-migration crash. Verify it by
+        // running migrations to 55, then dropping the column is a no-op
+        // when the probe returns false.
+        let conn = test_db();
+        run_migrations(&conn).expect("first run");
+        assert!(
+            !column_exists(&conn, "orders", "payment_method").expect("column_exists probe"),
+            "column should be gone after v55"
+        );
+        // A rerun of `run_migrations` hits the `current < 55` guard and
+        // skips the dispatch entirely — no UNIQUE-violation on
+        // schema_version, no re-drop.
+        run_migrations(&conn).expect("rerun should be a no-op");
+    }
+
+    #[test]
+    fn test_migrate_v57_creates_staff_shifts_staff_status_index() {
+        // Wave 11 L: migration v57 adds the `staff_shifts_staff_status`
+        // index on `staff_shifts(staff_id, status)`. Probe sqlite_master
+        // for the index name after running migrations.
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'staff_shifts_staff_status'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("probe sqlite_master");
+        assert_eq!(
+            count, 1,
+            "v57 must create the staff_shifts_staff_status index"
+        );
+
+        // Confirm the index targets the expected (staff_id, status)
+        // columns. SQLite stores the CREATE INDEX SQL verbatim in
+        // `sqlite_master.sql`.
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND name = 'staff_shifts_staff_status'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read index SQL");
+        assert!(
+            sql.contains("staff_id") && sql.contains("status"),
+            "v57 index SQL must mention both columns; got: {sql}"
+        );
+
+        // Schema_version row must record 57.
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .expect("read schema_version");
+        assert!(
+            version >= 57,
+            "schema_version must reach >= 57 after v57 runs (got {version})"
+        );
+    }
+
+    #[test]
     fn test_migrations_are_idempotent() {
         let conn = test_db();
         run_migrations(&conn).expect("first run");
@@ -3996,6 +4874,54 @@ mod tests {
             })
             .expect("read schema version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrations_repair_missing_v56_after_later_versions_applied() {
+        let conn = test_db();
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            );
+            INSERT INTO schema_version (version) VALUES (58);
+
+            CREATE TABLE parity_sync_queue (
+                id              TEXT PRIMARY KEY,
+                table_name      TEXT NOT NULL,
+                record_id       TEXT NOT NULL,
+                operation       TEXT NOT NULL CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE')),
+                data            TEXT NOT NULL,
+                organization_id TEXT NOT NULL,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_attempt    TEXT,
+                error_message   TEXT,
+                next_retry_at   TEXT,
+                retry_delay_ms  INTEGER NOT NULL DEFAULT 1000,
+                priority        INTEGER NOT NULL DEFAULT 0,
+                module_type     TEXT NOT NULL DEFAULT 'orders',
+                conflict_strategy TEXT NOT NULL DEFAULT 'server-wins',
+                version         INTEGER NOT NULL DEFAULT 1,
+                status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'processing', 'failed', 'conflict'))
+            );
+            ",
+        )
+        .expect("seed schema with v56 gap");
+
+        run_migrations(&conn).expect("migrations should repair v56 gap");
+
+        assert!(
+            column_exists(&conn, "parity_sync_queue", "claim_generation")
+                .expect("claim_generation column check"),
+            "missing v56 claim_generation column must be backfilled"
+        );
+        assert!(
+            schema_version_exists(&conn, 56).expect("schema version check"),
+            "missing v56 schema_version row must be backfilled"
+        );
     }
 
     #[test]
@@ -5138,5 +6064,496 @@ mod tests {
         delete_all_settings(&conn, "terminal").expect("delete");
         let val = get_setting(&conn, "terminal", "language");
         assert!(val.is_none());
+    }
+
+    // ----------------------------------------------------------------------
+    // Wave 4a — migration v51: *_cents shadow columns
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn v51_cents_columns_exist_after_migrations() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        // Bundle the shape into one prepared SELECT — column_exists errors
+        // cleanly if any is missing.
+        for col in [
+            "total_amount_cents",
+            "tax_amount_cents",
+            "subtotal_cents",
+            "discount_amount_cents",
+            "tip_amount_cents",
+            "delivery_fee_cents",
+        ] {
+            assert!(
+                column_exists(&conn, "orders", col).unwrap(),
+                "orders.{col} should exist after v51"
+            );
+        }
+        for col in ["amount_cents", "cash_received_cents", "change_given_cents"] {
+            assert!(
+                column_exists(&conn, "order_payments", col).unwrap(),
+                "order_payments.{col} should exist after v51"
+            );
+        }
+        assert!(
+            column_exists(&conn, "payment_adjustments", "amount_cents").unwrap(),
+            "payment_adjustments.amount_cents should exist after v51"
+        );
+    }
+
+    #[test]
+    fn v53_cents_columns_exist_after_migrations() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        // staff_shifts — 8 cols
+        for col in [
+            "opening_cash_amount_cents",
+            "closing_cash_amount_cents",
+            "expected_cash_amount_cents",
+            "cash_variance_cents",
+            "total_sales_amount_cents",
+            "total_cash_sales_cents",
+            "total_card_sales_cents",
+            "payment_amount_cents",
+        ] {
+            assert!(
+                column_exists(&conn, "staff_shifts", col).unwrap(),
+                "staff_shifts.{col} should exist after v53"
+            );
+        }
+
+        // cash_drawer_sessions — 12 cols
+        for col in [
+            "opening_amount_cents",
+            "closing_amount_cents",
+            "expected_amount_cents",
+            "variance_amount_cents",
+            "total_cash_sales_cents",
+            "total_card_sales_cents",
+            "total_refunds_cents",
+            "total_expenses_cents",
+            "cash_drops_cents",
+            "driver_cash_given_cents",
+            "driver_cash_returned_cents",
+            "total_staff_payments_cents",
+        ] {
+            assert!(
+                column_exists(&conn, "cash_drawer_sessions", col).unwrap(),
+                "cash_drawer_sessions.{col} should exist after v53"
+            );
+        }
+
+        // z_reports — 13 cols
+        for col in [
+            "gross_sales_cents",
+            "net_sales_cents",
+            "cash_sales_cents",
+            "card_sales_cents",
+            "refunds_total_cents",
+            "voids_total_cents",
+            "discounts_total_cents",
+            "tips_total_cents",
+            "expenses_total_cents",
+            "cash_variance_cents",
+            "opening_cash_cents",
+            "closing_cash_cents",
+            "expected_cash_cents",
+        ] {
+            assert!(
+                column_exists(&conn, "z_reports", col).unwrap(),
+                "z_reports.{col} should exist after v53"
+            );
+        }
+    }
+
+    #[test]
+    fn v51_backfills_existing_rows_with_exact_cents() {
+        // Craft a DB that is already at v50 (so the v51 backfill runs against
+        // real rows) by pre-seeding the schema_version table and inserting
+        // rows before v51 gets a chance to run. `run_migrations` is idempotent
+        // on the migrations it has already seen, so marking v1..=v50 as
+        // applied lets us control the pre-v51 state.
+        let conn = test_db();
+
+        // Apply the full schema (brings everything up to CURRENT_SCHEMA_VERSION),
+        // then pretend v51 never ran by deleting its schema_version entry AND
+        // nulling the cents columns we're about to repopulate.
+        run_migrations(&conn).expect("initial migrations");
+        conn.execute("DELETE FROM schema_version WHERE version = 51", [])
+            .expect("undo v51 marker");
+        conn.execute(
+            "UPDATE orders SET total_amount_cents = NULL, tax_amount_cents = NULL,
+                subtotal_cents = NULL, discount_amount_cents = NULL,
+                tip_amount_cents = NULL, delivery_fee_cents = NULL",
+            [],
+        )
+        .expect("null orders cents");
+        conn.execute(
+            "UPDATE order_payments SET amount_cents = NULL,
+                cash_received_cents = NULL, change_given_cents = NULL",
+            [],
+        )
+        .expect("null order_payments cents");
+        conn.execute("UPDATE payment_adjustments SET amount_cents = NULL", [])
+            .expect("null payment_adjustments cents");
+
+        // Pre-insert rows with REAL values we can predict cents for.
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, tax_amount, subtotal,
+                discount_amount, tip_amount, delivery_fee, status, sync_status, created_at, updated_at)
+             VALUES ('v51-ord-1', '[]', 12.34, 1.24, 11.10, 0.50, 2.00, 3.50,
+                     'completed', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert pre-v51 order");
+
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, cash_received,
+                change_given, sync_status, created_at, updated_at)
+             VALUES ('v51-pay-1', 'v51-ord-1', 'cash', 12.34, 20.00, 7.66,
+                     'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert pre-v51 payment");
+
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                amount, reason, created_at, updated_at)
+             VALUES ('v51-adj-1', 'v51-pay-1', 'v51-ord-1', 'refund',
+                     5.00, 'regression test', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert pre-v51 adjustment");
+
+        // Run just the v51 migration body.
+        migrate_v51(&conn).expect("migrate_v51");
+
+        let (total_c, tax_c, sub_c, disc_c, tip_c, deliv_c): (i64, i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT total_amount_cents, tax_amount_cents, subtotal_cents,
+                    discount_amount_cents, tip_amount_cents, delivery_fee_cents
+                 FROM orders WHERE id = 'v51-ord-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(total_c, 1234, "orders.total_amount backfill");
+        assert_eq!(tax_c, 124, "orders.tax_amount backfill");
+        assert_eq!(sub_c, 1110, "orders.subtotal backfill");
+        assert_eq!(disc_c, 50, "orders.discount_amount backfill");
+        assert_eq!(tip_c, 200, "orders.tip_amount backfill");
+        assert_eq!(deliv_c, 350, "orders.delivery_fee backfill");
+
+        let (amt_c, cash_c, change_c): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT amount_cents, cash_received_cents, change_given_cents
+                 FROM order_payments WHERE id = 'v51-pay-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(amt_c, 1234);
+        assert_eq!(cash_c, 2000);
+        assert_eq!(change_c, 766);
+
+        let adj_c: i64 = conn
+            .query_row(
+                "SELECT amount_cents FROM payment_adjustments WHERE id = 'v51-adj-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(adj_c, 500);
+    }
+
+    #[test]
+    fn v51_column_add_is_idempotent_on_partial_reapply() {
+        // If the migration framework crashes between ALTER and schema_version
+        // INSERT, the next `run_migrations` call re-enters `migrate_v51`.
+        // Re-running it must not fail on "duplicate column name".
+        let conn = test_db();
+        run_migrations(&conn).expect("initial migrations");
+
+        // Simulate the crash: pretend v51 didn't mark itself.
+        conn.execute("DELETE FROM schema_version WHERE version = 51", [])
+            .expect("undo v51 marker");
+
+        // Re-run the migration body. column_exists guard must no-op the ADDs.
+        migrate_v51(&conn).expect("migrate_v51 second run");
+    }
+
+    // ----------------------------------------------------------------------
+    // Wave 4a — migration v54: *_cents shadow columns (final sweep)
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn v54_cents_columns_exist_after_migrations() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        // order_payments — gap from v36 rebuild missed by v51
+        assert!(
+            column_exists(&conn, "order_payments", "discount_amount_cents").unwrap(),
+            "order_payments.discount_amount_cents should exist after v54"
+        );
+
+        // payment_items — v31 table entirely missed by v51/v53
+        assert!(
+            column_exists(&conn, "payment_items", "item_amount_cents").unwrap(),
+            "payment_items.item_amount_cents should exist after v54"
+        );
+
+        // driver_earnings — 6 money cols
+        for col in [
+            "delivery_fee_cents",
+            "tip_amount_cents",
+            "total_earning_cents",
+            "cash_collected_cents",
+            "card_amount_cents",
+            "cash_to_return_cents",
+        ] {
+            assert!(
+                column_exists(&conn, "driver_earnings", col).unwrap(),
+                "driver_earnings.{col} should exist after v54"
+            );
+        }
+
+        // shift_expenses — 1 money col
+        assert!(
+            column_exists(&conn, "shift_expenses", "amount_cents").unwrap(),
+            "shift_expenses.amount_cents should exist after v54"
+        );
+    }
+
+    /// W10 H32: the helper sets `synchronous = FULL` on entry and a
+    /// Drop guard restores `NORMAL` on exit. This test asserts the
+    /// guard fires even when the closure PANICS — without the guard,
+    /// a panic mid-closure would leave the connection stuck in FULL
+    /// mode, slowing every subsequent write on that connection.
+    #[test]
+    fn h32_with_full_sync_restores_pragma_on_panic() {
+        let conn = test_db();
+
+        // Sanity: at start, synchronous is unset / default for in-memory.
+        // We DO NOT assert the start value — what matters is that after
+        // the helper's closure panics, synchronous is back to NORMAL.
+
+        // The closure panics. catch_unwind lets us observe the
+        // post-panic state without crashing the test runner.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_full_sync(&conn, |_inner_conn| -> Result<(), String> {
+                panic!("simulated mid-closure panic");
+            });
+        }));
+        assert!(
+            result.is_err(),
+            "the closure must have panicked (test-setup sanity)"
+        );
+
+        // After the panic, the Drop guard must have restored NORMAL.
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read synchronous");
+        // SQLite's `PRAGMA synchronous` returns 1 for NORMAL, 2 for FULL,
+        // 3 for EXTRA. The Restore Drop must have set it back to 1.
+        assert_eq!(
+            synchronous, 1,
+            "Drop guard must restore synchronous to NORMAL (1) after a closure panic; got {synchronous} (FULL=2, EXTRA=3)"
+        );
+    }
+
+    /// W10 H32 bench harness — monetary-write latency under
+    /// `synchronous = NORMAL` vs `synchronous = FULL`.
+    ///
+    /// Marked `#[ignore]` so it stays out of `cargo test --lib` (which
+    /// is the acceptance gate). Run explicitly:
+    ///
+    ///     cd pos-tauri/src-tauri
+    ///     cargo test --release --lib h32_pragma_bench -- --ignored --nocapture
+    ///
+    /// The harness:
+    ///   - Opens a tempfile-backed WAL DB (NOT in-memory — `:memory:`
+    ///     never fsyncs, so synchronous=FULL would be a no-op there).
+    ///   - Runs migrations to set up the `order_payments` schema.
+    ///   - Times 1000 sequential monetary INSERTs, each in its own
+    ///     BEGIN IMMEDIATE / COMMIT pair (matching production write
+    ///     shape), 5 trials.
+    ///   - Computes P50 / P99 / mean per-INSERT latency.
+    ///   - Reports under both synchronous=NORMAL (current default) and
+    ///     synchronous=FULL (via `with_full_sync`) — output to stdout
+    ///     so a single test invocation gives both numbers.
+    ///   - Decision rule from `project_w10_h32_pragma_bench_deferred.md`:
+    ///     ship the wrap if FULL P99 ≤ +15% over NORMAL P99; descope
+    ///     if > 15% on the dominant path.
+    ///
+    /// Caveats:
+    ///   - Numbers are environment-dependent (disk speed, OS, FS).
+    ///     Run on the target machine before applying the rule.
+    ///   - First-write warmup: we discard the first 100 of each trial
+    ///     to avoid SQLite/OS cache cold-start skewing P50.
+    ///   - Single-threaded by design — production monetary writes are
+    ///     serialized through a `Mutex<Connection>`, so concurrent-
+    ///     write benchmarks would not represent the production
+    ///     hot-path.
+    #[test]
+    #[ignore = "bench harness — run with `cargo test --release h32_pragma_bench -- --ignored --nocapture`"]
+    fn h32_pragma_bench_normal_vs_full() {
+        use std::time::Instant;
+
+        const TRIALS: usize = 5;
+        const WRITES_PER_TRIAL: usize = 1000;
+        const WARMUP: usize = 100;
+
+        // Tempfile DB path — fresh each invocation.
+        let dir = std::env::temp_dir().join(format!(
+            "pos_h32_bench_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create bench tempdir");
+        let db_path = dir.join("bench.db");
+
+        let conn = open_and_configure(&db_path).expect("open bench db");
+        run_migrations(&conn).expect("run migrations on bench db");
+
+        // Insert one parent order to satisfy the order_payments FK.
+        // All bench payments reference this one order — the FK lookup
+        // hits a PK index and is microseconds either way; the dominant
+        // cost we want to measure is fsync, not constraint checking.
+        conn.execute("INSERT INTO orders (id) VALUES ('h32-bench-parent')", [])
+            .expect("seed parent order");
+
+        // ---- Helpers ----
+        fn percentile(sorted: &[u128], p: f64) -> u128 {
+            if sorted.is_empty() {
+                return 0;
+            }
+            let idx = ((sorted.len() as f64) * p / 100.0).floor() as usize;
+            sorted[idx.min(sorted.len() - 1)]
+        }
+
+        fn time_inserts(conn: &Connection, count: usize, base_id: usize) -> Vec<u128> {
+            // Tests are single-threaded by default; we use `base_id` to
+            // avoid PK collisions across trials. order_payments's CHECK
+            // constraint requires `method IN ('cash','card','other')`,
+            // status defaults handled by the schema.
+            let mut samples = Vec::with_capacity(count);
+            for i in 0..count {
+                let id = format!("h32-bench-pay-{base_id}-{i}");
+                let started = Instant::now();
+                conn.execute_batch("BEGIN IMMEDIATE")
+                    .expect("BEGIN IMMEDIATE");
+                conn.execute(
+                    "INSERT INTO order_payments
+                     (id, order_id, method, amount, status, created_at, updated_at)
+                     VALUES (?1, 'h32-bench-parent', 'cash', 12.34, 'completed',
+                             datetime('now'), datetime('now'))",
+                    rusqlite::params![id],
+                )
+                .expect("insert order_payments");
+                conn.execute_batch("COMMIT").expect("COMMIT");
+                samples.push(started.elapsed().as_micros());
+            }
+            samples
+        }
+
+        // ---- Bench A: synchronous = NORMAL (current default) ----
+        // The default was set by open_and_configure; just confirm.
+        let _: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        let mut all_normal = Vec::with_capacity(TRIALS * (WRITES_PER_TRIAL - WARMUP));
+        for trial in 0..TRIALS {
+            let base_id = trial * 100_000;
+            let samples = time_inserts(&conn, WRITES_PER_TRIAL, base_id);
+            // Drop warmup samples to stabilize P50.
+            all_normal.extend(samples.into_iter().skip(WARMUP));
+        }
+        all_normal.sort_unstable();
+        let n_p50 = percentile(&all_normal, 50.0);
+        let n_p99 = percentile(&all_normal, 99.0);
+        let n_mean: u128 = all_normal.iter().sum::<u128>() / (all_normal.len() as u128);
+
+        // ---- Bench B: synchronous = FULL via with_full_sync ----
+        let mut all_full = Vec::with_capacity(TRIALS * (WRITES_PER_TRIAL - WARMUP));
+        for trial in 0..TRIALS {
+            let base_id = (TRIALS + trial) * 100_000; // disjoint id space
+            let samples = with_full_sync(&conn, |c| Ok(time_inserts(c, WRITES_PER_TRIAL, base_id)))
+                .expect("with_full_sync sample collection");
+            all_full.extend(samples.into_iter().skip(WARMUP));
+        }
+        all_full.sort_unstable();
+        let f_p50 = percentile(&all_full, 50.0);
+        let f_p99 = percentile(&all_full, 99.0);
+        let f_mean: u128 = all_full.iter().sum::<u128>() / (all_full.len() as u128);
+
+        // ---- Report ----
+        let p99_delta_pct = ((f_p99 as f64 - n_p99 as f64) / (n_p99 as f64).max(1.0)) * 100.0;
+        let p50_delta_pct = ((f_p50 as f64 - n_p50 as f64) / (n_p50 as f64).max(1.0)) * 100.0;
+        let mean_delta_pct = ((f_mean as f64 - n_mean as f64) / (n_mean as f64).max(1.0)) * 100.0;
+
+        println!();
+        println!("===== W10 H32 PRAGMA bench =====");
+        println!(
+            "  trials={TRIALS}, writes/trial={WRITES_PER_TRIAL}, warmup-discarded={WARMUP}, samples-per-mode={}",
+            all_normal.len()
+        );
+        println!("                   NORMAL          FULL          delta");
+        println!(
+            "  P50 (µs):   {:>10}    {:>10}    {:>+6.1}%",
+            n_p50, f_p50, p50_delta_pct
+        );
+        println!(
+            "  P99 (µs):   {:>10}    {:>10}    {:>+6.1}%   <-- decision rule (≤ +15% to ship)",
+            n_p99, f_p99, p99_delta_pct
+        );
+        println!(
+            "  mean (µs):  {:>10}    {:>10}    {:>+6.1}%",
+            n_mean, f_mean, mean_delta_pct
+        );
+        println!("=================================");
+        println!();
+
+        // Cleanup the tempdir so repeated runs don't accumulate.
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Happy-path: the helper restores PRAGMA on Ok return.
+    #[test]
+    fn h32_with_full_sync_restores_pragma_on_ok() {
+        let conn = test_db();
+        let observed_inside: i64 = with_full_sync(&conn, |inner_conn| {
+            inner_conn
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .expect("with_full_sync should not return Err in this test");
+
+        assert_eq!(
+            observed_inside, 2,
+            "inside the closure, synchronous must be FULL (2); got {observed_inside}"
+        );
+
+        let observed_after: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read synchronous after");
+        assert_eq!(
+            observed_after, 1,
+            "after the helper returns, synchronous must be NORMAL (1); got {observed_after}"
+        );
     }
 }

@@ -16,7 +16,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
-use crate::money::MONEY_EPSILON;
+use crate::money::Cents;
+use crate::payments;
 use crate::storage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +183,7 @@ fn build_adjustment_queue_payload(
     refund_method: Option<&str>,
     cash_handler: Option<&str>,
     adjustment_context: Option<&str>,
+    idempotency_key: Option<&str>,
 ) -> String {
     let mut payload = Map::new();
     payload.insert(
@@ -204,7 +206,16 @@ fn build_adjustment_queue_payload(
         "adjustmentType".to_string(),
         Value::String(adjustment_type.to_string()),
     );
+    // W4d-i: emit BOTH float `amount` (legacy, what admin-dashboard's Zod
+    // schema currently requires) AND integer `amount_cents` (forward-compat
+    // for the wire-format cutover). Admin-dashboard switches its preference
+    // to `amount_cents` in a follow-up; this commit is purely additive on
+    // pos-tauri's emit side.
     payload.insert("amount".to_string(), Value::from(amount));
+    payload.insert(
+        "amount_cents".to_string(),
+        Value::from(Cents::round_half_even(amount).as_i64()),
+    );
     payload.insert("reason".to_string(), Value::String(reason.to_string()));
     payload.insert(
         "terminalId".to_string(),
@@ -239,92 +250,26 @@ fn build_adjustment_queue_payload(
             Value::String(adjustment_context.to_string()),
         );
     }
+    if let Some(idempotency_key) = idempotency_key {
+        payload.insert(
+            "idempotencyKey".to_string(),
+            Value::String(idempotency_key.to_string()),
+        );
+        payload.insert(
+            "idempotency_key".to_string(),
+            Value::String(idempotency_key.to_string()),
+        );
+    }
 
     Value::Object(payload).to_string()
 }
 
-pub(crate) fn build_adjustment_sync_payload_for_adjustment(
-    conn: &Connection,
-    adjustment_id: &str,
-) -> Result<String, String> {
-    type AdjustmentSyncRow = (
-        String,
-        String,
-        String,
-        f64,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-
-    let (
-        payment_id,
-        order_id,
-        adjustment_type,
-        amount,
-        reason,
-        staff_id,
-        staff_shift_id,
-        refund_method,
-        cash_handler,
-        adjustment_context,
-    ): AdjustmentSyncRow = conn
-        .query_row(
-            "SELECT
-                payment_id,
-                order_id,
-                adjustment_type,
-                amount,
-                reason,
-                staff_id,
-                staff_shift_id,
-                refund_method,
-                cash_handler,
-                adjustment_context
-             FROM payment_adjustments
-             WHERE id = ?1",
-            params![adjustment_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                ))
-            },
-        )
-        .map_err(|e| format!("load adjustment sync payload context: {e}"))?;
-
-    let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
-    let branch_id = storage::get_credential("branch_id").unwrap_or_default();
-    let remote_order_id = load_adjustment_remote_order_id(conn, &order_id);
-
-    Ok(build_adjustment_queue_payload(
-        adjustment_id,
-        &payment_id,
-        &order_id,
-        remote_order_id.as_deref(),
-        &adjustment_type,
-        amount,
-        &reason,
-        staff_id.as_deref(),
-        staff_shift_id.as_deref(),
-        &terminal_id,
-        &branch_id,
-        refund_method.as_deref(),
-        cash_handler.as_deref(),
-        adjustment_context.as_deref(),
-    ))
-}
+// Wave 5 Session 7 PR 2: `build_adjustment_sync_payload_for_adjustment`
+// deleted together with `upsert_payment_adjustment_sync_queue_row` and
+// the reconcile bridge. The two underlying helpers
+// (`load_adjustment_remote_order_id` at :150, `build_adjustment_queue_payload`
+// at :170) stay — they have other live callers at :463, :569, :737, :883
+// inside the refund-path entry points.
 
 pub(crate) fn refund_payment_in_connection(
     conn: &Connection,
@@ -338,6 +283,11 @@ pub(crate) fn refund_payment_in_connection(
         return Err("Refund amount must be positive".into());
     }
     let reason = str_field(payload, "reason").ok_or("Missing reason")?;
+    let requested_idempotency_key = str_field(payload, "idempotencyKey")
+        .or_else(|| str_field(payload, "idempotency_key"))
+        .or_else(|| str_field(payload, "clientRequestId"))
+        .or_else(|| str_field(payload, "client_request_id"));
+    let client_idempotency_key = normalize_non_empty_text(requested_idempotency_key.as_deref());
     let requested_staff_id =
         str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
     let requested_staff_shift_id =
@@ -366,14 +316,18 @@ pub(crate) fn refund_payment_in_connection(
         Option<String>,
     ) = conn
         .query_row(
-            "SELECT order_id, amount, status, method, staff_shift_id
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT order_id,
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
+                    status, method, staff_shift_id
              FROM order_payments
              WHERE id = ?1",
             params![payment_id],
             |row| {
                 Ok((
                     row.get(0)?,
-                    row.get(1)?,
+                    // W4b: cents column → f64 boundary conversion.
+                    Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
@@ -384,6 +338,39 @@ pub(crate) fn refund_payment_in_connection(
 
     if pay_status == "voided" {
         return Err("Cannot refund a voided payment".into());
+    }
+    if let Some(idempotency_key) = client_idempotency_key.as_deref() {
+        let existing = conn
+            .query_row(
+                "SELECT id, payment_id, amount
+                 FROM payment_adjustments
+                 WHERE idempotency_key = ?1
+                   AND adjustment_type = 'refund'
+                 LIMIT 1",
+                params![idempotency_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, f64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| format!("lookup refund idempotency key: {e}"))?;
+        if let Some((existing_id, existing_payment_id, existing_amount)) = existing {
+            if existing_payment_id != payment_id {
+                return Err("Refund idempotency key already belongs to another payment".into());
+            }
+            return Ok(serde_json::json!({
+                "success": true,
+                "duplicate": true,
+                "adjustmentId": existing_id,
+                "paymentId": existing_payment_id,
+                "amount": existing_amount,
+                "message": "Refund already recorded",
+            }));
+        }
     }
 
     let refund_method = requested_refund_method.unwrap_or_else(|| {
@@ -399,15 +386,20 @@ pub(crate) fn refund_payment_in_connection(
 
     let prior_refunds: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM payment_adjustments
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
+             FROM payment_adjustments
              WHERE payment_id = ?1 AND adjustment_type = 'refund'",
             params![payment_id],
-            |row| row.get(0),
+            // W4b: SUM returns INTEGER (cents); expose as f64 for the
+            // existing f64-typed local var.
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .unwrap_or(0.0);
 
     let remaining = original_amount - prior_refunds;
-    if amount > remaining + MONEY_EPSILON {
+    // W4e: integer-cent comparison. Half-cent epsilon no longer needed.
+    if Cents::round_half_even(amount).as_i64() > Cents::round_half_even(remaining).as_i64() {
         return Err(format!(
             "Refund amount {amount:.2} exceeds remaining balance {remaining:.2}"
         ));
@@ -430,7 +422,9 @@ pub(crate) fn refund_payment_in_connection(
     let adjustment_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let new_total_refunds = prior_refunds + amount;
-    let is_fully_refunded = (new_total_refunds - original_amount).abs() < MONEY_EPSILON;
+    // W4e: integer-cent equality replaces the float-distance epsilon.
+    let is_fully_refunded = Cents::round_half_even(new_total_refunds).as_i64()
+        == Cents::round_half_even(original_amount).as_i64();
     let order_shift_id: Option<String> = conn
         .query_row(
             "SELECT staff_shift_id FROM orders WHERE id = ?1",
@@ -450,17 +444,20 @@ pub(crate) fn refund_payment_in_connection(
     );
     let remote_order_id = load_adjustment_remote_order_id(conn, &order_id);
 
+    // W4c dual-write: populate `amount_cents` alongside REAL `amount`.
+    let amount_cents = Cents::round_half_even(amount).as_i64();
     conn.execute(
         "INSERT INTO payment_adjustments (
-            id, payment_id, order_id, adjustment_type, amount,
+            id, payment_id, order_id, adjustment_type, amount, amount_cents,
             reason, staff_id, staff_shift_id, sync_state, refund_method, cash_handler,
-            adjustment_context, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, 'refund', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+            adjustment_context, idempotency_key, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, 'refund', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
         params![
             adjustment_id,
             payment_id,
             order_id,
             amount,
+            amount_cents,
             reason,
             resolved_staff_id,
             resolved_staff_shift_id,
@@ -468,6 +465,7 @@ pub(crate) fn refund_payment_in_connection(
             refund_method.as_str(),
             cash_handler.map(CashHandler::as_str),
             adjustment_context.as_str(),
+            client_idempotency_key,
             now,
         ],
     )
@@ -487,17 +485,22 @@ pub(crate) fn refund_payment_in_connection(
                 .or(payment_shift_id.clone())
                 .or(order_shift_id.clone());
             if let Some(ref sid) = target_shift_id {
+                // W4c dual-write: maintain `total_refunds_cents` alongside REAL.
                 conn.execute(
                     "UPDATE cash_drawer_sessions SET
                         total_refunds = COALESCE(total_refunds, 0) + ?1,
-                        updated_at = ?2
-                     WHERE staff_shift_id = ?3",
-                    params![amount, now, sid],
+                        total_refunds_cents = COALESCE(total_refunds_cents, 0) + ?2,
+                        updated_at = ?3
+                     WHERE staff_shift_id = ?4",
+                    params![amount, amount_cents, now, sid],
                 )
                 .map_err(|e| format!("update drawer refunds: {e}"))?;
             }
         }
         Some(CashHandler::DriverShift) => {
+            // W4c dual-write: mirror `cash_collected`/`cash_to_return` updates
+            // onto their `_cents` siblings. The legacy REAL columns keep their
+            // `payment_method` derivation read-source unchanged.
             let updated = conn
                 .execute(
                     "UPDATE driver_earnings
@@ -505,9 +508,17 @@ pub(crate) fn refund_payment_in_connection(
                             WHEN COALESCE(cash_collected, 0) - ?1 < 0 THEN 0
                             ELSE COALESCE(cash_collected, 0) - ?1
                          END,
+                         cash_collected_cents = CASE
+                            WHEN COALESCE(cash_collected_cents, 0) - ?2 < 0 THEN 0
+                            ELSE COALESCE(cash_collected_cents, 0) - ?2
+                         END,
                          cash_to_return = CASE
                             WHEN COALESCE(cash_to_return, 0) - ?1 < 0 THEN 0
                             ELSE COALESCE(cash_to_return, 0) - ?1
+                         END,
+                         cash_to_return_cents = CASE
+                            WHEN COALESCE(cash_to_return_cents, 0) - ?2 < 0 THEN 0
+                            ELSE COALESCE(cash_to_return_cents, 0) - ?2
                          END,
                          payment_method = CASE
                             WHEN COALESCE(card_amount, 0) > 0 AND
@@ -516,11 +527,11 @@ pub(crate) fn refund_payment_in_connection(
                             WHEN COALESCE(card_amount, 0) > 0 THEN 'card'
                             ELSE 'cash'
                          END,
-                         updated_at = ?2
-                     WHERE order_id = ?3
+                         updated_at = ?3
+                     WHERE order_id = ?4
                        AND COALESCE(settled, 0) = 0
                        AND COALESCE(is_transferred, 0) = 0",
-                    params![amount, now, order_id],
+                    params![amount, amount_cents, now, order_id],
                 )
                 .map_err(|e| format!("update driver settlement refund: {e}"))?;
             if updated == 0 {
@@ -530,11 +541,16 @@ pub(crate) fn refund_payment_in_connection(
             }
         }
         None => {
+            // W4c dual-write: mirror `card_amount` clamp onto `card_amount_cents`.
             let _ = conn.execute(
                 "UPDATE driver_earnings
                  SET card_amount = CASE
                         WHEN COALESCE(card_amount, 0) - ?1 < 0 THEN 0
                         ELSE COALESCE(card_amount, 0) - ?1
+                     END,
+                     card_amount_cents = CASE
+                        WHEN COALESCE(card_amount_cents, 0) - ?2 < 0 THEN 0
+                        ELSE COALESCE(card_amount_cents, 0) - ?2
                      END,
                      payment_method = CASE
                         WHEN CASE WHEN COALESCE(card_amount, 0) - ?1 < 0 THEN 0 ELSE COALESCE(card_amount, 0) - ?1 END > 0
@@ -543,11 +559,11 @@ pub(crate) fn refund_payment_in_connection(
                         WHEN COALESCE(cash_collected, 0) > 0 THEN 'cash'
                         ELSE 'card'
                      END,
-                     updated_at = ?2
-                 WHERE order_id = ?3
+                     updated_at = ?3
+                 WHERE order_id = ?4
                    AND COALESCE(settled, 0) = 0
                    AND COALESCE(is_transferred, 0) = 0",
-                params![amount, now, order_id],
+                params![amount, amount_cents, now, order_id],
             );
         }
     }
@@ -569,7 +585,10 @@ pub(crate) fn refund_payment_in_connection(
         Some(refund_method.as_str()),
         cash_handler.map(CashHandler::as_str),
         Some(adjustment_context.as_str()),
+        client_idempotency_key.as_deref(),
     );
+
+    payments::recompute_order_payment_state(conn, &order_id, &now, &payment_id)?;
 
     let sync_payload_value = serde_json::from_str::<Value>(&sync_payload)
         .map_err(|e| format!("parse adjustment payload: {e}"))?;
@@ -669,9 +688,21 @@ pub fn void_payment_with_adjustment(
     // voidable state; other states each surface their own error message.
     let (order_id, amount, pay_method, pay_status): (String, f64, String, String) = conn
         .query_row(
-            "SELECT order_id, amount, method, status FROM order_payments WHERE id = ?1",
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT order_id,
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
+                    method, status
+             FROM order_payments WHERE id = ?1",
             params![payment_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    // W4b: cents column → f64 boundary conversion.
+                    Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                    row.get(2)?,
+                    row.get(3)?,
+                ))
+            },
         )
         .map_err(|_| format!("Payment not found: {payment_id}"))?;
 
@@ -696,13 +727,18 @@ pub fn void_payment_with_adjustment(
     // reverses the full amount while refunds have already been paid out.
     let prior_refunds: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM payment_adjustments
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
+             FROM payment_adjustments
              WHERE payment_id = ?1 AND adjustment_type = 'refund'",
             params![payment_id],
-            |row| row.get(0),
+            // W4b: SUM returns INTEGER (cents); expose as f64 for the
+            // existing f64-typed local var.
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .unwrap_or(0.0);
-    if prior_refunds > MONEY_EPSILON {
+    // W4e: integer-cent positive check.
+    if Cents::round_half_even(prior_refunds).as_i64() > 0 {
         return Err(format!(
             "Payment {payment_id} has {prior_refunds:.2} in prior refunds; \
              complete the remaining balance as a refund instead of voiding"
@@ -731,6 +767,53 @@ pub fn void_payment_with_adjustment(
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
+        // Wave 6 H17: re-read `status` and recompute `prior_refunds` INSIDE
+        // the transaction. The outer reads at lines ~670 and ~697 happened
+        // before BEGIN IMMEDIATE, so a concurrent refund landing in the
+        // gap could flip `status` to 'refunded' or bump `prior_refunds`
+        // above zero between the guard check and the void INSERT. With
+        // the re-check under the IMMEDIATE lock, the guards are truly
+        // serialising — either this void observes a fresh `completed`
+        // payment with zero refunds and proceeds, or it observes the
+        // concurrent change and aborts without double-spending.
+        let tx_pay_status: String = conn
+            .query_row(
+                "SELECT status FROM order_payments WHERE id = ?1",
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| pay_status.clone());
+        match tx_pay_status.as_str() {
+            "completed" => {}
+            "voided" => return Err(format!("Payment {payment_id} is already voided")),
+            "refunded" => {
+                return Err(format!(
+                    "Payment {payment_id} has been refunded and cannot be voided"
+                ))
+            }
+            other => {
+                return Err(format!(
+                    "Payment {payment_id} has status '{other}' and cannot be voided"
+                ))
+            }
+        }
+        let tx_prior_refunds: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM payment_adjustments
+                 WHERE payment_id = ?1 AND adjustment_type = 'refund'",
+                params![payment_id],
+                // W4b: SUM returns INTEGER cents; expose as f64.
+                |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
+            )
+            .unwrap_or(0.0);
+        // W4e: integer-cent positive check.
+        if Cents::round_half_even(tx_prior_refunds).as_i64() > 0 {
+            return Err(format!(
+                "Payment {payment_id} has {tx_prior_refunds:.2} in prior refunds; \
+                 complete the remaining balance as a refund instead of voiding"
+            ));
+        }
+
         // Read pay_sync_state INSIDE the transaction. Previously this ran
         // outside BEGIN IMMEDIATE, so a payment that transitioned from a
         // non-applied state to 'applied' in the gap would still cause the
@@ -759,24 +842,21 @@ pub fn void_payment_with_adjustment(
         )
         .map_err(|e| format!("void payment: {e}"))?;
 
-        // Revert order payment status
-        conn.execute(
-            "UPDATE orders SET payment_status = 'pending', updated_at = ?1 WHERE id = ?2",
-            params![now, order_id],
-        )
-        .map_err(|e| format!("revert order payment: {e}"))?;
+        payments::recompute_order_payment_state(&conn, &order_id, &now, payment_id)?;
 
-        // Insert adjustment audit record
+        // Insert adjustment audit record (W4c dual-write).
+        let void_amount_cents = Cents::round_half_even(amount).as_i64();
         conn.execute(
             "INSERT INTO payment_adjustments (
-                id, payment_id, order_id, adjustment_type, amount,
+                id, payment_id, order_id, adjustment_type, amount, amount_cents,
                 reason, staff_id, staff_shift_id, sync_state, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, 'void', ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            ) VALUES (?1, ?2, ?3, 'void', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
             params![
                 adjustment_id,
                 payment_id,
                 order_id,
                 amount,
+                void_amount_cents,
                 reason,
                 resolved_staff_id,
                 resolved_staff_shift_id,
@@ -788,23 +868,37 @@ pub fn void_payment_with_adjustment(
 
         // Reverse the original payment's drawer entry.
         // Voids reverse the sale (not add to refunds).
+        //
+        // Wave 6 H18: the subtraction is guarded with a `MAX(…, 0)` floor.
+        // The driver-earnings refund path at lines ~502–511 already clamps
+        // this way, but the void path here used to subtract unconditionally.
+        // If concurrent voids or a pre-existing drawer-counter drift produced
+        // `total_cash_sales < 0`, the cashier's expected-cash formula in
+        // `shifts.rs:877` would emit a negative expected total and close-out
+        // variance would be corrupted. Clamping at zero keeps the counter
+        // non-negative at the cost of one arithmetic op per void.
         if let Some(ref sid) = order_shift_id {
             if pay_method == "cash" {
+                // W4c dual-write: clamp the cents sibling alongside REAL.
                 conn.execute(
                     "UPDATE cash_drawer_sessions SET
-                        total_cash_sales = COALESCE(total_cash_sales, 0) - ?1,
-                        updated_at = ?2
-                     WHERE staff_shift_id = ?3",
-                    params![amount, now, sid],
+                        total_cash_sales = MAX(COALESCE(total_cash_sales, 0) - ?1, 0),
+                        total_cash_sales_cents = MAX(COALESCE(total_cash_sales_cents, 0) - ?2, 0),
+                        updated_at = ?3
+                     WHERE staff_shift_id = ?4",
+                    params![amount, void_amount_cents, now, sid],
                 )
                 .map_err(|e| format!("reverse drawer cash_sales: {e}"))?;
             } else if pay_method == "card" {
+                // Wave 6 H18: same `MAX(…, 0)` floor for card sales as cash.
+                // W4c dual-write: clamp the cents sibling alongside REAL.
                 conn.execute(
                     "UPDATE cash_drawer_sessions SET
-                        total_card_sales = COALESCE(total_card_sales, 0) - ?1,
-                        updated_at = ?2
-                     WHERE staff_shift_id = ?3",
-                    params![amount, now, sid],
+                        total_card_sales = MAX(COALESCE(total_card_sales, 0) - ?1, 0),
+                        total_card_sales_cents = MAX(COALESCE(total_card_sales_cents, 0) - ?2, 0),
+                        updated_at = ?3
+                     WHERE staff_shift_id = ?4",
+                    params![amount, void_amount_cents, now, sid],
                 )
                 .map_err(|e| format!("reverse drawer card_sales: {e}"))?;
             }
@@ -825,6 +919,7 @@ pub fn void_payment_with_adjustment(
             resolved_staff_shift_id.as_deref(),
             &terminal_id,
             &branch_id,
+            None,
             None,
             None,
             None,
@@ -884,7 +979,9 @@ pub fn list_order_adjustments(db: &DbState, order_id: &str) -> Result<Value, Str
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, payment_id, order_id, adjustment_type, amount,
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT id, payment_id, order_id, adjustment_type,
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
                     reason, staff_id, staff_shift_id, sync_state, sync_last_error,
                     refund_method, cash_handler, adjustment_context,
                     created_at, updated_at
@@ -901,7 +998,10 @@ pub fn list_order_adjustments(db: &DbState, order_id: &str) -> Result<Value, Str
                 "paymentId": row.get::<_, String>(1)?,
                 "orderId": row.get::<_, String>(2)?,
                 "adjustmentType": row.get::<_, String>(3)?,
-                "amount": row.get::<_, f64>(4)?,
+                // W4b: cents column → f64-dp2 for the existing JSON shape.
+                // Renderer/admin still expect float `amount` until 4d
+                // cuts the wire format over.
+                "amount": Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
                 "reason": row.get::<_, String>(5)?,
                 "staffId": row.get::<_, Option<String>>(6)?,
                 "staffShiftId": row.get::<_, Option<String>>(7)?,
@@ -938,31 +1038,47 @@ pub fn get_payment_balance(db: &DbState, payment_id: &str) -> Result<Value, Stri
 
     let (original_amount, status): (f64, String) = conn
         .query_row(
-            "SELECT amount, status FROM order_payments WHERE id = ?1",
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0), status
+             FROM order_payments WHERE id = ?1",
             params![payment_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok((
+                    // W4b: cents column → f64 for existing local var.
+                    Cents::new(row.get::<_, i64>(0)?).to_f64_dp2(),
+                    row.get(1)?,
+                ))
+            },
         )
         .map_err(|_| format!("Payment not found: {payment_id}"))?;
 
+    let total_refunds: f64 = conn
+        .query_row(
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
+             FROM payment_adjustments
+             WHERE payment_id = ?1 AND adjustment_type = 'refund'",
+            params![payment_id],
+            // W4b: SUM returns INTEGER (cents); expose as f64 for the
+            // existing f64-typed local var.
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
+        )
+        .unwrap_or(0.0);
+
     if status == "voided" {
+        // Wave 10 medium: surface the actual refund total even for voided
+        // payments so callers can distinguish "voided" from "voided after
+        // partial refund". `balance` is still forced to 0 — a voided
+        // payment is not refundable further, regardless of prior refunds.
         return Ok(serde_json::json!({
             "success": true,
             "paymentId": payment_id,
             "originalAmount": original_amount,
-            "totalRefunds": 0.0,
+            "totalRefunds": total_refunds,
             "balance": 0.0,
             "status": "voided",
         }));
     }
-
-    let total_refunds: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM payment_adjustments
-             WHERE payment_id = ?1 AND adjustment_type = 'refund'",
-            params![payment_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0);
 
     // Wave 6: clamp to zero. If `total_refunds` accidentally exceeds
     // `original_amount` (DB inconsistency, historical corruption,
@@ -1030,18 +1146,22 @@ mod tests {
     /// Insert a test order + payment and return (order_id, payment_id).
     fn seed_order_and_payment(db: &DbState, order_id: &str, amount: f64) -> String {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate REAL + cents columns. amount_cents is
+        // computed via Cents::round_half_even at the bind site so the
+        // fixture tracks the same rounding rule production code uses.
+        let amount_cents = Cents::round_half_even(amount).as_i64();
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
-             VALUES (?1, '[]', ?2, 'completed', 'synced', '11111111-1111-4111-8111-111111111111', datetime('now'), datetime('now'))",
-            params![order_id, amount],
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES (?1, '[]', ?2, ?3, 'completed', 'synced', '11111111-1111-4111-8111-111111111111', datetime('now'), datetime('now'))",
+            params![order_id, amount, amount_cents],
         )
         .expect("insert order");
 
         let pay_id = format!("pay-{order_id}");
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES (?1, ?2, 'cash', ?3, 'synced', 'applied', datetime('now'), datetime('now'))",
-            params![pay_id, order_id, amount],
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES (?1, ?2, 'cash', ?3, ?4, 'synced', 'applied', datetime('now'), datetime('now'))",
+            params![pay_id, order_id, amount, amount_cents],
         )
         .expect("insert payment");
 
@@ -1084,6 +1204,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sq_count, 1);
+    }
+
+    #[test]
+    fn test_refund_idempotency_client_request_id_returns_duplicate() {
+        let db = test_db();
+        let pay_id = seed_order_and_payment(&db, "ord-idem", 50.0);
+
+        let payload = serde_json::json!({
+            "paymentId": pay_id,
+            "amount": 15.0,
+            "reason": "Item returned",
+            "clientRequestId": "client-refund-1",
+        });
+
+        let first = refund_payment(&db, &payload).unwrap();
+        let second = refund_payment(&db, &payload).unwrap();
+
+        assert_eq!(second["success"], true);
+        assert_eq!(second["duplicate"], true);
+        assert_eq!(second["adjustmentId"], first["adjustmentId"]);
+
+        let conn = db.conn.lock().unwrap();
+        let adjustment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM payment_adjustments WHERE payment_id = ?1",
+                params![pay_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(adjustment_count, 1);
     }
 
     #[test]
@@ -1290,21 +1440,76 @@ mod tests {
         assert_eq!(b["status"], "voided");
     }
 
+    /// Wave 10 medium: a voided payment may carry prior refund adjustments
+    /// in the database (from data migrations, manual cleanup, or historical
+    /// rows that pre-date the current `void_payment_with_adjustment` guard
+    /// that refuses to void payments with any prior refund). The voided
+    /// branch of `get_payment_balance` previously returned hardcoded
+    /// `totalRefunds: 0.0` — callers could not distinguish "voided after
+    /// prior refund" from "voided cleanly". `balance` must remain 0 (a
+    /// voided payment is not refundable further regardless of prior
+    /// refunds).
+    ///
+    /// We seed the (voided payment + refund adjustment) state directly in
+    /// SQL because the production void path now refuses to construct
+    /// this state (and we don't want to flip the guard off for the
+    /// purpose of the test).
+    #[test]
+    fn test_get_payment_balance_voided_after_partial_refund() {
+        let db = test_db();
+        let pay_id = seed_order_and_payment(&db, "ord-gbvr", 50.0);
+
+        let conn = db.conn.lock().unwrap();
+        // Force the payment to voided status.
+        conn.execute(
+            "UPDATE order_payments SET status = 'voided' WHERE id = ?1",
+            params![pay_id],
+        )
+        .expect("force voided status");
+        // Seed a refund adjustment that pre-existed the void (the
+        // historical state H32 cares about).
+        conn.execute(
+            // W4e Step 0: dual-populate amount + amount_cents (12.0 → 1200).
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
+                sync_state, created_at, updated_at
+             ) VALUES ('adj-historic', ?1, 'ord-gbvr', 'refund', 12.0, 1200,
+                'Historic partial refund', 'pending',
+                datetime('now'), datetime('now'))",
+            params![pay_id],
+        )
+        .expect("seed historic refund adjustment");
+        drop(conn);
+
+        let b = get_payment_balance(&db, &pay_id).unwrap();
+        assert_eq!(b["status"], "voided", "payment must be marked voided");
+        assert_eq!(
+            b["totalRefunds"], 12.0,
+            "voided branch must surface prior refund total, not hardcoded 0.0"
+        );
+        assert_eq!(
+            b["balance"], 0.0,
+            "voided payment is not refundable further regardless of prior refunds"
+        );
+        assert_eq!(b["originalAmount"], 50.0);
+    }
+
     #[test]
     fn test_refund_waiting_parent_sync_state() {
         let db = test_db();
 
         // Create order + payment where payment hasn't synced yet
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (20.0 → 2000 cents).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-wp', '[]', 20.0, 'completed', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-wp', '[]', 20.0, 2000, 'completed', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-wp', 'ord-wp', 'cash', 20.0, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-wp', 'ord-wp', 'cash', 20.0, 2000, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -1352,19 +1557,24 @@ mod tests {
              VALUES ('shift-vr', 'staff-vr', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
+        // W4e Step 0: dual-populate (100.0 → 10000, 40.0 → 4000).
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, total_cash_sales, opened_at, created_at, updated_at)
-             VALUES ('cd-vr', 'shift-vr', 'staff-vr', 'b1', 't1', 100.0, 40.0, datetime('now'), datetime('now'), datetime('now'))",
+            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                                                opening_amount, opening_amount_cents,
+                                                total_cash_sales, total_cash_sales_cents,
+                                                opened_at, created_at, updated_at)
+             VALUES ('cd-vr', 'shift-vr', 'staff-vr', 'b1', 't1', 100.0, 10000, 40.0, 4000,
+                     datetime('now'), datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, staff_shift_id, supabase_id, created_at, updated_at)
-             VALUES ('ord-vr', '[]', 40.0, 'completed', 'synced', 'shift-vr', 'sup-vr', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, supabase_id, created_at, updated_at)
+             VALUES ('ord-vr', '[]', 40.0, 4000, 'completed', 'synced', 'shift-vr', 'sup-vr', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-vr', 'ord-vr', 'cash', 40.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-vr', 'ord-vr', 'cash', 40.0, 4000, 'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         drop(conn);
@@ -1408,19 +1618,24 @@ mod tests {
              VALUES ('shift-rdr', 'staff-rdr', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
+        // W4e Step 0: dual-populate (100.0 → 10000, 50.0 → 5000).
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, total_cash_sales, opened_at, created_at, updated_at)
-             VALUES ('cd-rdr', 'shift-rdr', 'staff-rdr', 'b1', 't1', 100.0, 50.0, datetime('now'), datetime('now'), datetime('now'))",
+            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                                                opening_amount, opening_amount_cents,
+                                                total_cash_sales, total_cash_sales_cents,
+                                                opened_at, created_at, updated_at)
+             VALUES ('cd-rdr', 'shift-rdr', 'staff-rdr', 'b1', 't1', 100.0, 10000, 50.0, 5000,
+                     datetime('now'), datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, staff_shift_id, supabase_id, created_at, updated_at)
-             VALUES ('ord-rdr', '[]', 50.0, 'completed', 'synced', 'shift-rdr', 'sup-rdr', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, supabase_id, created_at, updated_at)
+             VALUES ('ord-rdr', '[]', 50.0, 5000, 'completed', 'synced', 'shift-rdr', 'sup-rdr', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-rdr', 'ord-rdr', 'cash', 50.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-rdr', 'ord-rdr', 'cash', 50.0, 5000, 'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         drop(conn);
@@ -1514,24 +1729,29 @@ mod tests {
             params![staff_shift_id, database_staff_id],
         )
         .unwrap();
+        // W4e Step 0: dual-populate (50.0 → 5000, 20.0 → 2000).
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
-                 id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, total_cash_sales, opened_at, created_at, updated_at
+                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                 opening_amount, opening_amount_cents,
+                 total_cash_sales, total_cash_sales_cents,
+                 opened_at, created_at, updated_at
              ) VALUES (
-                 'cd-adjustment-staff', ?1, ?2, 'b1', 't1', 50.0, 20.0, datetime('now'), datetime('now'), datetime('now')
+                 'cd-adjustment-staff', ?1, ?2, 'b1', 't1', 50.0, 5000, 20.0, 2000,
+                 datetime('now'), datetime('now'), datetime('now')
              )",
             params![staff_shift_id, database_staff_id],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, staff_shift_id, supabase_id, created_at, updated_at)
-             VALUES ('ord-adjustment-staff', '[]', 20.0, 'completed', 'synced', ?1, 'sup-adjustment-staff', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, supabase_id, created_at, updated_at)
+             VALUES ('ord-adjustment-staff', '[]', 20.0, 2000, 'completed', 'synced', ?1, 'sup-adjustment-staff', datetime('now'), datetime('now'))",
             params![staff_shift_id],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-adjustment-staff', 'ord-adjustment-staff', 'cash', 20.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adjustment-staff', 'ord-adjustment-staff', 'cash', 20.0, 2000, 'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -1597,20 +1817,21 @@ mod tests {
             params![staff_shift_id, database_staff_id],
         )
         .unwrap();
+        // W4e Step 0: dual-populate amount + amount_cents (18.0 → 1800).
         conn.execute(
             "INSERT INTO orders (
-                 id, items, total_amount, status, sync_status, staff_shift_id, created_at, updated_at
+                 id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, created_at, updated_at
              ) VALUES (
-                 'ord-void-adjustment-staff', '[]', 18.0, 'completed', 'synced', ?1, datetime('now'), datetime('now')
+                 'ord-void-adjustment-staff', '[]', 18.0, 1800, 'completed', 'synced', ?1, datetime('now'), datetime('now')
              )",
             params![staff_shift_id],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                 'pay-void-adjustment-staff', 'ord-void-adjustment-staff', 'cash', 18.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+                 'pay-void-adjustment-staff', 'ord-void-adjustment-staff', 'cash', 18.0, 1800, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
              )",
             [],
         )

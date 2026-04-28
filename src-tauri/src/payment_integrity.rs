@@ -3,6 +3,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::business_day;
+use crate::money::{serialize_cents_as_f64_dp2, Cents};
 
 pub const UNSETTLED_PAYMENT_BLOCKER_ERROR_CODE: &str = "UNSETTLED_PAYMENT_BLOCKER";
 
@@ -11,8 +12,13 @@ pub const UNSETTLED_PAYMENT_BLOCKER_ERROR_CODE: &str = "UNSETTLED_PAYMENT_BLOCKE
 pub struct UnsettledPaymentBlocker {
     pub order_id: String,
     pub order_number: String,
-    pub total_amount: f64,
-    pub settled_amount: f64,
+    // W4b: internal Cents; serialized as f64-dp2 to keep the existing
+    // admin-dashboard wire shape unchanged. The serializer adapter is
+    // removed in 4d when the wire-format cutover lands.
+    #[serde(serialize_with = "serialize_cents_as_f64_dp2")]
+    pub total_amount: Cents,
+    #[serde(serialize_with = "serialize_cents_as_f64_dp2")]
+    pub settled_amount: Cents,
     pub payment_status: String,
     pub payment_method: String,
     pub reason_code: String,
@@ -24,8 +30,8 @@ pub struct UnsettledPaymentBlocker {
 struct RawBlockerRow {
     order_id: String,
     order_number: String,
-    total_amount: f64,
-    settled_amount: f64,
+    total_amount: Cents,
+    settled_amount: Cents,
     payment_status: String,
     payment_method: String,
     completed_payment_count: i64,
@@ -56,8 +62,10 @@ fn normalize_payment_method(value: &str) -> String {
     }
 }
 
-fn format_money(amount: f64) -> String {
-    format!("EUR {:.2}", amount.max(0.0))
+fn format_money(amount: Cents) -> String {
+    // Display-side conversion only: clamp negative values to zero for
+    // operator-friendly text. Internal arithmetic stays in `Cents`.
+    format!("EUR {:.2}", amount.to_f64_dp2().max(0.0))
 }
 
 fn build_blocker(
@@ -80,14 +88,19 @@ fn build_blocker(
 }
 
 fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
-    if row.total_amount <= 0.009 {
+    // W4b: integer-cent comparisons — exact equality, no epsilon. The W1
+    // C10 alignment with `payments::recompute_order_payment_state` is
+    // preserved because that path also moves to integer math in W4b.
+    // Previously this used MONEY_EPSILON (0.005) to guard against float
+    // drift; with `Cents` the drift class disappears entirely.
+    if row.total_amount <= Cents::ZERO {
         return None;
     }
 
-    let remaining = (row.total_amount - row.settled_amount).max(0.0);
+    let remaining = std::cmp::max(row.total_amount - row.settled_amount, Cents::ZERO);
 
     if row.invalid_completed_method_count > 0 {
-        let reason_text = if remaining <= 0.009 {
+        let reason_text = if remaining.is_zero() {
             "Completed payment rows contain an unsupported payment method.".to_string()
         } else {
             format!(
@@ -105,7 +118,7 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
         ));
     }
 
-    if remaining <= 0.009 {
+    if remaining.is_zero() {
         return None;
     }
 
@@ -119,42 +132,23 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
     }
 
     if row.completed_payment_count <= 0 {
-        return Some(match row.payment_method.as_str() {
-            "cash" => build_blocker(
-                &row,
-                "missing_cash_payment",
-                "Order is missing its recorded cash payment.".to_string(),
-                "Record or confirm the missing cash payment.".to_string(),
-            ),
-            "card" => build_blocker(
-                &row,
-                "missing_card_payment",
-                "Order is missing its recorded card payment.".to_string(),
-                "Record or confirm the missing card payment.".to_string(),
-            ),
-            "split" | "mixed" => build_blocker(
-                &row,
-                "split_payment_incomplete",
-                format!(
-                    "Split payment did not finish. {} of {} is still missing.",
-                    format_money(remaining),
-                    format_money(row.total_amount)
-                ),
-                "Resume split payment and finish the remaining balance.".to_string(),
-            ),
-            _ => build_blocker(
-                &row,
-                "no_persisted_payment",
-                "Order was completed without a persisted cash/card payment.".to_string(),
-                "Record the missing cash or card payment.".to_string(),
-            ),
-        });
+        // W6: with `orders.payment_method` dropped and `derive_payment_method`
+        // returning None → "pending" when there are zero completed rows, the
+        // specific `missing_cash_payment` / `missing_card_payment` /
+        // `split_payment_incomplete` codes are unreachable for this branch.
+        // Every zero-payment-count blocker collapses into `no_persisted_payment`.
+        return Some(build_blocker(
+            &row,
+            "no_persisted_payment",
+            "Order was completed without a persisted cash/card payment.".to_string(),
+            "Record the missing cash or card payment.".to_string(),
+        ));
     }
 
-    if row.payment_method == "split"
-        || row.payment_method == "mixed"
-        || row.completed_payment_count > 1
-    {
+    // Note: `derive_payment_method` never emits "mixed" (canonical
+    // vocabulary is "split"); the `== "mixed"` check is kept for
+    // defence-in-depth against any stale data synced from older peers.
+    if row.payment_method == "split" || row.payment_method == "mixed" {
         return Some(build_blocker(
             &row,
             "split_payment_incomplete",
@@ -202,18 +196,49 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
 }
 
 fn order_blocker_row_select() -> String {
+    // W6: column 5 (payment_method) is derived via a subquery matching
+    // `payments::derive_payment_method`. The stored `orders.payment_method`
+    // column was dropped in migration v55. Semantic consequence: for
+    // orders with zero completed payments (the `missing_local_payment_row`
+    // and `no_persisted_payment` branches in `classify_blocker_row`), the
+    // derived method is always "pending" — the three
+    // `missing_cash_payment` / `missing_card_payment` /
+    // `split_payment_incomplete` reason codes for that case were removed
+    // and collapsed into the catch-all `no_persisted_payment`. The
+    // operator UX loses specificity only for the "paid, but no local
+    // row" edge case; the hint column in the blocker UI becomes the
+    // generic "Record the missing cash or card payment".
+    //
+    // W4b: monetary columns now read from the `*_cents` integer siblings
+    // (W4a v51 added `orders.total_amount_cents` and
+    // `order_payments.amount_cents`; W4c populates them on every write).
+    // W4b: COALESCE(cents_col, CAST(ROUND(real_col * 100) AS INTEGER)) is
+    // a transition shim that lets pre-W4c fixtures (and any production
+    // row written between v51/v53/v54 backfill and 4c landing that still
+    // has NULL `_cents`) be read without silently zeroing money. 4e
+    // removes the COALESCE arms when the REAL columns are dropped.
     "SELECT
         o.id,
         COALESCE(NULLIF(TRIM(o.order_number), ''), o.id),
-        COALESCE(o.total_amount, 0),
+        COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
         COALESCE((
-            SELECT SUM(op.amount)
+            SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
             FROM order_payments op
             WHERE op.order_id = o.id
               AND op.status = 'completed'
         ), 0),
         LOWER(TRIM(COALESCE(o.payment_status, 'pending'))),
-        LOWER(TRIM(COALESCE(o.payment_method, 'pending'))),
+        COALESCE((
+            SELECT CASE
+                WHEN COUNT(DISTINCT LOWER(TRIM(method))) > 1
+                  THEN 'split'
+                ELSE LOWER(TRIM(MIN(method)))
+            END
+            FROM order_payments op
+            WHERE op.order_id = o.id
+              AND op.status = 'completed'
+              AND TRIM(COALESCE(op.method, '')) != ''
+        ), 'pending'),
         COALESCE((
             SELECT COUNT(*)
             FROM order_payments op
@@ -267,8 +292,9 @@ pub fn load_order_payment_blockers(
             Ok(RawBlockerRow {
                 order_id: row.get(0)?,
                 order_number: row.get(1)?,
-                total_amount: row.get(2)?,
-                settled_amount: row.get(3)?,
+                // W4b: cols 2 and 3 now select INTEGER cents columns.
+                total_amount: Cents::new(row.get::<_, i64>(2)?),
+                settled_amount: Cents::new(row.get::<_, i64>(3)?),
                 payment_status: row.get(4)?,
                 payment_method: row.get(5)?,
                 completed_payment_count: row.get(6)?,
@@ -307,8 +333,9 @@ pub fn load_branch_window_payment_blockers(
             Ok(RawBlockerRow {
                 order_id: row.get(0)?,
                 order_number: row.get(1)?,
-                total_amount: row.get(2)?,
-                settled_amount: row.get(3)?,
+                // W4b: cols 2 and 3 now select INTEGER cents columns.
+                total_amount: Cents::new(row.get::<_, i64>(2)?),
+                settled_amount: Cents::new(row.get::<_, i64>(3)?),
                 payment_status: row.get(4)?,
                 payment_method: row.get(5)?,
                 completed_payment_count: row.get(6)?,
@@ -393,11 +420,11 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, branch_id, items, total_amount, status, payment_status,
-                payment_method, created_at, updated_at
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, payment_status, created_at, updated_at
             ) VALUES (
-                'ord-missing-local', 'ORD-1', 'branch-1', '[]', 13.7, 'completed', 'paid',
-                'split', '2026-03-26T16:53:37Z', '2026-03-26T17:19:54Z'
+                'ord-missing-local', 'ORD-1', 'branch-1', '[]', 13.7, 1370,
+                'completed', 'paid', '2026-03-26T16:53:37Z', '2026-03-26T17:19:54Z'
             )",
             [],
         )
@@ -419,25 +446,40 @@ mod tests {
 
     #[test]
     fn branch_window_blockers_classify_partial_split_payment() {
+        // W6: the test previously seeded `payment_method='split'` on the
+        // order row to force the split-blocker branch. Post-v55 the split
+        // classification is derived from `order_payments` — seed two
+        // different-method completed rows so derive returns "split".
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, branch_id, items, total_amount, status, payment_status,
-                payment_method, created_at, updated_at
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, payment_status, created_at, updated_at
             ) VALUES (
-                'ord-split', 'ORD-2', 'branch-1', '[]', 20.0, 'completed', 'partially_paid',
-                'split', '2026-03-26T16:53:37Z', '2026-03-26T17:19:54Z'
+                'ord-split', 'ORD-2', 'branch-1', '[]', 20.0, 2000,
+                'completed', 'partially_paid',
+                '2026-03-26T16:53:37Z', '2026-03-26T17:19:54Z'
             )",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, created_at, updated_at
             ) VALUES (
-                'pay-split', 'ord-split', 'cash', 8.0, 'completed',
+                'pay-split-cash', 'ord-split', 'cash', 8.0, 800, 'completed',
                 '2026-03-26T16:55:00Z', '2026-03-26T16:55:00Z'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, created_at, updated_at
+            ) VALUES (
+                'pay-split-card', 'ord-split', 'card', 4.0, 400, 'completed',
+                '2026-03-26T16:56:00Z', '2026-03-26T16:56:00Z'
             )",
             [],
         )

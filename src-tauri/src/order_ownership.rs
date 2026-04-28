@@ -2,6 +2,7 @@ use rusqlite::{params, Connection};
 use uuid::Uuid;
 
 use crate::business_day;
+use crate::money::Cents;
 
 pub struct DriverOwnershipAssignment {
     pub driver_shift_id: String,
@@ -315,6 +316,13 @@ pub fn upsert_driver_earning(
 
     let total_earning = assignment.delivery_fee + assignment.tip_amount;
     let cash_to_return = assignment.cash_collected;
+    // W4c dual-write: every monetary REAL column gets its `_cents` sibling.
+    let delivery_fee_cents = Cents::round_half_even(assignment.delivery_fee).as_i64();
+    let tip_amount_cents = Cents::round_half_even(assignment.tip_amount).as_i64();
+    let total_earning_cents = Cents::round_half_even(total_earning).as_i64();
+    let cash_collected_cents = Cents::round_half_even(assignment.cash_collected).as_i64();
+    let card_amount_cents = Cents::round_half_even(assignment.card_amount).as_i64();
+    let cash_to_return_cents = Cents::round_half_even(cash_to_return).as_i64();
 
     if let Some(existing_id) = existing_id {
         conn.execute(
@@ -322,26 +330,32 @@ pub fn upsert_driver_earning(
              SET driver_id = ?1,
                  staff_shift_id = ?2,
                  branch_id = ?3,
-                 delivery_fee = ?4,
-                 tip_amount = ?5,
-                 total_earning = ?6,
-                 payment_method = ?7,
-                 cash_collected = ?8,
-                 card_amount = ?9,
-                 cash_to_return = ?10,
-                 updated_at = ?11
-             WHERE id = ?12",
+                 delivery_fee = ?4, delivery_fee_cents = ?5,
+                 tip_amount = ?6, tip_amount_cents = ?7,
+                 total_earning = ?8, total_earning_cents = ?9,
+                 payment_method = ?10,
+                 cash_collected = ?11, cash_collected_cents = ?12,
+                 card_amount = ?13, card_amount_cents = ?14,
+                 cash_to_return = ?15, cash_to_return_cents = ?16,
+                 updated_at = ?17
+             WHERE id = ?18",
             params![
                 driver_id,
                 assignment.driver_shift_id,
                 assignment.branch_id,
                 assignment.delivery_fee,
+                delivery_fee_cents,
                 assignment.tip_amount,
+                tip_amount_cents,
                 total_earning,
+                total_earning_cents,
                 assignment.payment_method,
                 assignment.cash_collected,
+                cash_collected_cents,
                 assignment.card_amount,
+                card_amount_cents,
                 cash_to_return,
+                cash_to_return_cents,
                 now,
                 existing_id
             ],
@@ -354,10 +368,15 @@ pub fn upsert_driver_earning(
         conn.execute(
             "INSERT INTO driver_earnings (
                 id, driver_id, staff_shift_id, order_id, branch_id,
-                delivery_fee, tip_amount, total_earning,
-                payment_method, cash_collected, card_amount, cash_to_return,
+                delivery_fee, delivery_fee_cents,
+                tip_amount, tip_amount_cents,
+                total_earning, total_earning_cents,
+                payment_method,
+                cash_collected, cash_collected_cents,
+                card_amount, card_amount_cents,
+                cash_to_return, cash_to_return_cents,
                 settled, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?13)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 0, ?19, ?19)",
             params![
                 earning_id,
                 driver_id,
@@ -365,12 +384,18 @@ pub fn upsert_driver_earning(
                 order_id,
                 assignment.branch_id,
                 assignment.delivery_fee,
+                delivery_fee_cents,
                 assignment.tip_amount,
+                tip_amount_cents,
                 total_earning,
+                total_earning_cents,
                 assignment.payment_method,
                 assignment.cash_collected,
+                cash_collected_cents,
                 assignment.card_amount,
+                card_amount_cents,
                 cash_to_return,
+                cash_to_return_cents,
                 now
             ],
         )
@@ -399,28 +424,19 @@ pub fn get_order_payment_totals(
         .map_err(|e| format!("load order payments: {e}"))?;
 
     if payment_count == 0 {
-        let (total_amount, payment_method) = conn
+        // W6: `orders.payment_method` was dropped in v55. With no
+        // completed payment rows there's nothing to derive the method
+        // from — default to "cash" (the same COALESCE default the
+        // pre-drop code used) so the attribution fallback stays stable.
+        let total_amount = conn
             .query_row(
-                "SELECT COALESCE(total_amount, 0), COALESCE(payment_method, 'cash')
-                 FROM orders
-                 WHERE id = ?1",
+                "SELECT COALESCE(total_amount, 0) FROM orders WHERE id = ?1",
                 params![order_id],
-                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)),
+                |row| row.get::<_, f64>(0),
             )
             .map_err(|e| format!("load order payment fallback: {e}"))?;
 
-        let normalized = payment_method.to_lowercase();
-        let cash = if normalized == "cash" || normalized == "mixed" {
-            total_amount
-        } else {
-            0.0
-        };
-        let card = if normalized == "card" || normalized == "mixed" {
-            total_amount
-        } else {
-            0.0
-        };
-        return Ok((normalized, cash, card, total_amount));
+        return Ok(("cash".to_string(), total_amount, 0.0, total_amount));
     }
 
     let payment_method = if cash_collected > 0.0 && card_amount > 0.0 {
@@ -891,19 +907,37 @@ fn adjust_drawer_totals(
         return Ok(());
     };
 
+    // W4c dual-write: clamped delta also applied to cents siblings.
+    let cash_delta_cents = Cents::round_half_even(cash_delta).as_i64();
+    let card_delta_cents = Cents::round_half_even(card_delta).as_i64();
     conn.execute(
         "UPDATE cash_drawer_sessions
          SET total_cash_sales = CASE
                 WHEN COALESCE(total_cash_sales, 0) + ?1 < 0 THEN 0
                 ELSE COALESCE(total_cash_sales, 0) + ?1
              END,
-             total_card_sales = CASE
-                WHEN COALESCE(total_card_sales, 0) + ?2 < 0 THEN 0
-                ELSE COALESCE(total_card_sales, 0) + ?2
+             total_cash_sales_cents = CASE
+                WHEN COALESCE(total_cash_sales_cents, 0) + ?2 < 0 THEN 0
+                ELSE COALESCE(total_cash_sales_cents, 0) + ?2
              END,
-             updated_at = ?3
-         WHERE staff_shift_id = ?4",
-        params![cash_delta, card_delta, now, shift_id],
+             total_card_sales = CASE
+                WHEN COALESCE(total_card_sales, 0) + ?3 < 0 THEN 0
+                ELSE COALESCE(total_card_sales, 0) + ?3
+             END,
+             total_card_sales_cents = CASE
+                WHEN COALESCE(total_card_sales_cents, 0) + ?4 < 0 THEN 0
+                ELSE COALESCE(total_card_sales_cents, 0) + ?4
+             END,
+             updated_at = ?5
+         WHERE staff_shift_id = ?6",
+        params![
+            cash_delta,
+            cash_delta_cents,
+            card_delta,
+            card_delta_cents,
+            now,
+            shift_id
+        ],
     )
     .map_err(|e| format!("adjust drawer totals: {e}"))?;
 
@@ -933,13 +967,16 @@ mod tests {
         let conn = test_conn();
         let now = "2026-03-13T10:00:00Z";
 
+        // W4e Step 0: dual-populate every monetary column
+        // (100.0/20.0/18.0 → 10000/2000/1800).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'cash-shift', 'cashier-1', 'Cashier', 'branch-1', 'terminal-main', 'cashier',
-                ?1, 100.0, 'active', 'pending', ?1, ?1
+                ?1, 100.0, 10000, 'active', 'pending', ?1, ?1
             )",
             params![now],
         )
@@ -947,10 +984,10 @@ mod tests {
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, opened_at, created_at, updated_at
+                opening_amount, opening_amount_cents, opened_at, created_at, updated_at
             ) VALUES (
                 'drawer-main', 'cash-shift', 'cashier-1', 'branch-1', 'terminal-main',
-                100.0, ?1, ?1, ?1
+                100.0, 10000, ?1, ?1, ?1
             )",
             params![now],
         )
@@ -958,10 +995,11 @@ mod tests {
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'driver-shift', 'driver-1', 'Driver', 'branch-1', 'terminal-delivery', 'driver',
-                ?1, 20.0, 'active', 'pending', ?1, ?1
+                ?1, 20.0, 2000, 'active', 'pending', ?1, ?1
             )",
             params![now],
         )
@@ -969,21 +1007,23 @@ mod tests {
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, total_cash_sales, opened_at, created_at, updated_at
+                opening_amount, opening_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                opened_at, created_at, updated_at
             ) VALUES (
                 'drawer-driver', 'driver-shift', 'driver-1', 'branch-1', 'terminal-delivery',
-                20.0, 18.0, ?1, ?1, ?1
+                20.0, 2000, 18.0, 1800, ?1, ?1, ?1
             )",
             params![now],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO orders (
-                id, items, total_amount, status, order_type, payment_method, payment_status,
+                id, items, total_amount, total_amount_cents, status, order_type, payment_status,
                 sync_status, branch_id, terminal_id, staff_shift_id, staff_id, driver_id,
                 driver_name, created_at, updated_at
             ) VALUES (
-                'order-1', '[]', 18.0, 'out_for_delivery', 'delivery', 'cash', 'paid',
+                'order-1', '[]', 18.0, 1800, 'out_for_delivery', 'delivery', 'paid',
                 'pending', 'branch-1', 'terminal-delivery', 'driver-shift', 'driver-1',
                 'driver-1', 'Driver', ?1, ?1
             )",
@@ -992,9 +1032,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, staff_shift_id, staff_id, currency, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, staff_shift_id, staff_id, currency, created_at, updated_at
             ) VALUES (
-                'payment-1', 'order-1', 'cash', 18.0, 'completed', 'driver-shift', 'driver-1', 'EUR', ?1, ?1
+                'payment-1', 'order-1', 'cash', 18.0, 1800, 'completed', 'driver-shift', 'driver-1', 'EUR', ?1, ?1
             )",
             params![now],
         )
@@ -1063,24 +1103,26 @@ mod tests {
         let conn = test_conn();
         let now = "2026-03-13T11:00:00Z";
 
+        // W4e Step 0: dual-populate (20.0/12.0 → 2000/1200).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'driver-shift', 'driver-1', 'Driver', 'branch-1', 'terminal-delivery', 'driver',
-                ?1, 20.0, 'active', 'pending', ?1, ?1
+                ?1, 20.0, 2000, 'active', 'pending', ?1, ?1
             )",
             params![now],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO orders (
-                id, items, total_amount, status, order_type, payment_method, payment_status,
+                id, items, total_amount, total_amount_cents, status, order_type, payment_status,
                 sync_status, branch_id, terminal_id, staff_shift_id, staff_id, driver_id,
                 driver_name, created_at, updated_at
             ) VALUES (
-                'order-2', '[]', 12.0, 'out_for_delivery', 'delivery', 'cash', 'paid',
+                'order-2', '[]', 12.0, 1200, 'out_for_delivery', 'delivery', 'paid',
                 'pending', 'branch-1', 'terminal-delivery', 'driver-shift', 'driver-1',
                 'driver-1', 'Driver', ?1, ?1
             )",
@@ -1107,13 +1149,15 @@ mod tests {
         let current_cashier_start = "2026-03-13T09:00:00Z";
         let now = "2026-03-13T10:00:00Z";
 
+        // W4e Step 0: dual-populate (100.0/0.0/20.0/18.0 → 10000/0/2000/1800).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, check_out_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, check_out_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'cash-old', 'cashier-old', 'Old Cashier', 'branch-1', 'terminal-main', 'cashier',
-                ?1, ?2, 100.0, 'closed', 'pending', ?1, ?2
+                ?1, ?2, 100.0, 10000, 'closed', 'pending', ?1, ?2
             )",
             params![old_cashier_start, old_cashier_end],
         )
@@ -1121,10 +1165,12 @@ mod tests {
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, total_cash_sales, opened_at, closed_at, created_at, updated_at
+                opening_amount, opening_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                opened_at, closed_at, created_at, updated_at
             ) VALUES (
                 'drawer-old', 'cash-old', 'cashier-old', 'branch-1', 'terminal-main',
-                100.0, 0.0, ?1, ?2, ?1, ?2
+                100.0, 10000, 0.0, 0, ?1, ?2, ?1, ?2
             )",
             params![old_cashier_start, old_cashier_end],
         )
@@ -1132,10 +1178,11 @@ mod tests {
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'cash-new', 'cashier-new', 'Current Cashier', 'branch-1', 'terminal-main', 'cashier',
-                ?1, 100.0, 'active', 'pending', ?1, ?1
+                ?1, 100.0, 10000, 'active', 'pending', ?1, ?1
             )",
             params![current_cashier_start],
         )
@@ -1143,10 +1190,12 @@ mod tests {
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, total_cash_sales, opened_at, created_at, updated_at
+                opening_amount, opening_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                opened_at, created_at, updated_at
             ) VALUES (
                 'drawer-new', 'cash-new', 'cashier-new', 'branch-1', 'terminal-main',
-                100.0, 0.0, ?1, ?1, ?1
+                100.0, 10000, 0.0, 0, ?1, ?1, ?1
             )",
             params![current_cashier_start],
         )
@@ -1154,21 +1203,22 @@ mod tests {
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'driver-old', 'driver-1', 'Driver', 'branch-1', 'terminal-delivery', 'driver',
-                ?1, 20.0, 'active', 'pending', ?1, ?1
+                ?1, 20.0, 2000, 'active', 'pending', ?1, ?1
             )",
             params![payment_time],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO orders (
-                id, items, total_amount, status, order_type, payment_method, payment_status,
+                id, items, total_amount, total_amount_cents, status, order_type, payment_status,
                 sync_status, branch_id, terminal_id, staff_shift_id, staff_id, driver_id,
                 driver_name, created_at, updated_at
             ) VALUES (
-                'order-historical', '[]', 18.0, 'out_for_delivery', 'delivery', 'cash', 'paid',
+                'order-historical', '[]', 18.0, 1800, 'out_for_delivery', 'delivery', 'paid',
                 'pending', 'branch-1', 'terminal-delivery', 'driver-old', 'driver-1',
                 'driver-1', 'Driver', ?1, ?1
             )",
@@ -1177,9 +1227,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, staff_shift_id, staff_id, currency, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, staff_shift_id, staff_id, currency, created_at, updated_at
             ) VALUES (
-                'payment-historical', 'order-historical', 'cash', 18.0, 'completed',
+                'payment-historical', 'order-historical', 'cash', 18.0, 1800, 'completed',
                 'driver-old', 'driver-1', 'EUR', ?1, ?1
             )",
             params![payment_time],
@@ -1243,13 +1293,15 @@ mod tests {
         let payment_time = "2026-03-12T17:45:00Z";
         let now = "2026-03-13T10:15:00Z";
 
+        // W4e Step 0: dual-populate (100.0/0.0/18.0 → 10000/0/1800).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, check_out_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, check_out_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'cash-prev', 'cashier-prev', 'Previous Cashier', 'branch-1', 'terminal-main', 'cashier',
-                ?1, ?2, 100.0, 'closed', 'pending', ?1, ?2
+                ?1, ?2, 100.0, 10000, 'closed', 'pending', ?1, ?2
             )",
             params![old_cashier_start, old_cashier_end],
         )
@@ -1257,10 +1309,12 @@ mod tests {
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, total_cash_sales, opened_at, closed_at, created_at, updated_at
+                opening_amount, opening_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                opened_at, closed_at, created_at, updated_at
             ) VALUES (
                 'drawer-prev', 'cash-prev', 'cashier-prev', 'branch-1', 'terminal-main',
-                100.0, 0.0, ?1, ?2, ?1, ?2
+                100.0, 10000, 0.0, 0, ?1, ?2, ?1, ?2
             )",
             params![old_cashier_start, old_cashier_end],
         )
@@ -1268,10 +1322,11 @@ mod tests {
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
             ) VALUES (
                 'cash-late', 'cashier-late', 'Late Cashier', 'branch-1', 'terminal-main', 'cashier',
-                ?1, 100.0, 'active', 'pending', ?1, ?1
+                ?1, 100.0, 10000, 'active', 'pending', ?1, ?1
             )",
             params![late_cashier_start],
         )
@@ -1279,20 +1334,22 @@ mod tests {
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, total_cash_sales, opened_at, created_at, updated_at
+                opening_amount, opening_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                opened_at, created_at, updated_at
             ) VALUES (
                 'drawer-late', 'cash-late', 'cashier-late', 'branch-1', 'terminal-main',
-                100.0, 18.0, ?1, ?1, ?1
+                100.0, 10000, 18.0, 1800, ?1, ?1, ?1
             )",
             params![late_cashier_start],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO orders (
-                id, items, total_amount, status, order_type, payment_method, payment_status,
+                id, items, total_amount, total_amount_cents, status, order_type, payment_status,
                 sync_status, branch_id, terminal_id, staff_shift_id, staff_id, created_at, updated_at
             ) VALUES (
-                'order-corrupt', '[]', 18.0, 'ready', 'pickup', 'cash', 'paid',
+                'order-corrupt', '[]', 18.0, 1800, 'ready', 'pickup', 'paid',
                 'pending', 'branch-1', 'terminal-main', 'cash-late', 'cashier-late', ?1, ?2
             )",
             params![payment_time, now],
@@ -1300,9 +1357,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, staff_shift_id, staff_id, currency, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, staff_shift_id, staff_id, currency, created_at, updated_at
             ) VALUES (
-                'payment-corrupt', 'order-corrupt', 'cash', 18.0, 'completed',
+                'payment-corrupt', 'order-corrupt', 'cash', 18.0, 1800, 'completed',
                 'cash-late', 'cashier-late', 'EUR', ?1, ?2
             )",
             params![payment_time, now],
@@ -1353,11 +1410,12 @@ mod tests {
         let conn = test_conn();
         let now = "2026-03-13T12:00:00Z";
 
+        // W4e Step 0: dual-populate (10.0/3.0 → 1000/300).
         conn.execute(
             "INSERT INTO orders (
-                id, items, total_amount, status, order_type, sync_status, created_at, updated_at
+                id, items, total_amount, total_amount_cents, status, order_type, sync_status, created_at, updated_at
             ) VALUES (
-                'order-3', '[]', 10.0, 'completed', 'delivery', 'pending', ?1, ?1
+                'order-3', '[]', 10.0, 1000, 'completed', 'delivery', 'pending', ?1, ?1
             )",
             params![now],
         )
@@ -1365,10 +1423,10 @@ mod tests {
         conn.execute(
             "INSERT INTO driver_earnings (
                 id, driver_id, staff_shift_id, order_id, branch_id,
-                total_earning, payment_method, supabase_id, created_at, updated_at
+                total_earning, total_earning_cents, payment_method, supabase_id, created_at, updated_at
             ) VALUES (
                 'earning-1', 'driver-1', NULL, 'order-3', 'branch-1',
-                3.0, 'cash', 'remote-earning-1', ?1, ?1
+                3.0, 300, 'cash', 'remote-earning-1', ?1, ?1
             )",
             params![now],
         )

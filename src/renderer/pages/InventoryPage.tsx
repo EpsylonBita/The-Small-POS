@@ -26,6 +26,7 @@ import { getOfflineActionState } from '../services/offline-page-capabilities';
 
 interface InventoryItem {
   id: string;
+  product_id?: string;
   name_en: string;
   name_el: string;
   category_name?: string;
@@ -57,7 +58,9 @@ function asNumber(value: unknown, fallback = 0): number {
 function normalizeInventoryItem(item: any): InventoryItem {
   const nameEn = typeof item?.name_en === 'string' && item.name_en.trim()
     ? item.name_en
-    : (typeof item?.name === 'string' && item.name.trim() ? item.name : 'Unnamed item');
+    : typeof item?.product_name === 'string' && item.product_name.trim()
+      ? item.product_name
+      : (typeof item?.name === 'string' && item.name.trim() ? item.name : 'Unnamed item');
 
   const nameEl = typeof item?.name_el === 'string' && item.name_el.trim()
     ? item.name_el
@@ -65,11 +68,12 @@ function normalizeInventoryItem(item: any): InventoryItem {
 
   return {
     id: String(item?.id || ''),
+    product_id: typeof item?.product_id === 'string' ? item.product_id : undefined,
     name_en: nameEn,
     name_el: nameEl,
     category_name: typeof item?.category_name === 'string' ? item.category_name : undefined,
-    stock_quantity: asNumber(item?.stock_quantity, 0),
-    min_stock_level: asNumber(item?.min_stock_level, 0),
+    stock_quantity: asNumber(item?.stock_quantity ?? item?.quantity, 0),
+    min_stock_level: asNumber(item?.min_stock_level ?? item?.low_stock_threshold, 0),
     cost_per_unit: asNumber(item?.cost_per_unit, 0),
     unit_of_measurement: typeof item?.unit_of_measurement === 'string' && item.unit_of_measurement.trim()
       ? item.unit_of_measurement
@@ -117,9 +121,13 @@ const InventoryPage: React.FC = () => {
     try {
       const invoke = getIpcInvoke();
       if (invoke) {
-        const result = await invoke('api:fetch-from-admin', '/api/pos/sync/inventory_items?limit=2000');
+        const result = await invoke('api:fetch-from-admin', '/api/pos/inventory');
         if (result?.success && result?.data?.success !== false) {
-          const rows = Array.isArray(result?.data?.data) ? result.data.data : [];
+          const rows = Array.isArray(result?.data?.inventory)
+            ? result.data.inventory
+            : Array.isArray(result?.data?.data)
+              ? result.data.data
+              : [];
           const normalized: InventoryItem[] = rows.map(normalizeInventoryItem);
           setInventory(normalized.filter((item: InventoryItem) => item.is_active));
           return;
@@ -127,11 +135,15 @@ const InventoryPage: React.FC = () => {
         throw new Error(result?.error || result?.data?.error || 'Failed to fetch inventory');
       }
 
-      const result = await posApiGet<any>('pos/sync/inventory_items?limit=2000');
+      const result = await posApiGet<any>('pos/inventory');
       if (!result.success || result.data?.success === false) {
         throw new Error(result.error || result.data?.error || 'Failed to fetch inventory');
       }
-      const rows = Array.isArray(result.data?.data) ? result.data.data : [];
+      const rows = Array.isArray(result.data?.inventory)
+        ? result.data.inventory
+        : Array.isArray(result.data?.data)
+          ? result.data.data
+          : [];
       const normalized: InventoryItem[] = rows.map(normalizeInventoryItem);
       setInventory(normalized.filter((item: InventoryItem) => item.is_active));
       setError(null);
@@ -196,14 +208,17 @@ const InventoryPage: React.FC = () => {
       const invoke = getIpcInvoke();
       if (invoke) {
         await offlineAdjustInventory({
-          product_id: selectedItem.id,
-          adjustment: nextQuantity,
+          product_id: selectedItem.product_id || selectedItem.id,
+          adjustment: adjustmentQty,
           reason: adjustmentReason,
           notes: adjustmentNotes.trim() || null,
         });
       } else {
-        const result = await posApiPatch<any>(`pos/sync/inventory_items/${selectedItem.id}`, {
-          stock_quantity: nextQuantity,
+        const result = await posApiPatch<any>('pos/inventory', {
+          product_id: selectedItem.product_id || selectedItem.id,
+          adjustment: adjustmentQty,
+          reason: adjustmentReason,
+          notes: adjustmentNotes.trim() || undefined,
         });
 
         if (!result.success || result.data?.success === false) {

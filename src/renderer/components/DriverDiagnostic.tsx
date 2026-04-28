@@ -37,7 +37,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
   const handleCheck = async () => {
     setIsChecking(true);
     try {
-      const response = await bridge.invoke('diagnostic:check-delivered-orders');
+      const response = await bridge.diagnostics.checkDeliveredOrders();
       if (response?.success) {
         setResult(response.data);
         toast.success(`Found ${response.data.total} delivery orders`);
@@ -60,7 +60,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
 
     setIsFixing(true);
     try {
-      const response = await bridge.invoke('diagnostic:fix-missing-driver-ids', selectedDriverId);
+      const response = await bridge.diagnostics.fixMissingDriverIds(selectedDriverId);
       if (response?.success) {
         toast.success(response.message || 'Orders fixed successfully');
         // Re-check to update the display

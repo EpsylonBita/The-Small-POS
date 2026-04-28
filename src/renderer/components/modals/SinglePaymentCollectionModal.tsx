@@ -220,7 +220,13 @@ export const SinglePaymentCollectionModal: React.FC<
   ]);
 
   return (
-    <LiquidGlassModal isOpen={isOpen} onClose={onClose} title="">
+    <LiquidGlassModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title=""
+      onEnterKey={handleCollect}
+      enterKeyEnabled={!isProcessing && amountToCollect > 0.009}
+    >
       <div className="space-y-5 text-white">
         <div className="flex items-start gap-3 rounded-2xl border border-amber-400/20 bg-amber-500/10 p-4">
           <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-300" />

@@ -4278,7 +4278,7 @@ dependencies = [
 
 [[package]]
 name = "the-small-pos"
-version = "1.3.89"
+version = "1.3.90"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4288,6 +4288,7 @@ dependencies = [
  "image",
  "keyring",
  "md5",
+ "proc-macro2",
  "reqwest 0.12.28",
  "rusqlite",
  "rusttype",
@@ -4295,6 +4296,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "serialport",
+ "syn 2.0.115",
  "tauri",
  "tauri-build",
  "tauri-plugin-updater",
@@ -4304,6 +4306,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
  "uuid",
  "webbrowser",
  "zeroize",

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CreditCard, Banknote, AlertTriangle, Split } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../../hooks/useFeatures';
@@ -50,6 +50,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [isProcessingPayment, setIsProcessingPayment] = useState(isProcessing);
   const [cashReceived, setCashReceived] = useState<string>('');
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'cash' | 'card' | null>(null);
+  const cashInputRef = useRef<HTMLInputElement | null>(null);
 
   // Check if order is below minimum (only if a minimum is set)
   const isBelowMinimum = minimumOrderAmount > 0 && orderTotal < minimumOrderAmount;
@@ -76,6 +77,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setSelectedPaymentMethod(null);
     }
   }, [isOpen, isProcessing, isBelowMinimum]);
+
+  useEffect(() => {
+    if (!isOpen || currentStep !== 'cash_input') return;
+
+    const focusTimer = window.setTimeout(() => {
+      cashInputRef.current?.focus();
+    }, 0);
+
+    return () => window.clearTimeout(focusTimer);
+  }, [isOpen, currentStep]);
 
   // Handle payment method selection
   const handlePaymentMethodSelect = (method: 'cash' | 'card') => {
@@ -161,6 +172,33 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     onClose();
   };
 
+  const handleModalEnter = () => {
+    if (isProcessingPayment || isFeatureLoading) return;
+
+    if (currentStep === 'minimum_warning') {
+      handleSkipMinimumWarning();
+      return;
+    }
+
+    if (currentStep === 'cash_input') {
+      handleCashPaymentComplete();
+      return;
+    }
+
+    if (currentStep === 'payment_selection' && !onSplitPayment) {
+      if (canUseCash && !canUseCard) {
+        handlePaymentMethodSelect('cash');
+      } else if (canUseCard && !canUseCash) {
+        handlePaymentMethodSelect('card');
+      }
+    }
+  };
+
+  const canSubmitWithEnter =
+    currentStep === 'minimum_warning' ||
+    currentStep === 'cash_input' ||
+    (currentStep === 'payment_selection' && !onSplitPayment && canUseCash !== canUseCard);
+
   return (
     <LiquidGlassModal
       isOpen={isOpen}
@@ -170,6 +208,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       className="!max-w-lg"
       closeOnBackdrop={false}
       closeOnEscape={!isProcessingPayment}
+      initialFocusRef={currentStep === 'cash_input' ? cashInputRef : undefined}
+      onEnterKey={handleModalEnter}
+      enterKeyEnabled={!isProcessingPayment && !isFeatureLoading && canSubmitWithEnter}
     >
       {/* Content */}
       <div>
@@ -380,6 +421,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 {t('modals.payment.enterCashReceived', 'Cash Received')}
               </p>
               <input
+                ref={cashInputRef}
                 type="text"
                 inputMode="decimal"
                 value={cashReceived}

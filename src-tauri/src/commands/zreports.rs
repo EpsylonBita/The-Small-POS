@@ -97,26 +97,17 @@ pub async fn zreport_generate(
         || payload.get("date").and_then(|v| v.as_str()).is_some();
 
     if has_shift_id && !has_branch_date {
-        let generated = zreport::generate_z_report(&db, &payload)?;
-        if !generated
-            .get("existing")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            if let Some(z_report_id) = generated
-                .get("zReportId")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    generated
-                        .get("report")
-                        .and_then(|report| report.get("id"))
-                        .and_then(serde_json::Value::as_str)
-                })
-            {
-                zreport::discard_generated_z_report_by_id(&db, z_report_id)?;
-            }
-        }
-        Ok(generated)
+        // Wave 1 C9: this branch used to call `discard_generated_z_report_by_id`
+        // whenever `existing: false` — which is exactly the "freshly generated"
+        // success case. The effect was that every newly-produced single-shift
+        // Z-report was silently deleted right after commit, making the entire
+        // shift-based flow a no-op. `generate_z_report` at `zreport.rs:2172`
+        // is idempotent (it returns the existing row when one exists for the
+        // shift, with `existing: true`), so there is no legitimate need to
+        // discard in the success path — the caller keeps whatever the
+        // generator returns. The preview-and-discard path lives under the
+        // `else` arm below (`preview_z_report_for_date`), not here.
+        zreport::generate_z_report(&db, &payload)
     } else {
         zreport::preview_z_report_for_date(&db, &payload)
     }

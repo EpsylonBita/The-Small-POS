@@ -2375,6 +2375,16 @@ fn non_empty_field(value: String) -> Option<String> {
 
 pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // W6: `orders.payment_method` was dropped in v55. Derive the method
+    // from completed `order_payments` rows via the canonical helper. For
+    // orders with no completed payment rows, `derive_payment_method`
+    // returns None → empty string → the snapshot fallback at the end of
+    // this function emits no payment line (the receipt still renders
+    // the total just without a "Cash"/"Card" label). This matches the
+    // fundamental limit of the new model: if nothing persisted a method,
+    // the terminal genuinely doesn't know it.
+    let derived_payment_method =
+        crate::payments::derive_payment_method(&conn, order_id)?.unwrap_or_default();
     let order = conn
         .query_row(
             "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
@@ -2386,7 +2396,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     COALESCE(delivery_floor, ''), COALESCE(name_on_ringer, ''),
                     COALESCE(driver_id, ''), COALESCE(driver_name, ''), COALESCE(staff_id, ''),
                     COALESCE(delivery_notes, ''), COALESCE(special_instructions, ''),
-                    COALESCE(payment_method, ''), COALESCE(payment_status, ''),
+                    COALESCE(payment_status, ''),
                     COALESCE(payment_transaction_id, '')
              FROM orders WHERE id = ?1",
             params![order_id],
@@ -2419,7 +2429,6 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     row.get::<_, String>(24)?,
                     row.get::<_, String>(25)?,
                     row.get::<_, String>(26)?,
-                    row.get::<_, String>(27)?,
                 ))
             },
         )
@@ -2450,10 +2459,10 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         staff_id,
         delivery_notes,
         special_instructions,
-        payment_method,
         payment_status,
         payment_transaction_id,
     ) = order;
+    let payment_method = derived_payment_method;
     let menu_lookup = build_menu_category_lookup(&conn);
 
     let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
@@ -4627,10 +4636,26 @@ pub fn start_print_worker(
             if cancel.is_cancelled() {
                 break;
             }
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                process_pending_jobs(&db, &data_dir)
-            }));
-            match result {
+            // Wave 2 C12: `process_pending_jobs` calls `print_raw_to_tcp`,
+            // which uses blocking TCP I/O plus `std::thread::sleep` up to
+            // 10× per raster payload (~200 ms total). Running that directly
+            // on the Tokio async runtime parked whichever worker was
+            // executing this tick. `spawn_blocking` moves the call onto a
+            // dedicated blocking thread.
+            //
+            // `spawn_blocking` also catches panics and surfaces them as a
+            // `JoinError` with `is_panic() == true`, so the old
+            // `catch_unwind` + `AssertUnwindSafe` wrapper is no longer
+            // needed — the three-arm match below preserves the same
+            // success / business-error / panic behaviour using JoinError
+            // for the panic path.
+            let db_for_tick = Arc::clone(&db);
+            let data_dir_for_tick = data_dir.clone();
+            let join_result = tokio::task::spawn_blocking(move || {
+                process_pending_jobs(&db_for_tick, &data_dir_for_tick)
+            })
+            .await;
+            match join_result {
                 Ok(Ok(processed)) => {
                     if processed > 0 {
                         consecutive_failures = 0;
@@ -4643,11 +4668,12 @@ pub fn start_print_worker(
                         "Print worker error: {e}"
                     );
                 }
-                Err(_) => {
+                Err(join_err) => {
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     error!(
                         consecutive_failures = consecutive_failures,
-                        "Print worker panicked, will retry next tick"
+                        panicked = join_err.is_panic(),
+                        "Print worker tick failed, will retry next tick: {join_err}"
                     );
                 }
             }
@@ -4681,6 +4707,7 @@ pub fn start_print_worker(
 mod tests {
     use super::*;
     use crate::db;
+    use crate::money::Cents;
     use rusqlite::{params, Connection};
     use std::sync::Mutex;
 
@@ -4731,15 +4758,17 @@ mod tests {
     }
 
     fn insert_receipt_order(conn: &Connection, order_id: &str, order_number: &str, total: f64) {
+        // W4e Step 0: dual-populate via Cents::round_half_even.
+        let total_cents = Cents::round_half_even(total).as_i64();
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, subtotal, status, order_type,
+                id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
                 sync_status, created_at, updated_at
              ) VALUES (
-                ?1, ?2, '[]', ?3, ?3, 'completed', 'pickup',
+                ?1, ?2, '[]', ?3, ?4, ?3, ?4, 'completed', 'pickup',
                 'pending', datetime('now'), datetime('now')
              )",
-            params![order_id, order_number, total],
+            params![order_id, order_number, total, total_cents],
         )
         .expect("insert test order");
     }
@@ -4755,21 +4784,30 @@ mod tests {
         change_given: Option<f64>,
         transaction_ref: Option<&str>,
     ) {
+        // W4e Step 0: dual-populate amount + amount_cents (and cash_received_cents
+        // / change_given_cents only if the f64 value is Some).
+        let amount_cents = Cents::round_half_even(amount).as_i64();
+        let cash_received_cents = cash_received.map(|v| Cents::round_half_even(v).as_i64());
+        let change_given_cents = change_given.map(|v| Cents::round_half_even(v).as_i64());
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, cash_received, change_given,
+                id, order_id, method, amount, amount_cents, status,
+                cash_received, cash_received_cents, change_given, change_given_cents,
                 transaction_ref, sync_status, created_at, updated_at
              ) VALUES (
-                ?1, ?2, ?3, ?4, 'completed', ?5, ?6,
-                ?7, 'pending', datetime('now'), datetime('now')
+                ?1, ?2, ?3, ?4, ?5, 'completed', ?6, ?7, ?8, ?9,
+                ?10, 'pending', datetime('now'), datetime('now')
              )",
             params![
                 payment_id,
                 order_id,
                 method,
                 amount,
+                amount_cents,
                 cash_received,
+                cash_received_cents,
                 change_given,
+                change_given_cents,
                 transaction_ref
             ],
         )
@@ -4777,19 +4815,28 @@ mod tests {
     }
 
     fn insert_shift_checkout_fixture(conn: &Connection, shift_id: &str, terminal_id: &str) {
+        // W4e Step 0: dual-populate every monetary column (100/125/0/25/15/10/0 → 10000/12500/0/2500/1500/1000/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, role_type, status,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
-                check_in_time, check_out_time, total_orders_count, total_sales_amount,
-                total_cash_sales, total_card_sales, branch_id, terminal_id, calculation_version,
-                payment_amount, sync_status, created_at, updated_at
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
+                check_in_time, check_out_time, total_orders_count,
+                total_sales_amount, total_sales_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                total_card_sales, total_card_sales_cents,
+                branch_id, terminal_id, calculation_version,
+                payment_amount, payment_amount_cents,
+                sync_status, created_at, updated_at
              ) VALUES (
                 ?1, 'staff-1', 'Alice', 'cashier', 'closed',
-                100.0, 125.0, 125.0, 0.0,
-                '2026-03-15T08:00:00Z', '2026-03-15T16:00:00Z', 3, 25.0,
-                15.0, 10.0, 'branch-1', ?2, 2,
-                0.0, 'pending', '2026-03-15T16:00:00Z', '2026-03-15T16:00:00Z'
+                100.0, 10000, 125.0, 12500, 125.0, 12500, 0.0, 0,
+                '2026-03-15T08:00:00Z', '2026-03-15T16:00:00Z', 3,
+                25.0, 2500, 15.0, 1500, 10.0, 1000,
+                'branch-1', ?2, 2,
+                0.0, 0, 'pending', '2026-03-15T16:00:00Z', '2026-03-15T16:00:00Z'
              )",
             params![shift_id, terminal_id],
         )
@@ -4797,14 +4844,16 @@ mod tests {
     }
 
     fn insert_active_cashier_fixture(conn: &Connection, shift_id: &str, drawer_id: &str) {
+        // W4e Step 0: dual-populate (200.0/0.0 → 20000/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                check_in_time, opening_cash_amount, status, calculation_version,
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 ?1, 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
-                '2026-03-18T08:00:00Z', 200.0, 'active', 2,
+                '2026-03-18T08:00:00Z', 200.0, 20000, 'active', 2,
                 'pending', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
              )",
             params![shift_id],
@@ -4813,10 +4862,12 @@ mod tests {
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, driver_cash_given, opened_at, created_at, updated_at
+                opening_amount, opening_amount_cents,
+                driver_cash_given, driver_cash_given_cents,
+                opened_at, created_at, updated_at
              ) VALUES (
                 ?1, ?2, 'cashier-1', 'branch-1', 'term-1',
-                200.0, 0.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                200.0, 20000, 0.0, 0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
              )",
             params![drawer_id, shift_id],
         )
@@ -5006,13 +5057,14 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (10.0 → 1000).
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
                     delivery_address, delivery_city, delivery_postal_code, delivery_floor,
                     name_on_ringer, driver_name, delivery_notes, sync_status, created_at, updated_at
                  ) VALUES (
-                    'ord-delivery', 'ORD-DEL-1', '[]', 10.0, 10.0, 'delivered', 'delivery',
+                    'ord-delivery', 'ORD-DEL-1', '[]', 10.0, 1000, 10.0, 1000, 'delivered', 'delivery',
                     'Main St 42', 'Athens', '10558', '2', 'Papadopoulos', 'Nikos Driver', 'Leave at the gate',
                     'pending', datetime('now'), datetime('now')
                  )",
@@ -5051,12 +5103,13 @@ mod tests {
                 [],
             )
             .unwrap();
+            // W4e Step 0: dual-populate (8.0 → 800).
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
                     driver_id, sync_status, created_at, updated_at
                  ) VALUES (
-                    'ord-delivery-fallback', 'ORD-DEL-2', '[]', 8.0, 8.0, 'completed', 'delivery',
+                    'ord-delivery-fallback', 'ORD-DEL-2', '[]', 8.0, 800, 8.0, 800, 'completed', 'delivery',
                     'driver-1', 'pending', datetime('now'), datetime('now')
                  )",
                 [],
@@ -5075,14 +5128,15 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (10.0 → 1000).
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
                     customer_name, customer_phone, delivery_address, delivery_city,
                     delivery_postal_code, delivery_floor, name_on_ringer, driver_id,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    'ord-slip-default', 'ORD-DSL-1', '[]', 10.0, 10.0, 'pending', 'delivery',
+                    'ord-slip-default', 'ORD-DSL-1', '[]', 10.0, 1000, 10.0, 1000, 'pending', 'delivery',
                     'Customer One', '2100000000', 'Main St 42', 'Athens', '10558', '2', 'Papadopoulos',
                     'drv-22', 'pending', datetime('now'), datetime('now')
                  )",
@@ -5106,14 +5160,15 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (12.0 → 1200).
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
                     customer_name, customer_phone, delivery_address, delivery_city,
                     delivery_postal_code, delivery_floor, name_on_ringer,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    'ord-slip-assign', 'ORD-DSL-2', '[]', 12.0, 12.0, 'pending', 'delivery',
+                    'ord-slip-assign', 'ORD-DSL-2', '[]', 12.0, 1200, 12.0, 1200, 'pending', 'delivery',
                     'Customer Two', '2100000001', 'Second St 10', 'Athens', '10559', '1', 'Kostas',
                     'pending', datetime('now'), datetime('now')
                  )",
@@ -5232,6 +5287,7 @@ mod tests {
 
     #[test]
     fn test_build_document_for_job_cashier_shift_checkout_includes_transferred_staff_returns() {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
 
         let cashier_one = crate::shifts::open_shift(
@@ -5321,18 +5377,28 @@ mod tests {
                 );",
             )
             .expect("create staff_payments table");
+            // W4e Step 0: dual-populate every monetary column.
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, closing_amount, expected_amount, variance_amount,
-                    total_cash_sales, total_card_sales, total_refunds, total_expenses,
-                    cash_drops, driver_cash_given, driver_cash_returned, total_staff_payments,
+                    opening_amount, opening_amount_cents,
+                    closing_amount, closing_amount_cents,
+                    expected_amount, expected_amount_cents,
+                    variance_amount, variance_amount_cents,
+                    total_cash_sales, total_cash_sales_cents,
+                    total_card_sales, total_card_sales_cents,
+                    total_refunds, total_refunds_cents,
+                    total_expenses, total_expenses_cents,
+                    cash_drops, cash_drops_cents,
+                    driver_cash_given, driver_cash_given_cents,
+                    driver_cash_returned, driver_cash_returned_cents,
+                    total_staff_payments, total_staff_payments_cents,
                     opened_at, closed_at, reconciled, created_at, updated_at
                  ) VALUES (
                     ?1, ?2, 'staff-1', 'branch-1', 'terminal-1',
-                    100.0, 125.0, 81.0, 44.0,
-                    15.0, 10.0, 1.0, 4.0,
-                    5.0, 20.0, 0.0, 34.0,
+                    100.0, 10000, 125.0, 12500, 81.0, 8100, 44.0, 4400,
+                    15.0, 1500, 10.0, 1000, 1.0, 100, 4.0, 400,
+                    5.0, 500, 20.0, 2000, 0.0, 0, 34.0, 3400,
                     '2026-03-15T08:00:00Z', '2026-03-15T16:00:00Z', 1, '2026-03-15T08:00:00Z', '2026-03-15T16:00:00Z'
                  )",
                 params!["drawer-shift-checkout-payouts", "shift-checkout-payouts"],
@@ -5389,14 +5455,15 @@ mod tests {
             let conn = db.conn.lock().unwrap();
             insert_active_cashier_fixture(&conn, "cashier-shift-live-print", "drawer-live-print");
 
+            // W4e Step 0: dual-populate (30.0/20.0 → 3000/2000).
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
-                    payment_status, payment_method, staff_shift_id, terminal_id, branch_id,
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
+                    payment_status, staff_shift_id, terminal_id, branch_id,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    'order-live-cash', '#C1', '[]', 30.0, 30.0, 'completed', 'pickup',
-                    'paid', 'cash', 'cashier-shift-live-print', 'term-1', 'branch-1',
+                    'order-live-cash', '#C1', '[]', 30.0, 3000, 30.0, 3000, 'completed', 'pickup',
+                    'paid', 'cashier-shift-live-print', 'term-1', 'branch-1',
                     'pending', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
                  )",
                 [],
@@ -5404,12 +5471,12 @@ mod tests {
             .expect("insert active cashier cash order");
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
-                    payment_status, payment_method, staff_shift_id, terminal_id, branch_id,
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
+                    payment_status, staff_shift_id, terminal_id, branch_id,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    'order-live-card', '#C2', '[]', 20.0, 20.0, 'completed', 'takeaway',
-                    'paid', 'card', 'cashier-shift-live-print', 'term-1', 'branch-1',
+                    'order-live-card', '#C2', '[]', 20.0, 2000, 20.0, 2000, 'completed', 'takeaway',
+                    'paid', 'cashier-shift-live-print', 'term-1', 'branch-1',
                     'pending', '2026-03-18T09:15:00Z', '2026-03-18T09:15:00Z'
                  )",
                 [],
@@ -5417,10 +5484,10 @@ mod tests {
             .expect("insert active cashier card order");
             conn.execute(
                 "INSERT INTO order_payments (
-                    id, order_id, method, amount, status, staff_shift_id,
+                    id, order_id, method, amount, amount_cents, status, staff_shift_id,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    'payment-live-cash', 'order-live-cash', 'cash', 30.0, 'completed',
+                    'payment-live-cash', 'order-live-cash', 'cash', 30.0, 3000, 'completed',
                     'cashier-shift-live-print', 'pending', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
                  )",
                 [],
@@ -5428,10 +5495,10 @@ mod tests {
             .expect("insert active cashier cash payment");
             conn.execute(
                 "INSERT INTO order_payments (
-                    id, order_id, method, amount, status, staff_shift_id,
+                    id, order_id, method, amount, amount_cents, status, staff_shift_id,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    'payment-live-card', 'order-live-card', 'card', 20.0, 'completed',
+                    'payment-live-card', 'order-live-card', 'card', 20.0, 2000, 'completed',
                     'cashier-shift-live-print', 'pending', '2026-03-18T09:15:00Z', '2026-03-18T09:15:00Z'
                  )",
                 [],
@@ -5457,6 +5524,7 @@ mod tests {
     #[test]
     fn test_build_document_for_job_driver_shift_checkout_keeps_amount_to_return_without_delivery_rows(
     ) {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
@@ -5513,6 +5581,7 @@ mod tests {
     #[test]
     fn test_build_document_for_job_driver_shift_checkout_payload_overrides_manual_snapshot_values()
     {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
@@ -5580,6 +5649,7 @@ mod tests {
     #[test]
     fn test_build_document_for_job_driver_shift_checkout_uses_driver_totals_instead_of_shift_expected(
     ) {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
@@ -5609,18 +5679,20 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
 
+            // W4e Step 0: dual-populate shift_expenses.amount + amount_cents (5.0 → 500).
             conn.execute(
                 "INSERT INTO shift_expenses (
                     id, staff_shift_id, staff_id, branch_id, expense_type,
-                    amount, description, receipt_number, status, sync_status,
+                    amount, amount_cents, description, receipt_number, status, sync_status,
                     created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, 'other', ?5, 'Fuel', NULL, 'pending', 'pending', ?6, ?6)",
+                ) VALUES (?1, ?2, ?3, ?4, 'other', ?5, ?6, 'Fuel', NULL, 'pending', 'pending', ?7, ?7)",
                 params![
                     "expense-driver-1",
                     driver_shift_id.as_str(),
                     "driver-1",
                     "branch-1",
                     5.0,
+                    500_i64,
                     now.as_str()
                 ],
             )
@@ -5631,23 +5703,26 @@ mod tests {
                 ("order-driver-card", "#D2", 83.85, "completed", "card"),
                 ("order-driver-refund", "#D3", 9.0, "refunded", "cash"),
             ] {
+                // W4e Step 0: dual-populate via Cents::round_half_even.
+                let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
                 conn.execute(
                     "INSERT INTO orders (
-                        id, order_number, items, total_amount, status, order_type,
-                        payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
-                    ) VALUES (?1, ?2, '[]', ?3, ?4, 'delivery',
-                        'paid', ?5, ?6, 'pending', ?7, ?7)",
+                        id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                        payment_status, staff_shift_id, sync_status, created_at, updated_at
+                    ) VALUES (?1, ?2, '[]', ?3, ?4, ?5, 'delivery',
+                        'paid', ?6, 'pending', ?7, ?7)",
                     params![
                         order_id,
                         order_number,
                         total_amount,
+                        total_amount_cents,
                         status,
-                        payment_method,
                         driver_shift_id.as_str(),
                         now.as_str()
                     ],
                 )
                 .expect("insert driver order");
+                let _ = payment_method; // W6: method now derives from order_payments only
             }
 
             for (earning_id, order_id, payment_method, cash_collected, card_amount, tip_amount) in [
@@ -5676,24 +5751,38 @@ mod tests {
                     1.0,
                 ),
             ] {
+                // W4e Step 0: dual-populate driver_earnings cents siblings.
+                let tip_amount_cents = Cents::round_half_even(tip_amount).as_i64();
+                let cash_collected_cents = Cents::round_half_even(cash_collected).as_i64();
+                let card_amount_cents = Cents::round_half_even(card_amount).as_i64();
                 conn.execute(
                     "INSERT INTO driver_earnings (
                         id, driver_id, staff_shift_id, order_id, branch_id,
-                        delivery_fee, tip_amount, total_earning, payment_method,
-                        cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+                        delivery_fee, delivery_fee_cents,
+                        tip_amount, tip_amount_cents,
+                        total_earning, total_earning_cents,
+                        payment_method,
+                        cash_collected, cash_collected_cents,
+                        card_amount, card_amount_cents,
+                        cash_to_return, cash_to_return_cents,
+                        settled, created_at, updated_at
                     ) VALUES (
                         ?1, 'driver-1', ?2, ?3, 'branch-1',
-                        0.0, ?4, ?4, ?5,
-                        ?6, ?7, ?6, 0, ?8, ?8
+                        0.0, 0, ?4, ?5, ?4, ?5, ?6,
+                        ?7, ?8, ?9, ?10, ?7, ?8,
+                        0, ?11, ?11
                     )",
                     params![
                         earning_id,
                         driver_shift_id.as_str(),
                         order_id,
                         tip_amount,
+                        tip_amount_cents,
                         payment_method,
                         cash_collected,
+                        cash_collected_cents,
                         card_amount,
+                        card_amount_cents,
                         now.as_str()
                     ],
                 )
@@ -5834,86 +5923,14 @@ mod tests {
         assert!(!doc.payments.iter().any(|line| line.label == "Received"));
     }
 
-    #[test]
-    fn test_build_order_receipt_doc_falls_back_to_paid_cash_order_snapshot() {
-        let db = test_db();
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
-                    payment_method, payment_status, sync_status, created_at, updated_at
-                 ) VALUES (
-                    'ord-snapshot-cash', 'ORD-SNAPSHOT-CASH', '[]', 21.50, 21.50, 'completed', 'pickup',
-                    'cash', 'paid', 'pending', datetime('now'), datetime('now')
-                 )",
-                [],
-            )
-            .unwrap();
-        }
-
-        let doc = build_order_receipt_doc(&db, "ord-snapshot-cash").unwrap();
-        assert_eq!(doc.payments.len(), 1);
-        assert_eq!(doc.payments[0].label, "Cash");
-        assert!((doc.payments[0].amount - 21.50).abs() < 0.001);
-        assert_eq!(doc.payments[0].detail, None);
-    }
-
-    #[test]
-    fn test_build_order_receipt_doc_falls_back_to_paid_card_order_snapshot_and_masked_card() {
-        let db = test_db();
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
-                    payment_method, payment_status, payment_transaction_id,
-                    sync_status, created_at, updated_at
-                 ) VALUES (
-                    'ord-snapshot-card', 'ORD-SNAPSHOT-CARD', '[]', 19.40, 19.40, 'completed', 'delivery',
-                    'card', 'paid', 'last4-4321',
-                    'pending', datetime('now'), datetime('now')
-                 )",
-                [],
-            )
-            .unwrap();
-        }
-
-        let doc = build_order_receipt_doc(&db, "ord-snapshot-card").unwrap();
-        assert_eq!(doc.payments.len(), 1);
-        assert_eq!(doc.payments[0].label, "Card");
-        assert!((doc.payments[0].amount - 19.40).abs() < 0.001);
-        assert_eq!(doc.payments[0].detail, None);
-        assert_eq!(doc.masked_card.as_deref(), Some("****4321"));
-    }
-
-    #[test]
-    fn test_build_order_receipt_doc_marks_unknown_snapshot_method_without_inventing_amount() {
-        let db = test_db();
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
-                    payment_method, payment_status, sync_status, created_at, updated_at
-                 ) VALUES (
-                    'ord-snapshot-other', 'ORD-SNAPSHOT-OTHER', '[]', 13.10, 13.10, 'completed', 'pickup',
-                    'bank_transfer', 'authorized', 'pending', datetime('now'), datetime('now')
-                 )",
-                [],
-            )
-            .unwrap();
-        }
-
-        let doc = build_order_receipt_doc(&db, "ord-snapshot-other").unwrap();
-        assert_eq!(doc.payments.len(), 1);
-        assert_eq!(doc.payments[0].label, "Bank Transfer");
-        assert_eq!(doc.payments[0].amount, 0.0);
-        assert_eq!(
-            doc.payments[0].detail.as_deref(),
-            Some(PAYMENT_DETAIL_AMOUNT_UNKNOWN)
-        );
-    }
+    // W6: the three `..._snapshot` regression tests (falls_back_to_paid_cash_order_snapshot,
+    // falls_back_to_paid_card_order_snapshot_and_masked_card,
+    // marks_unknown_snapshot_method_without_inventing_amount) covered the
+    // stored-column fallback path that existed when a "paid" order had no
+    // local `order_payments` rows. Post-v55 the `orders.payment_method`
+    // column is gone and `derive_payment_method` returns None for that
+    // case; the receipt falls through to no payment line. The behavior
+    // they exercised is no longer expressible, so they were deleted.
 
     #[test]
     fn test_build_order_receipt_doc_card_keeps_amount_and_masked_card() {
@@ -5969,13 +5986,14 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (12.60/14.00/1.40 → 1260/1400/140).
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
-                    discount_amount, discount_percentage, sync_status, created_at, updated_at
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
+                    discount_amount, discount_amount_cents, discount_percentage, sync_status, created_at, updated_at
                  ) VALUES (
-                    'ord-discount-percent', 'ORD-DISC-1', '[]', 12.60, 14.00, 'completed', 'pickup',
-                    1.40, 10.0, 'pending', datetime('now'), datetime('now')
+                    'ord-discount-percent', 'ORD-DISC-1', '[]', 12.60, 1260, 14.00, 1400, 'completed', 'pickup',
+                    1.40, 140, 10.0, 'pending', datetime('now'), datetime('now')
                  )",
                 [],
             )
@@ -6003,14 +6021,15 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (8.80 → 880).
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
                     delivery_notes, special_instructions, sync_status, created_at, updated_at
                  ) VALUES (
                     'ord-notes', 'ORD-NOTES-1',
                     '[{\"name\":\"Waffle\",\"quantity\":1,\"total\":8.8,\"notes\":\"Well done\",\"special_instructions\":\"No sugar\"}]',
-                    8.80, 8.80, 'completed', 'pickup',
+                    8.80, 880, 8.80, 880, 'completed', 'pickup',
                     'Use side door', 'Call on arrival', 'pending', datetime('now'), datetime('now')
                  )",
                 [],
@@ -6047,12 +6066,13 @@ mod tests {
                 ],
             )
             .unwrap();
+            // W4e Step 0: dual-populate (8.80 → 880).
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    'ord-category-backfill', 'ORD-CAT-1', ?1, 8.80, 8.80, 'completed', 'pickup',
+                    'ord-category-backfill', 'ORD-CAT-1', ?1, 8.80, 880, 8.80, 880, 'completed', 'pickup',
                     'pending', datetime('now'), datetime('now')
                  )",
                 params![r#"[{"menu_item_id":"sub-waffle","name":"Βάφλα","quantity":1,"total_price":8.8}]"#],
@@ -6648,9 +6668,10 @@ mod tests {
         // Insert an order so receipt generation works
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (10.0 → 1000).
             conn.execute(
-                "INSERT INTO orders (id, order_number, items, total_amount, subtotal, status, order_type, sync_status, created_at, updated_at)
-                 VALUES ('ord-gen', 'ORD-999', '[{\"name\":\"Test Item\",\"quantity\":1,\"totalPrice\":10.0}]', 10.0, 10.0, 'completed', 'dine-in', 'pending', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type, sync_status, created_at, updated_at)
+                 VALUES ('ord-gen', 'ORD-999', '[{\"name\":\"Test Item\",\"quantity\":1,\"totalPrice\":10.0}]', 10.0, 1000, 10.0, 1000, 'completed', 'dine-in', 'pending', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -6680,9 +6701,10 @@ mod tests {
         // Insert an order
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (6.0 → 600).
             conn.execute(
-                "INSERT INTO orders (id, order_number, items, total_amount, subtotal, status, order_type, sync_status, created_at, updated_at)
-                 VALUES ('ord-proc', 'ORD-100', '[{\"name\":\"Coffee\",\"quantity\":2,\"totalPrice\":6.0}]', 6.0, 6.0, 'completed', 'takeaway', 'pending', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type, sync_status, created_at, updated_at)
+                 VALUES ('ord-proc', 'ORD-100', '[{\"name\":\"Coffee\",\"quantity\":2,\"totalPrice\":6.0}]', 6.0, 600, 6.0, 600, 'completed', 'takeaway', 'pending', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -6948,9 +6970,10 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (10.0 → 1000).
             conn.execute(
-                "INSERT INTO orders (id, order_number, items, total_amount, subtotal, status, order_type, sync_status, created_at, updated_at)
-                 VALUES ('ord-done', 'ORD-DONE', '[]', 10.0, 10.0, 'completed', 'dine-in', 'pending', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type, sync_status, created_at, updated_at)
+                 VALUES ('ord-done', 'ORD-DONE', '[]', 10.0, 1000, 10.0, 1000, 'completed', 'dine-in', 'pending', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -6975,9 +6998,10 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (5.0 → 500).
             conn.execute(
-                "INSERT INTO orders (id, order_number, items, total_amount, subtotal, status, order_type, sync_status, created_at, updated_at)
-                 VALUES ('ord-x', 'ORD-X', '[]', 5.0, 5.0, 'canceled', 'takeaway', 'pending', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type, sync_status, created_at, updated_at)
+                 VALUES ('ord-x', 'ORD-X', '[]', 5.0, 500, 5.0, 500, 'canceled', 'takeaway', 'pending', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -7002,9 +7026,10 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (5.0 → 500).
             conn.execute(
-                "INSERT INTO orders (id, order_number, items, total_amount, subtotal, status, order_type, sync_status, created_at, updated_at)
-                 VALUES ('ord-x2', 'ORD-X2', '[]', 5.0, 5.0, 'canceled', 'takeaway', 'pending', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents, status, order_type, sync_status, created_at, updated_at)
+                 VALUES ('ord-x2', 'ORD-X2', '[]', 5.0, 500, 5.0, 500, 'canceled', 'takeaway', 'pending', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();

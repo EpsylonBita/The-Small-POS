@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tauri::Emitter;
 
+use crate::money::Cents;
 use crate::{
     can_transition_locally, db, fetch_supabase_rows, normalize_status_for_storage, order_ownership,
     payload_arg0_as_string, payment_integrity, payments, print, read_local_json_array, refunds,
@@ -81,6 +82,8 @@ struct OrderUpdateCustomerInfoPayload {
     #[serde(alias = "supabaseId")]
     #[serde(alias = "supabase_id")]
     order_id: String,
+    #[serde(default, alias = "customer_id")]
+    customer_id: Option<String>,
     #[serde(alias = "customer_name")]
     customer_name: String,
     #[serde(default, alias = "customer_email")]
@@ -90,6 +93,8 @@ struct OrderUpdateCustomerInfoPayload {
     #[serde(alias = "delivery_address")]
     #[serde(alias = "address")]
     delivery_address: String,
+    #[serde(default, alias = "delivery_address_id")]
+    delivery_address_id: Option<String>,
     #[serde(default, alias = "delivery_postal_code")]
     #[serde(alias = "postal_code")]
     #[serde(alias = "postalCode")]
@@ -97,6 +102,12 @@ struct OrderUpdateCustomerInfoPayload {
     #[serde(default, alias = "delivery_notes")]
     #[serde(alias = "notes")]
     delivery_notes: Option<String>,
+    #[serde(default, alias = "delivery_latitude")]
+    delivery_latitude: Option<f64>,
+    #[serde(default, alias = "delivery_longitude")]
+    delivery_longitude: Option<f64>,
+    #[serde(default, alias = "delivery_address_fingerprint")]
+    delivery_address_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +128,8 @@ struct PickupToDeliveryConversionPayload {
     customer_email: Option<String>,
     #[serde(alias = "delivery_address")]
     delivery_address: String,
+    #[serde(default, alias = "delivery_address_id")]
+    delivery_address_id: Option<String>,
     #[serde(default, alias = "delivery_city")]
     delivery_city: Option<String>,
     #[serde(default, alias = "delivery_postal_code")]
@@ -130,6 +143,14 @@ struct PickupToDeliveryConversionPayload {
     delivery_notes: Option<String>,
     #[serde(default, alias = "name_on_ringer")]
     name_on_ringer: Option<String>,
+    #[serde(default, alias = "delivery_latitude")]
+    delivery_latitude: Option<f64>,
+    #[serde(default, alias = "delivery_longitude")]
+    delivery_longitude: Option<f64>,
+    #[serde(default, alias = "delivery_address_fingerprint")]
+    delivery_address_fingerprint: Option<String>,
+    #[serde(default, alias = "delivery_zone_id")]
+    delivery_zone_id: Option<String>,
     #[serde(alias = "delivery_fee")]
     delivery_fee: f64,
     #[serde(alias = "total_amount")]
@@ -183,6 +204,25 @@ struct EditSettlementOrderUpdatesPayload {
     driver_name: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EditSettlementFinancialsPayload {
+    #[serde(default, alias = "total_amount")]
+    total_amount: Option<f64>,
+    #[serde(default)]
+    subtotal: Option<f64>,
+    #[serde(default, alias = "discount_amount")]
+    discount_amount: Option<f64>,
+    #[serde(default, alias = "discount_percentage")]
+    discount_percentage: Option<f64>,
+    #[serde(default, alias = "tax_amount")]
+    tax_amount: Option<f64>,
+    #[serde(default, alias = "delivery_fee")]
+    delivery_fee: Option<f64>,
+    #[serde(default, alias = "tip_amount")]
+    tip_amount: Option<f64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OrderEditSettlementRawPayload {
@@ -202,6 +242,8 @@ struct OrderEditSettlementRawPayload {
     order_notes: Option<serde_json::Value>,
     #[serde(default, alias = "order_updates")]
     order_updates: Option<EditSettlementOrderUpdatesPayload>,
+    #[serde(default)]
+    financials: Option<EditSettlementFinancialsPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +321,7 @@ struct OrderEditSettlementPayload {
     items: Vec<serde_json::Value>,
     order_notes: Option<String>,
     order_updates: Option<EditSettlementOrderUpdatesPayload>,
+    financials: Option<EditSettlementFinancialsPayload>,
 }
 
 fn parse_order_update_status_payload(
@@ -542,6 +585,35 @@ fn parse_order_update_items_payload(
     })
 }
 
+fn validate_edit_settlement_financials(
+    financials: Option<EditSettlementFinancialsPayload>,
+) -> Result<Option<EditSettlementFinancialsPayload>, String> {
+    let Some(financials) = financials else {
+        return Ok(None);
+    };
+
+    for (field, value) in [
+        ("financials.totalAmount", financials.total_amount),
+        ("financials.subtotal", financials.subtotal),
+        ("financials.discountAmount", financials.discount_amount),
+        (
+            "financials.discountPercentage",
+            financials.discount_percentage,
+        ),
+        ("financials.taxAmount", financials.tax_amount),
+        ("financials.deliveryFee", financials.delivery_fee),
+        ("financials.tipAmount", financials.tip_amount),
+    ] {
+        if let Some(value) = value {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{field} must be a non-negative number"));
+            }
+        }
+    }
+
+    Ok(Some(financials))
+}
+
 fn parse_order_edit_settlement_payload_value(
     payload: serde_json::Value,
 ) -> Result<OrderEditSettlementPayload, String> {
@@ -565,6 +637,7 @@ fn parse_order_edit_settlement_payload_value(
         items: raw.items,
         order_notes,
         order_updates: raw.order_updates,
+        financials: validate_edit_settlement_financials(raw.financials)?,
     })
 }
 
@@ -673,6 +746,147 @@ fn derive_next_order_totals(
     ))
 }
 
+fn resolve_edit_settlement_totals(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    payload: &OrderEditSettlementPayload,
+) -> Result<(f64, f64), String> {
+    let (derived_total, derived_subtotal) =
+        derive_next_order_totals(conn, order_id, &payload.items)?;
+    let Some(financials) = payload.financials.as_ref() else {
+        return Ok((derived_total, derived_subtotal));
+    };
+
+    Ok((
+        financials.total_amount.unwrap_or(derived_total).max(0.0),
+        financials.subtotal.unwrap_or(derived_subtotal).max(0.0),
+    ))
+}
+
+fn edit_settlement_financial_sync_fields(
+    financials: Option<&EditSettlementFinancialsPayload>,
+    subtotal_amount: f64,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("subtotal".to_string(), serde_json::json!(subtotal_amount));
+    fields.insert(
+        "subtotal_cents".to_string(),
+        serde_json::json!(Cents::round_half_even(subtotal_amount).as_i64()),
+    );
+
+    let Some(financials) = financials else {
+        return fields;
+    };
+
+    if let Some(value) = financials.discount_amount {
+        fields.insert("discountAmount".to_string(), serde_json::json!(value));
+        fields.insert(
+            "discount_amount_cents".to_string(),
+            serde_json::json!(Cents::round_half_even(value).as_i64()),
+        );
+    }
+    if let Some(value) = financials.discount_percentage {
+        fields.insert("discountPercentage".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = financials.tax_amount {
+        fields.insert("taxAmount".to_string(), serde_json::json!(value));
+        fields.insert(
+            "tax_amount_cents".to_string(),
+            serde_json::json!(Cents::round_half_even(value).as_i64()),
+        );
+    }
+    if let Some(value) = financials.delivery_fee {
+        fields.insert("deliveryFee".to_string(), serde_json::json!(value));
+        fields.insert(
+            "delivery_fee_cents".to_string(),
+            serde_json::json!(Cents::round_half_even(value).as_i64()),
+        );
+    }
+    if let Some(value) = financials.tip_amount {
+        fields.insert("tipAmount".to_string(), serde_json::json!(value));
+        fields.insert(
+            "tip_amount_cents".to_string(),
+            serde_json::json!(Cents::round_half_even(value).as_i64()),
+        );
+    }
+
+    fields
+}
+
+fn apply_edit_settlement_financial_adjustments(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    financials: Option<&EditSettlementFinancialsPayload>,
+    now: &str,
+) -> Result<(), String> {
+    use rusqlite::types::Value;
+
+    let Some(financials) = financials else {
+        return Ok(());
+    };
+
+    let mut set_clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+
+    fn add_money(
+        column: &str,
+        value: Option<f64>,
+        set_clauses: &mut Vec<String>,
+        params: &mut Vec<Value>,
+    ) {
+        if let Some(value) = value {
+            set_clauses.push(format!("{column} = ?"));
+            params.push(Value::Real(value));
+            set_clauses.push(format!("{column}_cents = ?"));
+            params.push(Value::Integer(Cents::round_half_even(value).as_i64()));
+        }
+    }
+
+    add_money(
+        "discount_amount",
+        financials.discount_amount,
+        &mut set_clauses,
+        &mut params,
+    );
+    if let Some(value) = financials.discount_percentage {
+        set_clauses.push("discount_percentage = ?".to_string());
+        params.push(Value::Real(value));
+    }
+    add_money(
+        "tax_amount",
+        financials.tax_amount,
+        &mut set_clauses,
+        &mut params,
+    );
+    add_money(
+        "delivery_fee",
+        financials.delivery_fee,
+        &mut set_clauses,
+        &mut params,
+    );
+    add_money(
+        "tip_amount",
+        financials.tip_amount,
+        &mut set_clauses,
+        &mut params,
+    );
+
+    if set_clauses.is_empty() {
+        return Ok(());
+    }
+
+    set_clauses.push("sync_status = 'pending'".to_string());
+    set_clauses.push("updated_at = ?".to_string());
+    params.push(Value::Text(now.to_string()));
+
+    let sql = format!("UPDATE orders SET {} WHERE id = ?", set_clauses.join(", "));
+    params.push(Value::Text(order_id.to_string()));
+    conn.execute(&sql, rusqlite::params_from_iter(params.iter()))
+        .map_err(|e| format!("apply edit settlement financials: {e}"))?;
+
+    Ok(())
+}
+
 fn update_order_items_in_connection(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -683,20 +897,25 @@ fn update_order_items_in_connection(
     now: &str,
 ) -> Result<(), String> {
     let items_json = serde_json::to_string(items).map_err(|e| format!("serialize items: {e}"))?;
+    // W4c dual-write: order edit total_amount + subtotal mirror onto cents.
+    let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
+    let subtotal_amount_cents = Cents::round_half_even(subtotal_amount).as_i64();
     if let Some(notes) = order_notes {
         conn.execute(
             "UPDATE orders
              SET items = ?1,
-                 total_amount = ?2,
-                 subtotal = ?3,
-                 special_instructions = ?4,
+                 total_amount = ?2, total_amount_cents = ?3,
+                 subtotal = ?4, subtotal_cents = ?5,
+                 special_instructions = ?6,
                  sync_status = 'pending',
-                 updated_at = ?5
-             WHERE id = ?6",
+                 updated_at = ?7
+             WHERE id = ?8",
             rusqlite::params![
                 items_json,
                 total_amount,
+                total_amount_cents,
                 subtotal_amount,
+                subtotal_amount_cents,
                 notes,
                 now,
                 order_id
@@ -707,12 +926,20 @@ fn update_order_items_in_connection(
         conn.execute(
             "UPDATE orders
              SET items = ?1,
-                 total_amount = ?2,
-                 subtotal = ?3,
+                 total_amount = ?2, total_amount_cents = ?3,
+                 subtotal = ?4, subtotal_cents = ?5,
                  sync_status = 'pending',
-                 updated_at = ?4
-             WHERE id = ?5",
-            rusqlite::params![items_json, total_amount, subtotal_amount, now, order_id],
+                 updated_at = ?6
+             WHERE id = ?7",
+            rusqlite::params![
+                items_json,
+                total_amount,
+                total_amount_cents,
+                subtotal_amount,
+                subtotal_amount_cents,
+                now,
+                order_id
+            ],
         )
         .map_err(|e| format!("update order items: {e}"))?;
     }
@@ -799,74 +1026,17 @@ fn refresh_order_payment_snapshot(
     order_id: &str,
     now: &str,
 ) -> Result<(String, String, f64), String> {
-    let (order_total, current_payment_method): (f64, String) = conn
+    let order_total: f64 = conn
         .query_row(
-            "SELECT COALESCE(total_amount, 0), COALESCE(payment_method, 'pending')
-             FROM orders
-             WHERE id = ?1",
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+             FROM orders WHERE id = ?1",
             rusqlite::params![order_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
-        .map_err(|e| format!("load order payment snapshot: {e}"))?;
+        .map_err(|e| format!("load order total for snapshot: {e}"))?;
 
     let total_paid = load_net_paid_for_order(conn, order_id)?;
-
-    let completed_payment_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
-             FROM order_payments
-             WHERE order_id = ?1
-               AND status = 'completed'",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    let has_item_assignments = conn
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1
-                FROM payment_items pi
-                INNER JOIN order_payments op ON op.id = pi.payment_id
-                WHERE op.order_id = ?1
-                  AND op.status = 'completed'
-            )",
-            rusqlite::params![order_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        == 1;
-
-    let last_completed_method = conn
-        .query_row(
-            "SELECT method
-             FROM order_payments
-             WHERE order_id = ?1
-               AND status = 'completed'
-             ORDER BY created_at DESC, updated_at DESC
-             LIMIT 1",
-            rusqlite::params![order_id],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .unwrap_or_else(|| current_payment_method.clone());
-
-    // Count *distinct* methods across completed payments. This is the signal
-    // we want for the "split" presentation — two payments that share the
-    // same method (e.g. a €10 cash charge plus a €0.80 cash delta for an
-    // edit-settlement) should display as "cash", not as a split order.
-    // Raw completed_payment_count conflates legitimate multi-method splits
-    // with benign same-method deltas.
-    let distinct_completed_methods: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT LOWER(TRIM(method)))
-             FROM order_payments
-             WHERE order_id = ?1
-               AND status = 'completed'",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
 
     let next_payment_status = if total_paid >= order_total - 0.01 {
         if total_paid > 0.009 {
@@ -880,39 +1050,21 @@ fn refresh_order_payment_snapshot(
         "pending".to_string()
     };
 
-    // The decision tree intentionally derives the next payment_method from
-    // *actual* completed payments rather than from the existing column
-    // value. Reading the existing column was the source of a stickiness
-    // bug: an edit-settlement that briefly marked the order as
-    // partially_paid wrote payment_method='split', and then the next
-    // refresh (after the operator collected the delta) re-saw 'split' in
-    // the column and re-wrote 'split' again forever — even when both
-    // completed payments shared a single method (cash + cash). The card
-    // would keep rendering the purple ΔΙΑΧΩΡΙΣΜΟΣ chip on an ordinary
-    // single-method order. Driving the decision from the payments
-    // themselves makes it idempotent and self-correcting.
-    let next_payment_method = if total_paid <= 0.009 {
-        "pending".to_string()
-    } else if next_payment_status == "partially_paid" || has_item_assignments {
-        // Outstanding balance OR per-item split-by-payer assignments:
-        // canonical "in-progress / multi-payer" state.
-        "split".to_string()
-    } else if completed_payment_count > 1 && distinct_completed_methods > 1 {
-        // Fully paid with multiple methods used (e.g. €10 cash + €2 card).
-        "split".to_string()
-    } else {
-        // Fully paid via either a single payment or multiple same-method
-        // payments. Use the canonical method of the most-recent payment.
-        last_completed_method
-    };
+    // W6: `orders.payment_method` was dropped in migration v55. The
+    // method is now derived from `order_payments` rows via
+    // `payments::derive_payment_method` on every read. This refresh
+    // only persists `payment_status`; the method returned from this
+    // function is a derived value computed for callers that still
+    // need to emit it in a sync payload or IPC response.
+    let next_payment_method = crate::payments::derive_payment_method(conn, order_id)?
+        .unwrap_or_else(|| "pending".to_string());
 
     conn.execute(
         "UPDATE orders
          SET payment_status = ?1,
-             payment_method = ?2,
-             updated_at = ?3
-         WHERE id = ?4",
-        rusqlite::params![next_payment_status, next_payment_method, now, order_id],
+             updated_at = ?2
+         WHERE id = ?3",
+        rusqlite::params![next_payment_status, now, order_id],
     )
     .map_err(|e| format!("refresh order payment snapshot: {e}"))?;
 
@@ -1096,9 +1248,18 @@ fn apply_edit_settlement_order_updates(
 
     if let Some(fee) = updates.delivery_fee {
         if fee.is_finite() && fee >= 0.0 {
+            // W4c dual-write: dynamic edit-settlement push for delivery_fee
+            // adds the cents sibling alongside the REAL column.
             set_clauses.push("delivery_fee = ?".to_string());
             params.push(Value::Real(fee));
+            set_clauses.push("delivery_fee_cents = ?".to_string());
+            params.push(Value::Integer(Cents::round_half_even(fee).as_i64()));
             applied.insert("deliveryFee".to_string(), serde_json::json!(fee));
+            // W4d-iv additive emission: cents sibling.
+            applied.insert(
+                "delivery_fee_cents".to_string(),
+                serde_json::json!(Cents::round_half_even(fee).as_i64()),
+            );
         }
     }
 
@@ -1131,6 +1292,7 @@ fn enqueue_order_edit_sync(
     items: &[serde_json::Value],
     order_notes: Option<&str>,
     total_amount: f64,
+    subtotal_amount: f64,
     payment_status: &str,
     payment_method: &str,
     extra_fields: &serde_json::Map<String, serde_json::Value>,
@@ -1151,7 +1313,18 @@ fn enqueue_order_edit_sync(
             None => serde_json::Value::Null,
         },
     );
+    // W4d-iv additive emission: ship cents sibling alongside the legacy
+    // camelCase float key so admin-dashboard schemas can read either.
     payload_map.insert("totalAmount".to_string(), serde_json::json!(total_amount));
+    payload_map.insert(
+        "total_amount_cents".to_string(),
+        serde_json::json!(Cents::round_half_even(total_amount).as_i64()),
+    );
+    payload_map.insert("subtotal".to_string(), serde_json::json!(subtotal_amount));
+    payload_map.insert(
+        "subtotal_cents".to_string(),
+        serde_json::json!(Cents::round_half_even(subtotal_amount).as_i64()),
+    );
     payload_map.insert(
         "paymentStatus".to_string(),
         serde_json::Value::String(payment_status.to_string()),
@@ -1177,15 +1350,16 @@ fn list_completed_payments_for_edit(
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut stmt = conn
         .prepare(
+            // W4b: cents-with-real-fallback shim (removed in 4e).
             "SELECT
                 op.id,
                 op.method,
-                op.amount,
+                COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
                 op.created_at,
                 op.transaction_ref,
                 op.staff_shift_id,
                 COALESCE((
-                    SELECT SUM(pa.amount)
+                    SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
                     FROM payment_adjustments pa
                     WHERE pa.payment_id = op.id
                       AND pa.adjustment_type = 'refund'
@@ -1199,8 +1373,9 @@ fn list_completed_payments_for_edit(
 
     let rows = stmt
         .query_map(rusqlite::params![order_id], |row| {
-            let amount = row.get::<_, f64>(2)?;
-            let refunded = row.get::<_, f64>(6)?;
+            // W4b: cents columns → f64 for the existing JSON shape.
+            let amount = Cents::new(row.get::<_, i64>(2)?).to_f64_dp2();
+            let refunded = Cents::new(row.get::<_, i64>(6)?).to_f64_dp2();
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "method": row.get::<_, String>(1)?,
@@ -1222,7 +1397,12 @@ fn load_active_driver_settlement(
     order_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
     conn.query_row(
-        "SELECT id, driver_id, staff_shift_id, cash_collected, card_amount, cash_to_return
+        // W4b: cents-with-real-fallback shim (removed in 4e). Existing
+        // JSON shape consumed by the renderer is unchanged.
+        "SELECT id, driver_id, staff_shift_id,
+                COALESCE(cash_collected_cents, CAST(ROUND(cash_collected * 100) AS INTEGER), 0),
+                COALESCE(card_amount_cents, CAST(ROUND(card_amount * 100) AS INTEGER), 0),
+                COALESCE(cash_to_return_cents, CAST(ROUND(cash_to_return * 100) AS INTEGER), 0)
          FROM driver_earnings
          WHERE order_id = ?1
            AND COALESCE(settled, 0) = 0
@@ -1234,9 +1414,9 @@ fn load_active_driver_settlement(
                 "id": row.get::<_, String>(0)?,
                 "driverId": row.get::<_, String>(1)?,
                 "staffShiftId": row.get::<_, Option<String>>(2)?,
-                "cashCollected": row.get::<_, f64>(3)?,
-                "cardAmount": row.get::<_, f64>(4)?,
-                "cashToReturn": row.get::<_, f64>(5)?,
+                "cashCollected": Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                "cardAmount": Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
+                "cashToReturn": Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
             }))
         },
     )
@@ -1252,12 +1432,16 @@ fn parse_order_update_customer_info_payload(
         .map_err(|e| format!("Invalid order customer info payload: {e}"))?;
 
     parsed.order_id = parsed.order_id.trim().to_string();
+    parsed.customer_id = normalize_optional_text(parsed.customer_id);
     parsed.customer_name = parsed.customer_name.trim().to_string();
     parsed.customer_phone = parsed.customer_phone.trim().to_string();
     parsed.delivery_address = parsed.delivery_address.trim().to_string();
+    parsed.delivery_address_id = normalize_optional_text(parsed.delivery_address_id);
     parsed.customer_email = normalize_optional_text(parsed.customer_email);
     parsed.delivery_postal_code = normalize_optional_text(parsed.delivery_postal_code);
     parsed.delivery_notes = normalize_optional_text(parsed.delivery_notes);
+    parsed.delivery_address_fingerprint =
+        normalize_optional_text(parsed.delivery_address_fingerprint);
 
     if parsed.order_id.is_empty() {
         return Err("Missing orderId".into());
@@ -1270,6 +1454,18 @@ fn parse_order_update_customer_info_payload(
     }
     if parsed.delivery_address.is_empty() {
         return Err("Missing deliveryAddress".into());
+    }
+    if parsed
+        .delivery_latitude
+        .is_some_and(|value| !value.is_finite() || !(-90.0..=90.0).contains(&value))
+    {
+        return Err("Invalid deliveryLatitude".into());
+    }
+    if parsed
+        .delivery_longitude
+        .is_some_and(|value| !value.is_finite() || !(-180.0..=180.0).contains(&value))
+    {
+        return Err("Invalid deliveryLongitude".into());
     }
 
     Ok(parsed)
@@ -1288,11 +1484,15 @@ fn parse_pickup_to_delivery_conversion_payload(
     parsed.customer_phone = parsed.customer_phone.trim().to_string();
     parsed.customer_email = normalize_optional_text(parsed.customer_email);
     parsed.delivery_address = parsed.delivery_address.trim().to_string();
+    parsed.delivery_address_id = normalize_optional_text(parsed.delivery_address_id);
     parsed.delivery_city = normalize_optional_text(parsed.delivery_city);
     parsed.delivery_postal_code = normalize_optional_text(parsed.delivery_postal_code);
     parsed.delivery_floor = normalize_optional_text(parsed.delivery_floor);
     parsed.delivery_notes = normalize_optional_text(parsed.delivery_notes);
     parsed.name_on_ringer = normalize_optional_text(parsed.name_on_ringer);
+    parsed.delivery_address_fingerprint =
+        normalize_optional_text(parsed.delivery_address_fingerprint);
+    parsed.delivery_zone_id = normalize_optional_text(parsed.delivery_zone_id);
 
     if parsed.order_id.is_empty() {
         return Err("Missing orderId".into());
@@ -1311,6 +1511,18 @@ fn parse_pickup_to_delivery_conversion_payload(
     }
     if !parsed.total_amount.is_finite() || parsed.total_amount < 0.0 {
         return Err("Invalid totalAmount".into());
+    }
+    if parsed
+        .delivery_latitude
+        .is_some_and(|value| !value.is_finite() || !(-90.0..=90.0).contains(&value))
+    {
+        return Err("Invalid deliveryLatitude".into());
+    }
+    if parsed
+        .delivery_longitude
+        .is_some_and(|value| !value.is_finite() || !(-180.0..=180.0).contains(&value))
+    {
+        return Err("Invalid deliveryLongitude".into());
     }
 
     Ok(parsed)
@@ -1509,11 +1721,16 @@ fn convert_pickup_order_to_delivery_inner(
         customer_phone,
         customer_email,
         delivery_address,
+        delivery_address_id,
         delivery_city,
         delivery_postal_code,
         delivery_floor,
         delivery_notes,
         name_on_ringer,
+        delivery_latitude,
+        delivery_longitude,
+        delivery_address_fingerprint,
+        delivery_zone_id,
         delivery_fee,
         total_amount,
     } = payload;
@@ -1525,39 +1742,58 @@ fn convert_pickup_order_to_delivery_inner(
         .transaction()
         .map_err(|e| format!("begin pickup to delivery transaction: {e}"))?;
 
+    // W4c dual-write: delivery_fee/total_amount must update their `_cents`
+    // siblings too, or the COALESCE-with-real read shim shadows the new
+    // REAL values with stale cents.
+    let delivery_fee_cents = Cents::round_half_even(delivery_fee).as_i64();
+    let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
     tx.execute(
         "UPDATE orders
          SET customer_id = ?1,
              customer_name = ?2,
              customer_phone = ?3,
-             customer_email = ?4,
-             order_type = 'delivery',
-             delivery_address = ?5,
-             delivery_city = ?6,
-             delivery_postal_code = ?7,
-             delivery_floor = ?8,
-             delivery_notes = ?9,
-             name_on_ringer = ?10,
-             delivery_fee = ?11,
-             total_amount = ?12,
-             driver_id = NULL,
-             driver_name = NULL,
-             sync_status = 'pending',
-             updated_at = ?13
-         WHERE id = ?14",
+              customer_email = ?4,
+              order_type = 'delivery',
+              delivery_address = ?5,
+              delivery_address_id = ?6,
+              delivery_city = ?7,
+              delivery_postal_code = ?8,
+              delivery_floor = ?9,
+              delivery_notes = ?10,
+              name_on_ringer = ?11,
+              delivery_latitude = ?12,
+              delivery_longitude = ?13,
+              delivery_address_fingerprint = ?14,
+              delivery_zone_id = ?15,
+              delivery_fee = ?16,
+              delivery_fee_cents = ?17,
+              total_amount = ?18,
+              total_amount_cents = ?19,
+              driver_id = NULL,
+              driver_name = NULL,
+              sync_status = 'pending',
+              updated_at = ?20
+          WHERE id = ?21",
         rusqlite::params![
             customer_id.as_deref(),
             &customer_name,
             &customer_phone,
             customer_email.as_deref(),
             &delivery_address,
+            delivery_address_id.as_deref(),
             delivery_city.as_deref(),
             delivery_postal_code.as_deref(),
             delivery_floor.as_deref(),
             delivery_notes.as_deref(),
             name_on_ringer.as_deref(),
+            delivery_latitude,
+            delivery_longitude,
+            delivery_address_fingerprint.as_deref(),
+            delivery_zone_id.as_deref(),
             delivery_fee,
+            delivery_fee_cents,
             total_amount,
+            total_amount_cents,
             &now,
             &actual_order_id,
         ],
@@ -1573,15 +1809,27 @@ fn convert_pickup_order_to_delivery_inner(
         "customerPhone": customer_phone,
         "orderType": "delivery",
         "deliveryAddress": delivery_address,
+        "deliveryAddressId": delivery_address_id,
+        "delivery_address_id": delivery_address_id,
         "deliveryCity": delivery_city,
         "deliveryPostalCode": delivery_postal_code,
         "deliveryFloor": delivery_floor,
         "deliveryNotes": delivery_notes,
         "nameOnRinger": name_on_ringer,
+        "deliveryLatitude": delivery_latitude,
+        "delivery_latitude": delivery_latitude,
+        "deliveryLongitude": delivery_longitude,
+        "delivery_longitude": delivery_longitude,
+        "deliveryAddressFingerprint": delivery_address_fingerprint,
+        "delivery_address_fingerprint": delivery_address_fingerprint,
+        "deliveryZoneId": delivery_zone_id,
+        "delivery_zone_id": delivery_zone_id,
+        // W4d-iv additive emission: legacy camelCase floats stay alongside
+        // snake_case_cents siblings so admin-dashboard can read either.
         "deliveryFee": delivery_fee,
+        "delivery_fee_cents": Cents::round_half_even(delivery_fee).as_i64(),
         "totalAmount": total_amount,
-        "driverId": serde_json::Value::Null,
-        "driverName": serde_json::Value::Null
+        "total_amount_cents": Cents::round_half_even(total_amount).as_i64()
     });
     enqueue_order_sync_payload(&tx, &actual_order_id, &sync_payload)
         .map_err(|e| format!("enqueue pickup to delivery parity row: {e}"))?;
@@ -1603,14 +1851,19 @@ pub async fn order_update_customer_info(
     let payload = parse_order_update_customer_info_payload(arg0)?;
     let now = Utc::now().to_rfc3339();
 
-    let OrderUpdateCustomerInfoPayload {
+        let OrderUpdateCustomerInfoPayload {
         order_id,
+        customer_id,
         customer_name,
         customer_email,
         customer_phone,
         delivery_address,
+        delivery_address_id,
         delivery_postal_code,
         delivery_notes,
+        delivery_latitude,
+        delivery_longitude,
+        delivery_address_fingerprint,
     } = payload;
 
     let actual_order_id = {
@@ -1624,20 +1877,30 @@ pub async fn order_update_customer_info(
             "UPDATE orders
              SET customer_name = ?1,
                  customer_phone = ?2,
-                 customer_email = COALESCE(?3, customer_email),
-                 delivery_address = ?4,
-                 delivery_postal_code = ?5,
-                 delivery_notes = ?6,
-                 sync_status = 'pending',
-                 updated_at = ?7
-             WHERE id = ?8",
+                  customer_id = COALESCE(?3, customer_id),
+                  customer_email = COALESCE(?4, customer_email),
+                  delivery_address = ?5,
+                  delivery_address_id = COALESCE(?6, delivery_address_id),
+                  delivery_postal_code = COALESCE(?7, delivery_postal_code),
+                  delivery_notes = COALESCE(?8, delivery_notes),
+                  delivery_latitude = COALESCE(?9, delivery_latitude),
+                  delivery_longitude = COALESCE(?10, delivery_longitude),
+                  delivery_address_fingerprint = COALESCE(?11, delivery_address_fingerprint),
+                  sync_status = 'pending',
+                  updated_at = ?12
+              WHERE id = ?13",
             rusqlite::params![
                 &customer_name,
                 &customer_phone,
+                customer_id.as_deref(),
                 customer_email.as_deref(),
                 &delivery_address,
+                delivery_address_id.as_deref(),
                 delivery_postal_code.as_deref(),
                 delivery_notes.as_deref(),
+                delivery_latitude,
+                delivery_longitude,
+                delivery_address_fingerprint.as_deref(),
                 &now,
                 &actual_order_id,
             ],
@@ -1646,12 +1909,22 @@ pub async fn order_update_customer_info(
 
         let sync_payload = serde_json::json!({
             "orderId": actual_order_id,
+            "customerId": customer_id,
+            "customer_id": customer_id,
             "customerName": customer_name,
             "customerEmail": customer_email,
             "customerPhone": customer_phone,
             "deliveryAddress": delivery_address,
+            "deliveryAddressId": delivery_address_id,
+            "delivery_address_id": delivery_address_id,
             "deliveryPostalCode": delivery_postal_code,
             "deliveryNotes": delivery_notes,
+            "deliveryLatitude": delivery_latitude,
+            "delivery_latitude": delivery_latitude,
+            "deliveryLongitude": delivery_longitude,
+            "delivery_longitude": delivery_longitude,
+            "deliveryAddressFingerprint": delivery_address_fingerprint,
+            "delivery_address_fingerprint": delivery_address_fingerprint,
         });
         let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
     }
@@ -1722,20 +1995,24 @@ pub async fn order_update_items(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let items_json =
             serde_json::to_string(&items).map_err(|e| format!("serialize items: {e}"))?;
+        // W4c dual-write: the post-edit total_amount must propagate to
+        // total_amount_cents too — otherwise downstream COALESCE reads
+        // get the pre-edit cents value instead of the new real.
+        let total_cents = Cents::round_half_even(total).as_i64();
         if let Some(order_notes) = notes.clone() {
             conn.execute(
                 "UPDATE orders
-                 SET items = ?1, total_amount = ?2, special_instructions = ?3, sync_status = 'pending', updated_at = ?4
-                 WHERE id = ?5",
-                rusqlite::params![items_json, total, order_notes, now, actual_order_id],
+                 SET items = ?1, total_amount = ?2, total_amount_cents = ?3, special_instructions = ?4, sync_status = 'pending', updated_at = ?5
+                 WHERE id = ?6",
+                rusqlite::params![items_json, total, total_cents, order_notes, now, actual_order_id],
             )
             .map_err(|e| format!("update order items: {e}"))?;
         } else {
             conn.execute(
                 "UPDATE orders
-                 SET items = ?1, total_amount = ?2, sync_status = 'pending', updated_at = ?3
-                 WHERE id = ?4",
-                rusqlite::params![items_json, total, now, actual_order_id],
+                 SET items = ?1, total_amount = ?2, total_amount_cents = ?3, sync_status = 'pending', updated_at = ?4
+                 WHERE id = ?5",
+                rusqlite::params![items_json, total, total_cents, now, actual_order_id],
             )
             .map_err(|e| format!("update order items: {e}"))?;
         }
@@ -1765,20 +2042,10 @@ pub async fn orders_preview_edit_settlement(
     let payload = parse_order_edit_settlement_preview_payload(arg0)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let actual_order_id = resolve_order_id(&conn, &payload.order_id).ok_or("Order not found")?;
-    let (next_total, _) = derive_next_order_totals(&conn, &actual_order_id, &payload.items)?;
+    let (next_total, _) = resolve_edit_settlement_totals(&conn, &actual_order_id, &payload)?;
 
-    let (
-        current_total,
-        payment_status,
-        payment_method,
-        order_type,
-        is_ghost,
-        branch_id,
-        terminal_id,
-        driver_id,
-    ): (
+    let (current_total, payment_status, order_type, is_ghost, branch_id, terminal_id, driver_id): (
         f64,
-        String,
         String,
         String,
         bool,
@@ -1790,7 +2057,6 @@ pub async fn orders_preview_edit_settlement(
             "SELECT
                 COALESCE(total_amount, 0),
                 COALESCE(payment_status, 'pending'),
-                COALESCE(payment_method, 'pending'),
                 COALESCE(order_type, 'dine-in'),
                 COALESCE(is_ghost, 0),
                 COALESCE(branch_id, ''),
@@ -1804,15 +2070,19 @@ pub async fn orders_preview_edit_settlement(
                     row.get(0)?,
                     row.get(1)?,
                     row.get(2)?,
-                    row.get(3)?,
-                    row.get::<_, i64>(4)? != 0,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
-                    row.get(7)?,
                 ))
             },
         )
         .map_err(|e| format!("load edit settlement order context: {e}"))?;
+
+    // W6: derive payment method from completed rows instead of reading
+    // the dropped `orders.payment_method` column.
+    let payment_method = crate::payments::derive_payment_method(&conn, &actual_order_id)?
+        .unwrap_or_else(|| "pending".to_string());
 
     let completed_payments = list_completed_payments_for_edit(&conn, &actual_order_id)?;
     let paid_total = completed_payments
@@ -1864,7 +2134,7 @@ pub async fn orders_apply_edit_settlement(
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (next_total, next_subtotal) =
-        derive_next_order_totals(&conn, &actual_order_id, &payload.items)?;
+        resolve_edit_settlement_totals(&conn, &actual_order_id, &payload)?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
@@ -1888,6 +2158,12 @@ pub async fn orders_apply_edit_settlement(
             payload.order_notes.as_deref(),
             next_total,
             next_subtotal,
+            &now,
+        )?;
+        apply_edit_settlement_financial_adjustments(
+            &conn,
+            &actual_order_id,
+            payload.financials.as_ref(),
             &now,
         )?;
 
@@ -1971,15 +2247,22 @@ pub async fn orders_apply_edit_settlement(
             refresh_order_payment_snapshot(&conn, &actual_order_id, &now)?;
         let required_action =
             determine_edit_settlement_required_action(paid_total_after, next_total);
+        let mut sync_extra_fields = applied_order_updates;
+        for (key, value) in
+            edit_settlement_financial_sync_fields(payload.financials.as_ref(), next_subtotal)
+        {
+            sync_extra_fields.insert(key, value);
+        }
         enqueue_order_edit_sync(
             &conn,
             &actual_order_id,
             &payload.items,
             payload.order_notes.as_deref(),
             next_total,
+            next_subtotal,
             &payment_status,
             &payment_method,
-            &applied_order_updates,
+            &sync_extra_fields,
         )?;
 
         Ok(serde_json::json!({
@@ -2046,27 +2329,40 @@ pub async fn order_update_financials(
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
+    // W4c dual-write: 6 monetary REAL columns mirror onto cents siblings.
+    let edit_total_amount_cents = Cents::round_half_even(payload.total_amount).as_i64();
+    let edit_subtotal_cents = Cents::round_half_even(subtotal).as_i64();
+    let edit_discount_amount_cents = Cents::round_half_even(discount_amount).as_i64();
+    let edit_tax_amount_cents = Cents::round_half_even(tax_amount).as_i64();
+    let edit_delivery_fee_cents = Cents::round_half_even(delivery_fee).as_i64();
+    let edit_tip_amount_cents = Cents::round_half_even(tip_amount).as_i64();
     let result = (|| -> Result<serde_json::Value, String> {
         conn.execute(
             "UPDATE orders
-             SET total_amount = ?1,
-                 subtotal = ?2,
-                 discount_amount = ?3,
-                 discount_percentage = ?4,
-                 tax_amount = ?5,
-                 delivery_fee = ?6,
-                 tip_amount = ?7,
+             SET total_amount = ?1, total_amount_cents = ?2,
+                 subtotal = ?3, subtotal_cents = ?4,
+                 discount_amount = ?5, discount_amount_cents = ?6,
+                 discount_percentage = ?7,
+                 tax_amount = ?8, tax_amount_cents = ?9,
+                 delivery_fee = ?10, delivery_fee_cents = ?11,
+                 tip_amount = ?12, tip_amount_cents = ?13,
                  sync_status = 'pending',
-                 updated_at = ?8
-             WHERE id = ?9",
+                 updated_at = ?14
+             WHERE id = ?15",
             rusqlite::params![
                 payload.total_amount,
+                edit_total_amount_cents,
                 subtotal,
+                edit_subtotal_cents,
                 discount_amount,
+                edit_discount_amount_cents,
                 discount_percentage,
                 tax_amount,
+                edit_tax_amount_cents,
                 delivery_fee,
+                edit_delivery_fee_cents,
                 tip_amount,
+                edit_tip_amount_cents,
                 now,
                 actual_order_id,
             ],
@@ -2078,15 +2374,23 @@ pub async fn order_update_financials(
         let (payment_status, payment_method, paid_total) =
             refresh_order_payment_snapshot(&conn, &actual_order_id, &now)?;
 
+        // W4d-iv additive emission: every monetary field carries its
+        // snake_case_cents sibling alongside the legacy camelCase float.
         let sync_payload = serde_json::json!({
             "orderId": actual_order_id,
             "totalAmount": payload.total_amount,
+            "total_amount_cents": Cents::round_half_even(payload.total_amount).as_i64(),
             "subtotal": subtotal,
+            "subtotal_cents": Cents::round_half_even(subtotal).as_i64(),
             "discountAmount": discount_amount,
+            "discount_amount_cents": Cents::round_half_even(discount_amount).as_i64(),
             "discountPercentage": discount_percentage,
             "taxAmount": tax_amount,
+            "tax_amount_cents": Cents::round_half_even(tax_amount).as_i64(),
             "deliveryFee": delivery_fee,
+            "delivery_fee_cents": Cents::round_half_even(delivery_fee).as_i64(),
             "tipAmount": tip_amount,
+            "tip_amount_cents": Cents::round_half_even(tip_amount).as_i64(),
             "paymentStatus": payment_status,
             "paymentMethod": payment_method,
         });
@@ -2321,28 +2625,50 @@ pub async fn order_save_from_remote(
 
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        // W4c dual-write: 6 monetary REAL columns mirror onto cents siblings.
+        let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
+        let tax_amount_cents = Cents::round_half_even(tax_amount).as_i64();
+        let subtotal_cents = Cents::round_half_even(subtotal).as_i64();
+        let discount_amount_cents = Cents::round_half_even(discount_amount).as_i64();
+        let tip_amount_cents = Cents::round_half_even(tip_amount).as_i64();
+        let delivery_fee_cents = Cents::round_half_even(delivery_fee).as_i64();
         conn.execute(
             "INSERT INTO orders (
                 id, order_number, display_order_number, customer_name, customer_phone, customer_email,
-                items, total_amount, tax_amount, subtotal, status,
+                items,
+                total_amount, total_amount_cents,
+                tax_amount, tax_amount_cents,
+                subtotal, subtotal_cents,
+                status,
                 order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
                 delivery_floor, delivery_notes, name_on_ringer, special_instructions,
                 created_at, updated_at, estimated_time, supabase_id, sync_status,
-                payment_status, payment_method, payment_transaction_id, staff_shift_id,
-                staff_id, driver_id, driver_name, discount_percentage, discount_amount,
-                tip_amount, version, terminal_id, branch_id, plugin, external_plugin_order_id,
-                tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
+                payment_status, payment_transaction_id, staff_shift_id,
+                staff_id, driver_id, driver_name, discount_percentage,
+                discount_amount, discount_amount_cents,
+                tip_amount, tip_amount_cents,
+                version, terminal_id, branch_id, plugin, external_plugin_order_id,
+                tax_rate,
+                delivery_fee, delivery_fee_cents,
+                is_ghost, ghost_source, ghost_metadata
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
-                ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20,
-                ?21, ?22, ?23, ?24, 'synced',
-                ?25, ?26, ?27, ?28,
-                ?29, ?30, ?31, ?32, ?33,
-                ?34, ?35, ?36, ?37, ?38,
-                ?39, ?40, ?41, ?42,
-                ?43, ?44
+                ?7,
+                ?8, ?9,
+                ?10, ?11,
+                ?12, ?13,
+                ?14,
+                ?15, ?16, ?17, ?18, ?19,
+                ?20, ?21, ?22, ?23,
+                ?24, ?25, ?26, ?27, 'synced',
+                ?28, ?29, ?30,
+                ?31, ?32, ?33, ?34,
+                ?35, ?36,
+                ?37, ?38,
+                ?39, ?40, ?41, ?42, ?43,
+                ?44,
+                ?45, ?46,
+                ?47, ?48, ?49
             )",
             rusqlite::params![
                 local_id,
@@ -2353,8 +2679,11 @@ pub async fn order_save_from_remote(
                 customer_email,
                 items_json,
                 total_amount,
+                total_amount_cents,
                 tax_amount,
+                tax_amount_cents,
                 subtotal,
+                subtotal_cents,
                 status,
                 order_type,
                 table_number,
@@ -2370,7 +2699,6 @@ pub async fn order_save_from_remote(
                 estimated_time,
                 remote_id,
                 payment_status,
-                payment_method,
                 payment_tx_id,
                 staff_shift_id,
                 staff_id,
@@ -2378,13 +2706,16 @@ pub async fn order_save_from_remote(
                 driver_name,
                 discount_pct,
                 discount_amount,
+                discount_amount_cents,
                 tip_amount,
+                tip_amount_cents,
                 terminal_id,
                 branch_id,
                 plugin,
                 external_plugin_order_id,
                 tax_rate,
                 delivery_fee,
+                delivery_fee_cents,
                 if is_ghost { 1_i64 } else { 0_i64 },
                 ghost_source,
                 ghost_metadata,
@@ -2804,6 +3135,9 @@ pub async fn order_assign_driver(
         rusqlite::params![notes, now, order_id],
     );
 
+    // W4d-iv additive emission: driver-earning sync payload now ships
+    // every monetary float key alongside its `_cents` integer sibling.
+    let total_earning = assignment.delivery_fee + assignment.tip_amount;
     let driver_earning_sync_payload = serde_json::json!({
         "id": earning_id,
         "driver_id": driver_id,
@@ -2811,12 +3145,18 @@ pub async fn order_assign_driver(
         "order_id": order_id,
         "branch_id": assignment.branch_id,
         "delivery_fee": assignment.delivery_fee,
+        "delivery_fee_cents": Cents::round_half_even(assignment.delivery_fee).as_i64(),
         "tip_amount": assignment.tip_amount,
-        "total_earning": assignment.delivery_fee + assignment.tip_amount,
+        "tip_amount_cents": Cents::round_half_even(assignment.tip_amount).as_i64(),
+        "total_earning": total_earning,
+        "total_earning_cents": Cents::round_half_even(total_earning).as_i64(),
         "payment_method": assignment.payment_method,
         "cash_collected": assignment.cash_collected,
+        "cash_collected_cents": Cents::round_half_even(assignment.cash_collected).as_i64(),
         "card_amount": assignment.card_amount,
+        "card_amount_cents": Cents::round_half_even(assignment.card_amount).as_i64(),
         "cash_to_return": assignment.cash_collected,
+        "cash_to_return_cents": Cents::round_half_even(assignment.cash_collected).as_i64(),
         "createdAt": now,
         "updatedAt": now,
     });
@@ -3231,85 +3571,6 @@ pub async fn orders_get_retry_info(
     }))
 }
 
-/// One-shot startup repair for orders whose `payment_method` got stuck
-/// on 'split' because the prior refresh_order_payment_snapshot version
-/// re-read 'split' from the column and re-wrote 'split' even after the
-/// operator collected the final delta with the same method as the
-/// original payment. Safe to run on every boot: only updates rows whose
-/// completed payments genuinely resolve to a single-method state under
-/// the new logic. Skips rows with item-level split assignments (true
-/// multi-payer splits) and rows with different-method completed payments.
-///
-/// Returns the number of rows repaired so the caller can log it.
-pub(crate) fn repair_sticky_split_payment_methods(db: &db::DbState) -> Result<usize, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now().to_rfc3339();
-
-    let candidates: Vec<String> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT o.id
-                 FROM orders o
-                 WHERE LOWER(TRIM(COALESCE(o.payment_method, ''))) = 'split'
-                   AND EXISTS(
-                       SELECT 1 FROM order_payments op
-                       WHERE op.order_id = o.id AND op.status = 'completed'
-                   )
-                   AND (
-                       SELECT COUNT(DISTINCT LOWER(TRIM(method)))
-                       FROM order_payments
-                       WHERE order_id = o.id AND status = 'completed'
-                   ) = 1
-                   AND NOT EXISTS(
-                       SELECT 1
-                       FROM payment_items pi
-                       INNER JOIN order_payments op ON op.id = pi.payment_id
-                       WHERE op.order_id = o.id
-                         AND op.status = 'completed'
-                   )",
-            )
-            .map_err(|e| format!("prepare sticky split repair candidates: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("query sticky split repair candidates: {e}"))?;
-        rows.filter_map(Result::ok).collect()
-    };
-
-    let mut repaired = 0usize;
-    for order_id in candidates {
-        match refresh_order_payment_snapshot(&conn, &order_id, &now) {
-            Ok((_payment_status, new_method, _paid)) => {
-                if new_method.eq_ignore_ascii_case("split") {
-                    // New logic still resolved to split — probably a race
-                    // or a payments-table shape we don't recognize. Leave
-                    // as-is rather than oscillate.
-                    continue;
-                }
-                // Enqueue the corrected payment_method for Supabase so the
-                // admin dashboard reflects the repair on the next sync
-                // cycle. Payment status is included to avoid the admin
-                // seeing the pair get out of step.
-                let sync_payload = serde_json::json!({
-                    "orderId": order_id,
-                    "paymentMethod": new_method,
-                });
-                let _ = enqueue_order_sync_payload(&conn, &order_id, &sync_payload);
-                repaired += 1;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "orders::repair",
-                    order_id = %order_id,
-                    error = %error,
-                    "skipped sticky split repair"
-                );
-            }
-        }
-    }
-
-    Ok(repaired)
-}
-
 #[cfg(test)]
 mod dto_tests {
     use super::*;
@@ -3456,9 +3717,10 @@ mod transition_tests {
 
     fn insert_order(db: &db::DbState, order_id: &str, status: &str) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (10.0 → 1000).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES (?1, '[]', 10.0, ?2, 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES (?1, '[]', 10.0, 1000, ?2, 'pending', datetime('now'), datetime('now'))",
             params![order_id, status],
         )
         .unwrap();
@@ -3470,25 +3732,20 @@ mod transition_tests {
         items_json: &str,
         subtotal: f64,
         total_amount: f64,
-        payment_method: &str,
         payment_status: &str,
     ) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate cents siblings via Cents::round_half_even.
+        let subtotal_cents = Cents::round_half_even(subtotal).as_i64();
+        let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
         conn.execute(
             "INSERT INTO orders (
-                 id, items, subtotal, total_amount, status, payment_method, payment_status,
+                 id, items, subtotal, subtotal_cents, total_amount, total_amount_cents, status, payment_status,
                  sync_status, created_at, updated_at
              ) VALUES (
-                 ?1, ?2, ?3, ?4, 'completed', ?5, ?6, 'pending', datetime('now'), datetime('now')
+                 ?1, ?2, ?3, ?4, ?5, ?6, 'completed', ?7, 'pending', datetime('now'), datetime('now')
              )",
-            params![
-                order_id,
-                items_json,
-                subtotal,
-                total_amount,
-                payment_method,
-                payment_status
-            ],
+            params![order_id, items_json, subtotal, subtotal_cents, total_amount, total_amount_cents, payment_status],
         )
         .unwrap();
     }
@@ -3500,27 +3757,30 @@ mod transition_tests {
         order_id: &str,
         amount: f64,
     ) {
+        // W4e Step 0: dual-populate amount + amount_cents.
+        let amount_cents = Cents::round_half_even(amount).as_i64();
         conn.execute(
             "INSERT INTO payment_adjustments (
-                 id, payment_id, order_id, adjustment_type, amount,
+                 id, payment_id, order_id, adjustment_type, amount, amount_cents,
                  reason, staff_id, sync_state, created_at, updated_at
              ) VALUES (
-                 ?1, ?2, ?3, 'refund', ?4,
+                 ?1, ?2, ?3, 'refund', ?4, ?5,
                  'edit settlement test', NULL, 'pending', datetime('now'), datetime('now')
              )",
-            params![adjustment_id, payment_id, order_id, amount],
+            params![adjustment_id, payment_id, order_id, amount, amount_cents],
         )
         .unwrap();
     }
 
     fn insert_pickup_order_for_conversion(db: &db::DbState, order_id: &str) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (15.0 → 1500).
         conn.execute(
             "INSERT INTO orders (
-                 id, order_number, items, subtotal, total_amount, status, order_type,
+                 id, order_number, items, subtotal, subtotal_cents, total_amount, total_amount_cents, status, order_type,
                  sync_status, created_at, updated_at
              ) VALUES (
-                 ?1, '00001', '[]', 15.0, 15.0, 'pending', 'pickup',
+                 ?1, '00001', '[]', 15.0, 1500, 15.0, 1500, 'pending', 'pickup',
                  'synced', datetime('now'), datetime('now')
              )",
             params![order_id],
@@ -3572,12 +3832,13 @@ mod transition_tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (13.7 → 1370).
             conn.execute(
                 "INSERT INTO orders (
-                     id, order_number, items, total_amount, status, payment_status, payment_method,
+                     id, order_number, items, total_amount, total_amount_cents, status, payment_status,
                      sync_status, created_at, updated_at
                  ) VALUES (
-                     'order-unpaid-final', 'ORD-guard-1', '[]', 13.7, 'pending', 'pending', 'other',
+                     'order-unpaid-final', 'ORD-guard-1', '[]', 13.7, 1370, 'pending', 'pending',
                      'pending', datetime('now'), datetime('now')
                  )",
                 [],
@@ -3785,7 +4046,6 @@ mod transition_tests {
             r#"[{"name":"Crepe","quantity":1,"unit_price":10.0,"total_price":10.0}]"#,
             10.0,
             12.5,
-            "cash",
             "paid",
         );
 
@@ -3807,6 +4067,50 @@ mod transition_tests {
     }
 
     #[test]
+    fn resolve_edit_settlement_totals_honors_financial_payload() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-delivery-reprice",
+            r#"[{"name":"Crepe","quantity":1,"unit_price":12.8,"total_price":12.8}]"#,
+            12.0,
+            12.0,
+            "paid",
+        );
+
+        let payload = OrderEditSettlementPayload {
+            order_id: "order-delivery-reprice".to_string(),
+            items: vec![serde_json::json!({
+                "name": "Crepe",
+                "quantity": 1,
+                "unit_price": 12.8,
+                "total_price": 12.8
+            })],
+            order_notes: None,
+            order_updates: None,
+            financials: Some(EditSettlementFinancialsPayload {
+                total_amount: Some(12.8),
+                subtotal: Some(12.8),
+                tax_amount: Some(0.0),
+                delivery_fee: Some(0.0),
+                ..Default::default()
+            }),
+        };
+
+        let conn = db.conn.lock().unwrap();
+        let (derived_total, _) =
+            derive_next_order_totals(&conn, "order-delivery-reprice", &payload.items)
+                .expect("derived totals");
+        let (next_total, next_subtotal) =
+            resolve_edit_settlement_totals(&conn, "order-delivery-reprice", &payload)
+                .expect("resolved totals");
+
+        assert!((derived_total - 12.0).abs() < 0.001);
+        assert!((next_total - 12.8).abs() < 0.001);
+        assert!((next_subtotal - 12.8).abs() < 0.001);
+    }
+
+    #[test]
     fn refresh_order_payment_snapshot_marks_edit_increase_as_partial() {
         let db = test_db();
         insert_order_with_financials(
@@ -3815,25 +4119,28 @@ mod transition_tests {
             r#"[{"name":"Toast","quantity":1,"unit_price":10.0,"total_price":10.0}]"#,
             10.0,
             10.0,
-            "cash",
             "paid",
         );
 
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (10.0 → 1000).
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, created_at, updated_at
              ) VALUES (
-                 'payment-edit-partial', 'order-edit-partial', 'cash', 10.0, 'completed',
+                 'payment-edit-partial', 'order-edit-partial', 'cash', 10.0, 1000, 'completed',
                  datetime('now'), datetime('now')
              )",
             [],
         )
         .unwrap();
+        // W4e Step 0: dual-populate (12.0 → 1200).
         conn.execute(
             "UPDATE orders
              SET total_amount = 12.0,
+                 total_amount_cents = 1200,
                  subtotal = 12.0,
+                 subtotal_cents = 1200,
                  updated_at = datetime('now')
              WHERE id = 'order-edit-partial'",
             [],
@@ -3845,7 +4152,11 @@ mod transition_tests {
                 .expect("refresh payment snapshot");
 
         assert_eq!(payment_status, "partially_paid");
-        assert_eq!(payment_method, "split");
+        // W6: with one completed cash row, derive_payment_method returns
+        // "cash" (not "split"). The old `has_item_assignments` / sticky
+        // stored-column logic that wrote "split" for partial states is
+        // gone; partial-vs-paid now lives purely in `payment_status`.
+        assert_eq!(payment_method, "cash");
         assert!((total_paid - 10.0).abs() < 0.001);
     }
 
@@ -3871,16 +4182,16 @@ mod transition_tests {
             r#"[{"name":"Toast","quantity":1,"unit_price":10.0,"total_price":10.0}]"#,
             10.0,
             10.0,
-            "split",
             "partially_paid",
         );
 
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (7.4 → 740).
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                 'payment-edit-stale', 'order-edit-stale', 'cash', 7.4, 'completed',
+                 'payment-edit-stale', 'order-edit-stale', 'cash', 7.4, 740, 'completed',
                  'failed', 'failed', datetime('now'), datetime('now')
              )",
             [],
@@ -3979,16 +4290,16 @@ mod transition_tests {
             r#"[{"name":"Crepe","quantity":1,"unit_price":12.8,"total_price":12.8}]"#,
             12.8,
             12.8,
-            "card",
             "paid",
         );
 
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (12.8 → 1280).
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, created_at, updated_at
              ) VALUES (
-                 'payment-net-paid', 'order-net-paid', 'card', 12.8, 'completed',
+                 'payment-net-paid', 'order-net-paid', 'card', 12.8, 1280, 'completed',
                  datetime('now'), datetime('now')
              )",
             [],
@@ -4015,117 +4326,9 @@ mod transition_tests {
         assert!((net_paid - 1.9).abs() < 0.001);
     }
 
-    #[test]
-    fn refresh_order_payment_snapshot_keeps_single_method_for_same_method_delta_collection() {
-        // Regression test for the ΔΙΑΧΩΡΙΣΜΟΣ / SPLIT chip bug: when an
-        // edit-settlement collects a delta in the same method as the
-        // original payment (e.g. €10 cash + €0.80 cash), the card should
-        // not flip to the split-payment presentation. Before the fix this
-        // test would see payment_method='split' because the previous logic
-        // treated any 2+ completed payments as split regardless of method.
-        let db = test_db();
-        insert_order_with_financials(
-            &db,
-            "order-delta-same-method",
-            r#"[{"name":"Crepe","quantity":1,"unit_price":12.0,"total_price":12.0}]"#,
-            12.0,
-            12.0,
-            "cash",
-            "paid",
-        );
-
-        let conn = db.conn.lock().unwrap();
-        // First payment: €10 cash (original).
-        conn.execute(
-            "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
-             ) VALUES (
-                 'payment-delta-1', 'order-delta-same-method', 'cash', 10.0, 'completed',
-                 datetime('now', '-1 minute'), datetime('now', '-1 minute')
-             )",
-            [],
-        )
-        .unwrap();
-        // Delta payment: €2 cash collected via edit-settlement.
-        conn.execute(
-            "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
-             ) VALUES (
-                 'payment-delta-2', 'order-delta-same-method', 'cash', 2.0, 'completed',
-                 datetime('now'), datetime('now')
-             )",
-            [],
-        )
-        .unwrap();
-
-        let (payment_status, payment_method, total_paid) = refresh_order_payment_snapshot(
-            &conn,
-            "order-delta-same-method",
-            "2026-04-22T14:30:00Z",
-        )
-        .expect("refresh payment snapshot");
-
-        assert_eq!(payment_status, "paid");
-        assert_eq!(
-            payment_method, "cash",
-            "same-method delta collection should keep single method, not flip to split"
-        );
-        assert!((total_paid - 12.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn refresh_order_payment_snapshot_unfreezes_split_sticky_after_same_method_collect() {
-        // Specific regression test for the "split stickiness" path observed
-        // in live testing on 2026-04-22. Sequence: an order was edited,
-        // briefly marked 'partially_paid' with payment_method='split'; the
-        // operator then collected the delta with the same method as the
-        // original payment. Before this fix, the next refresh read 'split'
-        // from the current column and re-wrote 'split' even though both
-        // completed payments shared one method. The ΔΙΑΧΩΡΙΣΜΟΣ chip
-        // therefore stayed lit on an ordinary single-method cash order.
-        let db = test_db();
-        insert_order_with_financials(
-            &db,
-            "order-sticky-split",
-            r#"[{"name":"Wrap","quantity":1,"unit_price":12.0,"total_price":12.0}]"#,
-            12.0,
-            12.0,
-            "split", // <-- simulating the briefly-partial state
-            "partially_paid",
-        );
-
-        let conn = db.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
-             ) VALUES (
-                 'payment-sticky-1', 'order-sticky-split', 'cash', 10.0, 'completed',
-                 datetime('now', '-2 minutes'), datetime('now', '-2 minutes')
-             )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
-             ) VALUES (
-                 'payment-sticky-2', 'order-sticky-split', 'cash', 2.0, 'completed',
-                 datetime('now'), datetime('now')
-             )",
-            [],
-        )
-        .unwrap();
-
-        let (payment_status, payment_method, _total_paid) =
-            refresh_order_payment_snapshot(&conn, "order-sticky-split", "2026-04-22T15:30:00Z")
-                .expect("refresh payment snapshot");
-
-        assert_eq!(payment_status, "paid");
-        assert_eq!(
-            payment_method, "cash",
-            "sticky 'split' column must not re-mark a fully-paid, single-method order as split"
-        );
-    }
+    // Same-method edit deltas must keep presenting as that method; only
+    // mixed-method rows collapse to "split". The test below covers the
+    // genuine cash+card case.
 
     #[test]
     fn refresh_order_payment_snapshot_flags_split_when_methods_actually_differ() {
@@ -4139,16 +4342,16 @@ mod transition_tests {
             r#"[{"name":"Crepe","quantity":1,"unit_price":12.0,"total_price":12.0}]"#,
             12.0,
             12.0,
-            "cash",
             "paid",
         );
 
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (10.0 → 1000, 2.0 → 200).
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, created_at, updated_at
              ) VALUES (
-                 'payment-mixed-1', 'order-delta-mixed', 'cash', 10.0, 'completed',
+                 'payment-mixed-1', 'order-delta-mixed', 'cash', 10.0, 1000, 'completed',
                  datetime('now', '-1 minute'), datetime('now', '-1 minute')
              )",
             [],
@@ -4156,9 +4359,9 @@ mod transition_tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, created_at, updated_at
              ) VALUES (
-                 'payment-mixed-2', 'order-delta-mixed', 'card', 2.0, 'completed',
+                 'payment-mixed-2', 'order-delta-mixed', 'card', 2.0, 200, 'completed',
                  datetime('now'), datetime('now')
              )",
             [],
@@ -4185,16 +4388,16 @@ mod transition_tests {
             r#"[{"name":"Crepe","quantity":1,"unit_price":4.7,"total_price":4.7}]"#,
             4.7,
             4.7,
-            "card",
             "paid",
         );
 
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (12.8 → 1280).
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, created_at, updated_at
              ) VALUES (
-                 'payment-edit-refunded', 'order-edit-refunded', 'card', 12.8, 'completed',
+                 'payment-edit-refunded', 'order-edit-refunded', 'card', 12.8, 1280, 'completed',
                  datetime('now'), datetime('now')
              )",
             [],
@@ -4213,7 +4416,11 @@ mod transition_tests {
                 .expect("refresh payment snapshot");
 
         assert_eq!(payment_status, "partially_paid");
-        assert_eq!(payment_method, "split");
+        // W6: one completed card row + refund adjustment → derive
+        // returns "card" (the sole method actually on file). The
+        // partial state is signaled by `payment_status`, not by the
+        // method label.
+        assert_eq!(payment_method, "card");
         assert!((total_paid - 1.9).abs() < 0.001);
     }
 
@@ -4226,16 +4433,16 @@ mod transition_tests {
             r#"[{"name":"Toast","quantity":1,"unit_price":10.0,"total_price":10.0}]"#,
             10.0,
             10.0,
-            "split",
             "partially_paid",
         );
 
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (7.4 → 740).
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                 'payment-financial-drop', 'order-financial-drop', 'cash', 7.4, 'completed',
+                 'payment-financial-drop', 'order-financial-drop', 'cash', 7.4, 740, 'completed',
                  'failed', 'failed', datetime('now'), datetime('now')
              )",
             [],
@@ -4269,15 +4476,27 @@ mod transition_tests {
         .unwrap();
 
         let now = "2026-04-16T09:39:05Z";
+        // W4e Step 0: dual-populate the financial-drop UPDATE — the seed
+        // wrote total_amount_cents=1000 (from 10.0); after this UPDATE
+        // production reads must see 690 (from 6.9), so we also write
+        // total_amount_cents=690 here. Without this, production's
+        // COALESCE-with-real shim prefers the stale 1000 and the
+        // overpay-stale detector fails to flag the 7.4 payment.
         conn.execute(
             "UPDATE orders
              SET total_amount = 6.9,
+                 total_amount_cents = 690,
                  subtotal = 6.9,
+                 subtotal_cents = 690,
                  discount_amount = 0,
+                 discount_amount_cents = 0,
                  discount_percentage = 0,
                  tax_amount = 0,
+                 tax_amount_cents = 0,
                  delivery_fee = 0,
+                 delivery_fee_cents = 0,
                  tip_amount = 0,
+                 tip_amount_cents = 0,
                  sync_status = 'pending',
                  updated_at = ?2
              WHERE id = ?1",
@@ -4349,11 +4568,16 @@ mod transition_tests {
                 customer_phone: "123456".into(),
                 customer_email: Some("alice@example.com".into()),
                 delivery_address: "Main St 42".into(),
+                delivery_address_id: None,
                 delivery_city: Some("Athens".into()),
                 delivery_postal_code: Some("10558".into()),
                 delivery_floor: Some("3".into()),
                 delivery_notes: Some("Side door".into()),
                 name_on_ringer: Some("Alice".into()),
+                delivery_latitude: None,
+                delivery_longitude: None,
+                delivery_address_fingerprint: None,
+                delivery_zone_id: None,
                 delivery_fee: 4.0,
                 total_amount: 19.0,
             },

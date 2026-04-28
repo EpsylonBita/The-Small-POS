@@ -26,14 +26,10 @@ use crate::printers;
 // ESC/POS drawer kick command
 // ---------------------------------------------------------------------------
 
-/// Standard ESC/POS pulse command: ESC p m t1 t2
-///
-/// - `0x1B` (ESC)
-/// - `0x70` (p) — generate pulse
-/// - `0x00` — pin 2 (connector pin)
-/// - `0x19` — on time  (25 × 2ms = 50ms)
-/// - `0xFA` — off time (250 × 2ms = 500ms)
-const ESCPOS_DRAWER_KICK: [u8; 5] = [0x1B, 0x70, 0x00, 0x19, 0xFA];
+// Wave 2 H22: the drawer-kick byte sequence lives in `escpos.rs` as the
+// single source of truth. Both this module and `EscPosBuilder::open_drawer`
+// reference the same constant so the two kick paths cannot drift.
+use crate::escpos::ESCPOS_DRAWER_KICK;
 
 /// Timeout for TCP connection to the printer.
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);

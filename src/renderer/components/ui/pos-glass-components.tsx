@@ -531,6 +531,18 @@ interface LiquidGlassModalProps {
    * Falls back to the first focusable element when not provided.
    */
   initialFocusRef?: React.RefObject<HTMLElement | null>;
+
+  /**
+   * Optional primary action to run when Enter is pressed inside the modal.
+   * Textareas and focused buttons keep their native keyboard behavior.
+   */
+  onEnterKey?: () => void;
+
+  /**
+   * Enables the Enter primary action while the modal is open.
+   * @default true
+   */
+  enterKeyEnabled?: boolean;
 }
 
 // Helper function to get focusable elements
@@ -565,7 +577,9 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   closeOnBackdrop = true,
   closeOnEscape = true,
   initialFocusRef,
-  ariaLabel
+  ariaLabel,
+  onEnterKey,
+  enterKeyEnabled = true
 }) => {
   const { t } = useI18n()
   const containerRef = React.useRef<HTMLDivElement>(null)
@@ -573,6 +587,8 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const previousActiveElementRef = React.useRef<HTMLElement | null>(null)
   const previousOverflowRef = React.useRef<string>('')
   const externalClosingRef = React.useRef<boolean>(false)
+  const enterActionRef = React.useRef(onEnterKey)
+  const enterKeyEnabledRef = React.useRef(enterKeyEnabled)
 
   const isTopMostDialog = React.useCallback(() => {
     if (!containerRef.current) {
@@ -605,6 +621,11 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
     active: mounted,
     metadata: blockerMetadata,
   })
+
+  React.useEffect(() => {
+    enterActionRef.current = onEnterKey
+    enterKeyEnabledRef.current = enterKeyEnabled
+  }, [enterKeyEnabled, onEnterKey])
 
   // Handle close with animation
   const handleClose = React.useCallback(() => {
@@ -704,6 +725,45 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         }
       }
 
+      const handleEnterKey = (e: KeyboardEvent) => {
+        if (
+          e.key !== 'Enter' ||
+          e.repeat ||
+          e.defaultPrevented ||
+          e.altKey ||
+          e.ctrlKey ||
+          e.metaKey ||
+          e.shiftKey ||
+          !isTopMostDialog()
+        ) {
+          return
+        }
+
+        const enterAction = enterActionRef.current
+        if (!enterKeyEnabledRef.current || !enterAction) {
+          return
+        }
+
+        const target = e.target
+        if (!(target instanceof HTMLElement) || !containerRef.current?.contains(target)) {
+          return
+        }
+
+        if (
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLButtonElement ||
+          target instanceof HTMLAnchorElement ||
+          target instanceof HTMLSelectElement ||
+          target.isContentEditable
+        ) {
+          return
+        }
+
+        e.preventDefault()
+        e.stopPropagation()
+        enterAction()
+      }
+
       // Handle focusin to redirect focus back to modal if it escapes
       const handleFocusIn = (e: FocusEvent) => {
         const target = e.target as Node;
@@ -733,6 +793,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
       // Add event listeners
       document.addEventListener('keydown', handleEscape)
       document.addEventListener('keydown', handleTabKey)
+      document.addEventListener('keydown', handleEnterKey)
       document.addEventListener('focusin', handleFocusIn)
 
       // Set body scroll lock
@@ -742,6 +803,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         clearTimeout(focusTimer)
         document.removeEventListener('keydown', handleEscape)
         document.removeEventListener('keydown', handleTabKey)
+        document.removeEventListener('keydown', handleEnterKey)
         document.removeEventListener('focusin', handleFocusIn)
         document.body.style.overflow = previousOverflowRef.current
       }

@@ -76,6 +76,7 @@ const STARTUP_CONFIG_SYNC_TIMEOUT_MS = 2500;
 const CONFIGURED_TERMINAL_HINT_KEY = 'pos-terminal-configured';
 const PARITY_QUEUE_REFRESH_INTERVAL_MS = 15_000;
 const PARITY_SYNC_RETRY_INTERVAL_MS = 30_000;
+const TOAST_CONTAINER_STYLE: React.CSSProperties = { zIndex: 2147483647 };
 
 type ConnectionSettingsSection = 'recovery' | null;
 
@@ -1267,6 +1268,7 @@ function AppContent() {
           </FullscreenAwareLayout>
           <Toaster
             position="top-center"
+            containerStyle={TOAST_CONTAINER_STYLE}
             toastOptions={{
               duration: 3000,
               style: { background: '#111827', color: '#fff' },
@@ -1375,6 +1377,7 @@ function AppContent() {
 
             <Toaster
               position="top-center"
+              containerStyle={TOAST_CONTAINER_STYLE}
               toastOptions={{
                 duration: 3000,
                 style: {

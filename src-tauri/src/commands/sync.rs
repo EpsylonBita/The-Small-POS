@@ -154,7 +154,6 @@ pub(crate) fn query_financial_queue_items(
     limit: i64,
     db: &db::DbState,
 ) -> Result<serde_json::Value, String> {
-    let _ = sync::reconcile_legacy_financial_parity_rows(db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(&format!(
@@ -349,7 +348,6 @@ fn load_legacy_financial_parity_orphan_issues(
 }
 
 pub(crate) fn collect_financial_integrity(db: &db::DbState) -> Result<serde_json::Value, String> {
-    let _ = sync::reconcile_legacy_financial_parity_rows(db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut issues = Vec::new();
 
@@ -1924,8 +1922,7 @@ mod dto_tests {
             .join("src")
             .join("commands")
             .join("sync.rs");
-        let src = std::fs::read_to_string(&src_path)
-            .expect("read commands/sync.rs source");
+        let src = std::fs::read_to_string(&src_path).expect("read commands/sync.rs source");
 
         let fn_marker = "pub async fn sync_retry_all_failed_financial";
         let fn_start = src

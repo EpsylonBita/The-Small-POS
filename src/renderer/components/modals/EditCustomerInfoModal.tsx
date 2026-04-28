@@ -29,6 +29,7 @@ export interface EditCustomerInfoFormData {
   coordinates?: { lat: number; lng: number } | null;
   latitude?: number | null;
   longitude?: number | null;
+  addressFingerprint?: string | null;
 }
 
 interface EditCustomerInfoModalProps {
@@ -407,6 +408,13 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         address: customerInfo.address.trim(),
         postal_code: customerInfo.postal_code?.trim() || undefined,
         notes: customerInfo.notes?.trim() || undefined,
+        coordinates: addressCoordinates || selectedAddressDetails?.coordinates || null,
+        latitude:
+          addressCoordinates?.lat ?? selectedAddressDetails?.coordinates?.lat ?? null,
+        longitude:
+          addressCoordinates?.lng ?? selectedAddressDetails?.coordinates?.lng ?? null,
+        addressFingerprint:
+          selectedAddressDetails?.addressFingerprint || validationSnapshot || null,
       });
       setIsSaving(false);
     } catch (error) {

@@ -84,12 +84,16 @@ class ActivityTrackerClass {
       this.scheduleRetry(150)
     }
 
+    // Wave 11 L: typed via the new `onEvent<T>` generic instead of
+    // a `(payload: any)` annotation. The compiler now flags any access
+    // to fields the payload type does not declare.
+    type ConnectivityStatus = { isOnline?: boolean }
     onEvent('sync:complete', triggerRetry)
-    onEvent('sync:status', (payload: any) => {
+    onEvent<ConnectivityStatus>('sync:status', (payload) => {
       if (payload?.isOnline === false) return
       triggerRetry()
     })
-    onEvent('network:status', (payload: any) => {
+    onEvent<ConnectivityStatus>('network:status', (payload) => {
       if (payload?.isOnline === false) return
       triggerRetry()
     })

@@ -24,6 +24,29 @@ const PAX_SETTLE: &str = "50";
 
 const DEFAULT_TIMEOUT_MS: u64 = 60000;
 
+/// Wave 2 C14: build the `raw_response` JSON attached to a PAX
+/// `TransactionResponse` / `SettlementResult`.
+///
+/// The PAX terminal returns a vector of fields that includes the response
+/// code, authorization code, card last-4, card brand, and arbitrary TLV
+/// data that can embed expiry or BIN. Emitting the full vector to the
+/// frontend (where every renderer log, Tauri event inspector, or
+/// screenshot tool can read it) is a PCI-adjacent leak.
+///
+/// In release builds we strip to the single field the renderer actually
+/// needs for error-surfacing — the response code — and drop the rest.
+/// Debug builds keep the full dump so protocol work stays debuggable.
+#[inline]
+fn redacted_raw_response(fields: &[String]) -> serde_json::Value {
+    if cfg!(debug_assertions) {
+        serde_json::json!({ "fields": fields })
+    } else {
+        serde_json::json!({
+            "responseCode": fields.first().cloned().unwrap_or_default(),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Protocol implementation
 // ---------------------------------------------------------------------------
@@ -66,6 +89,16 @@ impl PaxProtocol {
     }
 
     /// Parse a PAX response frame. Returns list of fields.
+    ///
+    /// Wave 11 L: also verifies the trailing LRC byte. PAX response
+    /// frames are `STX | <payload> | ETX | LRC` where the LRC is the
+    /// XOR of every byte from the byte AFTER STX through ETX
+    /// inclusive (matching the symmetric `build_frame` rule above).
+    /// A corrupted frame in transit (cable noise, partial read,
+    /// terminal misbehaviour) used to be parsed as if intact —
+    /// silently returning whatever fields the corrupted bytes split
+    /// into. The check is cheap (one XOR pass) and the alternative
+    /// is downstream parsing of garbage as a payment status.
     fn parse_response(raw: &[u8]) -> Result<Vec<String>, String> {
         if raw.is_empty() {
             return Err("Empty response from PAX terminal".into());
@@ -77,6 +110,25 @@ impl PaxProtocol {
 
         match (stx_pos, etx_pos) {
             (Some(s), Some(e)) if e > s => {
+                // LRC byte must follow ETX. If the buffer was truncated
+                // mid-frame the byte simply isn't present — flag as
+                // invalid rather than parsing the maybe-payload bytes.
+                let lrc_pos = e + 1;
+                if lrc_pos >= raw.len() {
+                    return Err(format!(
+                        "Truncated PAX frame: missing LRC after ETX at offset {e}"
+                    ));
+                }
+                let received_lrc = raw[lrc_pos];
+                // LRC is XOR over (STX, ETX] — bytes after STX through
+                // ETX inclusive — matching `build_frame`.
+                let computed_lrc = raw[s + 1..=e].iter().fold(0u8, |acc, &b| acc ^ b);
+                if received_lrc != computed_lrc {
+                    return Err(format!(
+                        "PAX frame LRC mismatch: expected {computed_lrc:02X}, got {received_lrc:02X}"
+                    ));
+                }
+
                 let payload = &raw[s + 1..e];
                 let fields: Vec<String> = payload
                     .split(|&b| b == FS)
@@ -200,7 +252,7 @@ impl EcrProtocol for PaxProtocol {
             } else {
                 None
             },
-            raw_response: Some(serde_json::json!({"fields": fields})),
+            raw_response: Some(redacted_raw_response(&fields)),
             started_at: started,
             completed_at: completed,
         })
@@ -251,7 +303,7 @@ impl EcrProtocol for PaxProtocol {
             } else {
                 fields.first().cloned()
             },
-            raw_response: Some(serde_json::json!({"fields": fields})),
+            raw_response: Some(redacted_raw_response(&fields)),
         })
     }
 
@@ -319,22 +371,74 @@ mod tests {
         assert_eq!(frame[etx_pos + 1], computed_lrc);
     }
 
+    /// Helper: build a `STX | <fields joined by FS> | ETX | LRC` frame
+    /// using the real LRC formula. Mirrors what a PAX terminal would
+    /// emit on the wire.
+    fn build_response_frame(fields: &[&[u8]]) -> Vec<u8> {
+        let mut raw = vec![STX];
+        for (i, f) in fields.iter().enumerate() {
+            if i > 0 {
+                raw.push(FS);
+            }
+            raw.extend_from_slice(f);
+        }
+        raw.push(ETX);
+        let lrc = raw[1..].iter().fold(0u8, |acc, &b| acc ^ b);
+        raw.push(lrc);
+        raw
+    }
+
     #[test]
     fn test_parse_response_fields() {
-        let mut raw = vec![STX];
-        raw.extend_from_slice(b"000000");
-        raw.push(FS);
-        raw.extend_from_slice(b"AUTH123");
-        raw.push(FS);
-        raw.extend_from_slice(b"REF456");
-        raw.push(ETX);
-        raw.push(0x00); // dummy LRC
-
+        let raw = build_response_frame(&[b"000000", b"AUTH123", b"REF456"]);
         let fields = PaxProtocol::parse_response(&raw).unwrap();
         assert_eq!(fields.len(), 3);
         assert_eq!(fields[0], "000000");
         assert_eq!(fields[1], "AUTH123");
         assert_eq!(fields[2], "REF456");
+    }
+
+    /// Wave 11 L: a frame with a corrupted LRC must be rejected, not
+    /// silently parsed. Without this guard, a transit error would
+    /// produce a "valid" parse of garbage bytes — including possibly
+    /// reporting a payment as approved when the terminal actually
+    /// declined.
+    #[test]
+    fn test_parse_response_rejects_corrupt_lrc() {
+        let mut raw = build_response_frame(&[b"000000", b"AUTH123"]);
+        // Flip the LRC byte's bottom bit to corrupt it.
+        let last = raw.len() - 1;
+        raw[last] ^= 0x01;
+
+        let result = PaxProtocol::parse_response(&raw);
+        assert!(
+            result.is_err(),
+            "parse_response must reject a frame with corrupted LRC"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("LRC mismatch"),
+            "error must mention LRC mismatch; got: {err}"
+        );
+    }
+
+    /// Wave 11 L: a frame truncated at ETX (no LRC byte present) is
+    /// also rejected. The buffer-shape guard prevents a panic on
+    /// `raw[lrc_pos]` and surfaces the truncation explicitly.
+    #[test]
+    fn test_parse_response_rejects_truncated_frame() {
+        let raw = vec![STX, b'0', b'0', b'0', ETX]; // no LRC after ETX
+
+        let result = PaxProtocol::parse_response(&raw);
+        assert!(
+            result.is_err(),
+            "parse_response must reject a frame missing LRC"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Truncated"),
+            "error must mention truncation; got: {err}"
+        );
     }
 
     #[test]

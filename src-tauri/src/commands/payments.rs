@@ -213,56 +213,86 @@ pub async fn payment_update_payment_status(
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
-    let (current_payment_status, completed_payment_rows): (String, i64) = conn
-        .query_row(
-            "SELECT COALESCE(payment_status, 'pending'),
-                    COALESCE((
-                        SELECT COUNT(*)
-                        FROM order_payments
-                        WHERE order_id = orders.id
-                          AND status = 'completed'
-                    ), 0)
-             FROM orders
-             WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+
+    // Wave 6 H15: the SELECT of `current_payment_status` +
+    // `completed_payment_rows` followed by the UPDATE used to run on the
+    // same connection but without an explicit `BEGIN IMMEDIATE`. A
+    // concurrent `void_payment` between the SELECT and the UPDATE could
+    // remove the last completed payment row, and we would still stamp
+    // the order `paid` with 0 completed payments. Wrapping both in a
+    // single IMMEDIATE transaction closes that window.
+    //
+    // Wave 6 C8: the UPDATE no longer writes `payment_method` — the
+    // derived value is reconstructed on read via
+    // `payments::derive_payment_method`. Removing the stored column
+    // write is the first step toward dropping the column entirely in
+    // a later migration.
+    //
+    // Wave 6 M3: the sync-queue idempotency key is anchored on
+    // `(order_id, payment_status)` so a double-submission of the same
+    // status change produces the same key. Previously the
+    // `Uuid::new_v4()` suffix rotated the key on every invocation.
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin payment-status transaction: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        let (current_payment_status, completed_payment_rows): (String, i64) = conn
+            .query_row(
+                "SELECT COALESCE(payment_status, 'pending'),
+                        COALESCE((
+                            SELECT COUNT(*)
+                            FROM order_payments
+                            WHERE order_id = orders.id
+                              AND status = 'completed'
+                        ), 0)
+                 FROM orders
+                 WHERE id = ?1",
+                rusqlite::params![order_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| format!("load payment reconciliation context: {e}"))?;
+        if completed_payment_rows == 0
+            && current_payment_status != payment_status
+            && matches!(
+                payment_status.as_str(),
+                "paid" | "partially_paid" | "refunded"
+            )
+        {
+            return Err(
+                "Cannot promote payment status without completed payment rows; use payment_record instead"
+                    .into(),
+            );
+        }
+        conn.execute(
+            "UPDATE orders
+             SET payment_status = ?1,
+                 sync_status = 'pending',
+                 updated_at = ?2
+             WHERE id = ?3",
+            rusqlite::params![payment_status, now, order_id],
         )
-        .map_err(|e| format!("load payment reconciliation context: {e}"))?;
-    if completed_payment_rows == 0
-        && current_payment_status != payment_status
-        && matches!(
-            payment_status.as_str(),
-            "paid" | "partially_paid" | "refunded"
-        )
-    {
-        return Err(
-            "Cannot promote payment status without completed payment rows; use payment_record instead"
-                .into(),
-        );
+        .map_err(|e| format!("update payment status: {e}"))?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("commit payment-status transaction: {e}"))?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
     }
-    conn.execute(
-        "UPDATE orders
-         SET payment_status = ?1,
-             payment_method = COALESCE(?2, payment_method),
-             sync_status = 'pending',
-             updated_at = ?3
-         WHERE id = ?4",
-        rusqlite::params![payment_status, payment_method, now, order_id],
-    )
-    .map_err(|e| format!("update payment status: {e}"))?;
 
     let event_payload = serde_json::json!({
         "orderId": order_id,
         "paymentStatus": payment_status,
         "paymentMethod": payment_method
     });
-    let idem = format!(
-        "order:update-payment-method:{}:{}",
-        order_id,
-        uuid::Uuid::new_v4()
-    );
+    let idem = format!("order:status:{}:{}", order_id, payment_status);
     let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+        "INSERT OR IGNORE INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
          VALUES ('order', ?1, 'update', ?2, ?3)",
         rusqlite::params![order_id, event_payload.to_string(), idem],
     );
@@ -354,8 +384,22 @@ pub async fn payment_print_split_receipt(
         .path()
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
-    if let Err(e) = crate::print::process_pending_jobs(&db, &data_dir) {
-        tracing::warn!(payment_id = %payment_id, error = %e, "Immediate split receipt print failed, worker will retry");
+    // Wave 11 Item 8 deferred follow-up: `process_pending_jobs` does
+    // blocking SQLite + TCP I/O. Calling it inline parked the Tokio
+    // runtime worker; offload to `spawn_blocking` with a cloned
+    // AppHandle so the inner closure can re-acquire `DbState` without
+    // borrowing the outer `tauri::State`'s lifetime.
+    let app_clone = app.clone();
+    let data_dir_clone = data_dir.clone();
+    let payment_id_for_log = payment_id.clone();
+    let job_result = tokio::task::spawn_blocking(move || {
+        let db_state = app_clone.state::<db::DbState>();
+        crate::print::process_pending_jobs(db_state.inner(), &data_dir_clone)
+    })
+    .await
+    .map_err(|join_err| format!("spawn_blocking join: {join_err}"))?;
+    if let Err(e) = job_result {
+        tracing::warn!(payment_id = %payment_id_for_log, error = %e, "Immediate split receipt print failed, worker will retry");
     }
 
     Ok(enqueue_result)

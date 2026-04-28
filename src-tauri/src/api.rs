@@ -22,24 +22,52 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// but referencing the singleton directly avoids even that overhead. Each
 /// caller sets its own timeout via `RequestBuilder::timeout()` rather
 /// than the client-level default.
-static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+/// Wave 9 H2: the shared HTTP client's builder can fail — rarely (typically
+/// only when the system TLS certificate store is unavailable on the very
+/// first call), but a `.expect()` here used to panic the entire process
+/// inside a Tauri command, which is uniformly worse than any API error.
+///
+/// The cell now stores a `Result<Client, String>`: init runs exactly once,
+/// and every subsequent caller sees either `Ok(&Client)` (the cached
+/// build-once client) or the same `Err` message repeated. Callers
+/// propagate the error instead of panicking.
+static HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
 
-fn shared_client() -> &'static Client {
-    HTTP_CLIENT.get_or_init(|| {
-        Client::builder()
-            .build()
-            .expect("build shared reqwest Client")
-    })
+fn shared_client() -> Result<&'static Client, String> {
+    HTTP_CLIENT
+        .get_or_init(|| {
+            // Wave 11 L: explicit connect timeout prevents a stalled TCP
+            // handshake (e.g. dead admin-dashboard IP, captive-portal
+            // sinkhole) from hanging the shared pool indefinitely. The
+            // per-request timeout (`.timeout()`) still governs the
+            // overall request deadline; `connect_timeout` bounds just
+            // the handshake phase.
+            Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|e| format!("build shared reqwest Client: {e}"))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
 }
 
 /// Redact a sensitive string for log output: shows only the last 4 characters.
 /// Returns `"****"` for strings shorter than 5 chars, `"...XXXX"` otherwise.
 pub fn redact(s: &str) -> String {
-    if s.len() <= 4 {
+    let mut tail = s.chars().rev().take(4).collect::<Vec<_>>();
+    if tail.len() < 4 {
         "****".to_string()
     } else {
-        format!("...{}", &s[s.len() - 4..])
+        tail.reverse();
+        format!("...{}", tail.into_iter().collect::<String>())
     }
+}
+
+fn is_local_plain_http_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://localhost")
+        || lower.starts_with("http://127.0.0.1")
+        || lower.starts_with("http://[::1]")
 }
 
 /// Timeout used specifically for the lightweight connectivity test.
@@ -138,6 +166,7 @@ pub fn extract_terminal_id_from_connection_string(raw: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[cfg(test)]
 fn extract_terminal_id_from_body(body: Option<&Value>) -> Option<String> {
     let body = body?;
     let resolved = match body {
@@ -203,7 +232,19 @@ pub async fn test_connectivity(admin_url: &str, api_key: &str) -> ConnectivityRe
         extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
     let health_url = format!("{url}/api/health");
 
-    let client = shared_client();
+    // Wave 9 H2: a client-build failure used to panic; now it surfaces as
+    // a regular `success: false` connectivity failure so the renderer
+    // can present it instead of crashing the process.
+    let client = match shared_client() {
+        Ok(c) => c,
+        Err(e) => {
+            return ConnectivityResult {
+                success: false,
+                latency_ms: None,
+                error: Some(format!("HTTP client init failed: {e}")),
+            };
+        }
+    };
 
     let start = Instant::now();
 
@@ -259,6 +300,12 @@ pub async fn fetch_from_admin(
     body: Option<Value>,
 ) -> Result<Value, String> {
     let base = normalize_admin_url(admin_url);
+    if base.starts_with("http://") && !is_local_plain_http_url(&base) {
+        return Err(
+            "Refusing non-local plain HTTP admin URL; use HTTPS or localhost for development"
+                .to_string(),
+        );
+    }
     let resolved_api_key =
         extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
     let full_url = format!("{base}{path}");
@@ -268,24 +315,14 @@ pub async fn fetch_from_admin(
         .parse()
         .map_err(|_| format!("Invalid HTTP method: {method}"))?;
 
-    let client = shared_client();
+    // Wave 9 H2: propagate client-init failures via the function's
+    // `Result<_, String>` return type instead of panicking.
+    let client = shared_client()?;
 
-    // Include terminal_id header — required by verifyPosAuth on the admin side
+    // Include terminal_id header — required by verifyPosAuth on the admin side.
+    // Only trusted local/keyring state or the onboarding connection string may
+    // supply this identity; never accept a renderer/body-provided fallback.
     let mut terminal_id = crate::storage::get_credential("terminal_id").unwrap_or_default();
-    if terminal_id.trim().is_empty() {
-        // If the keyring lacks a terminal_id, fall back to whatever the
-        // caller put in the request body so the server still receives a
-        // terminal header. We intentionally do NOT persist this value:
-        // the body is caller-supplied and unverified at this point, so
-        // trusting it for durable storage would let a bad payload seed
-        // the keyring with an attacker-chosen identity. The
-        // connection-string path below (which came through onboarding
-        // and is cryptographically scoped) remains the only trusted
-        // source that writes to the keyring.
-        if let Some(body_terminal_id) = extract_terminal_id_from_body(body.as_ref()) {
-            terminal_id = body_terminal_id;
-        }
-    }
     if let Some(decoded_tid) = extract_terminal_id_from_connection_string(api_key) {
         let existing = terminal_id.trim();
         if existing.is_empty() || existing != decoded_tid {
@@ -299,6 +336,9 @@ pub async fn fetch_from_admin(
             terminal_id = decoded_tid.clone();
             let _ = crate::storage::set_credential("terminal_id", &decoded_tid);
         }
+    }
+    if terminal_id.trim().is_empty() {
+        return Err("Terminal not configured: missing terminal_id".to_string());
     }
 
     let mut req = client

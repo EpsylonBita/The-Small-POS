@@ -1683,9 +1683,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                         onClick={async () => {
                           try {
                             if (hardwareStatus?.scale?.connected) {
-                              await bridge.invoke('scale_disconnect')
+                              await bridge.hardware.scaleDisconnect()
                             } else {
-                              await bridge.invoke('scale_connect', { port: scalePort, baud_rate: Number(scaleBaudRate), protocol: scaleProtocol })
+                              await bridge.hardware.scaleConnect({ port: scalePort, baud: Number(scaleBaudRate), protocol: scaleProtocol })
                             }
                           } catch (e) { console.error('Scale action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
                         }}
@@ -1757,13 +1757,13 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                         onClick={async () => {
                           try {
                             if (hardwareStatus?.customerDisplay?.connected) {
-                              await bridge.invoke('display_disconnect')
+                              await bridge.hardware.displayDisconnect()
                             } else {
-                              await bridge.invoke('display_connect', {
-                                connection_type: displayConnectionType,
-                                port_or_ip: displayPort,
-                                port_number: displayConnectionType === 'network' ? Number(displayTcpPort) : null,
-                                baud_rate: displayConnectionType === 'serial' ? Number(displayBaudRate) : null,
+                              await bridge.hardware.displayConnect({
+                                connectionType: displayConnectionType,
+                                target: displayPort,
+                                portNumber: displayConnectionType === 'network' ? Number(displayTcpPort) : undefined,
+                                baudRate: displayConnectionType === 'serial' ? Number(displayBaudRate) : undefined,
                               })
                             }
                           } catch (e) { console.error('Display action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
@@ -1822,9 +1822,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                         onClick={async () => {
                           try {
                             if (hardwareStatus?.serialScanner?.connected) {
-                              await bridge.invoke('scanner_serial_stop')
+                              await bridge.hardware.scannerSerialStop()
                             } else {
-                              await bridge.invoke('scanner_serial_start', { port: scannerPort, baud_rate: Number(scannerBaudRate) })
+                              await bridge.hardware.scannerSerialStart({ port: scannerPort, baud: Number(scannerBaudRate) })
                             }
                           } catch (e) { console.error('Scanner action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
                         }}

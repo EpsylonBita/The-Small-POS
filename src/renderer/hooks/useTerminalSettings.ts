@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getBridge, offEvent, onEvent } from '../../lib'
+import type { TerminalSettings } from '../../lib/ipc-adapter'
 
 // Terminal settings are typically returned as a flat map like "category.key" -> value
 // but we defensively support nested objects { category: { key: value } } too.
-export type TerminalSettings = Record<string, any>
+// Wave 8 H28: re-export the canonical type from ipc-adapter so consumers stay
+// aligned with Rust extractor coverage and don't fall back to a permissive
+// `Record<string, any>` shadow type that bypasses the typed interface.
+export type { TerminalSettings }
 
 export function useTerminalSettings() {
   const bridge = useMemo(() => getBridge(), [])

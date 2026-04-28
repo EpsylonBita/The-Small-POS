@@ -420,13 +420,23 @@ pub async fn serial_close(arg0: Option<Value>) -> Result<Value, String> {
 #[tauri::command]
 pub async fn serial_read(arg0: Option<Value>, arg1: Option<Value>) -> Result<Value, String> {
     let (handle, max_bytes) = parse_serial_read_args(arg0, arg1)?;
-    serial::read_port(&handle, max_bytes)
+    // Wave 2 H19: the Tauri command is `async`, so it runs on a Tokio
+    // worker. `serial::read_port` is a blocking call that may hold up to
+    // the configured read timeout. Offload to `spawn_blocking` so the
+    // runtime is not parked per invocation.
+    tokio::task::spawn_blocking(move || serial::read_port(&handle, max_bytes))
+        .await
+        .map_err(|e| format!("serial_read join error: {e}"))?
 }
 
 #[tauri::command]
 pub async fn serial_write(arg0: Option<Value>, arg1: Option<Value>) -> Result<Value, String> {
     let (handle, data) = parse_serial_write_args(arg0, arg1)?;
-    serial::write_port(&handle, &data)
+    // Wave 2 H19: same rationale as `serial_read` — keep blocking I/O
+    // off the Tokio runtime.
+    tokio::task::spawn_blocking(move || serial::write_port(&handle, &data))
+        .await
+        .map_err(|e| format!("serial_write join error: {e}"))?
 }
 
 #[tauri::command]

@@ -53,6 +53,49 @@ let hydrated = false;
 let hydratePromise: Promise<void> | null = null;
 
 /**
+ * Wave 8 H29: narrow an unknown blob to `SecureSessionUser` or reject it.
+ *
+ * The keyring is opaque storage and the renderer's session shape evolves
+ * independently from this module, so we only check the fields that are
+ * **critical for identity**: `staffId`, `branchId`, `terminalId`, and
+ * `organizationId` must each be non-empty strings when present. A blob
+ * that parses as JSON but fails one of those checks used to be accepted
+ * by a bare `as SecureSessionUser` cast and then cause downstream crashes
+ * (e.g. a `staffId: 42` number would fail `.startsWith(...)` deep in
+ * a permission check). The bounds here are deliberately loose: unknown
+ * extra fields pass through untouched, `undefined` for a critical field
+ * is accepted because shift-context fallback chains legitimately produce
+ * a partial session during auth hand-off.
+ */
+function validateSecureSessionUser(raw: unknown): SecureSessionUser | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const criticalStringFields = [
+    'staffId',
+    'branchId',
+    'terminalId',
+    'organizationId',
+  ] as const;
+  for (const key of criticalStringFields) {
+    const value = obj[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'string' || value.trim() === '') {
+      console.warn(
+        `[secure-session] rejecting blob: ${key} must be a non-empty string when present, got ${typeof value}`,
+      );
+      return null;
+    }
+  }
+  if (obj.role !== undefined && obj.role !== null) {
+    if (typeof obj.role !== 'object') {
+      console.warn('[secure-session] rejecting blob: role must be an object when present');
+      return null;
+    }
+  }
+  return obj as SecureSessionUser;
+}
+
+/**
  * Load the persisted session from the OS keyring into memory. Idempotent:
  * subsequent calls return the same resolved promise. Must be awaited
  * early in app startup; consumers calling `getSecureSessionSync()` before
@@ -66,15 +109,34 @@ export async function hydrateSecureSession(): Promise<void> {
     try {
       const raw = await getBridge().secureSession.get();
       if (raw && typeof raw === 'string') {
+        let parsed: unknown = null;
+        let parseOk = false;
         try {
-          cached = JSON.parse(raw) as SecureSessionUser;
+          parsed = JSON.parse(raw);
+          parseOk = true;
         } catch (parseErr) {
           console.warn(
             '[secure-session] failed to parse persisted session; treating as empty',
             parseErr,
           );
-          cached = null;
-          // Best-effort: clear the corrupted blob so the next write is clean.
+        }
+
+        // Wave 8 H29: even when JSON.parse succeeded, run the validator
+        // before accepting the blob. A wrong-shape session (e.g. a
+        // staffId that isn't a string) used to flow unchecked through
+        // `as SecureSessionUser` and cause downstream crashes far from
+        // the source.
+        const validated = parseOk ? validateSecureSessionUser(parsed) : null;
+        cached = validated;
+        if (parseOk && validated === null) {
+          console.warn(
+            '[secure-session] persisted blob failed schema validation; treating as empty and clearing',
+          );
+        }
+        if (!parseOk || validated === null) {
+          // Best-effort: clear the corrupted/invalid blob so the next
+          // write is clean and the user is forced back through login
+          // rather than living with a silently-null session.
           try {
             await getBridge().secureSession.clear();
           } catch (clearErr) {

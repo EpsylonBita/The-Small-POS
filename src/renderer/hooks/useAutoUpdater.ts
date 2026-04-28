@@ -216,8 +216,12 @@ export function useAutoUpdater() {
       },
     } as const;
 
+    // Wave 11 L: `onEvent` is now generic. The heterogeneous-listener
+    // record passes a different callback type per channel; we widen the
+    // listener to `(data: any) => void` at the iteration site so the
+    // union doesn't try to infer a single T from all branches.
     Object.entries(listeners).forEach(([channel, listener]) => {
-      onEvent(channel, listener);
+      onEvent(channel, listener as (data: any) => void);
     });
 
     bridge.updates
@@ -257,7 +261,7 @@ export function useAutoUpdater() {
 
     return () => {
       Object.entries(listeners).forEach(([channel, listener]) => {
-        offEvent(channel, listener);
+        offEvent(channel, listener as (data: any) => void);
       });
       if (checkingTimeoutRef.current) {
         clearTimeout(checkingTimeoutRef.current);

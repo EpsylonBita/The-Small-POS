@@ -5,7 +5,6 @@ import { useI18n } from '../contexts/i18n-context';
 interface BulkActionsBarProps {
   selectedCount: number;
   selectionType?: 'pickup' | 'delivery' | null;
-  canConvertPickupToDelivery?: boolean;
   deliverySelectionCanBeCompleted?: boolean;
   activeTab: 'orders' | 'delivered' | 'canceled' | 'tables';
   onBulkAction: (action: string) => void;
@@ -24,7 +23,6 @@ interface ActionConfig {
 const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
   selectedCount,
   selectionType = null,
-  canConvertPickupToDelivery = false,
   deliverySelectionCanBeCompleted = false,
   activeTab,
   onBulkAction,
@@ -198,9 +196,6 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
 
           {selectionType === 'pickup' && (
             <>
-              {canConvertPickupToDelivery && (
-                <button className={getButtonStyles('primary')} onClick={(e) => { e.preventDefault(); onBulkAction('delivery'); }}>{t('bulkActions.delivery')}</button>
-              )}
               <button className={`${getButtonStyles('warning')}`} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}>{t('bulkActions.delivered')}</button>
               <button className={getButtonStyles('info')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}>{t('bulkActions.edit')}</button>
               <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}>{t('bulkActions.cancel')}</button>

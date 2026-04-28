@@ -185,9 +185,7 @@ impl GenericEscPosFiscal {
                 // LRC itself, exclusive).
                 if STRICT_LRC && e >= 2 && e - 1 > s {
                     let expected_lrc = raw[e - 1];
-                    let computed_lrc = raw[s + 1..e - 1]
-                        .iter()
-                        .fold(0u8, |acc, &b| acc ^ b);
+                    let computed_lrc = raw[s + 1..e - 1].iter().fold(0u8, |acc, &b| acc ^ b);
                     if computed_lrc != expected_lrc {
                         return Err(format!(
                             "Fiscal frame LRC mismatch: expected 0x{expected_lrc:02X}, \

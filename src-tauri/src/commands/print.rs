@@ -615,9 +615,15 @@ pub async fn payment_print_receipt(
     let entity_type = parse_requested_receipt_entity_type(arg0.as_ref(), arg1.as_ref());
     let printer_profile_id = parse_printer_profile_id_payload(arg0.as_ref(), arg1.as_ref());
     let order_id_raw = parse_order_id_payload(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
-    drop(conn);
+    // Wave 11 Item 8: scope the `MutexGuard` to a block so the borrow
+    // checker can prove the (non-Send) guard is dropped before the
+    // `.await` below. An explicit `drop(conn)` is insufficient — the
+    // future-Send analysis ignores explicit drops and only respects
+    // lexical scope ends.
+    let order_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?
+    };
 
     if !crate::print::is_print_action_enabled(&db, "payment_receipt") {
         return Ok(serde_json::json!({ "success": true, "skipped": true }));
@@ -626,13 +632,25 @@ pub async fn payment_print_receipt(
     let enqueue_result =
         print::enqueue_print_job(&db, entity_type, &order_id, printer_profile_id.as_deref())?;
 
-    // Process the job immediately instead of waiting for the background worker
+    // Process the job immediately instead of waiting for the background worker.
+    // Wave 11 Item 8 deferred follow-up: offload to `spawn_blocking` so the
+    // sync SQLite + TCP I/O does not park the Tokio runtime worker. Clone
+    // AppHandle so the inner closure can re-acquire `DbState` independently.
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
-    if let Err(e) = print::process_pending_jobs(&db, &data_dir) {
-        warn!(order_id = %order_id, error = %e, "Immediate print processing failed, worker will retry");
+    let app_clone = app.clone();
+    let data_dir_clone = data_dir.clone();
+    let order_id_for_log = order_id.clone();
+    let job_result = tokio::task::spawn_blocking(move || {
+        let db_state = app_clone.state::<db::DbState>();
+        print::process_pending_jobs(db_state.inner(), &data_dir_clone)
+    })
+    .await
+    .map_err(|join_err| format!("spawn_blocking join: {join_err}"))?;
+    if let Err(e) = job_result {
+        warn!(order_id = %order_id_for_log, error = %e, "Immediate print processing failed, worker will retry");
     }
 
     Ok(enqueue_result)
@@ -656,13 +674,25 @@ pub async fn kitchen_print_ticket(
         printer_profile_id.as_deref(),
     )?;
 
-    // Process the job immediately instead of waiting for the background worker
+    // Process the job immediately instead of waiting for the background worker.
+    // Wave 11 Item 8 deferred follow-up: offload to `spawn_blocking` so the
+    // sync SQLite + TCP I/O does not park the Tokio runtime worker. Clone
+    // AppHandle so the inner closure can re-acquire `DbState` independently.
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
-    if let Err(e) = print::process_pending_jobs(&db, &data_dir) {
-        warn!(order_id = %order_id, error = %e, "Immediate kitchen ticket processing failed, worker will retry");
+    let app_clone = app.clone();
+    let data_dir_clone = data_dir.clone();
+    let order_id_for_log = order_id.clone();
+    let job_result = tokio::task::spawn_blocking(move || {
+        let db_state = app_clone.state::<db::DbState>();
+        print::process_pending_jobs(db_state.inner(), &data_dir_clone)
+    })
+    .await
+    .map_err(|join_err| format!("spawn_blocking join: {join_err}"))?;
+    if let Err(e) = job_result {
+        warn!(order_id = %order_id_for_log, error = %e, "Immediate kitchen ticket processing failed, worker will retry");
     }
 
     Ok(enqueue_result)

@@ -530,45 +530,18 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         });
       };
 
-      // Listen for order updates (e.g., after editing items)
-      const handleOrderUpdated = (orderData: Partial<Order> & { id: string }) => {
-        console.log('📡 [useOrderStore] Received order updated:', orderData);
-
-        // Validate order data
-        if (!orderData || !orderData.id) {
-          console.warn('⚠️ [useOrderStore] Invalid order update data received:', orderData);
-          return;
-        }
-
-        set((state) => {
-          const combined = [...state.orders, ...state.pendingExternalOrders];
-          const existingOrderIndex = findOrderIndex(combined, orderData);
-
-          if (existingOrderIndex >= 0) {
-            console.log('📡 [useOrderStore] Updating order in state:', orderData.id);
-            const updatedOrders = [...combined];
-            const currentStatus = updatedOrders[existingOrderIndex].status as string;
-            const incomingStatus = orderData.status
-              ? mapStatusForPOS(orderData.status)
-              : currentStatus;
-            updatedOrders[existingOrderIndex] = {
-              ...updatedOrders[existingOrderIndex],
-              ...orderData,
-              status: (currentStatus === 'cancelled' || currentStatus === 'canceled') && incomingStatus !== 'cancelled'
-                ? currentStatus
-                : incomingStatus,
-              items: orderData.items || updatedOrders[existingOrderIndex].items,
-              totalAmount: orderData.totalAmount ?? orderData.total_amount ?? updatedOrders[existingOrderIndex].totalAmount,
-            } as Order;
-            return splitOrdersForState(updatedOrders);
-          }
-
-          console.log('📡 [useOrderStore] Order not found in state, skipping update:', orderData.id);
-          return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
-        });
-
-        get()._invalidateCache();
-      };
+      // Wave 8 H25: the generic `order-updated` subscription was REMOVED.
+      // Rust never emits `order_updated`, and the event-bridge `EVENT_MAP`
+      // has no mapping for it — so `onEvent('order-updated', …)` used to
+      // attach a handler that could never fire. Any real order mutation
+      // comes through one of the already-subscribed channels:
+      //   • order-realtime-update   (supabase realtime → merged payload)
+      //   • order-status-updated    (status transitions)
+      //   • order-payment-updated   (payment status / method changes)
+      //   • order-created / order-deleted (lifecycle)
+      // If a future feature needs a "something about this order changed"
+      // signal, add the Tauri emitter AND add `order_updated` to
+      // `event-bridge.ts::EVENT_MAP` — do not re-add an orphan handler.
 
       // Listen for order deletions (handles both direct orderId and realtime payload formats)
       const handleOrderDelete = (data: { orderId?: string; old?: { id: string } }) => {
@@ -679,7 +652,6 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       onEvent('order-status-updated', handleOrderStatusUpdate);
       onEvent('order-payment-updated', handlePaymentUpdate);
       onEvent('order-created', handleOrderCreated);
-      onEvent('order-updated', handleOrderUpdated);
       onEvent('order-deleted', handleOrderDelete);
       onEvent('order-sync-conflict', handleSyncConflict);
       onEvent('order-conflict-resolved', handleConflictResolved);
@@ -692,7 +664,6 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         () => offEvent('order-status-updated', handleOrderStatusUpdate),
         () => offEvent('order-payment-updated', handlePaymentUpdate),
         () => offEvent('order-created', handleOrderCreated),
-        () => offEvent('order-updated', handleOrderUpdated),
         () => offEvent('order-deleted', handleOrderDelete),
         () => offEvent('order-sync-conflict', handleSyncConflict),
         () => offEvent('order-conflict-resolved', handleConflictResolved),

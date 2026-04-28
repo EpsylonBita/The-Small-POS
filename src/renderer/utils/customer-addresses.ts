@@ -19,6 +19,7 @@ export type MaterializedCustomerAddress = {
     | undefined;
   latitude?: number | null;
   longitude?: number | null;
+  address_fingerprint?: string | null;
   address_type: string;
   is_default: boolean;
   created_at: string;
@@ -44,6 +45,7 @@ type CustomerAddressLike = {
     | null;
   latitude?: number | null;
   longitude?: number | null;
+  address_fingerprint?: string | null;
   address_type?: string | null;
   is_default?: boolean | null;
   created_at?: string | null;

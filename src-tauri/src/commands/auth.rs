@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tauri::Emitter;
 
-use crate::{api, auth, db, storage};
+use crate::{api, auth, core_helpers, db, storage};
 
 fn parse_permission_payload(arg0: Option<Value>) -> Option<String> {
     let payload = arg0?;
@@ -210,6 +210,16 @@ pub async fn auth_setup_pin(
             return;
         };
 
+        // Wave 1 C3: validate terminal_id shape before path interpolation.
+        // Same rationale as commands/api_bridge.rs (C2). Because this runs
+        // in a detached fire-and-forget tokio::spawn, a validation failure
+        // is logged at warn! and the ack is skipped — the server will
+        // re-send the pin_reset_required flag on the next settings fetch,
+        // giving us another chance if the keyring is later repaired.
+        let Ok(terminal_id) = core_helpers::validate_terminal_id_path_safe(&terminal_id) else {
+            tracing::warn!("Skipping PIN-reset ack: terminal_id in keyring failed UUID validation");
+            return;
+        };
         let path = format!("/api/pos/settings/{terminal_id}");
         let body = serde_json::json!({
             "settings": { "terminal": { "pin_reset_required": false } }

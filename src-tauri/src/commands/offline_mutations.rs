@@ -177,6 +177,7 @@ where
     for item in items.iter_mut() {
         let item_id = item
             .get("id")
+            .or_else(|| item.get("product_id"))
             .and_then(Value::as_str)
             .map(|value| value.trim().to_string())
             .unwrap_or_default();
@@ -314,16 +315,27 @@ pub(crate) fn patch_menu_flag(
 fn patch_inventory_cache(
     db: &db::DbState,
     product_id: &str,
-    new_quantity: i64,
+    adjustment: i64,
 ) -> Result<Option<Value>, String> {
     let mut updated: Option<Value> = None;
-    patch_cached_admin_paths(db, "/api/pos/sync/inventory_items", |_path, data| {
-        let Some(items) = get_array_mut_path(data, &["data"]) else {
+    patch_cached_admin_paths(db, "/api/pos/inventory", |_path, data| {
+        let items = if let Some(items) = get_array_mut_path(data, &["inventory"]) {
+            items
+        } else if let Some(items) = get_array_mut_path(data, &["data"]) {
+            items
+        } else {
             return Ok(false);
         };
         let now = now_rfc3339();
         let result = update_array_record(items, product_id, |object| {
-            set_object_field(object, "stock_quantity", Value::from(new_quantity));
+            let current = object
+                .get("stock_quantity")
+                .or_else(|| object.get("quantity"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let next_quantity = current.saturating_add(adjustment);
+            set_object_field(object, "stock_quantity", Value::from(next_quantity));
+            set_object_field(object, "quantity", Value::from(next_quantity));
             set_object_field(object, "updated_at", Value::String(now.clone()));
         });
         if let Some(value) = result {

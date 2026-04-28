@@ -1473,12 +1473,10 @@ pub fn probe_printer_serial(port_name: &str, baud_rate: u32) -> Result<(), Strin
     // ESC @  — ESC/POS "initialise printer". Universally supported and
     // has no observable side-effect on a healthy device.
     const ESC_AT: &[u8] = &[0x1B, 0x40];
-    port.write_all(ESC_AT).map_err(|e| {
-        format!("Probe write to serial printer {port_name} @ {baud_rate}: {e}")
-    })?;
-    port.flush().map_err(|e| {
-        format!("Probe flush on serial printer {port_name} @ {baud_rate}: {e}")
-    })?;
+    port.write_all(ESC_AT)
+        .map_err(|e| format!("Probe write to serial printer {port_name} @ {baud_rate}: {e}"))?;
+    port.flush()
+        .map_err(|e| format!("Probe flush on serial printer {port_name} @ {baud_rate}: {e}"))?;
     Ok(())
 }
 

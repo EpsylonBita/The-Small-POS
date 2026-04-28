@@ -61,7 +61,18 @@ const ALL_KEYS: &[&str] = &[
 
 /// Retrieve a single credential from the OS keyring. Returns `None` when the
 /// entry does not exist (or the platform returns a "not found" error).
+///
+/// Under `#[cfg(test)]`, if a `tests::fake_keyring` is installed on the
+/// current thread this delegates to the fake — tests that opt in get
+/// hermetic, parallel-safe credential storage. Tests that do not install
+/// a fake see the existing real-OS-keyring behaviour (namespaced to
+/// `the-small-pos-test`).
 pub fn get_credential(key: &str) -> Option<String> {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        return crate::tests::fake_keyring::get(key);
+    }
+
     let entry = match Entry::new(SERVICE_NAME, key) {
         Ok(e) => e,
         Err(e) => {
@@ -80,7 +91,16 @@ pub fn get_credential(key: &str) -> Option<String> {
 }
 
 /// Store a credential in the OS keyring.
+///
+/// Honours an installed `tests::fake_keyring` under `#[cfg(test)]`
+/// (see [`get_credential`] for the rationale).
 pub fn set_credential(key: &str, value: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        crate::tests::fake_keyring::set(key, value);
+        return Ok(());
+    }
+
     let entry = Entry::new(SERVICE_NAME, key).map_err(|e| e.to_string())?;
     entry.set_password(value).map_err(|e| e.to_string())?;
     Ok(())
@@ -88,7 +108,15 @@ pub fn set_credential(key: &str, value: &str) -> Result<(), String> {
 
 /// Delete a credential from the OS keyring. Silently succeeds if the entry
 /// does not exist.
+///
+/// Honours an installed `tests::fake_keyring` under `#[cfg(test)]`.
 pub fn delete_credential(key: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        crate::tests::fake_keyring::delete(key);
+        return Ok(());
+    }
+
     let entry = Entry::new(SERVICE_NAME, key).map_err(|e| e.to_string())?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),

@@ -1,5 +1,6 @@
 import type { Customer, CustomerAddress } from '../../shared/types/customer';
 import type { Order } from '../../shared/types/orders';
+import { resolveMenuItemPrice } from './order-type-pricing';
 import { resolvePersistedCustomerId } from './persisted-customer-id';
 
 export interface ResolvedPickupToDeliveryAddress {
@@ -17,6 +18,8 @@ export interface ResolvedPickupToDeliveryAddress {
     | null;
   latitude: number | null;
   longitude: number | null;
+  addressFingerprint: string | null;
+  deliveryZoneId: string | null;
 }
 
 type PickupToDeliveryCustomer = Customer & {
@@ -93,12 +96,49 @@ export const resolvePickupToDeliveryAddress = (
     longitude:
       selectedAddress?.longitude ??
       (Number.isFinite(Number(customer.longitude)) ? Number(customer.longitude) : null),
+    addressFingerprint:
+      normalizeText(selectedAddress?.address_fingerprint) ||
+      normalizeText(customer.address_fingerprint || undefined) ||
+      null,
+    deliveryZoneId:
+      normalizeText((selectedAddress as any)?.delivery_zone_id) ||
+      normalizeText((customer as any)?.delivery_zone_id) ||
+      null,
   };
 };
 
 const toNumber = (value: unknown): number => {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : 0;
+};
+
+const resolveOrderItems = (order: Partial<Order>): any[] => {
+  const rawItems = (order as Partial<Order> & { items?: unknown }).items;
+  return Array.isArray(rawItems) ? rawItems : [];
+};
+
+const itemQuantity = (item: any): number => {
+  const quantity = Number(item?.quantity ?? 1);
+  return Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+};
+
+const currentItemLineTotal = (item: any): number => {
+  const explicitTotal = Number(item?.total_price ?? item?.totalPrice);
+  if (Number.isFinite(explicitTotal)) {
+    return explicitTotal;
+  }
+
+  return toNumber(item?.unit_price ?? item?.unitPrice ?? item?.price) * itemQuantity(item);
+};
+
+const deliveryItemUnitPrice = (item: any): number => {
+  return resolveMenuItemPrice(
+    {
+      ...item,
+      price: item?.price ?? item?.unit_price ?? item?.unitPrice,
+    },
+    'delivery',
+  );
 };
 
 export const getPickupToDeliveryValidationAmount = (order: Partial<Order>): number => {
@@ -126,5 +166,23 @@ export const calculatePickupToDeliveryTotal = (
   };
   const existingTotal = toNumber(order.totalAmount ?? order.total_amount);
   const existingDeliveryFee = toNumber(order.deliveryFee ?? legacyOrder.delivery_fee);
-  return Math.max(0, existingTotal - existingDeliveryFee + deliveryFee);
+  const items = resolveOrderItems(order);
+
+  if (items.length === 0) {
+    return Math.max(0, existingTotal - existingDeliveryFee + deliveryFee);
+  }
+
+  const currentItemsTotal = items.reduce(
+    (sum, item) => sum + currentItemLineTotal(item),
+    0,
+  );
+  const deliveryItemsTotal = items.reduce(
+    (sum, item) => sum + deliveryItemUnitPrice(item) * itemQuantity(item),
+    0,
+  );
+  const nonItemOffset = existingTotal - existingDeliveryFee - currentItemsTotal;
+
+  return Number(
+    Math.max(0, deliveryItemsTotal + nonItemOffset + deliveryFee).toFixed(2),
+  );
 };

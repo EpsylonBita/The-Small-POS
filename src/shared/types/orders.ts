@@ -113,11 +113,25 @@ export interface Order {
   table_number?: string | null; // Allow null for compatibility
   tableNumber?: string; // For backward compatibility
   delivery_address?: string | null; // Allow null for compatibility
+  deliveryAddress?: string | null; // For backward compatibility
+  delivery_address_id?: string | null;
+  deliveryAddressId?: string | null;
   delivery_city?: string | null; // City for delivery address
+  deliveryCity?: string | null;
   delivery_postal_code?: string | null; // Postal code for delivery address
+  deliveryPostalCode?: string | null;
   delivery_floor?: string | null; // Floor for delivery address
+  deliveryFloor?: string | null;
   delivery_notes?: string | null; // Notes for delivery address
+  deliveryNotes?: string | null;
+  delivery_latitude?: number | null;
+  deliveryLatitude?: number | null;
+  delivery_longitude?: number | null;
+  deliveryLongitude?: number | null;
+  delivery_address_fingerprint?: string | null;
+  deliveryAddressFingerprint?: string | null;
   name_on_ringer?: string | null; // Name on the ringer/doorbell
+  nameOnRinger?: string | null;
   address?: string; // For backward compatibility
   special_instructions?: string;
   notes?: string; // For backward compatibility

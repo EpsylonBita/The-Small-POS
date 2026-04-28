@@ -2,7 +2,7 @@ use chrono::Utc;
 use tauri::Emitter;
 use zeroize::Zeroizing;
 
-use crate::{api, db, read_local_json, storage, value_str, write_local_json};
+use crate::{api, core_helpers, db, read_local_json, storage, value_str, write_local_json};
 
 const ADMIN_API_CACHE_PREFIX: &str = "admin_api_get::";
 
@@ -194,6 +194,13 @@ pub async fn admin_sync_terminal_config(
         .or_else(|| crate::read_local_setting(&db, "terminal", "terminal_id"))
         .ok_or("Terminal not configured: missing terminal ID")?;
 
+    // Wave 1 C2: `terminal_id` comes from the OS keyring (or a local DB
+    // mirror) and is interpolated into an admin-API path. Any `/`, `..`,
+    // `?`, `#`, or control byte in that value would bypass
+    // `validate_admin_api_path`'s allowlist. Strict UUID validation is
+    // the only shape the onboarding pipeline ever writes, so we enforce
+    // it here before formatting the path.
+    let terminal_id = core_helpers::validate_terminal_id_path_safe(&terminal_id)?;
     let path = format!("/api/pos/settings/{terminal_id}");
     let resp = crate::admin_fetch(Some(&db), &path, "GET", None).await?;
 

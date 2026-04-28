@@ -950,17 +950,44 @@ pub async fn settings_get_admin_url(db: tauri::State<'_, db::DbState>) -> Result
 
 #[tauri::command]
 pub async fn settings_get_pos_api_key(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let api_key = storage::get_credential("pos_api_key")
+    let _ = db;
+    Ok(serde_json::Value::Null)
+}
+
+#[tauri::command]
+pub async fn settings_get_credential_status(
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    let admin_url = storage::get_credential("admin_dashboard_url")
+        .or_else(|| crate::read_local_setting(&db, "terminal", "admin_dashboard_url"))
+        .or_else(|| crate::read_local_setting(&db, "terminal", "admin_url"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let raw_api_key = storage::get_credential("pos_api_key")
         .or_else(|| crate::read_local_setting(&db, "terminal", "pos_api_key"))
-        .or_else(|| crate::read_local_setting(&db, "terminal", "api_key"))
-        .map(|raw| crate::api::extract_api_key_from_connection_string(&raw).unwrap_or(raw))
+        .or_else(|| crate::read_local_setting(&db, "terminal", "api_key"));
+    let api_key = raw_api_key
+        .as_deref()
+        .map(|raw| {
+            crate::api::extract_api_key_from_connection_string(raw).unwrap_or(raw.to_string())
+        })
         .map(|raw| raw.trim().to_string())
         .filter(|raw| !raw.is_empty());
+    let terminal_id = storage::get_credential("terminal_id")
+        .or_else(|| crate::read_local_setting(&db, "terminal", "terminal_id"))
+        .or_else(|| {
+            raw_api_key
+                .as_deref()
+                .and_then(crate::api::extract_terminal_id_from_connection_string)
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
-    Ok(match api_key {
-        Some(api_key) => serde_json::Value::String(api_key),
-        None => serde_json::Value::Null,
-    })
+    Ok(serde_json::json!({
+        "hasAdminUrl": admin_url.is_some(),
+        "hasApiKey": api_key.is_some(),
+        "hasTerminalId": terminal_id.is_some(),
+    }))
 }
 
 /// Returns all settings merged: local_settings DB + terminal credential store.

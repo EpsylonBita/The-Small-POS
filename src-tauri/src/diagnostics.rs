@@ -191,15 +191,19 @@ fn get_sync_backlog(conn: &rusqlite::Connection) -> Value {
                 ))
             })
             .ok();
+        // Wave 9 H5: guard the `as_object_mut()` call instead of `.unwrap()`.
+        // `result` is initialised via `json!({})` so `as_object_mut` almost
+        // always returns `Some` — but the unwrap panics inside a Tauri
+        // command path, and a panic there is uniformly worse than a
+        // missing diagnostic row. The guard also makes this safe if a
+        // future refactor ever makes `result` non-object-shaped.
         if let Some(rows) = rows {
-            for row in rows.flatten() {
-                let (entity_type, status, count) = row;
-                let entry = result
-                    .as_object_mut()
-                    .unwrap()
-                    .entry(&entity_type)
-                    .or_insert_with(|| json!({}));
-                entry[&status] = json!(count);
+            if let Some(obj) = result.as_object_mut() {
+                for row in rows.flatten() {
+                    let (entity_type, status, count) = row;
+                    let entry = obj.entry(&entity_type).or_insert_with(|| json!({}));
+                    entry[&status] = json!(count);
+                }
             }
         }
     }
@@ -216,14 +220,15 @@ fn get_sync_backlog(conn: &rusqlite::Connection) -> Value {
                 })
                 .ok();
             if let Some(rows) = rows {
-                for row in rows.flatten() {
-                    let (state, count) = row;
-                    let entry = result
-                        .as_object_mut()
-                        .unwrap()
-                        .entry(*table)
-                        .or_insert_with(|| json!({}));
-                    entry[&state] = json!(count);
+                // Wave 9 H5: see rationale above. Same guard, repeated here
+                // rather than hoisted so the two loops stay structurally
+                // similar to the diagnostics shape.
+                if let Some(obj) = result.as_object_mut() {
+                    for row in rows.flatten() {
+                        let (state, count) = row;
+                        let entry = obj.entry(*table).or_insert_with(|| json!({}));
+                        entry[&state] = json!(count);
+                    }
                 }
             }
         }
@@ -1168,14 +1173,16 @@ mod tests {
         let db_state = crate::db::init(&dir).unwrap();
         let conn = db_state.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (100.0/6.1 → 10000/610).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, role_type, branch_id, terminal_id,
-                check_in_time, opening_cash_amount, status, calculation_version,
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version,
                 report_date, period_start_at, sync_status, created_at, updated_at
              ) VALUES (
                 'shift-health-blocked', 'cashier-health', 'cashier', 'branch-health', 'term-health',
-                '2026-04-18T06:00:00Z', 100.0, 'active', 2,
+                '2026-04-18T06:00:00Z', 100.0, 10000, 'active', 2,
                 '2026-04-18', '2026-04-18T06:00:00Z', 'pending', '2026-04-18T06:00:00Z', '2026-04-18T06:00:00Z'
              )",
             [],
@@ -1183,11 +1190,11 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, branch_id, staff_shift_id, items, total_amount, status,
-                payment_status, payment_method, sync_status, created_at, updated_at
+                id, order_number, branch_id, staff_shift_id, items, total_amount, total_amount_cents, status,
+                payment_status, sync_status, created_at, updated_at
              ) VALUES (
-                'order-health-blocked', 'ORD-HEALTH-1', 'branch-health', 'shift-health-blocked', '[]', 6.1, 'delivered',
-                'pending', 'card', 'pending', '2026-04-18T09:10:00Z', '2026-04-18T09:10:00Z'
+                'order-health-blocked', 'ORD-HEALTH-1', 'branch-health', 'shift-health-blocked', '[]', 6.1, 610, 'delivered',
+                'pending', 'pending', '2026-04-18T09:10:00Z', '2026-04-18T09:10:00Z'
              )",
             [],
         )
@@ -1199,9 +1206,13 @@ mod tests {
         assert_eq!(blockers["count"], json!(1));
         assert_eq!(blockers["sourceWindow"], json!("active_shift"));
         assert_eq!(blockers["details"][0]["orderNumber"], json!("ORD-HEALTH-1"));
+        // W6: the `missing_cash_payment` / `missing_card_payment` /
+        // `split_payment_incomplete` reason codes were collapsed into the
+        // catch-all `no_persisted_payment` once the stored
+        // `orders.payment_method` column was dropped in v55.
         assert_eq!(
             blockers["details"][0]["reasonCode"],
-            json!("missing_card_payment")
+            json!("no_persisted_payment")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1214,59 +1225,60 @@ mod tests {
         let db_state = crate::db::init(&dir).unwrap();
         let conn = db_state.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (10/20/30 dollars → 1000/2000/3000 cents; 1/2/3 → 100/200/300).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-generic', '[]', 10.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-generic', '[]', 10.0, 1000, 'completed', 'synced', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, remote_payment_id, created_at, updated_at)
-             VALUES ('pay-generic', 'ord-generic', 'cash', 10.0, 'synced', 'applied', ?1, datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES ('pay-generic', 'ord-generic', 'cash', 10.0, 1000, 'synced', 'applied', ?1, datetime('now'), datetime('now'))",
             params![uuid::Uuid::new_v4().to_string()],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-generic', 'pay-generic', 'ord-generic', 'refund', 1.0, 'Generic', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-generic', 'pay-generic', 'ord-generic', 'refund', 1.0, 100, 'Generic', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
 
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-parent', '[]', 20.0, 'completed', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-parent', '[]', 20.0, 2000, 'completed', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-parent', 'ord-parent', 'cash', 20.0, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-parent', 'ord-parent', 'cash', 20.0, 2000, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-parent', 'pay-parent', 'ord-parent', 'refund', 2.0, 'Parent', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-parent', 'pay-parent', 'ord-parent', 'refund', 2.0, 200, 'Parent', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
 
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-             VALUES ('ord-canonical', '[]', 30.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-canonical', '[]', 30.0, 3000, 'completed', 'synced', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-canonical', 'ord-canonical', 'card', 30.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-canonical', 'ord-canonical', 'card', 30.0, 3000, 'synced', 'applied', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-canonical', 'pay-canonical', 'ord-canonical', 'refund', 3.0, 'Canonical', 'waiting_parent', datetime('now'), datetime('now'))",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-canonical', 'pay-canonical', 'ord-canonical', 'refund', 3.0, 300, 'Canonical', 'waiting_parent', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -1331,12 +1343,13 @@ mod tests {
         .unwrap();
         crate::db::set_setting(&conn, "terminal", "terminal_type", "secondary").unwrap();
         crate::db::set_setting(&conn, "terminal", "api_key", "super-secret").unwrap();
+        // W4e Step 0: dual-populate (9.7 → 970, 0.25 → 25).
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, payment_status, payment_method,
+                id, order_number, items, total_amount, total_amount_cents, status, payment_status,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'ord-diag-blocker', 'ORD-DIAG-0070', '[]', 9.7, 'completed', 'partially_paid', 'split',
+                'ord-diag-blocker', 'ORD-DIAG-0070', '[]', 9.7, 970, 'completed', 'partially_paid',
                 'synced', datetime('now'), datetime('now')
              )",
             [],
@@ -1344,10 +1357,10 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status, transaction_ref,
+                id, order_id, method, amount, amount_cents, currency, status, transaction_ref,
                 sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                'pay-diag-blocker', 'ord-diag-blocker', 'cash', 0.25, 'EUR', 'completed', 'TX-DIAG-1',
+                'pay-diag-blocker', 'ord-diag-blocker', 'cash', 0.25, 25, 'EUR', 'completed', 'TX-DIAG-1',
                 'failed', 'failed', '2026-04-16T09:39:05Z', '2026-04-16T09:39:05Z'
              )",
             [],

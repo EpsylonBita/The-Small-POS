@@ -26,6 +26,7 @@ export interface CustomerAddress {
   delivery_notes?: string;
   notes?: string; // Alias for delivery_notes (Supabase field name)
   name_on_ringer?: string; // Name to display on delivery ringer
+  address_fingerprint?: string | null;
   coordinates?:
     | { lat: number; lng: number }
     | { type: 'Point'; coordinates: [number, number] }
@@ -78,6 +79,7 @@ export interface Customer {
     | null;
   latitude?: number | null;
   longitude?: number | null;
+  address_fingerprint?: string | null;
   // Branch association
   branch_id?: string;
   // Sync metadata

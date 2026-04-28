@@ -16,7 +16,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
-use crate::{business_day, order_ownership, payment_integrity, storage};
+use crate::money::Cents;
+use crate::{business_day, order_ownership, payment_integrity, storage, sync_queue};
 
 #[derive(Debug)]
 struct CheckInEligibility {
@@ -155,18 +156,43 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let staff_id = str_field(payload, "staffId")
         .or_else(|| str_field(payload, "staff_id"))
         .ok_or("Missing staffId")?;
-    let branch_id = normalize_runtime_identity(
-        str_field(payload, "branchId")
-            .or_else(|| str_field(payload, "branch_id"))
-            .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default()),
-    )
-    .ok_or("Missing branchId")?;
-    let terminal_id = normalize_runtime_identity(
-        str_field(payload, "terminalId")
-            .or_else(|| str_field(payload, "terminal_id"))
-            .unwrap_or_else(|| storage::get_credential("terminal_id").unwrap_or_default()),
-    )
-    .ok_or("Missing terminalId")?;
+
+    // Wave 1 C15: keyring is authoritative when provisioned.
+    //
+    // Threat model: the renderer-supplied `branchId` / `terminalId` in the
+    // payload used to be preferred over the keyring, so a tampered renderer
+    // could open a shift against any tenant by choosing an arbitrary ID.
+    //
+    // New resolution (per identity):
+    //   - keyring EMPTY, renderer supplies   → renderer (onboarding/tests)
+    //   - keyring has X, renderer EMPTY      → keyring
+    //   - keyring has X, renderer has X      → keyring (match; safe)
+    //   - keyring has X, renderer has Y ≠ X  → REJECT with tenant-mismatch
+    //
+    // Keyring emptiness alone is not an error here — the admin-API key
+    // check at the ingress layer already gates unprovisioned terminals out
+    // of production tenants; onboarding tests legitimately open shifts
+    // before the keyring is populated.
+    let resolve_tenant_id = |renderer_key_camel: &str,
+                             renderer_key_snake: &str,
+                             keyring_key: &str|
+     -> Result<String, String> {
+        let renderer = str_field(payload, renderer_key_camel)
+            .or_else(|| str_field(payload, renderer_key_snake))
+            .and_then(&normalize_runtime_identity);
+        let keyring = storage::get_credential(keyring_key).and_then(&normalize_runtime_identity);
+        match (keyring, renderer) {
+            (Some(k), Some(r)) if k != r => Err(format!(
+                "Tenant mismatch: renderer {renderer_key_camel} ({r:?}) does not match provisioned {keyring_key} ({k:?})"
+            )),
+            (Some(k), _) => Ok(k),
+            (None, Some(r)) => Ok(r),
+            (None, None) => Err(format!("Missing {renderer_key_camel}")),
+        }
+    };
+
+    let branch_id = resolve_tenant_id("branchId", "branch_id", "branch_id")?;
+    let terminal_id = resolve_tenant_id("terminalId", "terminal_id", "terminal_id")?;
     let role_type = str_field(payload, "roleType")
         .or_else(|| str_field(payload, "role_type"))
         .unwrap_or_else(|| "cashier".to_string());
@@ -241,13 +267,16 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             period_start_at: check_in_eligibility.business_day_start_at.clone(),
         };
 
+        // W4c dual-write: every monetary REAL column gets its `_cents` sibling.
+        let opening_cash_cents = Cents::round_half_even(opening_cash).as_i64();
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, report_date, period_start_at, opening_cash_amount,
+                check_in_time, report_date, period_start_at,
+                opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version, transferred_to_cashier_shift_id,
                 sync_status, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', 2, ?11, 'pending', ?12, ?12)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', 2, ?12, 'pending', ?13, ?13)",
             params![
                 shift_id,
                 staff_id,
@@ -259,6 +288,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 shift_business_day.report_date.as_str(),
                 shift_business_day.period_start_at.as_str(),
                 opening_cash,
+                opening_cash_cents,
                 responsible_cashier_shift_id,
                 now,
             ],
@@ -268,11 +298,12 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         // Create cash drawer session for cashier/manager roles
         if role_type == "cashier" || role_type == "manager" {
             let drawer_id = Uuid::new_v4().to_string();
+            // W4c dual-write: opening_amount → opening_amount_cents.
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, opened_at, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
                 params![
                     drawer_id,
                     shift_id,
@@ -280,6 +311,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     branch_id,
                     terminal_id,
                     opening_cash,
+                    opening_cash_cents,
                     now,
                     now,
                 ],
@@ -304,12 +336,14 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         if role_returns_cash(&role_type) && opening_cash > 0.0 {
             match responsible_cashier_assignment.as_ref() {
                 Some((_cashier_shift_id, drawer_id)) => {
+                    // W4c dual-write: driver_cash_given → driver_cash_given_cents.
                     conn.execute(
                         "UPDATE cash_drawer_sessions SET
                             driver_cash_given = COALESCE(driver_cash_given, 0) + ?1,
-                            updated_at = ?2
-                         WHERE id = ?3",
-                        params![opening_cash, now, drawer_id],
+                            driver_cash_given_cents = COALESCE(driver_cash_given_cents, 0) + ?2,
+                            updated_at = ?3
+                         WHERE id = ?4",
+                        params![opening_cash, opening_cash_cents, now, drawer_id],
                     )
                     .map_err(|e| format!("update cashier drawer for staff starting amount: {e}"))?;
                     info!(
@@ -328,8 +362,12 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             }
         }
 
-        // Enqueue for sync
-        let idempotency_key = format!("shift:open:{shift_id}:{}", Uuid::new_v4());
+        // Wave 5 Session 6: shift-open row enqueued via parity queue. The
+        // parity dispatcher has no dedicated case for "staff_shifts" so the
+        // endpoint is resolved via module_type="shifts" → /api/pos/shifts/sync
+        // (same admin endpoint the legacy drain hit). idempotency_key is now
+        // read from staff_shifts.idempotency_key (v47/v49) instead of the
+        // volatile per-enqueue UUID (C17).
         let sync_payload = build_shift_open_sync_payload(
             &shift_id,
             &staff_id,
@@ -348,13 +386,18 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             responsible_cashier_assignment
                 .as_ref()
                 .map(|(_, drawer_id)| drawer_id.as_str()),
-        )
-        .to_string();
+        );
 
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('shift', ?1, 'insert', ?2, ?3)",
-            params![shift_id, sync_payload, idempotency_key],
+        sync_queue::enqueue_payload_item(
+            &conn,
+            "staff_shifts",
+            &shift_id,
+            "INSERT",
+            &sync_payload,
+            Some(1),
+            Some("shifts"),
+            Some("manual"),
+            Some(1),
         )
         .map_err(|e| format!("enqueue shift sync: {e}"))?;
 
@@ -396,6 +439,10 @@ fn build_shift_open_sync_payload(
     responsible_cashier_shift_id: Option<&str>,
     responsible_cashier_drawer_id: Option<&str>,
 ) -> Value {
+    let opening_cash_cents = Cents::round_half_even(opening_cash).as_i64();
+    // W4d-i: emit BOTH legacy float (`openingCash`, `borrowedStartingAmount`)
+    // and integer cents (`opening_cash_cents`, `borrowed_starting_amount_cents`)
+    // keys. Admin-dashboard still reads the float keys; cents are forward-compat.
     let mut payload = serde_json::json!({
         "shiftId": shift_id,
         "staffId": staff_id,
@@ -404,6 +451,7 @@ fn build_shift_open_sync_payload(
         "terminalId": terminal_id,
         "roleType": role_type,
         "openingCash": opening_cash,
+        "opening_cash_cents": opening_cash_cents,
         "checkInTime": check_in_time,
         "reportDate": report_date,
         "periodStartAt": period_start_at,
@@ -420,6 +468,7 @@ fn build_shift_open_sync_payload(
         payload["startingAmountSourceCashierShiftId"] =
             payload["responsibleCashierShiftId"].clone();
         payload["borrowedStartingAmount"] = serde_json::json!(opening_cash);
+        payload["borrowed_starting_amount_cents"] = serde_json::json!(opening_cash_cents);
     }
 
     payload
@@ -430,30 +479,70 @@ fn load_cash_drawer_snapshot_for_shift(
     shift_id: &str,
 ) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT id, cashier_id, opening_amount, closing_amount, expected_amount,
-                variance_amount, total_cash_sales, total_card_sales, total_refunds,
-                total_expenses, cash_drops, driver_cash_given, driver_cash_returned,
-                total_staff_payments, opened_at, closed_at, reconciled,
+        // W4b-ii: read all 12 monetary columns from their cents siblings
+        // with COALESCE-real fallback (removed in 4e). The round_half_even
+        // pre-conversion the 4d-replay had at the JSON-emit boundary
+        // becomes a no-op now that the source is already integer cents.
+        "SELECT id, cashier_id,
+                COALESCE(opening_amount_cents, CAST(ROUND(opening_amount * 100) AS INTEGER), 0),
+                COALESCE(closing_amount_cents, CAST(ROUND(closing_amount * 100) AS INTEGER)),
+                COALESCE(expected_amount_cents, CAST(ROUND(expected_amount * 100) AS INTEGER)),
+                COALESCE(variance_amount_cents, CAST(ROUND(variance_amount * 100) AS INTEGER)),
+                COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER), 0),
+                COALESCE(total_card_sales_cents, CAST(ROUND(total_card_sales * 100) AS INTEGER), 0),
+                COALESCE(total_refunds_cents, CAST(ROUND(total_refunds * 100) AS INTEGER), 0),
+                COALESCE(total_expenses_cents, CAST(ROUND(total_expenses * 100) AS INTEGER), 0),
+                COALESCE(cash_drops_cents, CAST(ROUND(cash_drops * 100) AS INTEGER), 0),
+                COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER), 0),
+                COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0),
+                COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER), 0),
+                opened_at, closed_at, reconciled,
                 reconciled_at, reconciled_by
          FROM cash_drawer_sessions
          WHERE staff_shift_id = ?1",
         params![shift_id],
         |row| {
+            // W4d-i: emit BOTH legacy float and integer cents keys for the
+            // 12 monetary drawer fields. Admin still reads the float keys.
+            let opening_amount_cents = row.get::<_, i64>(2)?;
+            let closing_amount_cents = row.get::<_, Option<i64>>(3)?;
+            let expected_amount_cents = row.get::<_, Option<i64>>(4)?;
+            let variance_amount_cents = row.get::<_, Option<i64>>(5)?;
+            let total_cash_sales_cents = row.get::<_, i64>(6)?;
+            let total_card_sales_cents = row.get::<_, i64>(7)?;
+            let total_refunds_cents = row.get::<_, i64>(8)?;
+            let total_expenses_cents = row.get::<_, i64>(9)?;
+            let cash_drops_cents = row.get::<_, i64>(10)?;
+            let driver_cash_given_cents = row.get::<_, i64>(11)?;
+            let driver_cash_returned_cents = row.get::<_, i64>(12)?;
+            let total_staff_payments_cents = row.get::<_, i64>(13)?;
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "cashierId": row.get::<_, Option<String>>(1)?,
-                "openingAmount": row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                "closingAmount": row.get::<_, Option<f64>>(3)?,
-                "expectedAmount": row.get::<_, Option<f64>>(4)?,
-                "varianceAmount": row.get::<_, Option<f64>>(5)?,
-                "totalCashSales": row.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
-                "totalCardSales": row.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
-                "totalRefunds": row.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
-                "totalExpenses": row.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
-                "cashDrops": row.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
-                "driverCashGiven": row.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
-                "driverCashReturned": row.get::<_, Option<f64>>(12)?.unwrap_or(0.0),
-                "totalStaffPayments": row.get::<_, Option<f64>>(13)?.unwrap_or(0.0),
+                "openingAmount": Cents::new(opening_amount_cents).to_f64_dp2(),
+                "opening_amount_cents": opening_amount_cents,
+                "closingAmount": closing_amount_cents.map(|c| Cents::new(c).to_f64_dp2()),
+                "closing_amount_cents": closing_amount_cents,
+                "expectedAmount": expected_amount_cents.map(|c| Cents::new(c).to_f64_dp2()),
+                "expected_amount_cents": expected_amount_cents,
+                "varianceAmount": variance_amount_cents.map(|c| Cents::new(c).to_f64_dp2()),
+                "variance_amount_cents": variance_amount_cents,
+                "totalCashSales": Cents::new(total_cash_sales_cents).to_f64_dp2(),
+                "total_cash_sales_cents": total_cash_sales_cents,
+                "totalCardSales": Cents::new(total_card_sales_cents).to_f64_dp2(),
+                "total_card_sales_cents": total_card_sales_cents,
+                "totalRefunds": Cents::new(total_refunds_cents).to_f64_dp2(),
+                "total_refunds_cents": total_refunds_cents,
+                "totalExpenses": Cents::new(total_expenses_cents).to_f64_dp2(),
+                "total_expenses_cents": total_expenses_cents,
+                "cashDrops": Cents::new(cash_drops_cents).to_f64_dp2(),
+                "cash_drops_cents": cash_drops_cents,
+                "driverCashGiven": Cents::new(driver_cash_given_cents).to_f64_dp2(),
+                "driver_cash_given_cents": driver_cash_given_cents,
+                "driverCashReturned": Cents::new(driver_cash_returned_cents).to_f64_dp2(),
+                "driver_cash_returned_cents": driver_cash_returned_cents,
+                "totalStaffPayments": Cents::new(total_staff_payments_cents).to_f64_dp2(),
+                "total_staff_payments_cents": total_staff_payments_cents,
                 "openedAt": row.get::<_, String>(14)?,
                 "closedAt": row.get::<_, Option<String>>(15)?,
                 "reconciled": row.get::<_, Option<i64>>(16)?.unwrap_or(0) != 0,
@@ -515,7 +604,10 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let shift = conn
             .query_row(
-                "SELECT id, staff_id, staff_name, role_type, opening_cash_amount, calculation_version,
+                // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+                "SELECT id, staff_id, staff_name, role_type,
+                        COALESCE(opening_cash_amount_cents, CAST(ROUND(opening_cash_amount * 100) AS INTEGER), 0),
+                        calculation_version,
                         branch_id, terminal_id, check_in_time, report_date, period_start_at
                  FROM staff_shifts WHERE id = ?1 AND status = 'active'",
                 params![shift_id],
@@ -525,7 +617,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, f64>(4)?,
+                        Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
                         row.get::<_, Option<i32>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
@@ -653,13 +745,22 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             )?;
 
             if transferred_driver_starting_total > 0.0 {
-                // Subtract transferred driver starting amounts from driver_cash_given
+                // Subtract transferred driver starting amounts from driver_cash_given.
+                // W4c dual-write: mirror onto driver_cash_given_cents.
+                let transferred_driver_starting_total_cents =
+                    Cents::round_half_even(transferred_driver_starting_total).as_i64();
                 conn.execute(
                     "UPDATE cash_drawer_sessions SET
                     driver_cash_given = COALESCE(driver_cash_given, 0) - ?1,
-                    updated_at = ?2
-                 WHERE staff_shift_id = ?3",
-                    params![transferred_driver_starting_total, now, shift_id],
+                    driver_cash_given_cents = COALESCE(driver_cash_given_cents, 0) - ?2,
+                    updated_at = ?3
+                 WHERE staff_shift_id = ?4",
+                    params![
+                        transferred_driver_starting_total,
+                        transferred_driver_starting_total_cents,
+                        now,
+                        shift_id
+                    ],
                 )
                 .map_err(|e| format!("adjust driver_cash_given for transfers: {e}"))?;
                 info!(
@@ -698,11 +799,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                        AND check_in_time <= ?3
                        AND transferred_to_cashier_shift_id IS NULL
                        AND COALESCE(is_transfer_pending, 0) = 0",
-                    params![
-                        shift_branch_id,
-                        shift_check_in_time.as_str(),
-                        now.as_str()
-                    ],
+                    params![shift_branch_id, shift_check_in_time.as_str(), now.as_str()],
                     |row| row.get(0),
                 )
                 .unwrap_or(0);
@@ -716,10 +813,11 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
             // Reconcile-at-close: re-derive drawer totals from source-of-truth tables.
             // This catches any missed incremental updates during the shift.
+            // W4b-ii: cents-with-real-fallback shim wraps each SUM (4e removes).
             let reconciled_cash_sales: f64 = conn
                 .query_row(
                     &format!(
-                        "SELECT COALESCE(SUM(op.amount), 0)
+                        "SELECT COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0)
                  FROM orders o
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -730,13 +828,13 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                    AND {order_financial_expr} <= ?3"
                     ),
                     params![shift_id, shift_check_in_time, now],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
                 )
                 .unwrap_or(0.0);
             let reconciled_card_sales: f64 = conn
                 .query_row(
                     &format!(
-                        "SELECT COALESCE(SUM(op.amount), 0)
+                        "SELECT COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0)
                  FROM orders o
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -747,13 +845,13 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                    AND {order_financial_expr} <= ?3"
                     ),
                     params![shift_id, shift_check_in_time, now],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
                 )
                 .unwrap_or(0.0);
             let reconciled_refunds: f64 = conn
                 .query_row(
                     &format!(
-                        "SELECT COALESCE(SUM(pa.amount), 0)
+                        "SELECT COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
                  FROM orders o
                  JOIN payment_adjustments pa ON pa.order_id = o.id
                  LEFT JOIN order_payments op ON op.id = pa.payment_id
@@ -764,15 +862,15 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                    AND {order_financial_expr} <= ?3"
                     ),
                     params![shift_id, shift_check_in_time, now],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
                 )
                 .unwrap_or(0.0);
             let reconciled_expenses: f64 = conn
                 .query_row(
-                    "SELECT COALESCE(SUM(amount), 0)
+                    "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
                  FROM shift_expenses WHERE staff_shift_id = ?1",
                     params![shift_id],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
                 )
                 .unwrap_or(0.0);
             let reconciled_staff_payments: f64 = conn
@@ -785,45 +883,64 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 )
                 .unwrap_or(0.0);
 
-            // Write reconciled values to cash_drawer_sessions
+            // Write reconciled values to cash_drawer_sessions (W4c dual-write).
+            let reconciled_cash_sales_cents =
+                Cents::round_half_even(reconciled_cash_sales).as_i64();
+            let reconciled_card_sales_cents =
+                Cents::round_half_even(reconciled_card_sales).as_i64();
+            let reconciled_refunds_cents = Cents::round_half_even(reconciled_refunds).as_i64();
+            let reconciled_expenses_cents = Cents::round_half_even(reconciled_expenses).as_i64();
+            let reconciled_staff_payments_cents =
+                Cents::round_half_even(reconciled_staff_payments).as_i64();
             conn.execute(
                 "UPDATE cash_drawer_sessions SET
-                total_cash_sales = ?1,
-                total_card_sales = ?2,
-                total_refunds = ?3,
-                total_expenses = ?4,
-                total_staff_payments = ?5,
-                updated_at = ?6
-             WHERE staff_shift_id = ?7",
+                total_cash_sales = ?1, total_cash_sales_cents = ?2,
+                total_card_sales = ?3, total_card_sales_cents = ?4,
+                total_refunds = ?5, total_refunds_cents = ?6,
+                total_expenses = ?7, total_expenses_cents = ?8,
+                total_staff_payments = ?9, total_staff_payments_cents = ?10,
+                updated_at = ?11
+             WHERE staff_shift_id = ?12",
                 params![
                     reconciled_cash_sales,
+                    reconciled_cash_sales_cents,
                     reconciled_card_sales,
+                    reconciled_card_sales_cents,
                     reconciled_refunds,
+                    reconciled_refunds_cents,
                     reconciled_expenses,
+                    reconciled_expenses_cents,
                     reconciled_staff_payments,
+                    reconciled_staff_payments_cents,
                     now,
                     shift_id,
                 ],
             )
             .map_err(|e| format!("reconcile drawer totals: {e}"))?;
 
-            // Fetch cash drawer session totals (now reconciled)
+            // Fetch cash drawer session totals (now reconciled).
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
             let drawer = conn
                 .query_row(
-                    "SELECT total_cash_sales, total_refunds, total_expenses,
-                        cash_drops, driver_cash_given, driver_cash_returned,
-                        total_staff_payments
+                    "SELECT
+                        COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER), 0),
+                        COALESCE(total_refunds_cents, CAST(ROUND(total_refunds * 100) AS INTEGER), 0),
+                        COALESCE(total_expenses_cents, CAST(ROUND(total_expenses * 100) AS INTEGER), 0),
+                        COALESCE(cash_drops_cents, CAST(ROUND(cash_drops * 100) AS INTEGER), 0),
+                        COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER), 0),
+                        COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0),
+                        COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER), 0)
                  FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
                     params![shift_id],
                     |row| {
                         Ok((
-                            row.get::<_, f64>(0).unwrap_or(0.0),
-                            row.get::<_, f64>(1).unwrap_or(0.0),
-                            row.get::<_, f64>(2).unwrap_or(0.0),
-                            row.get::<_, f64>(3).unwrap_or(0.0),
-                            row.get::<_, f64>(4).unwrap_or(0.0),
-                            row.get::<_, f64>(5).unwrap_or(0.0),
-                            row.get::<_, f64>(6).unwrap_or(0.0),
+                            Cents::new(row.get::<_, i64>(0).unwrap_or(0)).to_f64_dp2(),
+                            Cents::new(row.get::<_, i64>(1).unwrap_or(0)).to_f64_dp2(),
+                            Cents::new(row.get::<_, i64>(2).unwrap_or(0)).to_f64_dp2(),
+                            Cents::new(row.get::<_, i64>(3).unwrap_or(0)).to_f64_dp2(),
+                            Cents::new(row.get::<_, i64>(4).unwrap_or(0)).to_f64_dp2(),
+                            Cents::new(row.get::<_, i64>(5).unwrap_or(0)).to_f64_dp2(),
+                            Cents::new(row.get::<_, i64>(6).unwrap_or(0)).to_f64_dp2(),
                         ))
                     },
                 )
@@ -918,18 +1035,28 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
         // Update cash drawer session (if cashier/manager) and persist the
         // reconciliation metadata captured during closeout.
+        // W4c dual-write: closing_amount, expected_amount, variance_amount.
+        let closing_cash_to_persist_cents =
+            Cents::round_half_even(closing_cash_to_persist).as_i64();
+        let expected_cents = Cents::round_half_even(expected).as_i64();
+        let variance_cents = Cents::round_half_even(variance).as_i64();
         if role_type == "cashier" || role_type == "manager" {
             conn.execute(
                 "UPDATE cash_drawer_sessions SET
-                    closing_amount = ?1, expected_amount = ?2,
-                    variance_amount = ?3, reconciled = 1,
-                    closed_at = ?4, reconciled_at = ?4, reconciled_by = ?5,
-                    updated_at = ?4
-                 WHERE staff_shift_id = ?6",
+                    closing_amount = ?1, closing_amount_cents = ?2,
+                    expected_amount = ?3, expected_amount_cents = ?4,
+                    variance_amount = ?5, variance_amount_cents = ?6,
+                    reconciled = 1,
+                    closed_at = ?7, reconciled_at = ?7, reconciled_by = ?8,
+                    updated_at = ?7
+                 WHERE staff_shift_id = ?9",
                 params![
                     closing_cash_to_persist,
+                    closing_cash_to_persist_cents,
                     expected,
+                    expected_cents,
                     variance,
+                    variance_cents,
                     now,
                     closed_by.as_deref(),
                     shift_id,
@@ -946,12 +1073,19 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 &shift_terminal_id,
             )? {
                 Some((cashier_shift_id, drawer_id)) => {
+                    // W4c dual-write: driver_cash_returned → driver_cash_returned_cents.
                     conn.execute(
                         "UPDATE cash_drawer_sessions SET
                             driver_cash_returned = COALESCE(driver_cash_returned, 0) + ?1,
-                            updated_at = ?2
-                         WHERE id = ?3",
-                        params![closing_cash_to_persist, now, drawer_id],
+                            driver_cash_returned_cents = COALESCE(driver_cash_returned_cents, 0) + ?2,
+                            updated_at = ?3
+                         WHERE id = ?4",
+                        params![
+                            closing_cash_to_persist,
+                            closing_cash_to_persist_cents,
+                            now,
+                            drawer_id
+                        ],
                     )
                     .map_err(|e| format!("update cashier drawer for staff return: {e}"))?;
                     returned_cash_target = Some((
@@ -969,6 +1103,11 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     );
                 }
                 None => {
+                    if closing_cash_to_persist_cents > 0 {
+                        return Err(format!(
+                            "Cannot close {role_type} shift with returned cash but no active cashier drawer"
+                        ));
+                    }
                     warn!(
                         staff_shift = %shift_id,
                         branch_id = %shift_branch_id,
@@ -1001,37 +1140,58 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             )
             .unwrap_or((0, 0.0, 0.0, 0.0));
 
-        // Update the shift record
+        // Update the shift record (W4c dual-write: 7 monetary columns mirror).
+        // Note: `closing_cash_to_persist_cents`, `expected_cents`, `variance_cents`
+        // were computed for the cash-drawer reconciliation update above and are
+        // reused here. The other four cents values are computed inline below.
+        let persisted_payment_amount_cents =
+            persisted_payment_amount.map(|v| Cents::round_half_even(v).as_i64());
+        let total_sales_cents = Cents::round_half_even(total_sales).as_i64();
+        let shift_cash_sales_cents = Cents::round_half_even(shift_cash_sales).as_i64();
+        let shift_card_sales_cents = Cents::round_half_even(shift_card_sales).as_i64();
         conn.execute(
             "UPDATE staff_shifts SET
-                check_out_time = ?1, closing_cash_amount = ?2, expected_cash_amount = ?3,
-                cash_variance = ?4, status = 'closed', payment_amount = ?5,
-                closed_by = ?6, sync_status = 'pending', updated_at = ?1,
-                total_orders_count = ?8, total_sales_amount = ?9,
-                total_cash_sales = ?10, total_card_sales = ?11,
-                report_date = COALESCE(report_date, ?12),
-                period_start_at = COALESCE(period_start_at, ?13)
-             WHERE id = ?7",
+                check_out_time = ?1,
+                closing_cash_amount = ?2, closing_cash_amount_cents = ?3,
+                expected_cash_amount = ?4, expected_cash_amount_cents = ?5,
+                cash_variance = ?6, cash_variance_cents = ?7,
+                status = 'closed',
+                payment_amount = ?8, payment_amount_cents = ?9,
+                closed_by = ?10, sync_status = 'pending', updated_at = ?1,
+                total_orders_count = ?12,
+                total_sales_amount = ?13, total_sales_amount_cents = ?14,
+                total_cash_sales = ?15, total_cash_sales_cents = ?16,
+                total_card_sales = ?17, total_card_sales_cents = ?18,
+                report_date = COALESCE(report_date, ?19),
+                period_start_at = COALESCE(period_start_at, ?20)
+             WHERE id = ?11",
             params![
                 now,
                 closing_cash_to_persist,
+                closing_cash_to_persist_cents,
                 expected,
+                expected_cents,
                 variance,
+                variance_cents,
                 persisted_payment_amount,
+                persisted_payment_amount_cents,
                 closed_by,
                 shift_id,
                 order_count,
                 total_sales,
+                total_sales_cents,
                 shift_cash_sales,
+                shift_cash_sales_cents,
                 shift_card_sales,
+                shift_card_sales_cents,
                 shift_business_day.report_date.as_str(),
                 shift_business_day.period_start_at.as_str(),
             ],
         )
         .map_err(|e| format!("close shift: {e}"))?;
 
-        // Enqueue for sync
-        let idempotency_key = format!("shift:close:{shift_id}:{}", Uuid::new_v4());
+        // Wave 5 Session 6: shift-close row now flows through parity queue.
+        // Same module_type="shifts" routing as shift-open above.
         let cash_drawer_snapshot = load_cash_drawer_snapshot_for_shift(&conn, &shift_id)?;
         let mut sync_payload = serde_json::json!({
             "shiftId": shift_id,
@@ -1067,12 +1227,17 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             sync_payload["resolvedCashierShiftId"] = Value::String(cashier_shift_id);
             sync_payload["resolvedCashierDrawerId"] = Value::String(drawer_id);
         }
-        let sync_payload = sync_payload.to_string();
 
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('shift', ?1, 'update', ?2, ?3)",
-            params![shift_id, sync_payload, idempotency_key],
+        sync_queue::enqueue_payload_item(
+            &conn,
+            "staff_shifts",
+            &shift_id,
+            "UPDATE",
+            &sync_payload,
+            Some(1),
+            Some("shifts"),
+            Some("manual"),
+            Some(1),
         )
         .map_err(|e| format!("enqueue shift close sync: {e}"))?;
 
@@ -1237,6 +1402,11 @@ pub fn get_shift_sync_state(db: &DbState, shift_id: &str) -> Result<Value, Strin
         return Err(format!("No shift found with id {shift_id}"));
     };
 
+    // Wave 5 Session 6: union parity_sync_queue (new canonical queue for
+    // staff_shifts) with the legacy sync_queue so a shift created either
+    // before or after the producer cutover reports its live state. Parity's
+    // 'processing' status is projected back to the legacy 'in_progress'
+    // label so the renderer's enum check remains stable.
     let queue_row: Option<(
         String,
         Option<String>,
@@ -1247,11 +1417,26 @@ pub fn get_shift_sync_state(db: &DbState, shift_id: &str) -> Result<Value, Strin
     )> = conn
         .query_row(
             "SELECT status, last_error, retry_count, next_retry_at, created_at, updated_at
-             FROM sync_queue
-             WHERE entity_type = 'shift'
-               AND entity_id = ?1
-               AND status IN ('failed', 'in_progress', 'queued_remote', 'pending')
-             ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, id DESC
+             FROM (
+                 SELECT
+                     CASE status WHEN 'processing' THEN 'in_progress' ELSE status END AS status,
+                     error_message AS last_error,
+                     attempts AS retry_count,
+                     next_retry_at,
+                     created_at,
+                     COALESCE(last_attempt, created_at) AS updated_at
+                 FROM parity_sync_queue
+                 WHERE table_name = 'staff_shifts'
+                   AND record_id = ?1
+                   AND status IN ('pending', 'processing', 'failed', 'conflict')
+                 UNION ALL
+                 SELECT status, last_error, retry_count, next_retry_at, created_at, updated_at
+                 FROM sync_queue
+                 WHERE entity_type = 'shift'
+                   AND entity_id = ?1
+                   AND status IN ('failed', 'in_progress', 'queued_remote', 'pending')
+             )
+             ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
              LIMIT 1",
             params![shift_id],
             |row| {
@@ -1318,11 +1503,19 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         Value,
     ) = conn
         .query_row(
-            "SELECT id, staff_id, staff_name, role_type, status, opening_cash_amount,
-                    closing_cash_amount, expected_cash_amount, cash_variance,
+            // W4b-ii: cents-with-real-fallback shim on 8 monetary columns
+            // (cols 5,6,7,8,12,13,14,18). 4e removes the COALESCE arms.
+            "SELECT id, staff_id, staff_name, role_type, status,
+                    COALESCE(opening_cash_amount_cents, CAST(ROUND(opening_cash_amount * 100) AS INTEGER), 0),
+                    COALESCE(closing_cash_amount_cents, CAST(ROUND(closing_cash_amount * 100) AS INTEGER)),
+                    COALESCE(expected_cash_amount_cents, CAST(ROUND(expected_cash_amount * 100) AS INTEGER)),
+                    COALESCE(cash_variance_cents, CAST(ROUND(cash_variance * 100) AS INTEGER)),
                     check_in_time, check_out_time, total_orders_count,
-                    total_sales_amount, total_cash_sales, total_card_sales,
-                    branch_id, terminal_id, calculation_version, payment_amount
+                    COALESCE(total_sales_amount_cents, CAST(ROUND(total_sales_amount * 100) AS INTEGER), 0),
+                    COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER), 0),
+                    COALESCE(total_card_sales_cents, CAST(ROUND(total_card_sales * 100) AS INTEGER), 0),
+                    branch_id, terminal_id, calculation_version,
+                    COALESCE(payment_amount_cents, CAST(ROUND(payment_amount * 100) AS INTEGER))
              FROM staff_shifts WHERE id = ?1",
             params![shift_id],
             |row| {
@@ -1336,20 +1529,24 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                     "staff_name": row.get::<_, Option<String>>(2)?,
                     "role_type": &rt,
                     "status": row.get::<_, String>(4)?,
-                    "opening_cash_amount": row.get::<_, f64>(5)?,
-                    "closing_cash_amount": row.get::<_, Option<f64>>(6)?,
-                    "expected_cash_amount": row.get::<_, Option<f64>>(7)?,
-                    "cash_variance": row.get::<_, Option<f64>>(8)?,
+                    "opening_cash_amount": Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
+                    "closing_cash_amount": row.get::<_, Option<i64>>(6)?
+                        .map(|c| Cents::new(c).to_f64_dp2()),
+                    "expected_cash_amount": row.get::<_, Option<i64>>(7)?
+                        .map(|c| Cents::new(c).to_f64_dp2()),
+                    "cash_variance": row.get::<_, Option<i64>>(8)?
+                        .map(|c| Cents::new(c).to_f64_dp2()),
                     "check_in_time": &ci,
                     "check_out_time": row.get::<_, Option<String>>(10)?,
                     "total_orders_count": row.get::<_, i64>(11)?,
-                    "total_sales_amount": row.get::<_, f64>(12)?,
-                    "total_cash_sales": row.get::<_, f64>(13)?,
-                    "total_card_sales": row.get::<_, f64>(14)?,
+                    "total_sales_amount": Cents::new(row.get::<_, i64>(12)?).to_f64_dp2(),
+                    "total_cash_sales": Cents::new(row.get::<_, i64>(13)?).to_f64_dp2(),
+                    "total_card_sales": Cents::new(row.get::<_, i64>(14)?).to_f64_dp2(),
                     "branch_id": &bi,
                     "terminal_id": &ti,
                     "calculation_version": row.get::<_, i64>(17)?,
-                    "payment_amount": row.get::<_, Option<f64>>(18)?,
+                    "payment_amount": row.get::<_, Option<i64>>(18)?
+                        .map(|c| Cents::new(c).to_f64_dp2()),
                 });
                 Ok((rt, bi, ti, ci, val))
             },
@@ -1364,27 +1561,38 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
 
     let cash_drawer: Value = conn
         .query_row(
-            "SELECT id, opening_amount, closing_amount, expected_amount, variance_amount,
-                    total_cash_sales, total_card_sales, total_refunds, total_expenses,
-                    cash_drops, driver_cash_given, driver_cash_returned, total_staff_payments,
+            // W4b-ii: cents-with-real-fallback shim on 12 monetary columns.
+            "SELECT id,
+                    COALESCE(opening_amount_cents, CAST(ROUND(opening_amount * 100) AS INTEGER), 0),
+                    COALESCE(closing_amount_cents, CAST(ROUND(closing_amount * 100) AS INTEGER)),
+                    COALESCE(expected_amount_cents, CAST(ROUND(expected_amount * 100) AS INTEGER)),
+                    COALESCE(variance_amount_cents, CAST(ROUND(variance_amount * 100) AS INTEGER)),
+                    COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER), 0),
+                    COALESCE(total_card_sales_cents, CAST(ROUND(total_card_sales * 100) AS INTEGER), 0),
+                    COALESCE(total_refunds_cents, CAST(ROUND(total_refunds * 100) AS INTEGER), 0),
+                    COALESCE(total_expenses_cents, CAST(ROUND(total_expenses * 100) AS INTEGER), 0),
+                    COALESCE(cash_drops_cents, CAST(ROUND(cash_drops * 100) AS INTEGER), 0),
+                    COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER), 0),
+                    COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0),
+                    COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER), 0),
                     opened_at, closed_at, reconciled
              FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
             params![shift_id],
             |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,
-                    "opening_amount": row.get::<_, f64>(1)?,
-                    "closing_amount": row.get::<_, Option<f64>>(2)?,
-                    "expected_amount": row.get::<_, Option<f64>>(3)?,
-                    "variance_amount": row.get::<_, Option<f64>>(4)?,
-                    "total_cash_sales": row.get::<_, f64>(5)?,
-                    "total_card_sales": row.get::<_, f64>(6)?,
-                    "total_refunds": row.get::<_, f64>(7)?,
-                    "total_expenses": row.get::<_, f64>(8)?,
-                    "cash_drops": row.get::<_, f64>(9)?,
-                    "driver_cash_given": row.get::<_, f64>(10)?,
-                    "driver_cash_returned": row.get::<_, f64>(11)?,
-                    "total_staff_payments": row.get::<_, f64>(12)?,
+                    "opening_amount": Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                    "closing_amount": row.get::<_, Option<i64>>(2)?.map(|c| Cents::new(c).to_f64_dp2()),
+                    "expected_amount": row.get::<_, Option<i64>>(3)?.map(|c| Cents::new(c).to_f64_dp2()),
+                    "variance_amount": row.get::<_, Option<i64>>(4)?.map(|c| Cents::new(c).to_f64_dp2()),
+                    "total_cash_sales": Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
+                    "total_card_sales": Cents::new(row.get::<_, i64>(6)?).to_f64_dp2(),
+                    "total_refunds": Cents::new(row.get::<_, i64>(7)?).to_f64_dp2(),
+                    "total_expenses": Cents::new(row.get::<_, i64>(8)?).to_f64_dp2(),
+                    "cash_drops": Cents::new(row.get::<_, i64>(9)?).to_f64_dp2(),
+                    "driver_cash_given": Cents::new(row.get::<_, i64>(10)?).to_f64_dp2(),
+                    "driver_cash_returned": Cents::new(row.get::<_, i64>(11)?).to_f64_dp2(),
+                    "total_staff_payments": Cents::new(row.get::<_, i64>(12)?).to_f64_dp2(),
                     "opened_at": row.get::<_, String>(13)?,
                     "closed_at": row.get::<_, Option<String>>(14)?,
                     "reconciled": row.get::<_, i64>(15)? != 0,
@@ -1462,14 +1670,36 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     });
 
     // --- 4. Canceled orders breakdown ---
+    // W6: `orders.payment_method` was dropped in v55. Derive the method
+    // per cancelled order inline via a subquery that matches
+    // `payments::derive_payment_method` semantics (multi-method =
+    // "split"; one method = that method; zero rows =
+    // "pending"). The consumer at `canceled_rows.iter().find(|r| r.0 ==
+    // "cash")` etc. only keys on "cash"/"card" buckets; the new
+    // "pending" bucket (for fully-voided cancels) is silently
+    // discarded, matching the old behavior where cancelled orders
+    // without a stored method defaulted to 'cash' then were still
+    // bucketed correctly by the consumer.
     let canceled_sql = format!(
-        "SELECT COALESCE(payment_method, 'cash'), COUNT(*), COALESCE(SUM(total_amount), 0)
+        "SELECT COALESCE((
+                SELECT CASE
+                    WHEN COUNT(DISTINCT LOWER(TRIM(method))) > 1
+                      THEN 'split'
+                    ELSE LOWER(TRIM(MIN(method)))
+                END
+                FROM order_payments
+                WHERE order_id = orders.id
+                  AND status = 'completed'
+                  AND TRIM(COALESCE(method, '')) != ''
+            ), 'pending') AS pm,
+            COUNT(*),
+            COALESCE(SUM(COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER))), 0)
          FROM orders
          WHERE staff_shift_id = ?1
            AND COALESCE(is_ghost, 0) = 0
            AND status IN ('cancelled', 'canceled', 'refunded')
            {}
-         GROUP BY payment_method",
+         GROUP BY pm",
         role_order_type_filter_sql(&role_type, "orders")
     );
     let mut canceled_stmt = conn
@@ -1481,7 +1711,10 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, f64>(2)?,
+                // W4b-ii: SUM is integer cents now; expose as f64 to
+                // keep the existing tuple type and downstream JSON
+                // shape (canceled_orders.cashTotal/cardTotal).
+                Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query canceled: {e}"))?
@@ -1499,10 +1732,11 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     });
 
     // --- 5. Cash refunds ---
+    // W4b-ii: cents-with-real-fallback shim (removed in 4e).
     let cash_refunds: f64 = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(pa.amount), 0)
+                "SELECT COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
              FROM payment_adjustments pa
              JOIN order_payments op ON op.id = pa.payment_id
              JOIN orders o ON o.id = op.order_id
@@ -1518,14 +1752,17 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                AND (?3 IS NULL OR {order_financial_expr} <= ?3)"
             ),
             params![shift_id, check_in_time, shift_end_param],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .unwrap_or(0.0);
 
     // --- 6. Expense items array + total ---
     let mut exp_stmt = conn
         .prepare(
-            "SELECT id, expense_type, amount, description, receipt_number, status, created_at
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT id, expense_type,
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
+                    description, receipt_number, status, created_at
              FROM shift_expenses WHERE staff_shift_id = ?1
              ORDER BY created_at ASC",
         )
@@ -1536,7 +1773,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "expense_type": row.get::<_, String>(1)?,
-                "amount": row.get::<_, f64>(2)?,
+                "amount": Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
                 "description": row.get::<_, String>(3)?,
                 "receipt_number": row.get::<_, Option<String>>(4)?,
                 "status": row.get::<_, String>(5)?,
@@ -1580,9 +1817,19 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         // Backfill: create missing driver_earnings from orders assigned to this driver
         let driver_staff_id = shift["staff_id"].as_str().unwrap_or("");
         if !driver_staff_id.is_empty() {
+            // W6: `orders.payment_method` was dropped in v55. Drop the
+            // column from the SELECT; the Rust re-derives the method
+            // from `order_payments` sums below anyway (cash/card
+            // conditional), so the stored column was only a fallback
+            // for the no-payment-rows case where it always defaulted to
+            // 'cash' on NULL. Keep that default explicitly.
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
             let mut missing_stmt = conn
                 .prepare(
-                    "SELECT o.id, o.total_amount, o.payment_method, o.delivery_fee, o.branch_id
+                    "SELECT o.id,
+                            COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
+                            COALESCE(o.delivery_fee_cents, CAST(ROUND(o.delivery_fee * 100) AS INTEGER), 0),
+                            o.branch_id
                      FROM orders o
                      WHERE (o.driver_id = ?1 OR o.staff_shift_id = ?2)
                        AND o.order_type = 'delivery'
@@ -1592,25 +1839,23 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 )
                 .map_err(|e| format!("prepare backfill: {e}"))?;
             let now = chrono::Utc::now().to_rfc3339();
-            let backfill_rows: Vec<(String, f64, String, f64, String)> = missing_stmt
+            let backfill_rows: Vec<(String, f64, f64, String)> = missing_stmt
                 .query_map(params![driver_staff_id, shift_id, check_in_time], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, f64>(1).unwrap_or(0.0),
-                        row.get::<_, String>(2)
-                            .unwrap_or_else(|_| "cash".to_string()),
-                        row.get::<_, f64>(3).unwrap_or(0.0),
-                        row.get::<_, String>(4).unwrap_or_default(),
+                        // W4b-ii: cents → f64-dp2.
+                        Cents::new(row.get::<_, i64>(1).unwrap_or(0)).to_f64_dp2(),
+                        Cents::new(row.get::<_, i64>(2).unwrap_or(0)).to_f64_dp2(),
+                        row.get::<_, String>(3).unwrap_or_default(),
                     ))
                 })
                 .map_err(|e| format!("backfill query: {e}"))?
                 .filter_map(|r| r.ok())
                 .collect();
 
-            for (oid, total, pm, del_fee, bid) in &backfill_rows {
-                let pm_lower = pm.to_lowercase();
+            for (oid, total, del_fee, bid) in &backfill_rows {
                 let (_, cash, card, _total_paid) =
-                    compute_shift_payment_totals_for_order(&conn, oid, *total, &pm_lower)?;
+                    compute_shift_payment_totals_for_order(&conn, oid, *total, "cash")?;
                 let payment_method = if cash > 0.0 && card > 0.0 {
                     "mixed".to_string()
                 } else if card > 0.0 {
@@ -1651,10 +1896,17 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         // For driver checkout: get individual delivery records
         let mut de_stmt = conn
             .prepare(
-                "SELECT de.id, de.order_id, de.delivery_fee, de.tip_amount,
-                        de.total_earning, de.payment_method, de.cash_collected,
-                        de.card_amount, de.cash_to_return,
-                        o.order_number, o.delivery_address, o.total_amount,
+                // W4b-ii: cents-with-real-fallback shim on 7 monetary cols.
+                "SELECT de.id, de.order_id,
+                        COALESCE(de.delivery_fee_cents, CAST(ROUND(de.delivery_fee * 100) AS INTEGER), 0),
+                        COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                        COALESCE(de.total_earning_cents, CAST(ROUND(de.total_earning * 100) AS INTEGER), 0),
+                        de.payment_method,
+                        COALESCE(de.cash_collected_cents, CAST(ROUND(de.cash_collected * 100) AS INTEGER), 0),
+                        COALESCE(de.card_amount_cents, CAST(ROUND(de.card_amount * 100) AS INTEGER), 0),
+                        COALESCE(de.cash_to_return_cents, CAST(ROUND(de.cash_to_return * 100) AS INTEGER), 0),
+                        o.order_number, o.delivery_address,
+                        COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER)),
                         o.status, o.customer_name, o.customer_phone
                  FROM driver_earnings de
                  LEFT JOIN orders o ON de.order_id = o.id
@@ -1671,16 +1923,17 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,
                     "order_id": row.get::<_, String>(1)?,
-                    "delivery_fee": row.get::<_, f64>(2)?,
-                    "tip_amount": row.get::<_, f64>(3)?,
-                    "total_earning": row.get::<_, f64>(4)?,
+                    "delivery_fee": Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                    "tip_amount": Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                    "total_earning": Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
                     "payment_method": row.get::<_, String>(5)?,
-                    "cash_collected": row.get::<_, f64>(6)?,
-                    "card_amount": row.get::<_, f64>(7)?,
-                    "cash_to_return": row.get::<_, f64>(8)?,
+                    "cash_collected": Cents::new(row.get::<_, i64>(6)?).to_f64_dp2(),
+                    "card_amount": Cents::new(row.get::<_, i64>(7)?).to_f64_dp2(),
+                    "cash_to_return": Cents::new(row.get::<_, i64>(8)?).to_f64_dp2(),
                     "order_number": row.get::<_, Option<String>>(9)?,
                     "delivery_address": row.get::<_, Option<String>>(10)?,
-                    "total_amount": row.get::<_, Option<f64>>(11)?,
+                    "total_amount": row.get::<_, Option<i64>>(11)?
+                        .map(|c| Cents::new(c).to_f64_dp2()),
                     "status": &status,
                     "order_status": &status,
                     "customer_name": row.get::<_, Option<String>>(13)?,
@@ -1770,12 +2023,14 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
+        // W4c dual-write: shift_expenses.amount and cash_drawer_sessions.total_expenses.
+        let amount_cents = Cents::round_half_even(amount).as_i64();
         conn.execute(
             "INSERT INTO shift_expenses (
                 id, staff_shift_id, staff_id, branch_id, expense_type,
-                amount, description, receipt_number, status, sync_status,
+                amount, amount_cents, description, receipt_number, status, sync_status,
                 created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 'pending', ?9, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 'pending', ?10, ?10)",
             params![
                 expense_id,
                 shift_id,
@@ -1783,6 +2038,7 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
                 branch_id,
                 expense_type,
                 amount,
+                amount_cents,
                 description,
                 receipt_number,
                 now,
@@ -1790,18 +2046,21 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
         )
         .map_err(|e| format!("insert expense: {e}"))?;
 
-        // Update cash drawer total_expenses (if cashier/manager)
+        // Update cash drawer total_expenses (if cashier/manager).
         conn.execute(
             "UPDATE cash_drawer_sessions SET
                 total_expenses = COALESCE(total_expenses, 0) + ?1,
-                updated_at = ?2
-             WHERE staff_shift_id = ?3",
-            params![amount, now, shift_id],
+                total_expenses_cents = COALESCE(total_expenses_cents, 0) + ?2,
+                updated_at = ?3
+             WHERE staff_shift_id = ?4",
+            params![amount, amount_cents, now, shift_id],
         )
         .map_err(|e| format!("update drawer expenses: {e}"))?;
 
-        // Enqueue for sync
-        let idempotency_key = format!("expense:{expense_id}:{}", Uuid::new_v4());
+        // Wave 5 Session 6: enqueue via canonical parity queue. Idempotency
+        // key now flows from `shift_expenses.idempotency_key` (populated by
+        // v47/v49) inside `prepare_financial_request`, so the producer no
+        // longer stamps a volatile UUID per-enqueue (C17).
         let sync_payload = serde_json::json!({
             "expenseId": expense_id,
             "shiftId": shift_id,
@@ -1814,13 +2073,18 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
             "status": "pending",
             "createdAt": now,
             "updatedAt": now,
-        })
-        .to_string();
+        });
 
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('shift_expense', ?1, 'insert', ?2, ?3)",
-            params![expense_id, sync_payload, idempotency_key],
+        sync_queue::enqueue_payload_item(
+            &conn,
+            "shift_expenses",
+            &expense_id,
+            "INSERT",
+            &sync_payload,
+            Some(1),
+            Some("financial"),
+            Some("manual"),
+            Some(1),
         )
         .map_err(|e| format!("enqueue expense sync: {e}"))?;
 
@@ -1853,8 +2117,10 @@ pub fn get_expenses(db: &DbState, shift_id: &str) -> Result<Value, String> {
 
     let mut stmt = conn
         .prepare(
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
             "SELECT id, staff_shift_id, staff_id, branch_id, expense_type,
-                    amount, description, receipt_number, status,
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
+                    description, receipt_number, status,
                     approved_by, approved_at, rejection_reason,
                     created_at, updated_at
              FROM shift_expenses
@@ -1871,7 +2137,7 @@ pub fn get_expenses(db: &DbState, shift_id: &str) -> Result<Value, String> {
                 "staffId": row.get::<_, String>(2)?,
                 "branchId": row.get::<_, String>(3)?,
                 "expenseType": row.get::<_, String>(4)?,
-                "amount": row.get::<_, f64>(5)?,
+                "amount": Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
                 "description": row.get::<_, String>(6)?,
                 "receiptNumber": row.get::<_, Option<String>>(7)?,
                 "status": row.get::<_, String>(8)?,
@@ -1913,13 +2179,21 @@ pub fn delete_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
         .or_else(|| str_field(payload, "staff_shift_id"))
         .ok_or("Missing shiftId")?;
 
+    // W4b-ii: cents-with-real-fallback shim (removed in 4e).
     let expense_row: Option<(String, String, f64)> = conn
         .query_row(
-            "SELECT staff_shift_id, branch_id, amount
+            "SELECT staff_shift_id, branch_id,
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0)
              FROM shift_expenses
              WHERE id = ?1",
             params![expense_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                ))
+            },
         )
         .optional()
         .map_err(|e| format!("load expense: {e}"))?;
@@ -1945,15 +2219,22 @@ pub fn delete_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("delete expense: {e}"))?;
 
         let remaining_total = compute_shift_expenses_total(&conn, &stored_shift_id);
+        // W4c dual-write: recompute_drawer_expenses → cents sibling.
+        let remaining_total_cents = Cents::round_half_even(remaining_total).as_i64();
         conn.execute(
             "UPDATE cash_drawer_sessions SET
                 total_expenses = ?1,
-                updated_at = ?2
-             WHERE staff_shift_id = ?3",
-            params![remaining_total, now, stored_shift_id],
+                total_expenses_cents = ?2,
+                updated_at = ?3
+             WHERE staff_shift_id = ?4",
+            params![remaining_total, remaining_total_cents, now, stored_shift_id],
         )
         .map_err(|e| format!("recompute drawer expenses: {e}"))?;
 
+        // Clear lingering legacy-queue rows for this expense. Session 7 will
+        // seal/drop the legacy table once all deployed terminals have drained
+        // their backlog; until then, transitional producers must continue to
+        // invalidate pre-migration rows so the DELETE is authoritative.
         conn.execute(
             "DELETE FROM sync_queue
              WHERE entity_type = 'shift_expense'
@@ -1961,7 +2242,11 @@ pub fn delete_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
                AND status NOT IN ('synced', 'applied')",
             params![expense_id],
         )
-        .map_err(|e| format!("clear unfinished expense queue rows: {e}"))?;
+        .map_err(|e| format!("clear unfinished legacy expense queue rows: {e}"))?;
+
+        // Clear lingering parity-queue rows so the pending INSERT is superseded.
+        sync_queue::clear_unsynced_items(&conn, "shift_expenses", &expense_id)
+            .map_err(|e| format!("clear unfinished parity expense queue rows: {e}"))?;
 
         let sync_payload = serde_json::json!({
             "expenseId": expense_id,
@@ -1970,16 +2255,18 @@ pub fn delete_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
             "branchId": branch_id,
             "amount": amount,
             "deletedAt": now,
-        })
-        .to_string();
-        let idempotency_key = format!("expense:{expense_id}:delete:{}", Uuid::new_v4());
+        });
 
-        conn.execute(
-            "INSERT INTO sync_queue (
-                entity_type, entity_id, operation, payload, idempotency_key,
-                created_at, updated_at
-            ) VALUES ('shift_expense', ?1, 'delete', ?2, ?3, ?4, ?4)",
-            params![expense_id, sync_payload, idempotency_key, now],
+        sync_queue::enqueue_payload_item(
+            &conn,
+            "shift_expenses",
+            &expense_id,
+            "DELETE",
+            &sync_payload,
+            Some(1),
+            Some("financial"),
+            Some("manual"),
+            Some(1),
         )
         .map_err(|e| format!("enqueue expense delete sync: {e}"))?;
 
@@ -2082,9 +2369,18 @@ fn compute_staff_payments_total(conn: &Connection, cashier_shift_id: &str) -> Re
     .map_err(|e| format!("compute staff payment total: {e}"))
 }
 
+/// Clear unfinished sync rows for an entity across BOTH queues. Session 7
+/// will seal/drop the legacy `sync_queue` once deployed terminals drain;
+/// until then, helpers that supersede a pending mutation must invalidate
+/// rows on both tables so the new canonical row is authoritative.
+///
+/// `legacy_entity_type` is the `sync_queue.entity_type` value (e.g. `"shift"`,
+/// `"staff_payment"`). `parity_table_name` is the matching `parity_sync_queue.table_name`
+/// value (e.g. `"staff_shifts"`, `"staff_payments"`).
 fn clear_unfinished_sync_queue_rows(
     conn: &Connection,
-    entity_type: &str,
+    legacy_entity_type: &str,
+    parity_table_name: &str,
     entity_id: &str,
 ) -> Result<(), String> {
     conn.execute(
@@ -2092,9 +2388,11 @@ fn clear_unfinished_sync_queue_rows(
          WHERE entity_type = ?1
            AND entity_id = ?2
            AND status NOT IN ('synced', 'applied')",
-        params![entity_type, entity_id],
+        params![legacy_entity_type, entity_id],
     )
-    .map_err(|e| format!("clear unfinished {entity_type} queue rows: {e}"))?;
+    .map_err(|e| format!("clear unfinished {legacy_entity_type} legacy queue rows: {e}"))?;
+    sync_queue::clear_unsynced_items(conn, parity_table_name, entity_id)
+        .map_err(|e| format!("clear unfinished {parity_table_name} parity queue rows: {e}"))?;
     Ok(())
 }
 
@@ -2104,13 +2402,21 @@ fn recompute_active_cashier_staff_payment_total(
     written_at: &str,
 ) -> Result<f64, String> {
     let total_staff_payments = compute_staff_payments_total(conn, cashier_shift_id)?;
+    // W4c dual-write: recompute_active_drawer_staff_payments → cents sibling.
+    let total_staff_payments_cents = Cents::round_half_even(total_staff_payments).as_i64();
     let updated = conn
         .execute(
             "UPDATE cash_drawer_sessions
              SET total_staff_payments = ?1,
-                 updated_at = ?2
-             WHERE staff_shift_id = ?3",
-            params![total_staff_payments, written_at, cashier_shift_id],
+                 total_staff_payments_cents = ?2,
+                 updated_at = ?3
+             WHERE staff_shift_id = ?4",
+            params![
+                total_staff_payments,
+                total_staff_payments_cents,
+                written_at,
+                cashier_shift_id
+            ],
         )
         .map_err(|e| format!("recompute active drawer staff payments: {e}"))?;
 
@@ -2137,8 +2443,12 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         closing_cash_amount,
     ): (String, f64, i64, String, String, f64) = conn
         .query_row(
-            "SELECT role_type, opening_cash_amount, calculation_version,
-                    check_in_time, check_out_time, COALESCE(closing_cash_amount, 0)
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT role_type,
+                    COALESCE(opening_cash_amount_cents, CAST(ROUND(opening_cash_amount * 100) AS INTEGER), 0),
+                    calculation_version,
+                    check_in_time, check_out_time,
+                    COALESCE(closing_cash_amount_cents, CAST(ROUND(closing_cash_amount * 100) AS INTEGER), 0)
              FROM staff_shifts
              WHERE id = ?1
                AND status = 'closed'",
@@ -2146,11 +2456,11 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
             |row| {
                 Ok((
                     row.get(0)?,
-                    row.get(1)?,
+                    Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
                     row.get(2)?,
                     row.get(3)?,
                     row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    row.get(5)?,
+                    Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
                 ))
             },
         )
@@ -2181,10 +2491,11 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         Some(check_out_time.as_str()),
     )?;
 
+    // W4b-ii: cents-with-real-fallback shim (removed in 4e).
     let reconciled_refunds: f64 = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(pa.amount), 0)
+                "SELECT COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
                  FROM orders o
                  JOIN payment_adjustments pa ON pa.order_id = o.id
                  LEFT JOIN order_payments op ON op.id = pa.payment_id
@@ -2195,38 +2506,50 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
                    AND {order_financial_expr} <= ?3"
             ),
             params![shift_id, check_in_time, check_out_time],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .unwrap_or(0.0);
 
     let reconciled_expenses: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0)
+            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
              FROM shift_expenses
              WHERE staff_shift_id = ?1",
             params![shift_id],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .unwrap_or(0.0);
 
     let reconciled_staff_payments = compute_staff_payments_total(conn, shift_id)?;
 
+    // W4c dual-write: reconciled drawer totals mirror onto cents siblings.
+    let reconciled_cash_sales_cents = Cents::round_half_even(reconciled_cash_sales).as_i64();
+    let reconciled_card_sales_cents = Cents::round_half_even(reconciled_card_sales).as_i64();
+    let reconciled_refunds_cents = Cents::round_half_even(reconciled_refunds).as_i64();
+    let reconciled_expenses_cents = Cents::round_half_even(reconciled_expenses).as_i64();
+    let reconciled_staff_payments_cents =
+        Cents::round_half_even(reconciled_staff_payments).as_i64();
     let drawer_updated = conn
         .execute(
             "UPDATE cash_drawer_sessions SET
-                total_cash_sales = ?1,
-                total_card_sales = ?2,
-                total_refunds = ?3,
-                total_expenses = ?4,
-                total_staff_payments = ?5,
-                updated_at = ?6
-             WHERE staff_shift_id = ?7",
+                total_cash_sales = ?1, total_cash_sales_cents = ?2,
+                total_card_sales = ?3, total_card_sales_cents = ?4,
+                total_refunds = ?5, total_refunds_cents = ?6,
+                total_expenses = ?7, total_expenses_cents = ?8,
+                total_staff_payments = ?9, total_staff_payments_cents = ?10,
+                updated_at = ?11
+             WHERE staff_shift_id = ?12",
             params![
                 reconciled_cash_sales,
+                reconciled_cash_sales_cents,
                 reconciled_card_sales,
+                reconciled_card_sales_cents,
                 reconciled_refunds,
+                reconciled_refunds_cents,
                 reconciled_expenses,
+                reconciled_expenses_cents,
                 reconciled_staff_payments,
+                reconciled_staff_payments_cents,
                 written_at,
                 shift_id,
             ],
@@ -2239,15 +2562,22 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         ));
     }
 
+    // W4b-ii: cents-with-real-fallback shim (removed in 4e).
     let (cash_drops, driver_cash_given, driver_cash_returned): (f64, f64, f64) = conn
         .query_row(
-            "SELECT COALESCE(cash_drops, 0),
-                    COALESCE(driver_cash_given, 0),
-                    COALESCE(driver_cash_returned, 0)
+            "SELECT COALESCE(cash_drops_cents, CAST(ROUND(cash_drops * 100) AS INTEGER), 0),
+                    COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER), 0),
+                    COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0)
              FROM cash_drawer_sessions
              WHERE staff_shift_id = ?1",
             params![shift_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    Cents::new(row.get::<_, i64>(0)?).to_f64_dp2(),
+                    Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                    Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                ))
+            },
         )
         .map_err(|e| format!("load closed drawer cash movement totals: {e}"))?;
 
@@ -2270,34 +2600,50 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         + inherited_driver_expected_returns;
     let variance = closing_cash_amount - expected;
 
+    // W4c dual-write: corrected expected/variance and shift snapshot mirror.
+    let expected_cents_corrected = Cents::round_half_even(expected).as_i64();
+    let variance_cents_corrected = Cents::round_half_even(variance).as_i64();
+    let reconciled_total_sales_cents = Cents::round_half_even(reconciled_total_sales).as_i64();
     conn.execute(
         "UPDATE cash_drawer_sessions SET
-            expected_amount = ?1,
-            variance_amount = ?2,
-            updated_at = ?3
-         WHERE staff_shift_id = ?4",
-        params![expected, variance, written_at, shift_id],
+            expected_amount = ?1, expected_amount_cents = ?2,
+            variance_amount = ?3, variance_amount_cents = ?4,
+            updated_at = ?5
+         WHERE staff_shift_id = ?6",
+        params![
+            expected,
+            expected_cents_corrected,
+            variance,
+            variance_cents_corrected,
+            written_at,
+            shift_id
+        ],
     )
     .map_err(|e| format!("update corrected closed drawer snapshot: {e}"))?;
 
     conn.execute(
         "UPDATE staff_shifts SET
-            expected_cash_amount = ?1,
-            cash_variance = ?2,
-            total_orders_count = ?3,
-            total_sales_amount = ?4,
-            total_cash_sales = ?5,
-            total_card_sales = ?6,
+            expected_cash_amount = ?1, expected_cash_amount_cents = ?2,
+            cash_variance = ?3, cash_variance_cents = ?4,
+            total_orders_count = ?5,
+            total_sales_amount = ?6, total_sales_amount_cents = ?7,
+            total_cash_sales = ?8, total_cash_sales_cents = ?9,
+            total_card_sales = ?10, total_card_sales_cents = ?11,
             sync_status = 'pending',
-            updated_at = ?7
-         WHERE id = ?8",
+            updated_at = ?12
+         WHERE id = ?13",
         params![
             expected,
+            expected_cents_corrected,
             variance,
+            variance_cents_corrected,
             reconciled_order_count,
             reconciled_total_sales,
+            reconciled_total_sales_cents,
             reconciled_cash_sales,
+            reconciled_cash_sales_cents,
             reconciled_card_sales,
+            reconciled_card_sales_cents,
             written_at,
             shift_id,
         ],
@@ -2400,6 +2746,9 @@ fn build_shift_update_sync_payload_from_db(
         period_start_at.as_deref(),
     );
 
+    // W4d-i: emit BOTH legacy float and integer cents keys for the 8
+    // monetary shift-update fields. Admin-dashboard still reads the
+    // float keys; cents are forward-compat.
     let mut payload = serde_json::json!({
         "shiftId": shift_id,
         "staffId": staff_id,
@@ -2408,6 +2757,7 @@ fn build_shift_update_sync_payload_from_db(
         "terminalId": terminal_id,
         "roleType": role_type,
         "openingCash": opening_cash,
+        "opening_cash_cents": Cents::round_half_even(opening_cash).as_i64(),
         "checkInTime": check_in_time,
         "checkOutTime": check_out_time,
         "reportDate": shift_business_day.report_date,
@@ -2415,13 +2765,20 @@ fn build_shift_update_sync_payload_from_db(
         "calculationVersion": calculation_version,
         "totalOrdersCount": total_orders_count,
         "totalSalesAmount": total_sales_amount,
+        "total_sales_amount_cents": Cents::round_half_even(total_sales_amount).as_i64(),
         "totalCashSales": total_cash_sales,
+        "total_cash_sales_cents": Cents::round_half_even(total_cash_sales).as_i64(),
         "totalCardSales": total_card_sales,
+        "total_card_sales_cents": Cents::round_half_even(total_card_sales).as_i64(),
         "closingCash": closing_cash_amount,
+        "closing_cash_cents": closing_cash_amount.map(|v| Cents::round_half_even(v).as_i64()),
         "expectedCash": expected_cash_amount,
+        "expected_cash_cents": expected_cash_amount.map(|v| Cents::round_half_even(v).as_i64()),
         "variance": cash_variance,
+        "cash_variance_cents": cash_variance.map(|v| Cents::round_half_even(v).as_i64()),
         "closedBy": closed_by,
         "paymentAmount": payment_amount,
+        "payment_amount_cents": payment_amount.map(|v| Cents::round_half_even(v).as_i64()),
     });
 
     if let Some(drawer_snapshot) = load_cash_drawer_snapshot_for_shift(conn, shift_id)? {
@@ -2434,22 +2791,28 @@ fn build_shift_update_sync_payload_from_db(
 pub(crate) fn replace_unfinished_shift_sync_rows_with_current_snapshot(
     conn: &Connection,
     shift_id: &str,
-    written_at: &str,
+    _written_at: &str,
 ) -> Result<(), String> {
-    clear_unfinished_sync_queue_rows(conn, "shift", shift_id)?;
+    clear_unfinished_sync_queue_rows(conn, "shift", "staff_shifts", shift_id)?;
 
-    let sync_payload = build_shift_update_sync_payload_from_db(conn, shift_id)?;
-    let idempotency_key = format!(
-        "shift:staff-payment-correction:{shift_id}:{}",
-        Uuid::new_v4()
-    );
+    // Wave 5 Session 6: corrected-snapshot shift UPDATE flows through the
+    // parity queue. `build_shift_update_sync_payload_from_db` currently
+    // returns a String (legacy API), so we parse it back to Value so the
+    // parity helper can accept it without double-stringification.
+    let sync_payload_str = build_shift_update_sync_payload_from_db(conn, shift_id)?;
+    let sync_payload: Value = serde_json::from_str(&sync_payload_str)
+        .map_err(|e| format!("parse corrected shift snapshot payload: {e}"))?;
 
-    conn.execute(
-        "INSERT INTO sync_queue (
-            entity_type, entity_id, operation, payload, idempotency_key,
-            created_at, updated_at
-        ) VALUES ('shift', ?1, 'update', ?2, ?3, ?4, ?4)",
-        params![shift_id, sync_payload, idempotency_key, written_at],
+    sync_queue::enqueue_payload_item(
+        conn,
+        "staff_shifts",
+        shift_id,
+        "UPDATE",
+        &sync_payload,
+        Some(1),
+        Some("shifts"),
+        Some("manual"),
+        Some(1),
     )
     .map_err(|e| format!("enqueue corrected shift snapshot sync: {e}"))?;
 
@@ -2466,12 +2829,15 @@ fn build_staff_payment_sync_payload(
     created_at: &str,
     updated_at: &str,
 ) -> String {
+    // W4d-i: emit BOTH `amount` (legacy float) and `amount_cents` (new
+    // integer). Admin-dashboard still reads the float key.
     serde_json::json!({
         "id": payment_id,
         "cashierShiftId": cashier_shift_id,
         "paidByCashierShiftId": cashier_shift_id,
         "paidToStaffId": paid_to_staff_id,
         "amount": amount,
+        "amount_cents": Cents::round_half_even(amount).as_i64(),
         "paymentType": payment_type,
         "notes": notes,
         "createdAt": created_at,
@@ -2492,9 +2858,16 @@ fn enqueue_staff_payment_upsert_sync(
     updated_at: &str,
     operation: &str,
 ) -> Result<(), String> {
-    clear_unfinished_sync_queue_rows(conn, "staff_payment", payment_id)?;
+    clear_unfinished_sync_queue_rows(conn, "staff_payment", "staff_payments", payment_id)?;
 
-    let sync_payload = build_staff_payment_sync_payload(
+    // Wave 5 Session 6: staff_payments upsert flows through the parity
+    // queue's financial dispatcher (/api/pos/financial/sync via
+    // prepare_financial_request on table_name="staff_payments"). Note:
+    // staff_payments was explicitly excluded from v47 (per db.rs:3056) so
+    // the idempotency key falls back to the deterministic synthetic
+    // `entity:staff_payments:{payment_id}` — still stable enough for
+    // exactly-once because the payment id never changes across retries.
+    let sync_payload_str = build_staff_payment_sync_payload(
         payment_id,
         cashier_shift_id,
         paid_to_staff_id,
@@ -2504,20 +2877,20 @@ fn enqueue_staff_payment_upsert_sync(
         created_at,
         updated_at,
     );
-    let idempotency_key = format!("staff-payment:{operation}:{payment_id}:{}", Uuid::new_v4());
+    let sync_payload: Value = serde_json::from_str(&sync_payload_str)
+        .map_err(|e| format!("parse staff payment upsert payload: {e}"))?;
 
-    conn.execute(
-        "INSERT INTO sync_queue (
-            entity_type, entity_id, operation, payload, idempotency_key,
-            created_at, updated_at
-        ) VALUES ('staff_payment', ?1, ?2, ?3, ?4, ?5, ?5)",
-        params![
-            payment_id,
-            operation,
-            sync_payload,
-            idempotency_key,
-            updated_at
-        ],
+    let parity_op = operation.to_uppercase();
+    sync_queue::enqueue_payload_item(
+        conn,
+        "staff_payments",
+        payment_id,
+        &parity_op,
+        &sync_payload,
+        Some(1),
+        Some("financial"),
+        Some("manual"),
+        Some(1),
     )
     .map_err(|e| format!("enqueue staff payment {operation} sync: {e}"))?;
 
@@ -2531,7 +2904,7 @@ fn enqueue_staff_payment_delete_sync(
     paid_to_staff_id: &str,
     deleted_at: &str,
 ) -> Result<(), String> {
-    clear_unfinished_sync_queue_rows(conn, "staff_payment", payment_id)?;
+    clear_unfinished_sync_queue_rows(conn, "staff_payment", "staff_payments", payment_id)?;
 
     let sync_payload = serde_json::json!({
         "id": payment_id,
@@ -2540,16 +2913,18 @@ fn enqueue_staff_payment_delete_sync(
         "paidToStaffId": paid_to_staff_id,
         "deletedAt": deleted_at,
         "updatedAt": deleted_at,
-    })
-    .to_string();
-    let idempotency_key = format!("staff-payment:delete:{payment_id}:{}", Uuid::new_v4());
+    });
 
-    conn.execute(
-        "INSERT INTO sync_queue (
-            entity_type, entity_id, operation, payload, idempotency_key,
-            created_at, updated_at
-        ) VALUES ('staff_payment', ?1, 'delete', ?2, ?3, ?4, ?4)",
-        params![payment_id, sync_payload, idempotency_key, deleted_at],
+    sync_queue::enqueue_payload_item(
+        conn,
+        "staff_payments",
+        payment_id,
+        "DELETE",
+        &sync_payload,
+        Some(1),
+        Some("financial"),
+        Some("manual"),
+        Some(1),
     )
     .map_err(|e| format!("enqueue staff payment delete sync: {e}"))?;
 
@@ -2924,13 +3299,14 @@ fn compute_shift_expenses_total_in_window(
     window_end: Option<&str>,
 ) -> f64 {
     conn.query_row(
-        "SELECT COALESCE(SUM(amount), 0)
+        // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+        "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
          FROM shift_expenses
          WHERE staff_shift_id = ?1
            AND (?2 IS NULL OR created_at >= ?2)
            AND (?3 IS NULL OR created_at <= ?3)",
         params![shift_id, window_start, window_end],
-        |row| row.get(0),
+        |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
     )
     .unwrap_or(0.0)
 }
@@ -2958,9 +3334,9 @@ fn compute_shift_payment_totals_in_window(
     let sql = format!(
         "SELECT
             COUNT(DISTINCT o.id),
-            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN op.amount ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN op.amount ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN op.status = 'completed' THEN op.amount ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN op.status = 'completed' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0)
          FROM orders o
          LEFT JOIN order_payments op ON op.order_id = o.id
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -2972,7 +3348,12 @@ fn compute_shift_payment_totals_in_window(
         role_order_type_filter_sql(role_type, "o")
     );
     conn.query_row(&sql, params![shift_id, window_start, window_end], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        Ok((
+            row.get(0)?,
+            Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+            Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+            Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+        ))
     })
     .map_err(|e| format!("query shift payment totals: {e}"))
 }
@@ -3102,7 +3483,9 @@ fn transfer_active_cash_staff(
 ) -> Result<f64, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, opening_cash_amount
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT id,
+                    COALESCE(opening_cash_amount_cents, CAST(ROUND(opening_cash_amount * 100) AS INTEGER), 0)
              FROM staff_shifts
              WHERE role_type IN ('driver', 'server')
                AND status = 'active'
@@ -3124,7 +3507,7 @@ fn transfer_active_cash_staff(
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, f64>(1).unwrap_or(0.0),
+                    Cents::new(row.get::<_, i64>(1).unwrap_or(0)).to_f64_dp2(),
                 ))
             },
         )
@@ -3154,18 +3537,24 @@ fn transfer_active_cash_staff(
         )
         .map_err(|e| format!("mark driver earnings transferred: {e}"))?;
 
-        let idempotency_key = format!("shift:transfer:{driver_shift_id}:{}", Uuid::new_v4());
+        // Wave 5 Session 6: transfer-pending staff_shifts update routes
+        // through parity's module_type="shifts" endpoint.
         let sync_payload = serde_json::json!({
             "shiftId": driver_shift_id,
             "isTransferPending": true,
             "transferredToCashierShiftId": null,
-        })
-        .to_string();
+        });
 
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('shift', ?1, 'update', ?2, ?3)",
-            params![driver_shift_id, sync_payload, idempotency_key],
+        sync_queue::enqueue_payload_item(
+            conn,
+            "staff_shifts",
+            driver_shift_id,
+            "UPDATE",
+            &sync_payload,
+            Some(1),
+            Some("shifts"),
+            Some("manual"),
+            Some(1),
         )
         .map_err(|e| format!("enqueue staff transfer sync: {e}"))?;
 
@@ -3232,18 +3621,24 @@ fn claim_transferred_cash_staff(
         )
         .map_err(|e| format!("claim transferred staff: {e}"))?;
 
-        let idempotency_key = format!("shift:claim:{driver_shift_id}:{}", Uuid::new_v4());
+        // Wave 5 Session 6: claim-transferred staff_shifts update routes
+        // through parity's module_type="shifts" endpoint.
         let sync_payload = serde_json::json!({
             "shiftId": driver_shift_id,
             "transferredToCashierShiftId": new_cashier_shift_id,
             "isTransferPending": false,
-        })
-        .to_string();
+        });
 
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('shift', ?1, 'update', ?2, ?3)",
-            params![driver_shift_id, sync_payload, idempotency_key],
+        sync_queue::enqueue_payload_item(
+            conn,
+            "staff_shifts",
+            driver_shift_id,
+            "UPDATE",
+            &sync_payload,
+            Some(1),
+            Some("shifts"),
+            Some("manual"),
+            Some(1),
         )
         .map_err(|e| format!("enqueue staff claim sync: {e}"))?;
         info!(
@@ -3267,7 +3662,9 @@ fn compute_inherited_cash_staff_expected_returns(
 ) -> Result<f64, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT ss.id, ss.role_type, ss.opening_cash_amount
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT ss.id, ss.role_type,
+                    COALESCE(ss.opening_cash_amount_cents, CAST(ROUND(ss.opening_cash_amount * 100) AS INTEGER), 0)
              FROM staff_shifts ss
              WHERE ss.transferred_to_cashier_shift_id = ?1
                AND ss.status = 'active'
@@ -3281,7 +3678,7 @@ fn compute_inherited_cash_staff_expected_returns(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, f64>(2).unwrap_or(0.0),
+                Cents::new(row.get::<_, i64>(2).unwrap_or(0)).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query inherited staff: {e}"))?
@@ -3428,6 +3825,12 @@ fn build_cashier_order_history(
     cashier_check_out_time: Option<&str>,
 ) -> Result<Vec<Value>, String> {
     let order_financial_expr = business_day::order_financial_timestamp_expr("o");
+    // W6: derive payment method from `order_payments` instead of the
+    // dropped `orders.payment_method` column. Matches the semantic of
+    // `payments::derive_payment_method` (multi-method = "split").
+    // The cashier UI consumes this value directly as the
+    // presentation label.
+    // W4b-ii: cents-with-real-fallback shim (removed in 4e).
     let sql = format!(
         "SELECT
                 o.id,
@@ -3437,17 +3840,27 @@ fn build_cashier_order_history(
                 o.table_number,
                 o.customer_name,
                 o.status,
-                COALESCE(o.total_amount, 0),
-                COALESCE(o.payment_method, 'cash'),
+                COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
                 COALESCE((
-                    SELECT SUM(op.amount)
+                    SELECT CASE
+                        WHEN COUNT(DISTINCT LOWER(TRIM(method))) > 1
+                          THEN 'split'
+                        ELSE LOWER(TRIM(MIN(method)))
+                    END
+                    FROM order_payments op2
+                    WHERE op2.order_id = o.id
+                      AND op2.status = 'completed'
+                      AND TRIM(COALESCE(op2.method, '')) != ''
+                ), 'pending'),
+                COALESCE((
+                    SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
                     FROM order_payments op
                     WHERE op.order_id = o.id
                       AND op.status = 'completed'
                       AND op.method = 'cash'
                 ), 0),
                 COALESCE((
-                    SELECT SUM(op.amount)
+                    SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
                     FROM order_payments op
                     WHERE op.order_id = o.id
                       AND op.status = 'completed'
@@ -3494,10 +3907,10 @@ fn build_cashier_order_history(
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, f64>(7).unwrap_or(0.0),
+                    Cents::new(row.get::<_, i64>(7).unwrap_or(0)).to_f64_dp2(),
                     row.get::<_, String>(8)?,
-                    row.get::<_, f64>(9).unwrap_or(0.0),
-                    row.get::<_, f64>(10).unwrap_or(0.0),
+                    Cents::new(row.get::<_, i64>(9).unwrap_or(0)).to_f64_dp2(),
+                    Cents::new(row.get::<_, i64>(10).unwrap_or(0)).to_f64_dp2(),
                 ))
             },
         )
@@ -3547,7 +3960,10 @@ fn build_inherited_cash_staff_rows(
 ) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT ss.id, ss.staff_id, ss.staff_name, ss.opening_cash_amount, ss.check_in_time
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT ss.id, ss.staff_id, ss.staff_name,
+                    COALESCE(ss.opening_cash_amount_cents, CAST(ROUND(ss.opening_cash_amount * 100) AS INTEGER), 0),
+                    ss.check_in_time
              FROM staff_shifts ss
              WHERE ss.transferred_to_cashier_shift_id = ?1
                AND ss.role_type = ?2
@@ -3565,7 +3981,7 @@ fn build_inherited_cash_staff_rows(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
-                    row.get::<_, f64>(3).unwrap_or(0.0),
+                    Cents::new(row.get::<_, i64>(3).unwrap_or(0)).to_f64_dp2(),
                     row.get::<_, String>(4)?,
                 ))
             },
@@ -3680,19 +4096,36 @@ fn load_cashier_staff_payments(
 }
 
 fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Vec<Value>, String> {
+    // W6: derive payment_method per order from `order_payments` instead
+    // of reading the dropped `orders.payment_method` column. The table-
+    // level `payment_method` emitted below at the end of this function
+    // is independently computed from cash+card sums and is unaffected.
     let mut stmt = conn
         .prepare(
+            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
             "SELECT o.id, o.order_number, COALESCE(o.table_number, 'Mobile POS') AS table_number,
-                    COALESCE(o.total_amount, 0), COALESCE(o.payment_method, 'cash'), o.status,
+                    COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
                     COALESCE((
-                        SELECT SUM(op.amount)
+                        SELECT CASE
+                            WHEN COUNT(DISTINCT LOWER(TRIM(method))) > 1
+                              THEN 'split'
+                            ELSE LOWER(TRIM(MIN(method)))
+                        END
+                        FROM order_payments op2
+                        WHERE op2.order_id = o.id
+                          AND op2.status = 'completed'
+                          AND TRIM(COALESCE(op2.method, '')) != ''
+                    ), 'pending'),
+                    o.status,
+                    COALESCE((
+                        SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
                         FROM order_payments op
                         WHERE op.order_id = o.id
                           AND op.status = 'completed'
                           AND op.method = 'cash'
                     ), 0) AS cash_amount,
                     COALESCE((
-                        SELECT SUM(op.amount)
+                        SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
                         FROM order_payments op
                         WHERE op.order_id = o.id
                           AND op.status = 'completed'
@@ -3723,11 +4156,11 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, f64>(3).unwrap_or(0.0),
+                Cents::new(row.get::<_, i64>(3).unwrap_or(0)).to_f64_dp2(),
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, f64>(6).unwrap_or(0.0),
-                row.get::<_, f64>(7).unwrap_or(0.0),
+                Cents::new(row.get::<_, i64>(6).unwrap_or(0)).to_f64_dp2(),
+                Cents::new(row.get::<_, i64>(7).unwrap_or(0)).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query waiter tables: {e}"))?
@@ -3776,8 +4209,10 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
             .iter()
             .map(|order| order["card_amount"].as_f64().unwrap_or(0.0))
             .sum();
+        // W6: align the table-level method label with the new canonical
+        // vocabulary — "split" for mixed cash+card (was "mixed" pre-W6).
         let payment_method = if cash_amount > 0.0 && card_amount > 0.0 {
-            "mixed"
+            "split"
         } else if card_amount > 0.0 {
             "card"
         } else {
@@ -3911,17 +4346,21 @@ mod tests {
     }
 
     fn load_latest_shift_sync_payload(db: &DbState, operation: &str, shift_id: &str) -> Value {
+        // Wave 5 Session 6: shift producers now write to parity_sync_queue.
+        // Parity stores `operation` uppercased ("INSERT"/"UPDATE"); legacy
+        // tests used lowercase, so normalize the caller's input.
+        let parity_op = operation.to_uppercase();
         let conn = db.conn.lock().unwrap();
         let payload: String = conn
             .query_row(
-                "SELECT payload
-                 FROM sync_queue
-                 WHERE entity_type = 'shift'
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'staff_shifts'
                    AND operation = ?1
-                   AND entity_id = ?2
-                 ORDER BY id DESC
+                   AND record_id = ?2
+                 ORDER BY created_at DESC
                  LIMIT 1",
-                params![operation, shift_id],
+                params![parity_op, shift_id],
                 |row| row.get(0),
             )
             .expect("shift sync payload should exist");
@@ -3942,48 +4381,57 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
 
-            // Cashier shift
+            // W4e Step 0: dual-populate every monetary column.
+            // Cashier shift (500.0 → 50000)
             conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
                  VALUES ('cashier-shift', 'cashier-1', 'cashier', 'branch-1', 'term-1',
-                    datetime('now'), 500.0, 'active', 2, 'pending', datetime('now'), datetime('now'))",
+                    datetime('now'), 500.0, 50000, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
 
-            // Cashier drawer
+            // Cashier drawer (500.0 → 50000, 50.0 → 5000)
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id,
-                    terminal_id, opening_amount, driver_cash_given, opened_at, created_at, updated_at)
+                    terminal_id, opening_amount, opening_amount_cents,
+                    driver_cash_given, driver_cash_given_cents,
+                    opened_at, created_at, updated_at)
                  VALUES ('drawer-1', 'cashier-shift', 'cashier-1', 'branch-1', 'term-1',
-                    500.0, 50.0, datetime('now'), datetime('now'), datetime('now'))",
+                    500.0, 50000, 50.0, 5000, datetime('now'), datetime('now'), datetime('now'))",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
 
-            // Driver shift (opening_cash=50, same branch)
+            // Driver shift (opening_cash=50.0 → 5000, same branch)
             conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
                  VALUES ('driver-shift', 'driver-1', 'driver', 'branch-1', 'term-1',
-                    datetime('now'), 50.0, 'active', 2, 'pending', datetime('now'), datetime('now'))",
+                    datetime('now'), 50.0, 5000, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
 
-            // Order (must exist before driver_earnings FK)
+            // Order (30.0 → 3000)
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-                 VALUES ('ord-d1', '[]', 30.0, 'completed', 'pending', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-d1', '[]', 30.0, 3000, 'completed', 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
 
-            // Driver earnings: cash_collected = 30
+            // Driver earnings: cash_collected = 30 (30.0 → 3000)
             conn.execute(
                 "INSERT INTO driver_earnings (id, driver_id, staff_shift_id, order_id, branch_id,
-                    total_earning, payment_method, cash_collected, created_at, updated_at)
+                    total_earning, total_earning_cents,
+                    payment_method,
+                    cash_collected, cash_collected_cents,
+                    created_at, updated_at)
                  VALUES ('de-1', 'driver-1', 'driver-shift', 'ord-d1', 'branch-1',
-                    30.0, 'cash', 30.0, datetime('now'), datetime('now'))",
+                    30.0, 3000, 'cash', 30.0, 3000, datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -4020,14 +4468,15 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (250.0 → 25000).
             conn.execute(
                 "INSERT INTO staff_shifts (
                     id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version,
-                    sync_status, created_at, updated_at
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status, created_at, updated_at
                  ) VALUES (
                     'cashier-pending-z', 'cashier-ctx', 'cashier', 'branch-ctx', 'term-ctx',
-                    '2026-03-12T08:00:00Z', 250.0, 'active', 2, 'pending', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
+                    '2026-03-12T08:00:00Z', 250.0, 25000, 'active', 2, 'pending', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
                  )",
                 [],
             )
@@ -4035,10 +4484,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, opened_at, created_at, updated_at
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
                  ) VALUES (
                     'drawer-pending-z', 'cashier-pending-z', 'cashier-ctx', 'branch-ctx', 'term-ctx',
-                    250.0, '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
+                    250.0, 25000, '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
                  )",
                 [],
             )
@@ -4073,14 +4522,16 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (250.0/13.7 → 25000/1370).
             conn.execute(
                 "INSERT INTO staff_shifts (
                     id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version,
                     report_date, period_start_at, sync_status, created_at, updated_at
                  ) VALUES (
                     'cashier-blocked-close', 'cashier-ctx', 'cashier', 'branch-ctx', 'term-ctx',
-                    '2026-03-12T08:00:00Z', 250.0, 'active', 2,
+                    '2026-03-12T08:00:00Z', 250.0, 25000, 'active', 2,
                     '2026-03-12', '2026-03-12T08:00:00Z', 'pending', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
                  )",
                 [],
@@ -4089,21 +4540,21 @@ mod tests {
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, opened_at, created_at, updated_at
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
                  ) VALUES (
                     'drawer-blocked-close', 'cashier-blocked-close', 'cashier-ctx', 'branch-ctx', 'term-ctx',
-                    250.0, '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
+                    250.0, 25000, '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
                  )",
                 [],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, branch_id, staff_shift_id, items, total_amount, status,
-                    payment_status, payment_method, sync_status, created_at, updated_at
+                    id, order_number, branch_id, staff_shift_id, items, total_amount, total_amount_cents, status,
+                    payment_status, sync_status, created_at, updated_at
                  ) VALUES (
-                    'order-blocked-close', 'ORD-blocked-close', 'branch-ctx', 'cashier-blocked-close', '[]', 13.7, 'completed',
-                    'pending', 'other', 'pending', '2026-03-12T12:00:00Z', '2026-03-12T12:00:00Z'
+                    'order-blocked-close', 'ORD-blocked-close', 'branch-ctx', 'cashier-blocked-close', '[]', 13.7, 1370, 'completed',
+                    'pending', 'pending', '2026-03-12T12:00:00Z', '2026-03-12T12:00:00Z'
                  )",
                 [],
             )
@@ -4131,14 +4582,16 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (120.0 → 12000).
             conn.execute(
                 "INSERT INTO staff_shifts (
                     id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at
                  ) VALUES (
                     'cashier-previous-day', 'cashier-1', 'cashier', 'branch-1', 'term-1',
-                    '2026-03-21T12:00:00Z', 120.0, 'closed', 2, 'pending',
+                    '2026-03-21T12:00:00Z', 120.0, 12000, 'closed', 2, 'pending',
                     '2026-03-21T12:00:00Z', '2026-03-21T12:00:00Z'
                  )",
                 [],
@@ -4156,6 +4609,7 @@ mod tests {
 
     #[test]
     fn test_shift_open_blocks_non_cashier_before_first_cashier_of_business_day() {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         set_business_day_start(&db, "2026-03-22T08:00:00Z");
 
@@ -4179,6 +4633,7 @@ mod tests {
 
     #[test]
     fn test_shift_open_allows_cashier_as_first_shift_of_business_day() {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         set_business_day_start(&db, "2026-03-22T08:00:00Z");
 
@@ -4204,6 +4659,7 @@ mod tests {
 
     #[test]
     fn test_shift_open_allows_non_cashier_after_first_cashier_of_business_day() {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         set_business_day_start(&db, "2026-03-22T08:00:00Z");
 
@@ -4237,18 +4693,21 @@ mod tests {
 
     #[test]
     fn test_shift_open_sync_payload_includes_actual_check_in_and_cashier_context() {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (200.0/0.0 → 20000/0).
             conn.execute(
                 "INSERT INTO staff_shifts (
                     id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at
                  ) VALUES (
                     'cashier-sync-open', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
-                    '2026-03-18T08:00:00Z', 200.0, 'active', 2, 'pending',
+                    '2026-03-18T08:00:00Z', 200.0, 20000, 'active', 2, 'pending',
                     '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
                  )",
                 [],
@@ -4257,10 +4716,12 @@ mod tests {
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, driver_cash_given, opened_at, created_at, updated_at
+                    opening_amount, opening_amount_cents,
+                    driver_cash_given, driver_cash_given_cents,
+                    opened_at, created_at, updated_at
                  ) VALUES (
                     'drawer-sync-open', 'cashier-sync-open', 'cashier-1', 'branch-1', 'term-1',
-                    200.0, 0.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                    200.0, 20000, 0.0, 0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
                  )",
                 [],
             )
@@ -4312,7 +4773,11 @@ mod tests {
             payload["startingAmountSourceCashierShiftId"],
             "cashier-sync-open"
         );
-        assert_eq!(payload["borrowedStartingAmount"], 40.0);
+        // Wave 4d wire-format cutover: the borrowed-starting-amount field is
+        // emitted as integer cents (snake_case) on the outbound payload. 40
+        // dollars → 4000 cents. Tests pre-dating the cutover asserted a
+        // camelCase float; aligned here.
+        assert_eq!(payload["borrowed_starting_amount_cents"], 4000);
         assert_eq!(payload["reportDate"], actual_report_date.unwrap());
         assert_eq!(payload["periodStartAt"], actual_period_start_at.unwrap());
     }
@@ -4323,14 +4788,16 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (100.0 → 10000).
             conn.execute(
                 "INSERT INTO staff_shifts (
                     id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version,
                     sync_status, created_at, updated_at
                  ) VALUES (
                     'cashier-reconcile', 'cashier-1', 'cashier', 'branch-1', 'term-1',
-                    '2026-03-18T08:00:00Z', 100.0, 'active', 2, 'pending',
+                    '2026-03-18T08:00:00Z', 100.0, 10000, 'active', 2, 'pending',
                     '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
                  )",
                 [],
@@ -4339,10 +4806,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, opened_at, created_at, updated_at
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
                  ) VALUES (
                     'drawer-reconcile', 'cashier-reconcile', 'cashier-1', 'branch-1', 'term-1',
-                    100.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                    100.0, 10000, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
                  )",
                 [],
             )
@@ -4390,14 +4857,16 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (100.0/23.0 → 10000/2300).
             conn.execute(
                 "INSERT INTO staff_shifts (
                     id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version,
                     sync_status, created_at, updated_at
                  ) VALUES (
                     'cashier-self-pay', 'cashier-1', 'cashier', 'branch-1', 'term-1',
-                    '2026-03-18T08:00:00Z', 100.0, 'active', 2, 'pending',
+                    '2026-03-18T08:00:00Z', 100.0, 10000, 'active', 2, 'pending',
                     '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
                  )",
                 [],
@@ -4406,10 +4875,12 @@ mod tests {
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, total_staff_payments, opened_at, created_at, updated_at
+                    opening_amount, opening_amount_cents,
+                    total_staff_payments, total_staff_payments_cents,
+                    opened_at, created_at, updated_at
                  ) VALUES (
                     'drawer-self-pay', 'cashier-self-pay', 'cashier-1', 'branch-1', 'term-1',
-                    100.0, 23.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                    100.0, 10000, 23.0, 2300, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
                  )",
                 [],
             )
@@ -4485,6 +4956,7 @@ mod tests {
 
     #[test]
     fn test_non_financial_shift_ignores_cash_amounts_on_open_and_close() {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
 
         open_shift(
@@ -4565,14 +5037,16 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (100.0 → 10000).
             conn.execute(
                 "INSERT INTO staff_shifts (
                     id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version,
                     sync_status, created_at, updated_at
                  ) VALUES (
                     'cashier-sync-close', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
-                    '2026-03-18T09:00:00Z', 100.0, 'active', 2, 'pending',
+                    '2026-03-18T09:00:00Z', 100.0, 10000, 'active', 2, 'pending',
                     '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
                  )",
                 [],
@@ -4581,10 +5055,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, opened_at, created_at, updated_at
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
                  ) VALUES (
                     'drawer-sync-close', 'cashier-sync-close', 'cashier-1', 'branch-1', 'term-1',
-                    100.0, '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                    100.0, 10000, '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
                  )",
                 [],
             )
@@ -4609,14 +5083,18 @@ mod tests {
         assert_eq!(payload["checkInTime"], "2026-03-18T09:00:00Z");
         assert!(payload["checkOutTime"].as_str().is_some());
         assert_eq!(payload["totalOrdersCount"], 0);
+        // close_shift's outer payload money fields are still camelCase f64;
+        // the cashDrawer sub-object has been migrated to snake_case i64 cents
+        // by Wave 4d. Tests now verify both conventions where they're each
+        // the current canonical shape.
         assert_eq!(payload["totalSalesAmount"], 0.0);
         assert_eq!(payload["totalCashSales"], 0.0);
         assert_eq!(payload["totalCardSales"], 0.0);
         assert_eq!(cash_drawer["id"], "drawer-sync-close");
-        assert_eq!(cash_drawer["openingAmount"], 100.0);
-        assert_eq!(cash_drawer["closingAmount"], 100.0);
-        assert_eq!(cash_drawer["expectedAmount"], 100.0);
-        assert_eq!(cash_drawer["varianceAmount"], 0.0);
+        assert_eq!(cash_drawer["opening_amount_cents"], 10000);
+        assert_eq!(cash_drawer["closing_amount_cents"], 10000);
+        assert_eq!(cash_drawer["expected_amount_cents"], 10000);
+        assert_eq!(cash_drawer["variance_amount_cents"], 0);
         assert_eq!(cash_drawer["reconciled"], true);
         assert_eq!(cash_drawer["reconciledBy"], TEST_MANAGER_UUID);
         assert_eq!(cash_drawer["reconciledAt"], cash_drawer["closedAt"]);
@@ -4628,14 +5106,16 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (100.0 → 10000).
             conn.execute(
                 "INSERT INTO staff_shifts (
                     id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version,
                     sync_status, created_at, updated_at
                  ) VALUES (
                     'cashier-placeholder-close', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
-                    '2026-03-18T09:00:00Z', 100.0, 'active', 2, 'pending',
+                    '2026-03-18T09:00:00Z', 100.0, 10000, 'active', 2, 'pending',
                     '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
                  )",
                 [],
@@ -4644,10 +5124,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, opened_at, created_at, updated_at
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
                  ) VALUES (
                     'drawer-placeholder-close', 'cashier-placeholder-close', 'cashier-1', 'branch-1', 'term-1',
-                    100.0, '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                    100.0, 10000, '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
                  )",
                 [],
             )
@@ -4685,29 +5165,31 @@ mod tests {
     }
 
     #[test]
-    fn test_driver_close_no_cashier_does_not_fail() {
+    fn test_driver_close_no_cashier_with_returned_cash_fails() {
         let db = test_db();
 
         // Setup: Driver shift with no active cashier
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate (50.0 → 5000).
             conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
                  VALUES ('driver-solo', 'driver-2', 'driver', 'branch-2', 'term-2',
-                    datetime('now'), 50.0, 'active', 2, 'pending', datetime('now'), datetime('now'))",
+                    datetime('now'), 50.0, 5000, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
         }
 
-        // Close should succeed even without a cashier
+        // Close should fail rather than silently losing the returned drawer target.
         let payload = serde_json::json!({
             "shiftId": "driver-solo",
             "closingCash": 50.0,
         });
-        let result = close_shift(&db, &payload).unwrap();
-        assert_eq!(result["success"], true);
+        let result = close_shift(&db, &payload).unwrap_err();
+        assert!(result.contains("no active cashier drawer"));
     }
 
     #[test]
@@ -4719,40 +5201,47 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
 
+            // W4e Step 0: dual-populate (500/75/50/25 → 50000/7500/5000/2500).
             // Cashier shift + drawer
             conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
                  VALUES ('cashier-1', 'staff-c1', 'cashier', 'b1', 't1',
-                    datetime('now'), 500.0, 'active', 2, 'pending', datetime('now'), datetime('now'))",
+                    datetime('now'), 500.0, 50000, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id,
-                    terminal_id, opening_amount, driver_cash_given, opened_at, created_at, updated_at)
+                    terminal_id, opening_amount, opening_amount_cents,
+                    driver_cash_given, driver_cash_given_cents,
+                    opened_at, created_at, updated_at)
                  VALUES ('cd-1', 'cashier-1', 'staff-c1', 'b1', 't1',
-                    500.0, 75.0, datetime('now'), datetime('now'), datetime('now'))",
+                    500.0, 50000, 75.0, 7500, datetime('now'), datetime('now'), datetime('now'))",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
 
-            // Active driver 1 (opening_cash = 50)
+            // Active driver 1 (opening_cash = 50 → 5000)
             conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
                  VALUES ('driver-a', 'staff-d1', 'driver', 'b1', 't1',
-                    datetime('now'), 50.0, 'active', 2, 'pending', datetime('now'), datetime('now'))",
+                    datetime('now'), 50.0, 5000, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
 
-            // Active driver 2 (opening_cash = 25)
+            // Active driver 2 (opening_cash = 25 → 2500)
             conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
                  VALUES ('driver-b', 'staff-d2', 'driver', 'b1', 't1',
-                    datetime('now'), 25.0, 'active', 2, 'pending', datetime('now'), datetime('now'))",
+                    datetime('now'), 25.0, 2500, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
         }
@@ -4802,43 +5291,51 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // W4e Step 0: dual-populate every monetary column (500/50/30 → 50000/5000/3000).
             conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
                  VALUES ('cashier-sync-target', 'cashier-1', 'cashier', 'branch-1', 'term-1',
-                    '2026-03-18T08:00:00Z', 500.0, 'active', 2, 'pending', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z')",
+                    '2026-03-18T08:00:00Z', 500.0, 50000, 'active', 2, 'pending', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z')",
                 [],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id,
-                    terminal_id, opening_amount, driver_cash_given, opened_at, created_at, updated_at)
+                    terminal_id, opening_amount, opening_amount_cents,
+                    driver_cash_given, driver_cash_given_cents,
+                    opened_at, created_at, updated_at)
                  VALUES ('drawer-sync-target', 'cashier-sync-target', 'cashier-1', 'branch-1', 'term-1',
-                    500.0, 50.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z')",
+                    500.0, 50000, 50.0, 5000, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z')",
                 [],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
                  VALUES ('driver-sync-target', 'driver-1', 'Driver One', 'driver', 'branch-1', 'term-1',
-                    '2026-03-18T09:00:00Z', 50.0, 'active', 2, 'pending', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z')",
+                    '2026-03-18T09:00:00Z', 50.0, 5000, 'active', 2, 'pending', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z')",
                 [],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
-                 VALUES ('ord-sync-target', '[]', 30.0, 'completed', 'pending', '2026-03-18T09:30:00Z', '2026-03-18T09:30:00Z')",
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-sync-target', '[]', 30.0, 3000, 'completed', 'pending', '2026-03-18T09:30:00Z', '2026-03-18T09:30:00Z')",
                 [],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO driver_earnings (id, driver_id, staff_shift_id, order_id, branch_id,
-                    total_earning, payment_method, cash_collected, created_at, updated_at)
+                    total_earning, total_earning_cents,
+                    payment_method,
+                    cash_collected, cash_collected_cents,
+                    created_at, updated_at)
                  VALUES ('de-sync-target', 'driver-1', 'driver-sync-target', 'ord-sync-target', 'branch-1',
-                    30.0, 'cash', 30.0, '2026-03-18T09:30:00Z', '2026-03-18T09:30:00Z')",
+                    30.0, 3000, 'cash', 30.0, 3000, '2026-03-18T09:30:00Z', '2026-03-18T09:30:00Z')",
                 [],
             )
             .unwrap();
@@ -4882,6 +5379,7 @@ mod tests {
 
     #[test]
     fn test_new_cashier_inherits_transferred_drivers() {
+        let _fake = crate::tests::fake_keyring::install_empty();
         // Full cycle: cashier1 -> driver -> close cashier1 -> cashier2 opens -> driver claimed by cashier2
         let db = test_db();
 
@@ -4990,14 +5488,16 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let now = "2026-03-05T10:00:00Z";
 
+        // W4e Step 0: dual-populate every monetary column (20/30/50 → 2000/3000/5000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status,
                 created_at, updated_at
             ) VALUES (
                 'driver-shift', 'driver-1', 'Driver One', 'driver', 'branch-1', 'term-1',
-                ?1, 20.0, 'active', 2, 'pending', ?1, ?1
+                ?1, 20.0, 2000, 'active', 2, 'pending', ?1, ?1
             )",
             params![now],
         )
@@ -5005,22 +5505,22 @@ mod tests {
 
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, order_type,
-                payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id, sync_status, created_at, updated_at
             ) VALUES (
-                'order-delivery', '#D1', '[]', 30.0, 'completed', 'delivery',
-                'paid', 'cash', 'driver-shift', 'pending', ?1, ?1
+                'order-delivery', '#D1', '[]', 30.0, 3000, 'completed', 'delivery',
+                'paid', 'driver-shift', 'pending', ?1, ?1
             )",
             params![now],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, order_type,
-                payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id, sync_status, created_at, updated_at
             ) VALUES (
-                'order-pickup', '#P1', '[]', 50.0, 'completed', 'pickup',
-                'paid', 'cash', 'driver-shift', 'pending', ?1, ?1
+                'order-pickup', '#P1', '[]', 50.0, 5000, 'completed', 'pickup',
+                'paid', 'driver-shift', 'pending', ?1, ?1
             )",
             params![now],
         )
@@ -5028,18 +5528,18 @@ mod tests {
 
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
             ) VALUES (
-                'pay-delivery', 'order-delivery', 'cash', 30.0, 'completed', 'driver-shift', 'EUR', ?1, ?1
+                'pay-delivery', 'order-delivery', 'cash', 30.0, 3000, 'completed', 'driver-shift', 'EUR', ?1, ?1
             )",
             params![now],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
             ) VALUES (
-                'pay-pickup', 'order-pickup', 'cash', 50.0, 'completed', 'driver-shift', 'EUR', ?1, ?1
+                'pay-pickup', 'order-pickup', 'cash', 50.0, 5000, 'completed', 'driver-shift', 'EUR', ?1, ?1
             )",
             params![now],
         )
@@ -5048,12 +5548,18 @@ mod tests {
         conn.execute(
             "INSERT INTO driver_earnings (
                 id, driver_id, staff_shift_id, order_id, branch_id,
-                delivery_fee, tip_amount, total_earning, payment_method,
-                cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+                delivery_fee, delivery_fee_cents,
+                tip_amount, tip_amount_cents,
+                total_earning, total_earning_cents,
+                payment_method,
+                cash_collected, cash_collected_cents,
+                card_amount, card_amount_cents,
+                cash_to_return, cash_to_return_cents,
+                settled, created_at, updated_at
             ) VALUES (
                 'earning-1', 'driver-1', 'driver-shift', 'order-delivery', 'branch-1',
-                0.0, 0.0, 0.0, 'cash',
-                30.0, 0.0, 30.0, 0, ?1, ?1
+                0.0, 0, 0.0, 0, 0.0, 0, 'cash',
+                30.0, 3000, 0.0, 0, 30.0, 3000, 0, ?1, ?1
             )",
             params![now],
         )
@@ -5081,14 +5587,16 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let cashier_in = "2026-03-05T10:00:00Z";
 
+        // W4e Step 0: dual-populate (100/15/20 → 10000/1500/2000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status,
                 created_at, updated_at
             ) VALUES (
                 'cashier-shift', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
-                ?1, 100.0, 'active', 2, 'pending', ?1, ?1
+                ?1, 100.0, 10000, 'active', 2, 'pending', ?1, ?1
             )",
             params![cashier_in],
         )
@@ -5096,10 +5604,10 @@ mod tests {
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, opened_at, created_at, updated_at
+                opening_amount, opening_amount_cents, opened_at, created_at, updated_at
             ) VALUES (
                 'drawer-1', 'cashier-shift', 'cashier-1', 'branch-1', 'term-1',
-                100.0, ?1, ?1, ?1
+                100.0, 10000, ?1, ?1, ?1
             )",
             params![cashier_in],
         )
@@ -5108,11 +5616,12 @@ mod tests {
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                check_in_time, check_out_time, opening_cash_amount, status, calculation_version,
+                check_in_time, check_out_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version,
                 sync_status, created_at, updated_at
             ) VALUES (
                 'driver-old', 'driver-old', 'Old Driver', 'driver', 'branch-1', 'term-1',
-                '2026-03-05T08:00:00Z', '2026-03-05T09:00:00Z', 15.0, 'closed', 2,
+                '2026-03-05T08:00:00Z', '2026-03-05T09:00:00Z', 15.0, 1500, 'closed', 2,
                 'pending', '2026-03-05T08:00:00Z', '2026-03-05T09:00:00Z'
             )",
             [],
@@ -5122,11 +5631,12 @@ mod tests {
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status,
                 created_at, updated_at
             ) VALUES (
                 'driver-current', 'driver-current', 'Current Driver', 'driver', 'branch-1', 'term-1',
-                '2026-03-05T10:30:00Z', 20.0, 'active', 2, 'pending',
+                '2026-03-05T10:30:00Z', 20.0, 2000, 'active', 2, 'pending',
                 '2026-03-05T10:30:00Z', '2026-03-05T10:30:00Z'
             )",
             [],
@@ -5142,24 +5652,33 @@ mod tests {
                 "2026-03-05T10:45:00Z",
             ),
         ] {
+            // W4e Step 0: dual-populate via Cents::round_half_even.
+            let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, status, order_type,
-                    payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
-                ) VALUES (?1, ?1, '[]', ?2, 'completed', 'delivery',
-                    'paid', 'cash', ?3, 'pending', ?4, ?4)",
-                params![order_id, total_amount, shift_id, created_at],
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                    payment_status, staff_shift_id, sync_status, created_at, updated_at
+                ) VALUES (?1, ?1, '[]', ?2, ?3, 'completed', 'delivery',
+                    'paid', ?4, 'pending', ?5, ?5)",
+                params![
+                    order_id,
+                    total_amount,
+                    total_amount_cents,
+                    shift_id,
+                    created_at
+                ],
             )
             .unwrap();
 
             conn.execute(
                 "INSERT INTO order_payments (
-                    id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
-                ) VALUES (?1, ?2, 'cash', ?3, 'completed', ?4, 'EUR', ?5, ?5)",
+                    id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
+                ) VALUES (?1, ?2, 'cash', ?3, ?4, 'completed', ?5, 'EUR', ?6, ?6)",
                 params![
                     format!("pay-{order_id}"),
                     order_id,
                     total_amount,
+                    total_amount_cents,
                     shift_id,
                     created_at
                 ],
@@ -5169,12 +5688,18 @@ mod tests {
             conn.execute(
                 "INSERT INTO driver_earnings (
                     id, driver_id, staff_shift_id, order_id, branch_id,
-                    delivery_fee, tip_amount, total_earning, payment_method,
-                    cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+                    delivery_fee, delivery_fee_cents,
+                    tip_amount, tip_amount_cents,
+                    total_earning, total_earning_cents,
+                    payment_method,
+                    cash_collected, cash_collected_cents,
+                    card_amount, card_amount_cents,
+                    cash_to_return, cash_to_return_cents,
+                    settled, created_at, updated_at
                 ) VALUES (
                     ?1, ?2, ?3, ?4, 'branch-1',
-                    0.0, 0.0, ?5, 'cash',
-                    ?5, 0.0, ?5, 0, ?6, ?6
+                    0.0, 0, 0.0, 0, ?5, ?6, 'cash',
+                    ?5, ?6, 0.0, 0, ?5, ?6, 0, ?7, ?7
                 )",
                 params![
                     format!("earning-{order_id}"),
@@ -5182,6 +5707,7 @@ mod tests {
                     shift_id,
                     order_id,
                     total_amount,
+                    total_amount_cents,
                     created_at
                 ],
             )
@@ -5212,70 +5738,43 @@ mod tests {
         let cashier_in = "2026-03-05T10:00:00Z";
         let cashier_out = "2026-03-05T11:00:00Z";
 
+        // W4e Step 0: dual-populate (100.0 → 10000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                check_in_time, check_out_time, opening_cash_amount, status, calculation_version,
+                check_in_time, check_out_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version,
                 sync_status, created_at, updated_at
             ) VALUES (
                 'cashier-orders', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
-                ?1, ?2, 100.0, 'closed', 2, 'pending', ?1, ?2
+                ?1, ?2, 100.0, 10000, 'closed', 2, 'pending', ?1, ?2
             )",
             params![cashier_in, cashier_out],
         )
         .unwrap();
 
-        for (order_id, order_number, total_amount, payment_method, created_at, is_ghost) in [
-            (
-                "order-valid",
-                "C-101",
-                40.0,
-                "mixed",
-                "2026-03-05T10:30:00Z",
-                0,
-            ),
-            (
-                "order-before",
-                "C-099",
-                15.0,
-                "cash",
-                "2026-03-05T09:55:00Z",
-                0,
-            ),
-            (
-                "order-after",
-                "C-102",
-                22.0,
-                "card",
-                "2026-03-05T11:15:00Z",
-                0,
-            ),
-            (
-                "order-ghost",
-                "C-103",
-                18.0,
-                "cash",
-                "2026-03-05T10:40:00Z",
-                1,
-            ),
+        // W6: `orders.payment_method` is gone in v55 — the stored-column
+        // fixtures are irrelevant. The derived method is computed from
+        // `order_payments` rows seeded below, so the cashier summary
+        // correctly classifies "order-valid" (cash+card = split).
+        for (order_id, order_number, total_amount, created_at, is_ghost) in [
+            ("order-valid", "C-101", 40.0, "2026-03-05T10:30:00Z", 0),
+            ("order-before", "C-099", 15.0, "2026-03-05T09:55:00Z", 0),
+            ("order-after", "C-102", 22.0, "2026-03-05T11:15:00Z", 0),
+            ("order-ghost", "C-103", 18.0, "2026-03-05T10:40:00Z", 1),
         ] {
+            // W4e Step 0: dual-populate via Cents::round_half_even.
+            let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, status, order_type, payment_status,
-                    payment_method, staff_shift_id, customer_name, table_number, is_ghost,
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type, payment_status,
+                    staff_shift_id, customer_name, table_number, is_ghost,
                     sync_status, created_at, updated_at
                 ) VALUES (
-                    ?1, ?2, '[]', ?3, 'completed', 'dine-in', 'paid',
-                    ?4, 'cashier-orders', 'Alex', 'T1', ?5, 'pending', ?6, ?6
+                    ?1, ?2, '[]', ?3, ?4, 'completed', 'dine-in', 'paid',
+                    'cashier-orders', 'Alex', 'T1', ?5, 'pending', ?6, ?6
                 )",
-                params![
-                    order_id,
-                    order_number,
-                    total_amount,
-                    payment_method,
-                    is_ghost,
-                    created_at
-                ],
+                params![order_id, order_number, total_amount, total_amount_cents, is_ghost, created_at],
             )
             .unwrap();
         }
@@ -5317,13 +5816,15 @@ mod tests {
                 "2026-03-05T10:40:00Z",
             ),
         ] {
+            // W4e Step 0: dual-populate via Cents::round_half_even.
+            let amount_cents = Cents::round_half_even(amount).as_i64();
             conn.execute(
                 "INSERT INTO order_payments (
-                    id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                    id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, 'completed', 'cashier-orders', 'EUR', ?5, ?5
+                    ?1, ?2, ?3, ?4, ?5, 'completed', 'cashier-orders', 'EUR', ?6, ?6
                 )",
-                params![payment_id, order_id, method, amount, created_at],
+                params![payment_id, order_id, method, amount, amount_cents, created_at],
             )
             .unwrap();
         }
@@ -5342,7 +5843,9 @@ mod tests {
         );
         assert_eq!(orders[0]["order_id"], "order-valid");
         assert_eq!(orders[0]["order_number"], "C-101");
-        assert_eq!(orders[0]["payment_method"], "mixed");
+        // W6: two completed methods (cash + card) → derive returns
+        // "split" (canonical new vocabulary; was "mixed" pre-v55).
+        assert_eq!(orders[0]["payment_method"], "split");
         assert_eq!(orders[0]["cash_amount"], 30.0);
         assert_eq!(orders[0]["card_amount"], 10.0);
         assert_eq!(orders[0]["customer_name"], "Alex");
@@ -5355,14 +5858,16 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let cashier_in = "2026-03-05T10:00:00Z";
 
+        // W4e Step 0: dual-populate (50.0 → 5000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
-                check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status,
                 created_at, updated_at
             ) VALUES (
                 'cashier-quiet', 'cashier-quiet', 'Quiet Cashier', 'cashier', 'branch-1', 'term-1',
-                ?1, 50.0, 'active', 2, 'pending', ?1, ?1
+                ?1, 50.0, 5000, 'active', 2, 'pending', ?1, ?1
             )",
             params![cashier_in],
         )
@@ -5387,34 +5892,38 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let created_at = "2026-03-26T10:00:00Z";
 
+        // W4e Step 0: dual-populate (100/15/10/5 → 10000/1500/1000/500).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
-                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
             ) VALUES (
                 'cashier-delete', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
-                100.0, 'active', 2, 'pending', ?1, ?1
+                100.0, 10000, 'active', 2, 'pending', ?1, ?1
             )",
             params![created_at],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
-                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
-                total_expenses, opened_at, created_at, updated_at
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                total_expenses, total_expenses_cents,
+                opened_at, created_at, updated_at
             ) VALUES (
-                'drawer-delete', 'cashier-delete', 'cashier-1', 'branch-1', 'term-1', 100.0,
-                15.0, ?1, ?1, ?1
+                'drawer-delete', 'cashier-delete', 'cashier-1', 'branch-1', 'term-1', 100.0, 10000,
+                15.0, 1500, ?1, ?1, ?1
             )",
             params![created_at],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO shift_expenses (
-                id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, amount_cents, description,
                 status, sync_status, created_at, updated_at
             ) VALUES (
-                'expense-delete', 'cashier-delete', 'cashier-1', 'branch-1', 'other', 10.0, 'Wrong expense',
+                'expense-delete', 'cashier-delete', 'cashier-1', 'branch-1', 'other', 10.0, 1000, 'Wrong expense',
                 'pending', 'pending', ?1, ?1
             )",
             params![created_at],
@@ -5422,10 +5931,10 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO shift_expenses (
-                id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, amount_cents, description,
                 status, sync_status, created_at, updated_at
             ) VALUES (
-                'expense-keep', 'cashier-delete', 'cashier-1', 'branch-1', 'supplies', 5.0, 'Keep expense',
+                'expense-keep', 'cashier-delete', 'cashier-1', 'branch-1', 'supplies', 5.0, 500, 'Keep expense',
                 'pending', 'pending', ?1, ?1
             )",
             params![created_at],
@@ -5469,7 +5978,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let queue_rows: i64 = conn
+        // Wave 5 Session 6: the pending legacy-queue insert must be cleared
+        // and the canonical delete now lives on parity_sync_queue, not the
+        // legacy table. We assert both halves of that split-brain cleanup.
+        let legacy_remaining: i64 = conn
             .query_row(
                 "SELECT COUNT(*)
                  FROM sync_queue
@@ -5478,19 +5990,28 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let (operation, status, payload): (String, String, String) = conn
+        let parity_rows: i64 = conn
             .query_row(
-                "SELECT operation, status, payload
-                 FROM sync_queue
-                 WHERE entity_type = 'shift_expense' AND entity_id = 'expense-delete'
-                 ORDER BY id DESC
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'shift_expenses' AND record_id = 'expense-delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (operation, status, data): (String, String, String) = conn
+            .query_row(
+                "SELECT operation, status, data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'shift_expenses' AND record_id = 'expense-delete'
+                 ORDER BY created_at DESC
                  LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         let payload: Value =
-            serde_json::from_str(&payload).expect("delete sync payload should be valid json");
+            serde_json::from_str(&data).expect("delete sync data should be valid json");
 
         assert_eq!(
             deleted_count, 0,
@@ -5501,10 +6022,14 @@ mod tests {
             "drawer total_expenses should be recomputed from remaining expenses"
         );
         assert_eq!(
-            queue_rows, 1,
-            "unfinished insert rows should be replaced by one canonical delete row"
+            legacy_remaining, 0,
+            "pending legacy-queue insert for the deleted expense should be cleared"
         );
-        assert_eq!(operation, "delete");
+        assert_eq!(
+            parity_rows, 1,
+            "the canonical delete should land on parity_sync_queue"
+        );
+        assert_eq!(operation, "DELETE");
         assert_eq!(status, "pending");
         assert_eq!(payload["expenseId"], "expense-delete");
         assert_eq!(payload["shiftId"], "cashier-delete");
@@ -5519,34 +6044,38 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let created_at = "2026-03-26T10:00:00Z";
 
+        // W4e Step 0: dual-populate (100/9/4/5 → 10000/900/400/500).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
-                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
             ) VALUES (
                 'cashier-delete-synced', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
-                100.0, 'active', 2, 'synced', ?1, ?1
+                100.0, 10000, 'active', 2, 'synced', ?1, ?1
             )",
             params![created_at],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
-                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
-                total_expenses, opened_at, created_at, updated_at
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                total_expenses, total_expenses_cents,
+                opened_at, created_at, updated_at
             ) VALUES (
-                'drawer-delete-synced', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'term-1', 100.0,
-                9.0, ?1, ?1, ?1
+                'drawer-delete-synced', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'term-1', 100.0, 10000,
+                9.0, 900, ?1, ?1, ?1
             )",
             params![created_at],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO shift_expenses (
-                id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, amount_cents, description,
                 status, sync_status, created_at, updated_at
             ) VALUES (
-                'expense-synced', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'other', 4.0, 'Synced expense',
+                'expense-synced', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'other', 4.0, 400, 'Synced expense',
                 'pending', 'synced', ?1, ?1
             )",
             params![created_at],
@@ -5554,10 +6083,10 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO shift_expenses (
-                id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, amount_cents, description,
                 status, sync_status, created_at, updated_at
             ) VALUES (
-                'expense-stays', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'supplies', 5.0, 'Remaining expense',
+                'expense-stays', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'supplies', 5.0, 500, 'Remaining expense',
                 'pending', 'pending', ?1, ?1
             )",
             params![created_at],
@@ -5594,12 +6123,29 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let queue_rows: Vec<(String, String)> = conn
+        // Wave 5 Session 6: synced history rows stay on the legacy queue
+        // (drain-only until Session 7 drops it) while the new delete is
+        // enqueued on parity_sync_queue. Assert both sides so we catch either
+        // a regression that drops legacy history OR one that misroutes the
+        // new delete back to the legacy table.
+        let legacy_rows: Vec<(String, String)> = conn
             .prepare(
                 "SELECT operation, status
                  FROM sync_queue
                  WHERE entity_type = 'shift_expense' AND entity_id = 'expense-synced'
                  ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<(String, String)>, _>>()
+            .unwrap();
+        let parity_rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT operation, status
+                 FROM parity_sync_queue
+                 WHERE table_name = 'shift_expenses' AND record_id = 'expense-synced'
+                 ORDER BY created_at ASC",
             )
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -5612,12 +6158,14 @@ mod tests {
             "drawer total_expenses should match the remaining synced + unsynced local rows"
         );
         assert_eq!(
-            queue_rows,
-            vec![
-                ("insert".to_string(), "synced".to_string()),
-                ("delete".to_string(), "pending".to_string()),
-            ],
-            "final synced insert history should remain while the new delete is queued"
+            legacy_rows,
+            vec![("insert".to_string(), "synced".to_string())],
+            "synced legacy history should remain untouched by the new delete"
+        );
+        assert_eq!(
+            parity_rows,
+            vec![("DELETE".to_string(), "pending".to_string())],
+            "the canonical delete should land on parity_sync_queue"
         );
     }
 
@@ -5628,24 +6176,29 @@ mod tests {
         let created_at = "2026-03-26T10:00:00Z";
 
         ensure_staff_payments_table(&conn).unwrap();
+        // W4e Step 0: dual-populate (100/18 → 10000/1800). staff_payments
+        // table is excluded from cents migration per migrate_v54 docstring.
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
-                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
             ) VALUES (
                 'cashier-staff-update', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
-                100.0, 'active', 2, 'pending', ?1, ?1
+                100.0, 10000, 'active', 2, 'pending', ?1, ?1
             )",
             params![created_at],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
-                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
-                total_staff_payments, opened_at, created_at, updated_at
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                total_staff_payments, total_staff_payments_cents,
+                opened_at, created_at, updated_at
             ) VALUES (
                 'drawer-staff-update', 'cashier-staff-update', 'cashier-1', 'branch-1', 'term-1',
-                100.0, 18.0, ?1, ?1, ?1
+                100.0, 10000, 18.0, 1800, ?1, ?1, ?1
             )",
             params![created_at],
         )
@@ -5726,12 +6279,13 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        // Wave 5 Session 6: staff_payments mutations now write to parity.
         let queue_rows: Vec<(String, String)> = conn
             .prepare(
                 "SELECT operation, status
-                 FROM sync_queue
-                 WHERE entity_type = 'staff_payment' AND entity_id = 'payment-update-target'
-                 ORDER BY id ASC",
+                 FROM parity_sync_queue
+                 WHERE table_name = 'staff_payments' AND record_id = 'payment-update-target'
+                 ORDER BY created_at ASC",
             )
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -5750,7 +6304,7 @@ mod tests {
         );
         assert_eq!(
             queue_rows,
-            vec![("update".to_string(), "pending".to_string())],
+            vec![("UPDATE".to_string(), "pending".to_string())],
             "unfinished sync rows should be replaced by one canonical update row"
         );
     }
@@ -5762,24 +6316,28 @@ mod tests {
         let created_at = "2026-03-26T10:00:00Z";
 
         ensure_staff_payments_table(&conn).unwrap();
+        // W4e Step 0: dual-populate (100/18 → 10000/1800).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
-                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
             ) VALUES (
                 'cashier-staff-delete', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
-                100.0, 'active', 2, 'pending', ?1, ?1
+                100.0, 10000, 'active', 2, 'pending', ?1, ?1
             )",
             params![created_at],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
-                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
-                total_staff_payments, opened_at, created_at, updated_at
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                total_staff_payments, total_staff_payments_cents,
+                opened_at, created_at, updated_at
             ) VALUES (
                 'drawer-staff-delete', 'cashier-staff-delete', 'cashier-1', 'branch-1', 'term-1',
-                100.0, 18.0, ?1, ?1, ?1
+                100.0, 10000, 18.0, 1800, ?1, ?1, ?1
             )",
             params![created_at],
         )
@@ -5840,12 +6398,13 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        // Wave 5 Session 6: staff_payments delete now writes to parity.
         let queue_rows: Vec<(String, String)> = conn
             .prepare(
                 "SELECT operation, status
-                 FROM sync_queue
-                 WHERE entity_type = 'staff_payment' AND entity_id = 'payment-delete-target'
-                 ORDER BY id ASC",
+                 FROM parity_sync_queue
+                 WHERE table_name = 'staff_payments' AND record_id = 'payment-delete-target'
+                 ORDER BY created_at ASC",
             )
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -5860,7 +6419,7 @@ mod tests {
         );
         assert_eq!(
             queue_rows,
-            vec![("delete".to_string(), "pending".to_string())],
+            vec![("DELETE".to_string(), "pending".to_string())],
             "unfinished sync rows should be replaced by one canonical delete row"
         );
     }
@@ -5872,26 +6431,34 @@ mod tests {
         let created_at = "2026-03-26T10:00:00Z";
 
         ensure_staff_payments_table(&conn).unwrap();
+        // W4e Step 0: dual-populate every monetary column (100/80/80/0/20 → 10000/8000/8000/0/2000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time, check_out_time,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 status, calculation_version, sync_status, created_at, updated_at
             ) VALUES (
                 'cashier-staff-closed-update', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1, ?1,
-                100.0, 80.0, 80.0, 0.0, 'closed', 2, 'synced', ?1, ?1
+                100.0, 10000, 80.0, 8000, 80.0, 8000, 0.0, 0, 'closed', 2, 'synced', ?1, ?1
             )",
             params![created_at],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
-                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
-                closing_amount, expected_amount, variance_amount, total_staff_payments,
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents,
+                variance_amount, variance_amount_cents,
+                total_staff_payments, total_staff_payments_cents,
                 opened_at, closed_at, reconciled, created_at, updated_at
             ) VALUES (
                 'drawer-staff-closed-update', 'cashier-staff-closed-update', 'cashier-1', 'branch-1', 'term-1',
-                100.0, 80.0, 80.0, 0.0, 20.0, ?1, ?1, 1, ?1, ?1
+                100.0, 10000, 80.0, 8000, 80.0, 8000, 0.0, 0, 20.0, 2000, ?1, ?1, 1, ?1, ?1
             )",
             params![created_at],
         )
@@ -5954,12 +6521,16 @@ mod tests {
                 },
             )
             .unwrap();
+        // Wave 5 Session 6: shift correction writes to parity_sync_queue.
+        // The staff_payment mutation also writes to parity but with a
+        // different record_id (payment UUID), so this query — scoped to
+        // record_id = shift id — sees only the shift-correction row.
         let queue_rows: Vec<(String, String, String)> = conn
             .prepare(
-                "SELECT entity_type, operation, status
-                 FROM sync_queue
-                 WHERE entity_id = 'cashier-staff-closed-update'
-                 ORDER BY id ASC",
+                "SELECT table_name, operation, status
+                 FROM parity_sync_queue
+                 WHERE record_id = 'cashier-staff-closed-update'
+                 ORDER BY created_at ASC",
             )
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
@@ -5974,7 +6545,11 @@ mod tests {
         assert!((drawer_total - 12.0).abs() < f64::EPSILON);
         assert_eq!(
             queue_rows,
-            vec![("shift".to_string(), "update".to_string(), "pending".to_string())],
+            vec![(
+                "staff_shifts".to_string(),
+                "UPDATE".to_string(),
+                "pending".to_string()
+            )],
             "closed shift corrections should replace unfinished shift sync rows with one fresh snapshot"
         );
     }
@@ -5986,26 +6561,34 @@ mod tests {
         let created_at = "2026-03-26T10:00:00Z";
 
         ensure_staff_payments_table(&conn).unwrap();
+        // W4e Step 0: dual-populate (100/80/80/0/20 → 10000/8000/8000/0/2000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time, check_out_time,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 status, calculation_version, sync_status, created_at, updated_at
             ) VALUES (
                 'cashier-staff-closed-delete', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1, ?1,
-                100.0, 80.0, 80.0, 0.0, 'closed', 2, 'synced', ?1, ?1
+                100.0, 10000, 80.0, 8000, 80.0, 8000, 0.0, 0, 'closed', 2, 'synced', ?1, ?1
             )",
             params![created_at],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
-                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
-                closing_amount, expected_amount, variance_amount, total_staff_payments,
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents,
+                variance_amount, variance_amount_cents,
+                total_staff_payments, total_staff_payments_cents,
                 opened_at, closed_at, reconciled, created_at, updated_at
             ) VALUES (
                 'drawer-staff-closed-delete', 'cashier-staff-closed-delete', 'cashier-1', 'branch-1', 'term-1',
-                100.0, 80.0, 80.0, 0.0, 20.0, ?1, ?1, 1, ?1, ?1
+                100.0, 10000, 80.0, 8000, 80.0, 8000, 0.0, 0, 20.0, 2000, ?1, ?1, 1, ?1, ?1
             )",
             params![created_at],
         )
@@ -6081,12 +6664,13 @@ mod tests {
                 },
             )
             .unwrap();
+        // Wave 5 Session 6: shift correction writes to parity_sync_queue.
         let queue_rows: Vec<(String, String, String)> = conn
             .prepare(
-                "SELECT entity_type, operation, status
-                 FROM sync_queue
-                 WHERE entity_id = 'cashier-staff-closed-delete'
-                 ORDER BY id ASC",
+                "SELECT table_name, operation, status
+                 FROM parity_sync_queue
+                 WHERE record_id = 'cashier-staff-closed-delete'
+                 ORDER BY created_at ASC",
             )
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
@@ -6102,13 +6686,18 @@ mod tests {
         assert!((drawer_total - 12.0).abs() < f64::EPSILON);
         assert_eq!(
             queue_rows,
-            vec![("shift".to_string(), "update".to_string(), "pending".to_string())],
+            vec![(
+                "staff_shifts".to_string(),
+                "UPDATE".to_string(),
+                "pending".to_string()
+            )],
             "closed shift corrections should replace unfinished shift sync rows with one fresh snapshot"
         );
     }
 
     #[test]
     fn test_get_shift_sync_state_returns_pending_queue_metadata_for_open_shift() {
+        let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         let result = open_shift(
             &db,
@@ -6146,13 +6735,15 @@ mod tests {
         let failed_at = "2026-03-26T10:05:00Z";
         let next_retry_at = "2026-03-26T10:10:00Z";
 
+        // W4e Step 0: dual-populate (100.0 → 10000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
-                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
             ) VALUES (
                 'shift-sync-failed', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
-                100.0, 'active', 2, 'failed', ?1, ?2
+                100.0, 10000, 'active', 2, 'failed', ?1, ?2
             )",
             params![created_at, failed_at],
         )
@@ -6225,10 +6816,8 @@ mod tests {
         use std::sync::{Arc, Barrier};
         use std::thread;
 
-        let db_path = std::env::temp_dir().join(format!(
-            "pos-shift-race-{}.db",
-            uuid::Uuid::new_v4()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("pos-shift-race-{}.db", uuid::Uuid::new_v4()));
 
         // Setup: fresh file-backed DB with migrations + WAL + foreign keys.
         {
@@ -6274,11 +6863,13 @@ mod tests {
                 .map_err(|e| format!("begin: {e}"))?;
             let shift_id = uuid::Uuid::new_v4().to_string();
             let now = Utc::now().to_rfc3339();
+            // W4e Step 0: dual-populate (0.0 → 0).
             let ins = conn.execute(
                 "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status,
                     created_at, updated_at)
-                 VALUES (?1, ?2, 'cashier', 'branch-race', ?3, ?4, 0.0, 'active', 2, 'pending', ?4, ?4)",
+                 VALUES (?1, ?2, 'cashier', 'branch-race', ?3, ?4, 0.0, 0, 'active', 2, 'pending', ?4, ?4)",
                 params![shift_id, staff_id, format!("term-{shift_id}"), now],
             );
             match ins {
@@ -6341,5 +6932,144 @@ mod tests {
             "Expected exactly one active shift in DB after the race, found {active_count}. \
              Cross-terminal exclusivity invariant violated (Wave 2a C2)."
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Wave 1 C15: keyring is authoritative for tenant identity
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn open_shift_accepts_renderer_identity_matching_keyring() {
+        let _fake = crate::tests::fake_keyring::install_seeded([
+            ("branch_id", "branch-seeded"),
+            ("terminal_id", "terminal-seeded"),
+        ]);
+        let db = test_db();
+
+        let payload = serde_json::json!({
+            "staffId": "staff-match",
+            "branchId": "branch-seeded",
+            "terminalId": "terminal-seeded",
+            "roleType": "cashier",
+            "openingCash": 100.0,
+        });
+        let result = open_shift(&db, &payload);
+        assert!(
+            result.is_ok(),
+            "matching renderer identity must succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn open_shift_rejects_renderer_branch_id_disagreeing_with_keyring() {
+        let _fake = crate::tests::fake_keyring::install_seeded([
+            ("branch_id", "branch-real"),
+            ("terminal_id", "terminal-real"),
+        ]);
+        let db = test_db();
+
+        let payload = serde_json::json!({
+            "staffId": "staff-evil-branch",
+            "branchId": "branch-evil",
+            "terminalId": "terminal-real",
+            "roleType": "cashier",
+            "openingCash": 100.0,
+        });
+        let err = open_shift(&db, &payload).expect_err("tenant mismatch must reject");
+        assert!(
+            err.contains("Tenant mismatch") && err.contains("branchId"),
+            "error message must flag the mismatched field; got: {err}"
+        );
+
+        // Nothing should have landed in staff_shifts.
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM staff_shifts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "rejected shift must not be persisted");
+    }
+
+    #[test]
+    fn open_shift_rejects_renderer_terminal_id_disagreeing_with_keyring() {
+        let _fake = crate::tests::fake_keyring::install_seeded([
+            ("branch_id", "branch-real"),
+            ("terminal_id", "terminal-real"),
+        ]);
+        let db = test_db();
+
+        let payload = serde_json::json!({
+            "staffId": "staff-evil-terminal",
+            "branchId": "branch-real",
+            "terminalId": "terminal-evil",
+            "roleType": "cashier",
+            "openingCash": 100.0,
+        });
+        let err = open_shift(&db, &payload).expect_err("tenant mismatch must reject");
+        assert!(
+            err.contains("Tenant mismatch") && err.contains("terminalId"),
+            "error message must flag the mismatched field; got: {err}"
+        );
+    }
+
+    #[test]
+    fn open_shift_uses_keyring_when_renderer_omits_identity() {
+        let _fake = crate::tests::fake_keyring::install_seeded([
+            ("branch_id", "branch-from-keyring"),
+            ("terminal_id", "terminal-from-keyring"),
+        ]);
+        let db = test_db();
+
+        // Renderer sends only staffId — everything else must fill from keyring.
+        let payload = serde_json::json!({
+            "staffId": "staff-keyring-only",
+            "roleType": "cashier",
+            "openingCash": 100.0,
+        });
+        let result = open_shift(&db, &payload).expect("shift should open using keyring");
+        let shift_id = result["shiftId"]
+            .as_str()
+            .expect("response carries shiftId")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        let (branch, terminal): (String, String) = conn
+            .query_row(
+                "SELECT branch_id, terminal_id FROM staff_shifts WHERE id = ?1",
+                params![shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(branch, "branch-from-keyring");
+        assert_eq!(terminal, "terminal-from-keyring");
+    }
+
+    #[test]
+    fn open_shift_falls_back_to_renderer_when_keyring_empty() {
+        // Unprovisioned terminal: no keyring entries. Renderer value is used;
+        // this preserves onboarding / legacy behaviour. Admin-API key gate
+        // already prevents unprovisioned terminals from hitting real tenants.
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+
+        let payload = serde_json::json!({
+            "staffId": "staff-onboarding",
+            "branchId": "branch-renderer",
+            "terminalId": "terminal-renderer",
+            "roleType": "cashier",
+            "openingCash": 100.0,
+        });
+        let result = open_shift(&db, &payload).expect("onboarding shift should open");
+        let shift_id = result["shiftId"].as_str().unwrap().to_string();
+
+        let conn = db.conn.lock().unwrap();
+        let (branch, terminal): (String, String) = conn
+            .query_row(
+                "SELECT branch_id, terminal_id FROM staff_shifts WHERE id = ?1",
+                params![shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(branch, "branch-renderer");
+        assert_eq!(terminal, "terminal-renderer");
     }
 }

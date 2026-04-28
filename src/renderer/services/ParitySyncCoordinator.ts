@@ -1,10 +1,6 @@
 import { environment } from '../../config/environment';
 import { emitCompatEvent, getBridge } from '../../lib';
 import { getSyncQueueBridge } from './SyncQueueBridge';
-import {
-  getCachedTerminalCredentials,
-  refreshTerminalCredentialCache,
-} from './terminal-credentials';
 import type { QueueStatus, SyncResult } from '../../../../shared/pos/sync-queue-types';
 
 export const PARITY_QUEUE_STATUS_EVENT = 'parity-queue:status';
@@ -76,6 +72,22 @@ let lastParitySyncSnapshot: ParitySyncSnapshot = {
   },
   queueStatus: null,
 };
+
+function describeCaughtError(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+  if (error && typeof error === 'object') {
+    const maybeMessage = (error as { message?: unknown }).message;
+    if (typeof maybeMessage === 'string' && maybeMessage.trim()) {
+      return maybeMessage;
+    }
+  }
+  return fallback;
+}
 
 function getAdvisoryCachePaths(config: RuntimeConfigLike): string[] {
   const terminalId = readString(config, 'terminal_id', 'terminalId');
@@ -191,13 +203,9 @@ async function getRuntimeConfig(): Promise<RuntimeConfigLike> {
 
 async function resolveParitySyncCredentials(config: RuntimeConfigLike): Promise<{
   adminUrl: string;
-  apiKey: string;
+  hasApiKey: boolean;
+  hasTerminalId: boolean;
 }> {
-  const cachedCredentials = getCachedTerminalCredentials();
-  const resolvedCredentials = cachedCredentials.apiKey
-    ? cachedCredentials
-    : await refreshTerminalCredentialCache().catch(() => cachedCredentials);
-
   const adminUrl =
     readString(config, 'admin_dashboard_url', 'admin_url') ||
     (typeof window !== 'undefined'
@@ -205,21 +213,16 @@ async function resolveParitySyncCredentials(config: RuntimeConfigLike): Promise<
       : '') ||
     environment.ADMIN_DASHBOARD_URL;
 
-  const apiKey =
-    resolvedCredentials.apiKey ||
-    readString(config, 'pos_api_key', 'api_key') ||
-    cachedCredentials.apiKey;
+  const credentialStatus = await getBridge().settings.getCredentialStatus().catch(() => ({
+    hasAdminUrl: Boolean(adminUrl.trim()),
+    hasApiKey: false,
+    hasTerminalId: false,
+  }));
 
   return {
     adminUrl: adminUrl.trim(),
-    apiKey: apiKey.trim(),
-  };
-}
-
-function createCredentialState(adminUrl: string, apiKey: string): ParitySyncCredentialState {
-  return {
-    hasAdminUrl: Boolean(adminUrl.trim()),
-    hasApiKey: Boolean(apiKey.trim()),
+    hasApiKey: Boolean(credentialStatus.hasApiKey),
+    hasTerminalId: Boolean(credentialStatus.hasTerminalId),
   };
 }
 
@@ -288,8 +291,11 @@ export async function runParitySyncCycle(options?: {
       }
 
       const config = await getRuntimeConfig();
-      const { adminUrl, apiKey } = await resolveParitySyncCredentials(config);
-      const credentialState = createCredentialState(adminUrl, apiKey);
+      const { adminUrl, hasApiKey, hasTerminalId } = await resolveParitySyncCredentials(config);
+      const credentialState = {
+        hasAdminUrl: Boolean(adminUrl.trim()),
+        hasApiKey: hasApiKey && hasTerminalId,
+      };
       const initialSnapshot: ParitySyncSnapshot = {
         status: 'started',
         trigger,
@@ -312,13 +318,12 @@ export async function runParitySyncCycle(options?: {
       let paritySyncReason: string | null = null;
       let paritySyncStatus: ParitySyncStatus = 'completed';
 
-      if (adminUrl && apiKey) {
+      if (credentialState.hasAdminUrl && credentialState.hasApiKey) {
         try {
-          paritySyncResult = await syncQueue.processQueue(adminUrl, apiKey);
+          paritySyncResult = await syncQueue.processQueue();
         } catch (error) {
           paritySyncStatus = 'failed';
-          paritySyncError =
-            error instanceof Error ? error.message : 'Unknown parity sync failure';
+          paritySyncError = describeCaughtError(error, 'Unknown parity sync failure');
           console.warn('[ParitySyncCoordinator] Parity queue sync failed:', error);
         }
       } else {
@@ -356,8 +361,7 @@ export async function runParitySyncCycle(options?: {
         } catch (error) {
           paritySyncStatus = 'failed';
           paritySyncError =
-            paritySyncError ??
-            (error instanceof Error ? error.message : 'Legacy sync force failed');
+            paritySyncError ?? describeCaughtError(error, 'Legacy sync force failed');
           console.warn('[ParitySyncCoordinator] Legacy sync force failed:', error);
         }
       }

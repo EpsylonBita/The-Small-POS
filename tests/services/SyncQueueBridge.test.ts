@@ -101,7 +101,7 @@ test('SyncQueueBridge processQueue and clear keep pending count synchronized', a
   bridge.onPendingCountChange((count) => updates.push(count));
 
   const status = await bridge.getStatus();
-  const result = await bridge.processQueue('https://admin.example', 'pos-key');
+  const result = await bridge.processQueue();
   await bridge.clear();
 
   assert.deepEqual(status, {
@@ -127,10 +127,7 @@ test('SyncQueueBridge processQueue and clear keep pending count synchronized', a
     },
     {
       command: 'sync_queue_process',
-      payload: {
-        apiBaseUrl: 'https://admin.example',
-        apiKey: 'pos-key',
-      },
+      payload: undefined,
     },
     {
       command: 'sync_queue_length',

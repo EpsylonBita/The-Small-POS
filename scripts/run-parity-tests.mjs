@@ -23,6 +23,9 @@ const entryPoints = [
   // D:\The-Small-002\planning\claude\now-create-a-plan-vivid-sutton.md.
   path.join(testsRoot, 'renderer', 'session-storage.test.ts'),
   path.join(testsRoot, 'renderer', 'login-migration.test.ts'),
+  // Wave 8 H29 regression: corrupt keyring blob must be rejected by
+  // validateSecureSessionUser AND the keyring entry must be cleared.
+  path.join(testsRoot, 'renderer', 'secure-session-validation.test.ts'),
 ];
 
 await fs.mkdir(outDir, { recursive: true });

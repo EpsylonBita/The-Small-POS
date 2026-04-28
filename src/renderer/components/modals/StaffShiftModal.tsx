@@ -285,8 +285,12 @@ function hasOwnKey(value: unknown, key: string): boolean {
 function includesStaffAuthMetadata(members: unknown[]): boolean {
   return members.some((member) =>
     hasOwnKey(member, 'pin_hash') ||
+    hasOwnKey(member, 'pinHash') ||
     hasOwnKey(member, 'has_pin') ||
-    hasOwnKey(member, 'can_login_pos'),
+    hasOwnKey(member, 'hasPin') ||
+    hasOwnKey(member, 'can_login_pos') ||
+    hasOwnKey(member, 'canLoginPos') ||
+    hasOwnKey(member, 'canLoginPOS'),
   );
 }
 
@@ -344,10 +348,20 @@ function mapScheduledStaffToMember(member: any): StaffMember {
     role_name: primaryRole?.role_name ?? 'staff',
     role_display_name: primaryRole?.role_display_name ?? 'Staff',
     roles: apiRoles,
-    can_login_pos: parseBoolean(member?.can_login_pos, true),
-    is_active: parseBoolean(member?.is_active, true),
-    has_pin: typeof member?.has_pin === 'boolean' ? member.has_pin : undefined,
-    pin_hash: typeof member?.pin_hash === 'string' ? member.pin_hash : null,
+    can_login_pos: parseBoolean(member?.can_login_pos ?? member?.canLoginPos ?? member?.canLoginPOS, true),
+    is_active: parseBoolean(member?.is_active ?? member?.isActive, true),
+    has_pin:
+      typeof member?.has_pin === 'boolean'
+        ? member.has_pin
+        : typeof member?.hasPin === 'boolean'
+          ? member.hasPin
+          : undefined,
+    pin_hash:
+      typeof member?.pin_hash === 'string'
+        ? member.pin_hash
+        : typeof member?.pinHash === 'string'
+          ? member.pinHash
+          : null,
     hourly_rate: member?.hourly_rate,
   };
 }

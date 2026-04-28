@@ -339,9 +339,17 @@ pub async fn diagnostic_fix_missing_driver_ids(
         }));
     };
 
+    // W6: `orders.payment_method` was dropped in v55. Derive per-row
+    // from `order_payments` via `payments::derive_payment_method`. Fetch
+    // the order ids first (so we don't hold `orders_stmt` open while
+    // calling another query), then derive per id.
     let mut orders_stmt = conn
         .prepare(
-            "SELECT id, COALESCE(payment_method, ''), COALESCE(total_amount, 0), COALESCE(tip_amount, 0), COALESCE(branch_id, '')
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT id,
+                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
+                    COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
+                    COALESCE(branch_id, '')
              FROM orders
              WHERE LOWER(COALESCE(order_type, '')) = 'delivery'
                AND LOWER(COALESCE(status, '')) IN ('delivered', 'completed')
@@ -352,15 +360,28 @@ pub async fn diagnostic_fix_missing_driver_ids(
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, f64>(2)?,
-                row.get::<_, f64>(3)?,
-                row.get::<_, String>(4)?,
+                crate::money::Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                crate::money::Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                row.get::<_, String>(3)?,
             ))
         })
         .map_err(|e| e.to_string())?;
-    let orders: Vec<(String, String, f64, f64, String)> =
-        orders_rows.filter_map(|r| r.ok()).collect();
+    let mut orders: Vec<(String, String, f64, f64, String)> = Vec::new();
+    for row in orders_rows.filter_map(|r| r.ok()) {
+        let (order_id, total_amount, tip_amount, branch_id) = row;
+        let payment_method = crate::payments::derive_payment_method(&conn, &order_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        orders.push((
+            order_id,
+            payment_method,
+            total_amount,
+            tip_amount,
+            branch_id,
+        ));
+    }
+    drop(orders_stmt);
 
     if orders.is_empty() {
         return Ok(serde_json::json!({

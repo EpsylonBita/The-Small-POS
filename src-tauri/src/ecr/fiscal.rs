@@ -8,6 +8,42 @@ use crate::ecr::protocol::{FiscalLineItem, FiscalPayment, FiscalReceiptData, Tax
 use crate::escpos::{EscPosBuilder, PaperWidth};
 use tracing::debug;
 
+fn str_field<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn f64_field(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_f64()))
+}
+
+fn positive_cents(value: f64, field: &str) -> Result<i64, String> {
+    if !value.is_finite() {
+        return Err(format!("Invalid fiscal {field}: value must be finite"));
+    }
+    if value <= 0.0 {
+        return Err(format!("Invalid fiscal {field}: value must be positive"));
+    }
+    Ok((value * 100.0).round() as i64)
+}
+
+fn optional_discount_cents(value: Option<f64>) -> Result<Option<i64>, String> {
+    let Some(discount) = value else {
+        return Ok(None);
+    };
+    if !discount.is_finite() {
+        return Err("Invalid fiscal item discount: value must be finite".to_string());
+    }
+    if discount < 0.0 {
+        return Err("Invalid fiscal item discount: value cannot be negative".to_string());
+    }
+    let cents = (discount * 100.0).round() as i64;
+    Ok((cents > 0).then_some(cents))
+}
+
 /// Build fiscal receipt data from an order and its payments.
 ///
 /// Maps each order item to its tax code using the configured tax rates, and
@@ -22,14 +58,26 @@ pub fn build_fiscal_data(
         .get("items")
         .and_then(|v| v.as_array())
         .ok_or("Order has no 'items' array")?;
+    if items_arr.is_empty() {
+        return Err("Order has empty 'items' array".to_string());
+    }
 
     let mut fiscal_items = Vec::with_capacity(items_arr.len());
 
-    for item in items_arr {
-        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("Item");
-        let qty = item.get("quantity").and_then(|v| v.as_f64()).unwrap_or(1.0);
-        let price_f = item.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let unit_price = (price_f * 100.0).round() as i64;
+    for (index, item) in items_arr.iter().enumerate() {
+        let name = str_field(item, &["name", "name_en", "product_name", "title"])
+            .ok_or_else(|| format!("Fiscal item {index} is missing a non-empty name"))?;
+        let qty = f64_field(item, &["quantity", "qty"])
+            .ok_or_else(|| format!("Fiscal item {index} is missing quantity"))?;
+        if !qty.is_finite() || qty <= 0.0 {
+            return Err(format!(
+                "Invalid fiscal item {index} quantity: value must be positive"
+            ));
+        }
+        let price_f = f64_field(item, &["price", "unitPrice", "unit_price"])
+            .or_else(|| f64_field(item, &["totalPrice", "total_price"]).map(|total| total / qty))
+            .ok_or_else(|| format!("Fiscal item {index} is missing unit price"))?;
+        let unit_price = positive_cents(price_f, &format!("item {index} unit price"))?;
 
         // Determine tax code: use item's taxRate if present, otherwise default to "A"
         let item_tax_rate = item.get("taxRate").and_then(|v| v.as_f64());
@@ -50,11 +98,7 @@ pub fn build_fiscal_data(
         };
 
         // Item-level discount
-        let discount = item
-            .get("discount")
-            .and_then(|v| v.as_f64())
-            .map(|d| (d * 100.0).round() as i64)
-            .filter(|&d| d > 0);
+        let discount = optional_discount_cents(f64_field(item, &["discount", "discountAmount"]))?;
 
         fiscal_items.push(FiscalLineItem {
             description: name.to_string(),
@@ -67,17 +111,13 @@ pub fn build_fiscal_data(
 
     // Build payment entries
     let mut fiscal_payments = Vec::new();
-    for payment in payments {
-        let method = payment
-            .get("method")
-            .and_then(|v| v.as_str())
-            .unwrap_or("cash")
+    for (index, payment) in payments.iter().enumerate() {
+        let method = str_field(payment, &["method", "paymentMethod", "payment_method"])
+            .ok_or_else(|| format!("Fiscal payment {index} is missing a method"))?
             .to_string();
-        let amount_f = payment
-            .get("amount")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let amount = (amount_f * 100.0).round() as i64;
+        let amount_f = f64_field(payment, &["amount", "amountPaid", "amount_paid", "total"])
+            .ok_or_else(|| format!("Fiscal payment {index} is missing amount"))?;
+        let amount = positive_cents(amount_f, &format!("payment {index} amount"))?;
 
         fiscal_payments.push(FiscalPayment { method, amount });
     }
@@ -87,11 +127,12 @@ pub fn build_fiscal_data(
         let total_f = order
             .get("total_amount")
             .or_else(|| order.get("totalAmount"))
+            .or_else(|| order.get("total"))
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+            .ok_or("Order total is required when fiscal payments are empty")?;
         fiscal_payments.push(FiscalPayment {
             method: "cash".into(),
-            amount: (total_f * 100.0).round() as i64,
+            amount: positive_cents(total_f, "fallback payment total")?,
         });
     }
 
@@ -287,6 +328,27 @@ mod tests {
         let order = json!({"total_amount": 5.00});
         let result = build_fiscal_data(&order, &[], &sample_tax_rates(), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_fiscal_data_rejects_malformed_item() {
+        let order = json!({
+            "items": [{"quantity": 1, "price": 5.00}],
+            "total_amount": 5.00
+        });
+        let result = build_fiscal_data(&order, &[], &sample_tax_rates(), None);
+        assert!(result.unwrap_err().contains("missing a non-empty name"));
+    }
+
+    #[test]
+    fn test_build_fiscal_data_rejects_malformed_payment() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 5.00}],
+            "total_amount": 5.00
+        });
+        let payments = vec![json!({"method": "card", "amount": 0.0})];
+        let result = build_fiscal_data(&order, &payments, &sample_tax_rates(), None);
+        assert!(result.unwrap_err().contains("must be positive"));
     }
 
     #[test]

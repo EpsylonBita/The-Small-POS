@@ -18,7 +18,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::db::{self, DbState};
-use crate::{business_day, order_ownership, payment_integrity, storage};
+use crate::money::Cents;
+use crate::{business_day, order_ownership, payment_integrity, storage, sync_queue};
 
 // ---------------------------------------------------------------------------
 // Period filtering (Gap 9)
@@ -432,14 +433,19 @@ pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<u
     let now = Utc::now().to_rfc3339();
     let mut repaired = 0usize;
 
+    // Wave 5 Session 6: z-report sync rows now live on parity_sync_queue.
+    // The repair JOIN and subsequent UPDATE target parity columns
+    // (`data` instead of `payload`, `attempts` instead of `retry_count`,
+    // `error_message` instead of `last_error`, `last_attempt` instead of
+    // `updated_at`). Parity uses 'processing' where legacy used 'in_progress'.
     let mut stmt = conn
         .prepare(
-            "SELECT zr.id, zr.report_date, zr.report_json, sq.id, sq.status, COALESCE(sq.payload, '')
+            "SELECT zr.id, zr.report_date, zr.report_json, sq.id, sq.status, COALESCE(sq.data, '')
              FROM z_reports zr
-             JOIN sync_queue sq
-               ON sq.entity_type = 'z_report'
-              AND sq.entity_id = zr.id
-             WHERE sq.status IN ('failed', 'pending', 'in_progress')
+             JOIN parity_sync_queue sq
+               ON sq.table_name = 'z_reports'
+              AND sq.record_id = zr.id
+             WHERE sq.status IN ('failed', 'pending', 'processing')
                AND COALESCE(zr.sync_state, '') != 'applied'
              ORDER BY zr.created_at ASC, zr.id ASC",
         )
@@ -451,7 +457,7 @@ pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<u
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
             ))
@@ -530,17 +536,17 @@ pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<u
         .map_err(|e| format!("update repaired z_report business date: {e}"))?;
 
         conn.execute(
-            "UPDATE sync_queue
-             SET payload = ?2,
+            "UPDATE parity_sync_queue
+             SET data = ?2,
                  status = 'pending',
-                 retry_count = 0,
-                 last_error = NULL,
+                 attempts = 0,
+                 error_message = NULL,
                  next_retry_at = NULL,
-                 updated_at = ?3
+                 last_attempt = ?3
              WHERE id = ?1",
             params![queue_id, sync_payload, now],
         )
-        .map_err(|e| format!("update repaired z-report sync queue payload: {e}"))?;
+        .map_err(|e| format!("update repaired z-report parity queue data: {e}"))?;
 
         repaired += 1;
         info!(
@@ -645,7 +651,10 @@ pub(crate) fn get_closeout_readiness_snapshot(
             load_unsettled_payment_blockers_for_window(&conn, &branch_id, &window)?;
         let last_z_report = conn
             .query_row(
-                "SELECT id, shift_id, generated_at, sync_state, gross_sales, net_sales
+                // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+                "SELECT id, shift_id, generated_at, sync_state,
+                        COALESCE(gross_sales_cents, CAST(ROUND(gross_sales * 100) AS INTEGER), 0),
+                        COALESCE(net_sales_cents, CAST(ROUND(net_sales * 100) AS INTEGER), 0)
                  FROM z_reports
                  ORDER BY generated_at DESC
                  LIMIT 1",
@@ -656,8 +665,8 @@ pub(crate) fn get_closeout_readiness_snapshot(
                         "shiftId": row.get::<_, String>(1)?,
                         "generatedAt": row.get::<_, String>(2)?,
                         "syncState": row.get::<_, String>(3)?,
-                        "totalGrossSales": row.get::<_, f64>(4)?,
-                        "totalNetSales": row.get::<_, f64>(5)?,
+                        "totalGrossSales": Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
+                        "totalNetSales": Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
                     }))
                 },
             )
@@ -924,55 +933,62 @@ fn ensure_z_report_sync_queue_row(
     conn: &Connection,
     z_report_id: &str,
     sync_payload: &str,
-    now: &str,
+    _now: &str,
 ) -> Result<(), String> {
-    let existing_status: Option<String> = conn
+    // Wave 5 Session 6: convert the legacy UPSERT pattern into a clear-and-
+    // insert on parity_sync_queue. Admin-server dedup is driven by the
+    // business key (`z_report_id` + `shift_id` inside report_data), so a
+    // fresh parity row with the synthetic `entity:z_reports:{id}` key is
+    // still exactly-once equivalent to the legacy `zreport:{id}` key.
+    //
+    // If the legacy queue already has a `synced` row for this z-report we
+    // stay idempotent and do nothing — matches the original skip-on-synced
+    // fast path. We also scan parity's `conflict` status because the admin
+    // may have flagged a prior attempt.
+    let legacy_synced: i64 = conn
         .query_row(
-            "SELECT status
-             FROM sync_queue
-             WHERE entity_type = 'z_report'
-               AND entity_id = ?1
-             ORDER BY id DESC
-             LIMIT 1",
+            "SELECT COUNT(*) FROM sync_queue
+             WHERE entity_type = 'z_report' AND entity_id = ?1
+               AND status IN ('synced', 'applied')",
             params![z_report_id],
             |row| row.get(0),
         )
-        .optional()
-        .map_err(|e| format!("load existing z-report sync queue row: {e}"))?;
-
-    if matches!(existing_status.as_deref(), Some("synced")) {
+        .unwrap_or(0);
+    if legacy_synced > 0 {
         return Ok(());
     }
 
-    let idempotency_key = format!("zreport:{z_report_id}");
-    match existing_status {
-        Some(_) => {
-            conn.execute(
-                "UPDATE sync_queue
-                 SET payload = ?1,
-                     idempotency_key = ?2,
-                     updated_at = ?3
-                 WHERE id = (
-                     SELECT id
-                     FROM sync_queue
-                     WHERE entity_type = 'z_report'
-                       AND entity_id = ?4
-                     ORDER BY id DESC
-                     LIMIT 1
-                 )",
-                params![sync_payload, idempotency_key, now, z_report_id],
-            )
-            .map_err(|e| format!("update existing z-report sync queue row: {e}"))?;
-        }
-        None => {
-            conn.execute(
-                "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, created_at, updated_at)
-                 VALUES ('z_report', ?1, 'insert', ?2, ?3, ?4, ?4)",
-                params![z_report_id, sync_payload, idempotency_key, now],
-            )
-            .map_err(|e| format!("insert z-report sync queue row: {e}"))?;
-        }
-    }
+    // Clear stale legacy rows so a drain doesn't race a resubmission with a
+    // stale payload. Synced/applied rows are kept for audit history.
+    conn.execute(
+        "DELETE FROM sync_queue
+         WHERE entity_type = 'z_report'
+           AND entity_id = ?1
+           AND status NOT IN ('synced', 'applied')",
+        params![z_report_id],
+    )
+    .map_err(|e| format!("clear stale z-report legacy queue rows: {e}"))?;
+
+    // Clear any lingering parity rows — the UPSERT semantic is "latest
+    // payload wins" so the new row replaces prior unsynced attempts.
+    sync_queue::clear_unsynced_items(conn, "z_reports", z_report_id)
+        .map_err(|e| format!("clear stale z-report parity queue rows: {e}"))?;
+
+    let sync_payload_value: Value = serde_json::from_str(sync_payload)
+        .map_err(|e| format!("parse z-report sync payload: {e}"))?;
+
+    sync_queue::enqueue_payload_item(
+        conn,
+        "z_reports",
+        z_report_id,
+        "INSERT",
+        &sync_payload_value,
+        Some(1),
+        Some("z_report"),
+        Some("manual"),
+        Some(1),
+    )
+    .map_err(|e| format!("enqueue z-report sync: {e}"))?;
 
     Ok(())
 }
@@ -998,11 +1014,17 @@ fn prune_duplicate_local_z_reports_for_window(
 
     let mut removed = 0usize;
     for duplicate_id in duplicate_ids {
+        // Wave 5 Session 6: duplicate z-report cleanup must scrub both
+        // queues. `sync_queue::clear_unsynced_items` only removes pending/
+        // failed/conflict parity rows; since parity deletes rows on success
+        // (no 'synced' status), that's equivalent to "all rows" here.
         conn.execute(
             "DELETE FROM sync_queue WHERE entity_type = 'z_report' AND entity_id = ?1",
             params![duplicate_id],
         )
-        .map_err(|e| format!("delete duplicate z-report sync queue row: {e}"))?;
+        .map_err(|e| format!("delete duplicate z-report legacy sync queue row: {e}"))?;
+        sync_queue::clear_unsynced_items(conn, "z_reports", &duplicate_id)
+            .map_err(|e| format!("delete duplicate z-report parity sync queue row: {e}"))?;
         removed += conn
             .execute("DELETE FROM z_reports WHERE id = ?1", params![duplicate_id])
             .map_err(|e| format!("delete duplicate z-report row: {e}"))?;
@@ -1063,27 +1085,34 @@ fn build_staff_cash_breakdown_row(
     opening_amount: f64,
 ) -> Result<Value, String> {
     let (cash_collected, card_amount): (f64, f64) = if role_type == "driver" {
+        // W4b-iii: cents-with-real-fallback shim (removed in 4e).
         let driver_totals = conn
             .query_row(
                 "SELECT
-                COALESCE(SUM(de.cash_collected), 0),
-                COALESCE(SUM(de.card_amount), 0)
+                COALESCE(SUM(COALESCE(de.cash_collected_cents, CAST(ROUND(de.cash_collected * 100) AS INTEGER))), 0),
+                COALESCE(SUM(COALESCE(de.card_amount_cents, CAST(ROUND(de.card_amount * 100) AS INTEGER))), 0)
              FROM driver_earnings de
              LEFT JOIN orders o ON o.id = de.order_id
              WHERE de.staff_shift_id = ?1
                AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
                AND (o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))",
                 params![staff_shift_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| {
+                    Ok((
+                        Cents::new(row.get::<_, i64>(0)?).to_f64_dp2(),
+                        Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                    ))
+                },
             )
             .map_err(|e| format!("query driver cash breakdown totals: {e}"))?;
 
         if driver_totals.0 > 0.0 || driver_totals.1 > 0.0 {
             driver_totals
         } else {
+            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
             let sql = "SELECT
-                    COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN op.amount ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN op.amount ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0)
                  FROM orders o
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -1092,7 +1121,10 @@ fn build_staff_cash_breakdown_row(
                    AND COALESCE(o.order_type, 'dine-in') = 'delivery'";
 
             conn.query_row(sql, params![staff_shift_id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
+                Ok((
+                    Cents::new(row.get::<_, i64>(0)?).to_f64_dp2(),
+                    Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                ))
             })
             .map_err(|e| format!("fallback driver cash breakdown totals: {e}"))?
         }
@@ -1116,11 +1148,32 @@ fn build_staff_cash_breakdown_row(
         .map_err(|e| format!("query staff cash breakdown totals: {e}"))?
     };
 
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let expenses: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ?1",
+            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
+             FROM shift_expenses WHERE staff_shift_id = ?1",
             params![staff_shift_id],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
+        )
+        .unwrap_or(0.0);
+
+    // Wave 10 medium: cash refunds physically remove cash from the drawer
+    // and must be deducted from the amount the staff returns at end of
+    // shift. Card refunds don't touch the drawer, so we only sum
+    // refund_method = 'cash'. Without this, a shift with a EUR 20 cash
+    // refund had cashToReturn overstated by EUR 20 — the shift would
+    // appear short by exactly the refund amount during reconciliation.
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+    let cash_refunds: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
+             FROM payment_adjustments
+             WHERE staff_shift_id = ?1
+               AND adjustment_type = 'refund'
+               AND refund_method = 'cash'",
+            params![staff_shift_id],
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .unwrap_or(0.0);
 
@@ -1131,7 +1184,8 @@ fn build_staff_cash_breakdown_row(
         "startingAmount": opening_amount,
         "cashCollected": cash_collected,
         "cardAmount": card_amount,
-        "cashToReturn": opening_amount + cash_collected - expenses,
+        "cashToReturn": opening_amount + cash_collected - expenses - cash_refunds,
+        "cashRefunds": cash_refunds,
         "expenses": expenses,
     }))
 }
@@ -1216,7 +1270,10 @@ fn ensure_staff_payments_table(conn: &Connection) {
 fn load_staff_expense_items(conn: &Connection, shift_id: &str) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, expense_type, amount, description, created_at
+            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT id, expense_type,
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
+                    description, created_at
              FROM shift_expenses
              WHERE staff_shift_id = ?1
                AND (expense_type IS NULL OR expense_type != 'staff_payment')
@@ -1229,7 +1286,7 @@ fn load_staff_expense_items(conn: &Connection, shift_id: &str) -> Result<Vec<Val
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "expenseType": row.get::<_, Option<String>>(1)?,
-                "amount": row.get::<_, f64>(2)?,
+                "amount": Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
                 "description": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 "createdAt": row.get::<_, Option<String>>(4)?,
             }))
@@ -1311,24 +1368,33 @@ fn load_staff_payment_items(
 
 fn load_staff_drawer_snapshot(conn: &Connection, shift_id: &str) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT opening_amount, expected_amount, closing_amount, variance_amount,
-                total_cash_sales, total_card_sales, cash_drops,
-                driver_cash_returned, driver_cash_given, total_staff_payments
+        // W4b-iii: cents-with-real-fallback shim on 10 monetary cols.
+        "SELECT
+                COALESCE(opening_amount_cents, CAST(ROUND(opening_amount * 100) AS INTEGER), 0),
+                COALESCE(expected_amount_cents, CAST(ROUND(expected_amount * 100) AS INTEGER)),
+                COALESCE(closing_amount_cents, CAST(ROUND(closing_amount * 100) AS INTEGER)),
+                COALESCE(variance_amount_cents, CAST(ROUND(variance_amount * 100) AS INTEGER)),
+                COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER), 0),
+                COALESCE(total_card_sales_cents, CAST(ROUND(total_card_sales * 100) AS INTEGER), 0),
+                COALESCE(cash_drops_cents, CAST(ROUND(cash_drops * 100) AS INTEGER), 0),
+                COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0),
+                COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER), 0),
+                COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER), 0)
          FROM cash_drawer_sessions
          WHERE staff_shift_id = ?1",
         params![shift_id],
         |row| {
             Ok(serde_json::json!({
-                "opening": row.get::<_, f64>(0).unwrap_or(0.0),
-                "expected": row.get::<_, Option<f64>>(1)?,
-                "closing": row.get::<_, Option<f64>>(2)?,
-                "variance": row.get::<_, Option<f64>>(3)?,
-                "cashSales": row.get::<_, f64>(4).unwrap_or(0.0),
-                "cardSales": row.get::<_, f64>(5).unwrap_or(0.0),
-                "drops": row.get::<_, f64>(6).unwrap_or(0.0),
-                "driverCashReturned": row.get::<_, f64>(7).unwrap_or(0.0),
-                "driverCashGiven": row.get::<_, f64>(8).unwrap_or(0.0),
-                "staffPayments": row.get::<_, f64>(9).unwrap_or(0.0),
+                "opening": Cents::new(row.get::<_, i64>(0).unwrap_or(0)).to_f64_dp2(),
+                "expected": row.get::<_, Option<i64>>(1)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "closing": row.get::<_, Option<i64>>(2)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "variance": row.get::<_, Option<i64>>(3)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "cashSales": Cents::new(row.get::<_, i64>(4).unwrap_or(0)).to_f64_dp2(),
+                "cardSales": Cents::new(row.get::<_, i64>(5).unwrap_or(0)).to_f64_dp2(),
+                "drops": Cents::new(row.get::<_, i64>(6).unwrap_or(0)).to_f64_dp2(),
+                "driverCashReturned": Cents::new(row.get::<_, i64>(7).unwrap_or(0)).to_f64_dp2(),
+                "driverCashGiven": Cents::new(row.get::<_, i64>(8).unwrap_or(0)).to_f64_dp2(),
+                "staffPayments": Cents::new(row.get::<_, i64>(9).unwrap_or(0)).to_f64_dp2(),
             }))
         },
     )
@@ -1345,11 +1411,19 @@ fn load_drawer_rows_for_period(
     let opened_at_predicate = lower_bound_mode.sql_predicate("cds.opened_at", "?1");
     let mut stmt = conn
         .prepare(&format!(
+            // W4b-iii: cents-with-real-fallback shim on 10 monetary cols.
             "SELECT cds.id, cds.staff_shift_id, ss.staff_name,
-                    cds.opening_amount, cds.expected_amount, cds.closing_amount,
-                    cds.variance_amount, cds.total_cash_sales, cds.total_card_sales,
-                    cds.driver_cash_given, cds.driver_cash_returned, cds.cash_drops,
-                    cds.total_staff_payments, cds.opened_at, cds.closed_at, cds.reconciled
+                    COALESCE(cds.opening_amount_cents, CAST(ROUND(cds.opening_amount * 100) AS INTEGER), 0),
+                    COALESCE(cds.expected_amount_cents, CAST(ROUND(cds.expected_amount * 100) AS INTEGER)),
+                    COALESCE(cds.closing_amount_cents, CAST(ROUND(cds.closing_amount * 100) AS INTEGER)),
+                    COALESCE(cds.variance_amount_cents, CAST(ROUND(cds.variance_amount * 100) AS INTEGER)),
+                    COALESCE(cds.total_cash_sales_cents, CAST(ROUND(cds.total_cash_sales * 100) AS INTEGER), 0),
+                    COALESCE(cds.total_card_sales_cents, CAST(ROUND(cds.total_card_sales * 100) AS INTEGER), 0),
+                    COALESCE(cds.driver_cash_given_cents, CAST(ROUND(cds.driver_cash_given * 100) AS INTEGER), 0),
+                    COALESCE(cds.driver_cash_returned_cents, CAST(ROUND(cds.driver_cash_returned * 100) AS INTEGER), 0),
+                    COALESCE(cds.cash_drops_cents, CAST(ROUND(cds.cash_drops * 100) AS INTEGER), 0),
+                    COALESCE(cds.total_staff_payments_cents, CAST(ROUND(cds.total_staff_payments * 100) AS INTEGER), 0),
+                    cds.opened_at, cds.closed_at, cds.reconciled
              FROM cash_drawer_sessions cds
              LEFT JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
              WHERE {opened_at_predicate}
@@ -1364,16 +1438,16 @@ fn load_drawer_rows_for_period(
                 "id": row.get::<_, String>(0)?,
                 "staffShiftId": row.get::<_, String>(1)?,
                 "staffName": row.get::<_, Option<String>>(2)?,
-                "opening": row.get::<_, f64>(3).unwrap_or(0.0),
-                "expected": row.get::<_, Option<f64>>(4)?,
-                "closing": row.get::<_, Option<f64>>(5)?,
-                "variance": row.get::<_, Option<f64>>(6)?,
-                "cashSales": row.get::<_, f64>(7).unwrap_or(0.0),
-                "cardSales": row.get::<_, f64>(8).unwrap_or(0.0),
-                "driverCashGiven": row.get::<_, f64>(9).unwrap_or(0.0),
-                "driverCashReturned": row.get::<_, f64>(10).unwrap_or(0.0),
-                "drops": row.get::<_, f64>(11).unwrap_or(0.0),
-                "staffPayments": row.get::<_, f64>(12).unwrap_or(0.0),
+                "opening": Cents::new(row.get::<_, i64>(3).unwrap_or(0)).to_f64_dp2(),
+                "expected": row.get::<_, Option<i64>>(4)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "closing": row.get::<_, Option<i64>>(5)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "variance": row.get::<_, Option<i64>>(6)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "cashSales": Cents::new(row.get::<_, i64>(7).unwrap_or(0)).to_f64_dp2(),
+                "cardSales": Cents::new(row.get::<_, i64>(8).unwrap_or(0)).to_f64_dp2(),
+                "driverCashGiven": Cents::new(row.get::<_, i64>(9).unwrap_or(0)).to_f64_dp2(),
+                "driverCashReturned": Cents::new(row.get::<_, i64>(10).unwrap_or(0)).to_f64_dp2(),
+                "drops": Cents::new(row.get::<_, i64>(11).unwrap_or(0)).to_f64_dp2(),
+                "staffPayments": Cents::new(row.get::<_, i64>(12).unwrap_or(0)).to_f64_dp2(),
                 "openedAt": row.get::<_, Option<String>>(13)?,
                 "closedAt": row.get::<_, Option<String>>(14)?,
                 "reconciled": row.get::<_, i64>(15).unwrap_or(0) != 0,
@@ -1389,11 +1463,19 @@ fn load_drawer_rows_for_period(
 fn load_drawer_rows_for_shift(conn: &Connection, shift_id: &str) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
+            // W4b-iii: cents-with-real-fallback shim on 10 monetary cols.
             "SELECT cds.id, cds.staff_shift_id, ss.staff_name,
-                    cds.opening_amount, cds.expected_amount, cds.closing_amount,
-                    cds.variance_amount, cds.total_cash_sales, cds.total_card_sales,
-                    cds.driver_cash_given, cds.driver_cash_returned, cds.cash_drops,
-                    cds.total_staff_payments, cds.opened_at, cds.closed_at, cds.reconciled
+                    COALESCE(cds.opening_amount_cents, CAST(ROUND(cds.opening_amount * 100) AS INTEGER), 0),
+                    COALESCE(cds.expected_amount_cents, CAST(ROUND(cds.expected_amount * 100) AS INTEGER)),
+                    COALESCE(cds.closing_amount_cents, CAST(ROUND(cds.closing_amount * 100) AS INTEGER)),
+                    COALESCE(cds.variance_amount_cents, CAST(ROUND(cds.variance_amount * 100) AS INTEGER)),
+                    COALESCE(cds.total_cash_sales_cents, CAST(ROUND(cds.total_cash_sales * 100) AS INTEGER), 0),
+                    COALESCE(cds.total_card_sales_cents, CAST(ROUND(cds.total_card_sales * 100) AS INTEGER), 0),
+                    COALESCE(cds.driver_cash_given_cents, CAST(ROUND(cds.driver_cash_given * 100) AS INTEGER), 0),
+                    COALESCE(cds.driver_cash_returned_cents, CAST(ROUND(cds.driver_cash_returned * 100) AS INTEGER), 0),
+                    COALESCE(cds.cash_drops_cents, CAST(ROUND(cds.cash_drops * 100) AS INTEGER), 0),
+                    COALESCE(cds.total_staff_payments_cents, CAST(ROUND(cds.total_staff_payments * 100) AS INTEGER), 0),
+                    cds.opened_at, cds.closed_at, cds.reconciled
              FROM cash_drawer_sessions cds
              LEFT JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
              WHERE cds.staff_shift_id = ?1
@@ -1407,16 +1489,16 @@ fn load_drawer_rows_for_shift(conn: &Connection, shift_id: &str) -> Result<Vec<V
                 "id": row.get::<_, String>(0)?,
                 "staffShiftId": row.get::<_, String>(1)?,
                 "staffName": row.get::<_, Option<String>>(2)?,
-                "opening": row.get::<_, f64>(3).unwrap_or(0.0),
-                "expected": row.get::<_, Option<f64>>(4)?,
-                "closing": row.get::<_, Option<f64>>(5)?,
-                "variance": row.get::<_, Option<f64>>(6)?,
-                "cashSales": row.get::<_, f64>(7).unwrap_or(0.0),
-                "cardSales": row.get::<_, f64>(8).unwrap_or(0.0),
-                "driverCashGiven": row.get::<_, f64>(9).unwrap_or(0.0),
-                "driverCashReturned": row.get::<_, f64>(10).unwrap_or(0.0),
-                "drops": row.get::<_, f64>(11).unwrap_or(0.0),
-                "staffPayments": row.get::<_, f64>(12).unwrap_or(0.0),
+                "opening": Cents::new(row.get::<_, i64>(3).unwrap_or(0)).to_f64_dp2(),
+                "expected": row.get::<_, Option<i64>>(4)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "closing": row.get::<_, Option<i64>>(5)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "variance": row.get::<_, Option<i64>>(6)?.map(|c| Cents::new(c).to_f64_dp2()),
+                "cashSales": Cents::new(row.get::<_, i64>(7).unwrap_or(0)).to_f64_dp2(),
+                "cardSales": Cents::new(row.get::<_, i64>(8).unwrap_or(0)).to_f64_dp2(),
+                "driverCashGiven": Cents::new(row.get::<_, i64>(9).unwrap_or(0)).to_f64_dp2(),
+                "driverCashReturned": Cents::new(row.get::<_, i64>(10).unwrap_or(0)).to_f64_dp2(),
+                "drops": Cents::new(row.get::<_, i64>(11).unwrap_or(0)).to_f64_dp2(),
+                "staffPayments": Cents::new(row.get::<_, i64>(12).unwrap_or(0)).to_f64_dp2(),
                 "openedAt": row.get::<_, Option<String>>(13)?,
                 "closedAt": row.get::<_, Option<String>>(14)?,
                 "reconciled": row.get::<_, i64>(15).unwrap_or(0) != 0,
@@ -1438,6 +1520,7 @@ fn load_sales_by_type_for_period(
 ) -> Result<Value, String> {
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let sql = format!(
         "SELECT
             CASE
@@ -1446,7 +1529,7 @@ fn load_sales_by_type_for_period(
             END AS bucket,
             op.method,
             COUNT(DISTINCT o.id),
-            COALESCE(SUM(op.amount), 0)
+            COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0)
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE {financial_predicate}
@@ -1472,7 +1555,7 @@ fn load_sales_by_type_for_period(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
-                row.get::<_, f64>(3)?,
+                Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query sales by type for period: {e}"))?;
@@ -1503,6 +1586,7 @@ fn load_sales_by_type_for_period(
 fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Value, String> {
     let mut stmt = conn
         .prepare(
+            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
             "SELECT
                 CASE
                     WHEN COALESCE(o.order_type, 'dine-in') = 'delivery' THEN 'delivery'
@@ -1510,7 +1594,7 @@ fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Val
                 END AS bucket,
                 op.method,
                 COUNT(DISTINCT o.id),
-                COALESCE(SUM(op.amount), 0)
+                COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0)
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -1532,7 +1616,7 @@ fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Val
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
-                row.get::<_, f64>(3)?,
+                Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query sales by type for shift: {e}"))?;
@@ -1569,10 +1653,11 @@ fn load_non_driver_order_totals(
         .check_in_time
         .as_deref()
         .unwrap_or(business_day::EPOCH_RFC3339);
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let order_scope_sql = format!(
-        "SELECT COUNT(*), COALESCE(SUM(order_total), 0)
+        "SELECT COUNT(*), COALESCE(SUM(order_total_cents), 0)
          FROM (
-            SELECT o.id, MAX(COALESCE(o.total_amount, 0)) AS order_total
+            SELECT o.id, MAX(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)) AS order_total_cents
             FROM orders o
             LEFT JOIN order_payments op ON op.order_id = o.id
             WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -1597,14 +1682,15 @@ fn load_non_driver_order_totals(
                 shift_start,
                 shift.check_out_time.as_deref()
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, Cents::new(row.get::<_, i64>(1)?).to_f64_dp2())),
         )
         .map_err(|e| format!("query non-driver order totals: {e}"))?;
 
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let payment_sql = format!(
         "SELECT
-            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN op.amount ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN op.amount ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0)
          FROM orders o
          LEFT JOIN order_payments op ON op.order_id = o.id
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -1627,7 +1713,12 @@ fn load_non_driver_order_totals(
                 shift_start,
                 shift.check_out_time.as_deref()
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok((
+                    Cents::new(row.get::<_, i64>(0)?).to_f64_dp2(),
+                    Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                ))
+            },
         )
         .map_err(|e| format!("query non-driver payment totals: {e}"))?;
 
@@ -1639,6 +1730,7 @@ fn load_driver_order_totals(
     conn: &Connection,
     shift_id: &str,
 ) -> Result<(i64, i64, i64, f64, f64, f64, f64), String> {
+    // W4b-iii: cents-with-real-fallback shim on 4 monetary SUM cols.
     conn.query_row(
         "SELECT
             COALESCE(SUM(CASE
@@ -1654,19 +1746,25 @@ fn load_driver_order_totals(
                 ELSE 0
             END), 0),
             COALESCE(SUM(CASE
-                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded') THEN de.total_earning
+                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded')
+                    THEN COALESCE(de.total_earning_cents, CAST(ROUND(de.total_earning * 100) AS INTEGER))
                 ELSE 0
             END), 0),
             COALESCE(SUM(CASE
-                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded') THEN de.cash_collected
+                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded')
+                    THEN COALESCE(de.cash_collected_cents, CAST(ROUND(de.cash_collected * 100) AS INTEGER))
                 ELSE 0
             END), 0),
             COALESCE(SUM(CASE
-                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded') THEN de.card_amount
+                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded')
+                    THEN COALESCE(de.card_amount_cents, CAST(ROUND(de.card_amount * 100) AS INTEGER))
                 ELSE 0
             END), 0),
             COALESCE(SUM(CASE
-                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded') THEN COALESCE(o.total_amount, de.cash_collected + de.card_amount)
+                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded')
+                    THEN COALESCE(o.total_amount_cents,
+                                  CAST(ROUND(o.total_amount * 100) AS INTEGER),
+                                  CAST(ROUND((de.cash_collected + de.card_amount) * 100) AS INTEGER))
                 ELSE 0
             END), 0)
          FROM driver_earnings de
@@ -1679,10 +1777,10 @@ fn load_driver_order_totals(
                 row.get(0)?,
                 row.get(1)?,
                 row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
+                Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
+                Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
+                Cents::new(row.get::<_, i64>(6)?).to_f64_dp2(),
             ))
         },
     )
@@ -1698,6 +1796,13 @@ fn load_non_driver_order_details(
         .check_in_time
         .as_deref()
         .unwrap_or(business_day::EPOCH_RFC3339);
+    // W6: `orders.payment_method` was dropped in migration v55. Derive
+    // the method inline from `order_payments` using the same semantic as
+    // `payments::derive_payment_method` — multi-method = "split"; one
+    // method = that method; no rows = "pending". Inline as
+    // a subquery (not a Rust post-process) because this query already
+    // joins across order and payment tables and we want to keep the
+    // classification deterministic per SELECT pass.
     let detail_sql = format!(
         "SELECT o.id,
                 COALESCE(NULLIF(TRIM(o.order_number), ''), o.id),
@@ -1705,31 +1810,17 @@ fn load_non_driver_order_details(
                 o.table_number,
                 o.delivery_address,
                 COALESCE(o.total_amount, 0),
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1 FROM order_payments op2
-                        WHERE op2.order_id = o.id
-                          AND op2.status = 'completed'
-                          AND op2.method = 'cash'
-                    ) AND EXISTS (
-                        SELECT 1 FROM order_payments op2
-                        WHERE op2.order_id = o.id
-                          AND op2.status = 'completed'
-                          AND op2.method = 'card'
-                    ) THEN 'mixed'
-                    ELSE COALESCE((
-                        SELECT op2.method
-                        FROM order_payments op2
-                        WHERE op2.order_id = o.id
-                          AND op2.status = 'completed'
-                        ORDER BY CASE op2.method
-                            WHEN 'cash' THEN 0
-                            WHEN 'card' THEN 1
-                            ELSE 2
-                        END
-                        LIMIT 1
-                    ), o.payment_method, 'cash')
-                END AS payment_method,
+                COALESCE((
+                    SELECT CASE
+                        WHEN COUNT(DISTINCT LOWER(TRIM(method))) > 1
+                          THEN 'split'
+                        ELSE LOWER(TRIM(MIN(method)))
+                    END
+                    FROM order_payments op2
+                    WHERE op2.order_id = o.id
+                      AND op2.status = 'completed'
+                      AND TRIM(COALESCE(op2.method, '')) != ''
+                ), 'pending') AS payment_method,
                 o.payment_status,
                 o.status,
                 o.created_at
@@ -2296,7 +2387,19 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
 
     // --- Aggregate data from the shift ---
 
-    // Orders: count, gross sales, discounts, tips
+    // Orders: count, gross sales, discounts, tips.
+    //
+    // Wave 6 H16 — invariant: `orders.total_amount` is the POST-discount
+    // order total. `gross` here reconstructs the PRE-discount revenue by
+    // adding `discount_amount` back in: `SUM(total_amount + discount_amount)`.
+    // The downstream `net_sales = gross - refunds - voids - discounts`
+    // formula in `build_z_report_*` therefore does NOT double-deduct
+    // discounts: gross is pre-discount, subtracting `discounts_total`
+    // brings it back to post-discount revenue, and the remaining
+    // refund/void subtractions are on money that was actually recognised
+    // but later returned. If the schema convention for `total_amount`
+    // ever changes (e.g. starts storing pre-discount), this reconstruction
+    // formula MUST change too.
     let order_agg = conn
         .query_row(
             "SELECT COUNT(*) as cnt,
@@ -2324,7 +2427,9 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // Payments: breakdown by method
     let mut pay_stmt = conn
         .prepare(
-            "SELECT op.method, COUNT(*) as cnt, COALESCE(SUM(op.amount), 0) as total
+            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT op.method, COUNT(*) as cnt,
+                    COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE op.staff_shift_id = ?1
@@ -2347,7 +2452,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, f64>(2)?,
+                Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query payments: {e}"))?;
@@ -2379,7 +2484,9 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // silently dropped these, under-reporting refunds/voids in the Z-report.
     let mut adj_stmt = conn
         .prepare(
-            "SELECT pa.adjustment_type, COALESCE(SUM(pa.amount), 0)
+            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT pa.adjustment_type,
+                    COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
              FROM payment_adjustments pa
              JOIN order_payments op ON pa.payment_id = op.id
              JOIN orders o ON o.id = op.order_id
@@ -2395,7 +2502,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
 
     let adj_rows = adj_stmt
         .query_map(params![shift_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+            ))
         })
         .map_err(|e| format!("query adjustments: {e}"))?;
 
@@ -2409,18 +2519,23 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     }
 
     // Expenses
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let expenses_total: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ?1",
+            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
+             FROM shift_expenses WHERE staff_shift_id = ?1",
             params![shift_id],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .unwrap_or(0.0);
 
     // Expense items for report_json
     let mut exp_stmt = conn
         .prepare(
-            "SELECT se.id, se.expense_type, se.amount, se.description, se.created_at, ss.staff_name
+            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT se.id, se.expense_type,
+                    COALESCE(se.amount_cents, CAST(ROUND(se.amount * 100) AS INTEGER), 0),
+                    se.description, se.created_at, ss.staff_name
              FROM shift_expenses se
              LEFT JOIN staff_shifts ss ON ss.id = se.staff_shift_id
              WHERE se.staff_shift_id = ?1
@@ -2433,7 +2548,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "expenseType": row.get::<_, Option<String>>(1)?,
-                "amount": row.get::<_, f64>(2)?,
+                "amount": Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
                 "description": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 "createdAt": row.get::<_, String>(4)?,
                 "staffName": row.get::<_, Option<String>>(5)?,
@@ -2444,30 +2559,44 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         .collect();
 
     // Cash drawer session
+    // W4b-iii: cents-with-real-fallback shim on 12 monetary cols.
     let mut drawer = conn
         .query_row(
-            "SELECT opening_amount, closing_amount, expected_amount, variance_amount,
-                    total_cash_sales, total_card_sales, total_refunds, total_expenses,
-                    cash_drops, driver_cash_given, driver_cash_returned, reconciled,
-                    total_staff_payments
+            "SELECT
+                COALESCE(opening_amount_cents, CAST(ROUND(opening_amount * 100) AS INTEGER), 0),
+                COALESCE(closing_amount_cents, CAST(ROUND(closing_amount * 100) AS INTEGER)),
+                COALESCE(expected_amount_cents, CAST(ROUND(expected_amount * 100) AS INTEGER)),
+                COALESCE(variance_amount_cents, CAST(ROUND(variance_amount * 100) AS INTEGER)),
+                COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER), 0),
+                COALESCE(total_card_sales_cents, CAST(ROUND(total_card_sales * 100) AS INTEGER), 0),
+                COALESCE(total_refunds_cents, CAST(ROUND(total_refunds * 100) AS INTEGER), 0),
+                COALESCE(total_expenses_cents, CAST(ROUND(total_expenses * 100) AS INTEGER), 0),
+                COALESCE(cash_drops_cents, CAST(ROUND(cash_drops * 100) AS INTEGER), 0),
+                COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER), 0),
+                COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0),
+                reconciled,
+                COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER), 0)
              FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
             params![shift_id],
             |row| {
                 let reconciled: bool = row.get::<_, i64>(11).unwrap_or(0) != 0;
                 Ok(serde_json::json!({
-                    "openingTotal": row.get::<_, f64>(0).unwrap_or(0.0),
-                    "closing": row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
-                    "expected": row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                    "totalVariance": row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                    "cashSales": row.get::<_, f64>(4).unwrap_or(0.0),
-                    "cardSales": row.get::<_, f64>(5).unwrap_or(0.0),
-                    "totalRefunds": row.get::<_, f64>(6).unwrap_or(0.0),
-                    "totalExpenses": row.get::<_, f64>(7).unwrap_or(0.0),
-                    "totalCashDrops": row.get::<_, f64>(8).unwrap_or(0.0),
-                    "driverCashGiven": row.get::<_, f64>(9).unwrap_or(0.0),
-                    "driverCashReturned": row.get::<_, f64>(10).unwrap_or(0.0),
+                    "openingTotal": Cents::new(row.get::<_, i64>(0).unwrap_or(0)).to_f64_dp2(),
+                    "closing": row.get::<_, Option<i64>>(1)?
+                        .map(|c| Cents::new(c).to_f64_dp2()).unwrap_or(0.0),
+                    "expected": row.get::<_, Option<i64>>(2)?
+                        .map(|c| Cents::new(c).to_f64_dp2()).unwrap_or(0.0),
+                    "totalVariance": row.get::<_, Option<i64>>(3)?
+                        .map(|c| Cents::new(c).to_f64_dp2()).unwrap_or(0.0),
+                    "cashSales": Cents::new(row.get::<_, i64>(4).unwrap_or(0)).to_f64_dp2(),
+                    "cardSales": Cents::new(row.get::<_, i64>(5).unwrap_or(0)).to_f64_dp2(),
+                    "totalRefunds": Cents::new(row.get::<_, i64>(6).unwrap_or(0)).to_f64_dp2(),
+                    "totalExpenses": Cents::new(row.get::<_, i64>(7).unwrap_or(0)).to_f64_dp2(),
+                    "totalCashDrops": Cents::new(row.get::<_, i64>(8).unwrap_or(0)).to_f64_dp2(),
+                    "driverCashGiven": Cents::new(row.get::<_, i64>(9).unwrap_or(0)).to_f64_dp2(),
+                    "driverCashReturned": Cents::new(row.get::<_, i64>(10).unwrap_or(0)).to_f64_dp2(),
                     "unreconciledCount": if reconciled { 0 } else { 1 },
-                    "staffPaymentsTotal": row.get::<_, f64>(12).unwrap_or(0.0),
+                    "staffPaymentsTotal": Cents::new(row.get::<_, i64>(12).unwrap_or(0)).to_f64_dp2(),
                 }))
             },
         )
@@ -2556,13 +2685,15 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // multiply `total_amount` by the number of adjustments per order.
     let mut ot_stmt = conn
         .prepare(
+            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
             "SELECT COALESCE(o.order_type, 'dine-in'),
                     COUNT(*),
-                    COALESCE(SUM(o.total_amount), 0)
-                        - COALESCE(SUM(COALESCE(r.refund_sum, 0)), 0) AS net_total
+                    COALESCE(SUM(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER))), 0)
+                        - COALESCE(SUM(COALESCE(r.refund_sum_cents, 0)), 0) AS net_total_cents
              FROM orders o
              LEFT JOIN (
-                 SELECT order_id, SUM(amount) AS refund_sum
+                 SELECT order_id,
+                        SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))) AS refund_sum_cents
                  FROM payment_adjustments
                  WHERE adjustment_type = 'refund'
                  GROUP BY order_id
@@ -2586,7 +2717,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, f64>(2)?,
+                Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query order_type: {e}"))?;
@@ -2709,31 +2840,47 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         .unwrap_or_else(|| check_out_time.as_deref().unwrap_or(now.as_str()));
     let period_end = check_out_time.as_deref().unwrap_or(now.as_str());
 
-    // Build full report_json (matches Electron POS shape for server compat)
+    // Build full report_json (matches Electron POS shape for server compat).
+    // W4d-iv additive emission: every monetary float key (top-level and
+    // nested) carries a `_cents` integer sibling so admin-dashboard can
+    // read either shape during the bake window.
+    let total_sales = gross_sales - discounts_total;
+    let day_total = cash_sales + card_sales + other_sales;
     let mut report_json = serde_json::json!({
         "date": report_date,
         "shifts": shift_counts,
         "sales": {
             "totalOrders": total_orders,
-            "totalSales": gross_sales - discounts_total,
+            "totalSales": total_sales,
+            "totalSales_cents": Cents::round_half_even(total_sales).as_i64(),
             "discountsTotal": discounts_total,
+            "discountsTotal_cents": Cents::round_half_even(discounts_total).as_i64(),
             "cashSales": cash_sales,
+            "cashSales_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardSales": card_sales,
+            "cardSales_cents": Cents::round_half_even(card_sales).as_i64(),
             "dineInOrders": dine_in_orders,
             "dineInSales": dine_in_sales,
+            "dineInSales_cents": Cents::round_half_even(dine_in_sales).as_i64(),
             "takeawayOrders": takeaway_orders,
             "takeawaySales": takeaway_sales,
+            "takeawaySales_cents": Cents::round_half_even(takeaway_sales).as_i64(),
             "deliveryOrders": delivery_orders,
             "deliverySales": delivery_sales,
+            "deliverySales_cents": Cents::round_half_even(delivery_sales).as_i64(),
             "byType": sales_by_type,
         },
         "cashDrawer": drawer.as_ref().unwrap_or(&serde_json::json!({
             "totalVariance": variance,
+            "totalVariance_cents": Cents::round_half_even(variance).as_i64(),
             "openingTotal": opening,
+            "openingTotal_cents": Cents::round_half_even(opening).as_i64(),
         })),
         "expenses": {
             "total": expenses_total,
+            "total_cents": Cents::round_half_even(expenses_total).as_i64(),
             "staffPaymentsTotal": staff_payments_total,
+            "staffPaymentsTotal_cents": Cents::round_half_even(staff_payments_total).as_i64(),
             "pendingCount": pending_expenses_count,
             "items": expense_items,
         },
@@ -2741,14 +2888,19 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "drawers": drawer_rows,
         "staffPayments": {
             "total": staff_payments_total,
+            "total_cents": Cents::round_half_even(staff_payments_total).as_i64(),
         },
         "tips": {
             "total": tips_total,
+            "total_cents": Cents::round_half_even(tips_total).as_i64(),
         },
         "daySummary": {
             "cashTotal": cash_sales,
+            "cashTotal_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardTotal": card_sales,
-            "total": cash_sales + card_sales + other_sales,
+            "cardTotal_cents": Cents::round_half_even(card_sales).as_i64(),
+            "total": day_total,
+            "total_cents": Cents::round_half_even(day_total).as_i64(),
             "totalOrders": total_orders,
         },
         "staffReports": staff_reports,
@@ -2795,22 +2947,58 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         });
     }
 
+    // W4c dual-write: every monetary REAL column gets its `_cents` sibling.
+    let gross_sales_cents = Cents::round_half_even(gross_sales).as_i64();
+    let net_sales_cents = Cents::round_half_even(net_sales).as_i64();
+    let cash_sales_cents = Cents::round_half_even(cash_sales).as_i64();
+    let card_sales_cents = Cents::round_half_even(card_sales).as_i64();
+    let refunds_total_cents = Cents::round_half_even(refunds_total).as_i64();
+    let voids_total_cents = Cents::round_half_even(voids_total).as_i64();
+    let discounts_total_cents = Cents::round_half_even(discounts_total).as_i64();
+    let tips_total_cents = Cents::round_half_even(tips_total).as_i64();
+    let expenses_total_cents = Cents::round_half_even(expenses_total).as_i64();
+    let variance_cents = Cents::round_half_even(variance).as_i64();
+    let opening_cents = Cents::round_half_even(opening).as_i64();
+    let closing_cents = Cents::round_half_even(closing).as_i64();
+    let expected_cents = Cents::round_half_even(expected).as_i64();
     let result = (|| -> Result<(), String> {
         conn.execute(
             "INSERT INTO z_reports (
                 id, shift_id, branch_id, terminal_id, report_date, generated_at,
-                gross_sales, net_sales, total_orders, cash_sales, card_sales,
-                refunds_total, voids_total, discounts_total, tips_total,
-                expenses_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                gross_sales, gross_sales_cents,
+                net_sales, net_sales_cents,
+                total_orders,
+                cash_sales, cash_sales_cents,
+                card_sales, card_sales_cents,
+                refunds_total, refunds_total_cents,
+                voids_total, voids_total_cents,
+                discounts_total, discounts_total_cents,
+                tips_total, tips_total_cents,
+                expenses_total, expenses_total_cents,
+                cash_variance, cash_variance_cents,
+                opening_cash, opening_cash_cents,
+                closing_cash, closing_cash_cents,
+                expected_cash, expected_cash_cents,
                 payments_breakdown_json, report_json,
                 sync_state, created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
-                ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19, ?20,
-                ?21, ?22,
-                'pending', ?23, ?23
+                ?7, ?8,
+                ?9, ?10,
+                ?11,
+                ?12, ?13,
+                ?14, ?15,
+                ?16, ?17,
+                ?18, ?19,
+                ?20, ?21,
+                ?22, ?23,
+                ?24, ?25,
+                ?26, ?27,
+                ?28, ?29,
+                ?30, ?31,
+                ?32, ?33,
+                ?34, ?35,
+                'pending', ?36, ?36
              )",
             params![
                 z_report_id,
@@ -2820,19 +3008,32 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                 report_date,
                 now,
                 gross_sales,
+                gross_sales_cents,
                 net_sales,
+                net_sales_cents,
                 total_orders,
                 cash_sales,
+                cash_sales_cents,
                 card_sales,
+                card_sales_cents,
                 refunds_total,
+                refunds_total_cents,
                 voids_total,
+                voids_total_cents,
                 discounts_total,
+                discounts_total_cents,
                 tips_total,
+                tips_total_cents,
                 expenses_total,
+                expenses_total_cents,
                 variance,
+                variance_cents,
                 opening,
+                opening_cents,
                 closing,
+                closing_cents,
                 expected,
+                expected_cents,
                 payments_json_str,
                 report_json_str,
                 now,
@@ -2840,20 +3041,31 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         )
         .map_err(|e| format!("insert z_report: {e}"))?;
 
-        // Enqueue for sync — the payload for the server is the report_json
-        // plus terminal/branch/date metadata.
+        // Wave 5 Session 6: enqueue via canonical parity queue. The legacy
+        // stamp `idempotency_key` ("zreport:{id}") is no longer needed —
+        // parity's default dispatch reads the entity row's idempotency_key
+        // column, and for `z_reports` (not in v47) falls back to the
+        // deterministic synthetic `entity:z_reports:{id}`. Admin dedup is
+        // on the business key (z_report_id + shift_id), so format changes
+        // don't break exactly-once.
+        let _ = idempotency_key; // Kept in scope for log tracing elsewhere.
         let sync_payload = serde_json::json!({
             "terminal_id": terminal_id,
             "branch_id": branch_id,
             "report_date": report_date,
             "report_data": report_json,
-        })
-        .to_string();
+        });
 
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('z_report', ?1, 'insert', ?2, ?3)",
-            params![z_report_id, sync_payload, idempotency_key],
+        sync_queue::enqueue_payload_item(
+            &conn,
+            "z_reports",
+            &z_report_id,
+            "INSERT",
+            &sync_payload,
+            Some(1),
+            Some("z_report"),
+            Some("manual"),
+            Some(1),
         )
         .map_err(|e| format!("enqueue z_report sync: {e}"))?;
 
@@ -3191,10 +3403,12 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
     let order_agg_sql = format!(
+        // W4b-iii: cents-with-real-fallback shim (removed in 4e).
         "SELECT COUNT(*) as cnt,
-                COALESCE(SUM(o.total_amount + COALESCE(o.discount_amount, 0)), 0) as gross,
-                COALESCE(SUM(o.discount_amount), 0) as discounts,
-                COALESCE(SUM(o.tip_amount), 0) as tips
+                COALESCE(SUM(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER))
+                             + COALESCE(o.discount_amount_cents, CAST(ROUND(o.discount_amount * 100) AS INTEGER), 0)), 0) as gross_cents,
+                COALESCE(SUM(COALESCE(o.discount_amount_cents, CAST(ROUND(o.discount_amount * 100) AS INTEGER))), 0) as discounts_cents,
+                COALESCE(SUM(COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER))), 0) as tips_cents
          FROM orders o
          WHERE {financial_predicate}
            AND (?2 IS NULL OR {financial_expr} <= ?2)
@@ -3209,9 +3423,9 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, f64>(3)?,
+                    Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                    Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                    Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
                 ))
             },
         )
@@ -3222,8 +3436,10 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
     // --- Payments: breakdown by method across all shifts ---
     let payment_scope_expr = business_day::order_financial_timestamp_expr("o");
     let payment_scope_predicate = lower_bound_mode.sql_predicate(&payment_scope_expr, "?1");
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let payment_scope_sql = format!(
-        "SELECT op.method, COUNT(*) as cnt, COALESCE(SUM(op.amount), 0) as total
+        "SELECT op.method, COUNT(*) as cnt,
+                COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE {payment_scope_predicate}
@@ -3250,7 +3466,7 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, f64>(2)?,
+                Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query payments: {e}"))?;
@@ -3277,7 +3493,9 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
     let adjustment_scope_expr = business_day::order_financial_timestamp_expr("o");
     let adjustment_scope_predicate = lower_bound_mode.sql_predicate(&adjustment_scope_expr, "?1");
     let adjustment_scope_sql = format!(
-        "SELECT pa.adjustment_type, COALESCE(SUM(pa.amount), 0)
+        // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+        "SELECT pa.adjustment_type,
+                COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
          FROM payment_adjustments pa
          JOIN orders o ON o.id = pa.order_id
          WHERE {adjustment_scope_predicate}
@@ -3296,7 +3514,10 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
 
     let adj_rows = adj_stmt
         .query_map(params![period_start, cutoff_param, branch_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+            ))
         })
         .map_err(|e| format!("query adjustments: {e}"))?;
 
@@ -3310,28 +3531,35 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
     }
 
     // --- Expenses (excluding staff_payment type) across all shifts ---
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let expenses_total: f64 = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses
-             WHERE {}
-               AND (?2 IS NULL OR created_at <= ?2)
-               AND (expense_type IS NULL OR expense_type != 'staff_payment')",
+                "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
+                 FROM shift_expenses
+                 WHERE {}
+                   AND (?2 IS NULL OR created_at <= ?2)
+                   AND (?3 = '' OR branch_id = ?3 OR branch_id IS NULL)
+                   AND (expense_type IS NULL OR expense_type != 'staff_payment')",
                 lower_bound_mode.sql_predicate("created_at", "?1")
             ),
-            params![period_start, cutoff_param],
-            |row| row.get(0),
+            params![period_start, cutoff_param, branch_id],
+            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .unwrap_or(0.0);
 
     // Expense items for report_json
     let mut exp_stmt = conn
         .prepare(&format!(
-            "SELECT se.id, se.expense_type, se.amount, se.description, se.created_at, ss.staff_name
+            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+            "SELECT se.id, se.expense_type,
+                    COALESCE(se.amount_cents, CAST(ROUND(se.amount * 100) AS INTEGER), 0),
+                    se.description, se.created_at, ss.staff_name
              FROM shift_expenses se
              LEFT JOIN staff_shifts ss ON ss.id = se.staff_shift_id
              WHERE {}
                AND (?2 IS NULL OR se.created_at <= ?2)
+               AND (?3 = '' OR se.branch_id = ?3 OR se.branch_id IS NULL)
                AND (se.expense_type IS NULL OR se.expense_type != 'staff_payment')
              ORDER BY se.created_at ASC",
             lower_bound_mode.sql_predicate("se.created_at", "?1")
@@ -3339,11 +3567,11 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         .map_err(|e| format!("prepare expense query: {e}"))?;
 
     let expense_items: Vec<Value> = exp_stmt
-        .query_map(params![period_start, cutoff_param], |row| {
+        .query_map(params![period_start, cutoff_param, branch_id], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "expenseType": row.get::<_, Option<String>>(1)?,
-                "amount": row.get::<_, f64>(2)?,
+                "amount": Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
                 "description": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 "createdAt": row.get::<_, String>(4)?,
                 "staffName": row.get::<_, Option<String>>(5)?,
@@ -3354,43 +3582,46 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         .collect();
 
     // --- Cash drawer sessions (aggregate across all shifts) ---
+    // W4b-iii: cents-with-real-fallback shim on 12 monetary SUMs.
     let mut drawer_agg = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(opening_amount), 0),
-                    COALESCE(SUM(closing_amount), 0),
-                    COALESCE(SUM(expected_amount), 0),
-                    COALESCE(SUM(variance_amount), 0),
-                    COALESCE(SUM(total_cash_sales), 0),
-                    COALESCE(SUM(total_card_sales), 0),
-                    COALESCE(SUM(total_refunds), 0),
-                    COALESCE(SUM(total_expenses), 0),
-                    COALESCE(SUM(cash_drops), 0),
-                    COALESCE(SUM(driver_cash_given), 0),
-                    COALESCE(SUM(driver_cash_returned), 0),
+                "SELECT
+                    COALESCE(SUM(COALESCE(opening_amount_cents, CAST(ROUND(opening_amount * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(closing_amount_cents, CAST(ROUND(closing_amount * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(expected_amount_cents, CAST(ROUND(expected_amount * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(variance_amount_cents, CAST(ROUND(variance_amount * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(total_card_sales_cents, CAST(ROUND(total_card_sales * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(total_refunds_cents, CAST(ROUND(total_refunds * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(total_expenses_cents, CAST(ROUND(total_expenses * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(cash_drops_cents, CAST(ROUND(cash_drops * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER))), 0),
+                    COALESCE(SUM(COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER))), 0),
                     SUM(CASE WHEN (reconciled = 0 OR reconciled IS NULL) THEN 1 ELSE 0 END),
-                    COALESCE(SUM(total_staff_payments), 0)
+                    COALESCE(SUM(COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER))), 0)
              FROM cash_drawer_sessions
              WHERE {}
-               AND (?2 IS NULL OR opened_at <= ?2)",
+               AND (?2 IS NULL OR opened_at <= ?2)
+               AND (?3 = '' OR branch_id = ?3 OR branch_id IS NULL)",
                 lower_bound_mode.sql_predicate("opened_at", "?1")
             ),
-            params![period_start, cutoff_param],
+            params![period_start, cutoff_param, branch_id],
             |row| {
                 Ok(serde_json::json!({
-                    "openingTotal": row.get::<_, f64>(0)?,
-                    "closing": row.get::<_, f64>(1)?,
-                    "expected": row.get::<_, f64>(2)?,
-                    "totalVariance": row.get::<_, f64>(3)?,
-                    "cashSales": row.get::<_, f64>(4)?,
-                    "cardSales": row.get::<_, f64>(5)?,
-                    "totalRefunds": row.get::<_, f64>(6)?,
-                    "totalExpenses": row.get::<_, f64>(7)?,
-                    "totalCashDrops": row.get::<_, f64>(8)?,
-                    "driverCashGiven": row.get::<_, f64>(9)?,
-                    "driverCashReturned": row.get::<_, f64>(10)?,
+                    "openingTotal": Cents::new(row.get::<_, i64>(0)?).to_f64_dp2(),
+                    "closing": Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                    "expected": Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                    "totalVariance": Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                    "cashSales": Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
+                    "cardSales": Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
+                    "totalRefunds": Cents::new(row.get::<_, i64>(6)?).to_f64_dp2(),
+                    "totalExpenses": Cents::new(row.get::<_, i64>(7)?).to_f64_dp2(),
+                    "totalCashDrops": Cents::new(row.get::<_, i64>(8)?).to_f64_dp2(),
+                    "driverCashGiven": Cents::new(row.get::<_, i64>(9)?).to_f64_dp2(),
+                    "driverCashReturned": Cents::new(row.get::<_, i64>(10)?).to_f64_dp2(),
                     "unreconciledCount": row.get::<_, i64>(11)?,
-                    "staffPaymentsTotal": row.get::<_, f64>(12)?,
+                    "staffPaymentsTotal": Cents::new(row.get::<_, i64>(12)?).to_f64_dp2(),
                 }))
             },
         )
@@ -3424,8 +3655,10 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
     // --- Order type breakdown across all shifts in the period ---
     let order_type_scope_expr = business_day::order_financial_timestamp_expr("o");
     let order_type_scope_predicate = lower_bound_mode.sql_predicate(&order_type_scope_expr, "?1");
+    // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let order_type_scope_sql = format!(
-        "SELECT COALESCE(o.order_type, 'dine-in'), COUNT(*), COALESCE(SUM(o.total_amount), 0)
+        "SELECT COALESCE(o.order_type, 'dine-in'), COUNT(*),
+                COALESCE(SUM(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER))), 0)
          FROM orders o
          WHERE {order_type_scope_predicate}
            AND (?2 IS NULL OR {order_type_scope_expr} <= ?2)
@@ -3450,7 +3683,7 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, f64>(2)?,
+                Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query order_type: {e}"))?;
@@ -3587,7 +3820,11 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         )?,
     );
 
-    // Build Electron-compatible report_json
+    // Build Electron-compatible report_json.
+    // W4d-iv additive emission: every monetary float key carries a `_cents`
+    // sibling. Mirrors the single-shift body at line 2844.
+    let total_sales = gross_sales - discounts_total;
+    let day_total = cash_sales + card_sales + other_sales;
     let mut report_json = serde_json::json!({
         "date": date,
         "shifts": {
@@ -3598,25 +3835,36 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         },
         "sales": {
             "totalOrders": total_orders,
-            "totalSales": gross_sales - discounts_total,
+            "totalSales": total_sales,
+            "totalSales_cents": Cents::round_half_even(total_sales).as_i64(),
             "discountsTotal": discounts_total,
+            "discountsTotal_cents": Cents::round_half_even(discounts_total).as_i64(),
             "cashSales": cash_sales,
+            "cashSales_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardSales": card_sales,
+            "cardSales_cents": Cents::round_half_even(card_sales).as_i64(),
             "dineInOrders": dine_in_orders,
             "dineInSales": dine_in_sales,
+            "dineInSales_cents": Cents::round_half_even(dine_in_sales).as_i64(),
             "takeawayOrders": takeaway_orders,
             "takeawaySales": takeaway_sales,
+            "takeawaySales_cents": Cents::round_half_even(takeaway_sales).as_i64(),
             "deliveryOrders": delivery_orders,
             "deliverySales": delivery_sales,
+            "deliverySales_cents": Cents::round_half_even(delivery_sales).as_i64(),
             "byType": sales_by_type,
         },
         "cashDrawer": drawer_agg.as_ref().unwrap_or(&serde_json::json!({
             "totalVariance": total_variance,
+            "totalVariance_cents": Cents::round_half_even(total_variance).as_i64(),
             "openingTotal": total_opening,
+            "openingTotal_cents": Cents::round_half_even(total_opening).as_i64(),
         })),
         "expenses": {
             "total": expenses_total,
+            "total_cents": Cents::round_half_even(expenses_total).as_i64(),
             "staffPaymentsTotal": staff_payments_total,
+            "staffPaymentsTotal_cents": Cents::round_half_even(staff_payments_total).as_i64(),
             "pendingCount": pending_expenses_count,
             "items": expense_items,
         },
@@ -3624,14 +3872,19 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         "drawers": drawer_rows,
         "staffPayments": {
             "total": staff_payments_total,
+            "total_cents": Cents::round_half_even(staff_payments_total).as_i64(),
         },
         "tips": {
             "total": tips_total,
+            "total_cents": Cents::round_half_even(tips_total).as_i64(),
         },
         "daySummary": {
             "cashTotal": cash_sales,
+            "cashTotal_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardTotal": card_sales,
-            "total": cash_sales + card_sales + other_sales,
+            "cardTotal_cents": Cents::round_half_even(card_sales).as_i64(),
+            "total": day_total,
+            "total_cents": Cents::round_half_even(day_total).as_i64(),
             "totalOrders": total_orders,
         },
         "staffReports": staff_reports,
@@ -3781,22 +4034,59 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         });
     }
 
+    // W4c dual-write: every monetary REAL column gets its `_cents` sibling
+    // (multi-shift z-report variant — uses `built.*` aggregates).
+    let built_gross_sales_cents = Cents::round_half_even(built.gross_sales).as_i64();
+    let built_net_sales_cents = Cents::round_half_even(built.net_sales).as_i64();
+    let built_cash_sales_cents = Cents::round_half_even(built.cash_sales).as_i64();
+    let built_card_sales_cents = Cents::round_half_even(built.card_sales).as_i64();
+    let built_refunds_total_cents = Cents::round_half_even(built.refunds_total).as_i64();
+    let built_voids_total_cents = Cents::round_half_even(built.voids_total).as_i64();
+    let built_discounts_total_cents = Cents::round_half_even(built.discounts_total).as_i64();
+    let built_tips_total_cents = Cents::round_half_even(built.tips_total).as_i64();
+    let built_expenses_total_cents = Cents::round_half_even(built.expenses_total).as_i64();
+    let built_total_variance_cents = Cents::round_half_even(built.total_variance).as_i64();
+    let built_total_opening_cents = Cents::round_half_even(built.total_opening).as_i64();
+    let built_total_closing_cents = Cents::round_half_even(built.total_closing).as_i64();
+    let built_total_expected_cents = Cents::round_half_even(built.total_expected).as_i64();
     let result = (|| -> Result<(), String> {
         conn.execute(
             "INSERT INTO z_reports (
                 id, shift_id, branch_id, terminal_id, report_date, generated_at,
-                gross_sales, net_sales, total_orders, cash_sales, card_sales,
-                refunds_total, voids_total, discounts_total, tips_total,
-                expenses_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                gross_sales, gross_sales_cents,
+                net_sales, net_sales_cents,
+                total_orders,
+                cash_sales, cash_sales_cents,
+                card_sales, card_sales_cents,
+                refunds_total, refunds_total_cents,
+                voids_total, voids_total_cents,
+                discounts_total, discounts_total_cents,
+                tips_total, tips_total_cents,
+                expenses_total, expenses_total_cents,
+                cash_variance, cash_variance_cents,
+                opening_cash, opening_cash_cents,
+                closing_cash, closing_cash_cents,
+                expected_cash, expected_cash_cents,
                 payments_breakdown_json, report_json,
                 sync_state, created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
-                ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19, ?20,
-                ?21, ?22,
-                'pending', ?23, ?23
+                ?7, ?8,
+                ?9, ?10,
+                ?11,
+                ?12, ?13,
+                ?14, ?15,
+                ?16, ?17,
+                ?18, ?19,
+                ?20, ?21,
+                ?22, ?23,
+                ?24, ?25,
+                ?26, ?27,
+                ?28, ?29,
+                ?30, ?31,
+                ?32, ?33,
+                ?34, ?35,
+                'pending', ?36, ?36
              )",
             params![
                 z_report_id,
@@ -3806,19 +4096,32 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                 built.report_date,
                 built.generated_at,
                 built.gross_sales,
+                built_gross_sales_cents,
                 built.net_sales,
+                built_net_sales_cents,
                 built.total_orders,
                 built.cash_sales,
+                built_cash_sales_cents,
                 built.card_sales,
+                built_card_sales_cents,
                 built.refunds_total,
+                built_refunds_total_cents,
                 built.voids_total,
+                built_voids_total_cents,
                 built.discounts_total,
+                built_discounts_total_cents,
                 built.tips_total,
+                built_tips_total_cents,
                 built.expenses_total,
+                built_expenses_total_cents,
                 built.total_variance,
+                built_total_variance_cents,
                 built.total_opening,
+                built_total_opening_cents,
                 built.total_closing,
+                built_total_closing_cents,
                 built.total_expected,
+                built_total_expected_cents,
                 payments_json_str,
                 report_json_str,
                 built.generated_at,
@@ -4056,7 +4359,12 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
 /// Deletes in FK-safe order within a transaction.
 /// Returns a JSON object with per-table deletion counts.
 fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Value, String> {
-    fn safe_delete(conn: &Connection, table: &str, sql: &str, cutoff_at: Option<&str>) -> i64 {
+    fn safe_delete(
+        conn: &Connection,
+        table: &str,
+        sql: &str,
+        cutoff_at: Option<&str>,
+    ) -> Result<i64, String> {
         let execution = if sql.contains("?1") {
             conn.execute(sql, params![cutoff_at.unwrap_or_default()])
         } else {
@@ -4064,11 +4372,14 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         };
 
         match execution {
-            Ok(count) => count as i64,
+            Ok(count) => Ok(count as i64),
             Err(e) => {
-                // Some tables may not exist yet in older local schemas.
-                warn!(table = %table, error = %e, "Cleanup: table delete failed (may not exist)");
-                0
+                if e.to_string().contains("no such table:") {
+                    warn!(table = %table, error = %e, "Cleanup: optional table is absent");
+                    return Ok(0);
+                }
+                warn!(table = %table, error = %e, "Cleanup: table delete failed");
+                Err(format!("cleanup delete {table}: {e}"))
             }
         }
     }
@@ -4115,9 +4426,9 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "payment_adjustments",
         "DELETE FROM payment_adjustments
-         WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
+        WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
         None,
-    );
+    )?;
     cleared.insert("payment_adjustments".into(), serde_json::json!(c));
 
     // 2. order_payments linked to the same closed orders.
@@ -4125,9 +4436,9 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "order_payments",
         "DELETE FROM order_payments
-         WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
+        WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
         None,
-    );
+    )?;
     cleared.insert("order_payments".into(), serde_json::json!(c));
 
     // 3. driver_earnings linked to the closed orders.
@@ -4135,9 +4446,9 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "driver_earnings",
         "DELETE FROM driver_earnings
-         WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
+        WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
         None,
-    );
+    )?;
     cleared.insert("driver_earnings".into(), serde_json::json!(c));
 
     // 4. sync_queue -- only clear synced items that were already materialized before the cutoff.
@@ -4148,7 +4459,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
          WHERE status = 'synced'
            AND datetime(created_at) <= datetime(?1)",
         Some(cutoff_at),
-    );
+    )?;
     cleared.insert("sync_queue".into(), serde_json::json!(c));
 
     // 5. shift_expenses by their own operational timestamp.
@@ -4159,7 +4470,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
          WHERE datetime(created_at) <= datetime(?1)
            AND id NOT IN (SELECT id FROM temp_rollover_protected_shift_expense_ids)",
         Some(cutoff_at),
-    );
+    )?;
     cleared.insert("shift_expenses".into(), serde_json::json!(c));
 
     // 6. staff_payments by their own operational timestamp.
@@ -4170,7 +4481,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
          WHERE datetime(created_at) <= datetime(?1)
            AND id NOT IN (SELECT id FROM temp_rollover_protected_staff_payment_ids)",
         Some(cutoff_at),
-    );
+    )?;
     cleared.insert("staff_payments".into(), serde_json::json!(c));
 
     // 7. print_jobs (standalone operational artifacts).
@@ -4180,7 +4491,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         "DELETE FROM print_jobs
          WHERE datetime(created_at) <= datetime(?1)",
         Some(cutoff_at),
-    );
+    )?;
     cleared.insert("print_jobs".into(), serde_json::json!(c));
 
     // 8. cash_drawer_sessions by close/open timestamp.
@@ -4191,7 +4502,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
          WHERE datetime(COALESCE(closed_at, opened_at, created_at)) <= datetime(?1)
            AND staff_shift_id NOT IN (SELECT id FROM temp_rollover_protected_shift_ids)",
         Some(cutoff_at),
-    );
+    )?;
     cleared.insert("cash_drawer_sessions".into(), serde_json::json!(c));
 
     // 9. staff_shifts by close/check-in timestamp.
@@ -4202,7 +4513,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
          WHERE datetime(COALESCE(check_out_time, check_in_time, created_at)) <= datetime(?1)
            AND id NOT IN (SELECT id FROM temp_rollover_protected_shift_ids)",
         Some(cutoff_at),
-    );
+    )?;
     cleared.insert("staff_shifts".into(), serde_json::json!(c));
 
     // 10. orders in the closed business window. Payments/adjustments were already removed above.
@@ -4212,7 +4523,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         "DELETE FROM orders
          WHERE id IN (SELECT id FROM temp_z_report_order_ids)",
         None,
-    );
+    )?;
     cleared.insert("orders".into(), serde_json::json!(c));
 
     conn.execute_batch(
@@ -4627,16 +4938,20 @@ mod tests {
         let shift_id = "shift-zr-1";
         let now = "2026-02-16T18:00:00Z";
 
-        // Insert shift
+        // W4e Step 0: dual-populate every monetary column.
+        // Insert shift (200/235/235/0 → 20000/23500/23500/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 ?1, 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
-                200.0, 235.0, 235.0, 0.0,
+                200.0, 20000, 235.0, 23500, 235.0, 23500, 0.0, 0,
                 '2026-02-16T09:00:00Z', ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
@@ -4644,69 +4959,90 @@ mod tests {
         )
         .expect("insert shift");
 
-        // Insert cash drawer session
+        // Insert cash drawer session (every monetary column dual-populated).
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, closing_amount, expected_amount, variance_amount,
-                total_cash_sales, total_card_sales, total_refunds, total_expenses,
-                cash_drops, driver_cash_given, driver_cash_returned,
-                total_staff_payments, reconciled,
+                opening_amount, opening_amount_cents,
+                closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents,
+                variance_amount, variance_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                total_card_sales, total_card_sales_cents,
+                total_refunds, total_refunds_cents,
+                total_expenses, total_expenses_cents,
+                cash_drops, cash_drops_cents,
+                driver_cash_given, driver_cash_given_cents,
+                driver_cash_returned, driver_cash_returned_cents,
+                total_staff_payments, total_staff_payments_cents,
+                reconciled,
                 opened_at, created_at, updated_at
              ) VALUES (
                 'cds-1', ?1, 'staff-1', 'branch-1', 'term-1',
-                200.0, 235.0, 235.0, 0.0,
-                60.0, 40.0, 10.0, 15.0,
-                0.0, 0.0, 0.0,
+                200.0, 20000, 235.0, 23500, 235.0, 23500, 0.0, 0,
+                60.0, 6000, 40.0, 4000, 10.0, 1000, 15.0, 1500,
+                0.0, 0, 0.0, 0, 0.0, 0,
                 0.0, 0,
+                0,
                 '2026-02-16T09:00:00Z', ?2, ?2
              )",
             params![shift_id, now],
         )
         .expect("insert drawer");
 
-        // Insert 3 orders
+        // Insert 3 orders — dual-populate via Cents::round_half_even.
         for (i, total) in [(1, 25.0), (2, 35.0), (3, 40.0)] {
+            let total_cents = Cents::round_half_even(total).as_i64();
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, status, order_type,
-                    payment_status, staff_shift_id, discount_amount, tip_amount,
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                    payment_status, staff_shift_id,
+                    discount_amount, discount_amount_cents,
+                    tip_amount, tip_amount_cents,
                     sync_status, created_at, updated_at
-                 ) VALUES (?1, ?2, '[]', ?3, 'completed', 'dine-in',
-                    'paid', ?4, 0.0, 0.0, 'pending', ?5, ?5)",
-                params![format!("ord-{i}"), format!("#{i}"), total, shift_id, now,],
+                 ) VALUES (?1, ?2, '[]', ?3, ?4, 'completed', 'dine-in',
+                    'paid', ?5, 0.0, 0, 0.0, 0, 'pending', ?6, ?6)",
+                params![
+                    format!("ord-{i}"),
+                    format!("#{i}"),
+                    total,
+                    total_cents,
+                    shift_id,
+                    now,
+                ],
             )
             .expect("insert order");
         }
 
-        // Insert payments: cash for orders 1+2, card for order 3
+        // Insert payments: cash for orders 1+2, card for order 3.
+        // Dual-populate amount + amount_cents (25/35/40 → 2500/3500/4000).
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at)
-             VALUES ('pay-1', 'ord-1', 'cash', 25.0, 'completed', ?1, 'EUR', ?2, ?2)",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at)
+             VALUES ('pay-1', 'ord-1', 'cash', 25.0, 2500, 'completed', ?1, 'EUR', ?2, ?2)",
             params![shift_id, now],
         ).expect("insert payment 1");
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at)
-             VALUES ('pay-2', 'ord-2', 'cash', 35.0, 'completed', ?1, 'EUR', ?2, ?2)",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at)
+             VALUES ('pay-2', 'ord-2', 'cash', 35.0, 3500, 'completed', ?1, 'EUR', ?2, ?2)",
             params![shift_id, now],
         ).expect("insert payment 2");
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at)
-             VALUES ('pay-3', 'ord-3', 'card', 40.0, 'completed', ?1, 'EUR', ?2, ?2)",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at)
+             VALUES ('pay-3', 'ord-3', 'card', 40.0, 4000, 'completed', ?1, 'EUR', ?2, ?2)",
             params![shift_id, now],
         ).expect("insert payment 3");
 
-        // Insert a refund adjustment on payment 1
+        // Insert a refund adjustment on payment 1 (10.0 → 1000).
         conn.execute(
-            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
-             VALUES ('adj-1', 'pay-1', 'ord-1', 'refund', 10.0, 'wrong item', 'pending', ?1, ?1)",
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-1', 'pay-1', 'ord-1', 'refund', 10.0, 1000, 'wrong item', 'pending', ?1, ?1)",
             params![now],
         ).expect("insert adjustment");
 
-        // Insert an expense
+        // Insert an expense (15.0 → 1500).
         conn.execute(
-            "INSERT INTO shift_expenses (id, staff_shift_id, staff_id, branch_id, expense_type, amount, description, sync_status, created_at, updated_at)
-             VALUES ('exp-1', ?1, 'staff-1', 'branch-1', 'supplies', 15.0, 'Napkins', 'pending', ?2, ?2)",
+            "INSERT INTO shift_expenses (id, staff_shift_id, staff_id, branch_id, expense_type, amount, amount_cents, description, sync_status, created_at, updated_at)
+             VALUES ('exp-1', ?1, 'staff-1', 'branch-1', 'supplies', 15.0, 1500, 'Napkins', 'pending', ?2, ?2)",
             params![shift_id, now],
         ).expect("insert expense");
 
@@ -4769,10 +5105,10 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
 
-        // Verify sync_queue has entry
+        // Wave 5 Session 6: verify parity_sync_queue has entry
         let sq_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'z_report'",
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name = 'z_reports'",
                 [],
                 |row| row.get(0),
             )
@@ -4858,15 +5194,16 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let now = "2026-02-16T18:00:00Z";
 
-        // Insert an active (not closed) shift
+        // Insert an active (not closed) shift — W4e Step 0: dual-populate (200.0 → 20000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, branch_id, terminal_id, role_type,
-                opening_cash_amount, check_in_time, status,
+                opening_cash_amount, opening_cash_amount_cents,
+                check_in_time, status,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'shift-active', 'staff-1', 'branch-1', 'term-1', 'cashier',
-                200.0, ?1, 'active', 'pending', ?1, ?1
+                200.0, 20000, ?1, 'active', 'pending', ?1, ?1
              )",
             params![now],
         )
@@ -4968,15 +5305,19 @@ mod tests {
         let shift_id = "shift-zr-2";
         let now = "2026-02-16T22:00:00Z";
 
+        // W4e Step 0: dual-populate every monetary column (300/350/350/0 → 30000/35000/35000/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 ?1, 'staff-2', 'Jane', 'branch-1', 'term-1', 'cashier',
-                300.0, 350.0, 350.0, 0.0,
+                300.0, 30000, 350.0, 35000, 350.0, 35000, 0.0, 0,
                 '2026-02-16T14:00:00Z', ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
@@ -4984,52 +5325,65 @@ mod tests {
         )
         .expect("insert shift 2");
 
-        // 2 more orders for shift 2
+        // 2 more orders for shift 2 — dual-populate via Cents::round_half_even.
         for (i, total) in [(4, 50.0), (5, 70.0)] {
+            let total_cents = Cents::round_half_even(total).as_i64();
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, status, order_type,
-                    payment_status, staff_shift_id, discount_amount, tip_amount,
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                    payment_status, staff_shift_id,
+                    discount_amount, discount_amount_cents,
+                    tip_amount, tip_amount_cents,
                     sync_status, created_at, updated_at
-                 ) VALUES (?1, ?2, '[]', ?3, 'completed', 'dine-in',
-                    'paid', ?4, 0.0, 0.0, 'pending', ?5, ?5)",
-                params![format!("ord-{i}"), format!("#{i}"), total, shift_id, now],
+                 ) VALUES (?1, ?2, '[]', ?3, ?4, 'completed', 'dine-in',
+                    'paid', ?5, 0.0, 0, 0.0, 0, 'pending', ?6, ?6)",
+                params![
+                    format!("ord-{i}"),
+                    format!("#{i}"),
+                    total,
+                    total_cents,
+                    shift_id,
+                    now
+                ],
             )
             .expect("insert order");
         }
 
-        // Payments for shift 2: cash + card
+        // Payments for shift 2: cash + card. Dual-populate (50/70 → 5000/7000).
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at)
-             VALUES ('pay-4', 'ord-4', 'cash', 50.0, 'completed', ?1, 'EUR', ?2, ?2)",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at)
+             VALUES ('pay-4', 'ord-4', 'cash', 50.0, 5000, 'completed', ?1, 'EUR', ?2, ?2)",
             params![shift_id, now],
         ).expect("insert payment 4");
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at)
-             VALUES ('pay-5', 'ord-5', 'card', 70.0, 'completed', ?1, 'EUR', ?2, ?2)",
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at)
+             VALUES ('pay-5', 'ord-5', 'card', 70.0, 7000, 'completed', ?1, 'EUR', ?2, ?2)",
             params![shift_id, now],
         ).expect("insert payment 5");
     }
 
     fn seed_late_day_order(db: &DbState, created_at: &str) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (80.0 → 8000).
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, order_type,
-                payment_status, staff_shift_id, discount_amount, tip_amount,
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id,
+                discount_amount, discount_amount_cents,
+                tip_amount, tip_amount_cents,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'ord-late', '#late', '[]', 80.0, 'completed', 'dine-in',
-                'paid', 'shift-zr-1', 0.0, 0.0, 'pending', ?1, ?1
+                'ord-late', '#late', '[]', 80.0, 8000, 'completed', 'dine-in',
+                'paid', 'shift-zr-1', 0.0, 0, 0.0, 0, 'pending', ?1, ?1
              )",
             params![created_at],
         )
         .expect("insert late order");
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
              ) VALUES (
-                'pay-late', 'ord-late', 'cash', 80.0, 'completed', 'shift-zr-1', 'EUR', ?1, ?1
+                'pay-late', 'ord-late', 'cash', 80.0, 8000, 'completed', 'shift-zr-1', 'EUR', ?1, ?1
              )",
             params![created_at],
         )
@@ -5038,14 +5392,16 @@ mod tests {
 
     fn seed_next_day_active_shift(db: &DbState, check_in_time: &str) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (100.0 → 10000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, check_in_time, status, calculation_version,
+                opening_cash_amount, opening_cash_amount_cents,
+                check_in_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'shift-next-day-active', 'staff-next', 'Next Day', 'branch-1', 'term-1', 'cashier',
-                100.0, ?1, 'active', 2, 'pending', ?1, ?1
+                100.0, 10000, ?1, 'active', 2, 'pending', ?1, ?1
              )",
             params![check_in_time],
         )
@@ -5054,14 +5410,17 @@ mod tests {
 
     fn seed_other_branch_unpaid_order(db: &DbState, created_at: &str) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (22.0 → 2200).
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, order_type,
-                payment_status, staff_shift_id, branch_id, discount_amount, tip_amount,
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id, branch_id,
+                discount_amount, discount_amount_cents,
+                tip_amount, tip_amount_cents,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'ord-other-branch-unpaid', '#other-branch', '[]', 22.0, 'completed', 'dine-in',
-                'pending', 'shift-other-branch', 'branch-2', 0.0, 0.0, 'pending', ?1, ?1
+                'ord-other-branch-unpaid', '#other-branch', '[]', 22.0, 2200, 'completed', 'dine-in',
+                'pending', 'shift-other-branch', 'branch-2', 0.0, 0, 0.0, 0, 'pending', ?1, ?1
              )",
             params![created_at],
         )
@@ -5070,23 +5429,26 @@ mod tests {
 
     fn seed_paid_order_with_stale_payment_status(db: &DbState, created_at: &str) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (22.0 → 2200).
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, order_type,
-                payment_status, payment_method, staff_shift_id, branch_id, discount_amount, tip_amount,
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id, branch_id,
+                discount_amount, discount_amount_cents,
+                tip_amount, tip_amount_cents,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'ord-stale-paid-status', '#stale-paid', '[]', 22.0, 'completed', 'pickup',
-                'pending', 'cash', 'shift-zr-1', 'branch-1', 0.0, 0.0, 'pending', ?1, ?1
+                'ord-stale-paid-status', '#stale-paid', '[]', 22.0, 2200, 'completed', 'pickup',
+                'pending', 'shift-zr-1', 'branch-1', 0.0, 0, 0.0, 0, 'pending', ?1, ?1
              )",
             params![created_at],
         )
         .expect("insert stale payment-status order");
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
              ) VALUES (
-                'pay-stale-paid-status', 'ord-stale-paid-status', 'cash', 22.0, 'completed',
+                'pay-stale-paid-status', 'ord-stale-paid-status', 'cash', 22.0, 2200, 'completed',
                 'shift-zr-1', 'EUR', ?1, ?1
              )",
             params![created_at],
@@ -5096,14 +5458,17 @@ mod tests {
 
     fn seed_paid_order_missing_local_payment_rows(db: &DbState, created_at: &str) {
         let conn = db.conn.lock().unwrap();
+        // W4e Step 0: dual-populate (18.0 → 1800).
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, order_type,
-                payment_status, payment_method, staff_shift_id, branch_id, discount_amount, tip_amount,
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id, branch_id,
+                discount_amount, discount_amount_cents,
+                tip_amount, tip_amount_cents,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'ord-missing-local-payment', '#missing-local', '[]', 18.0, 'completed', 'pickup',
-                'paid', 'split', 'shift-zr-1', 'branch-1', 0.0, 0.0, 'synced', ?1, ?1
+                'ord-missing-local-payment', '#missing-local', '[]', 18.0, 1800, 'completed', 'pickup',
+                'paid', 'shift-zr-1', 'branch-1', 0.0, 0, 0.0, 0, 'synced', ?1, ?1
              )",
             params![created_at],
         )
@@ -5116,48 +5481,66 @@ mod tests {
         let driver_shift_id = "driver-zr-day";
         let now = "2026-03-06T19:05:40Z";
 
+        // W4e Step 0: dual-populate (100/130/130/0 → 10000/13000/13000/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 ?1, 'cashier-11', 'Alexandra Evaggelou', 'branch-1', 'term-1', 'cashier',
-                100.0, 130.0, 130.0, 0.0,
+                100.0, 10000, 130.0, 13000, 130.0, 13000, 0.0, 0,
                 '2026-03-06T12:10:16Z', ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
             params![cashier_shift_id, now],
         )
         .unwrap();
+        // W4e Step 0: dual-populate (every monetary column).
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, closing_amount, expected_amount, variance_amount,
-                total_cash_sales, total_card_sales, total_refunds, total_expenses,
-                cash_drops, driver_cash_given, driver_cash_returned, total_staff_payments,
+                opening_amount, opening_amount_cents,
+                closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents,
+                variance_amount, variance_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                total_card_sales, total_card_sales_cents,
+                total_refunds, total_refunds_cents,
+                total_expenses, total_expenses_cents,
+                cash_drops, cash_drops_cents,
+                driver_cash_given, driver_cash_given_cents,
+                driver_cash_returned, driver_cash_returned_cents,
+                total_staff_payments, total_staff_payments_cents,
                 reconciled, opened_at, created_at, updated_at
              ) VALUES (
                 'drawer-zr-day', ?1, 'cashier-11', 'branch-1', 'term-1',
-                100.0, 182.5, 182.5, 0.0,
-                12.0, 18.0, 0.0, 0.0,
-                0.0, 20.0, 52.5, 0.0,
+                100.0, 10000, 182.5, 18250, 182.5, 18250, 0.0, 0,
+                12.0, 1200, 18.0, 1800, 0.0, 0, 0.0, 0,
+                0.0, 0, 20.0, 2000, 52.5, 5250, 0.0, 0,
                 1, '2026-03-06T12:10:16Z', ?2, ?2
              )",
             params![cashier_shift_id, now],
         )
         .unwrap();
 
+        // W4e Step 0: dual-populate (20/52.5/52.5/0 → 2000/5250/5250/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 ?1, 'driver-11', 'Endrit Bashi', 'branch-1', 'term-1', 'driver',
-                20.0, 52.5, 52.5, 0.0,
+                20.0, 2000, 52.5, 5250, 52.5, 5250, 0.0, 0,
                 '2026-03-06T14:07:42Z', ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
@@ -5169,65 +5552,78 @@ mod tests {
             ("cashier-order-1", 12.0, "cash"),
             ("cashier-order-2", 18.0, "card"),
         ] {
+            // W4e Step 0: dual-populate via Cents::round_half_even.
+            let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, status, order_type,
-                    payment_status, payment_method, staff_shift_id, staff_id,
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                    payment_status, staff_shift_id, staff_id,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    ?1, ?1, '[]', ?2, 'completed', 'dine-in',
-                    'paid', ?3, ?4, 'cashier-11',
+                    ?1, ?1, '[]', ?2, ?3, 'completed', 'dine-in',
+                    'paid', ?4, 'cashier-11',
                     'pending', '2026-03-06T15:00:00Z', '2026-03-06T15:00:00Z'
                  )",
-                params![order_id, total_amount, method, cashier_shift_id],
+                params![order_id, total_amount, total_amount_cents, cashier_shift_id],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO order_payments (
-                    id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, 'completed', ?5, 'EUR', '2026-03-06T15:00:00Z', '2026-03-06T15:00:00Z')",
-                params![format!("pay-{order_id}"), order_id, method, total_amount, cashier_shift_id],
+                    id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, 'EUR', '2026-03-06T15:00:00Z', '2026-03-06T15:00:00Z')",
+                params![format!("pay-{order_id}"), order_id, method, total_amount, total_amount_cents, cashier_shift_id],
             )
             .unwrap();
         }
 
         for (suffix, total_amount, cash_collected) in [("1", 13.0, 13.0), ("2", 19.5, 19.5)] {
             let order_id = format!("delivery-order-{suffix}");
+            // W4e Step 0: dual-populate via Cents::round_half_even.
+            let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
+            let cash_collected_cents = Cents::round_half_even(cash_collected).as_i64();
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, status, order_type,
-                    payment_status, payment_method, staff_shift_id, staff_id, driver_id,
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                    payment_status, staff_shift_id, staff_id, driver_id,
                     sync_status, created_at, updated_at
                  ) VALUES (
-                    ?1, ?1, '[]', ?2, 'completed', 'delivery',
-                    'paid', 'cash', ?3, 'cashier-11', 'driver-11',
+                    ?1, ?1, '[]', ?2, ?3, 'completed', 'delivery',
+                    'paid', ?4, 'cashier-11', 'driver-11',
                     'pending', '2026-03-06T16:00:00Z', '2026-03-06T16:00:00Z'
                  )",
-                params![order_id, total_amount, cashier_shift_id],
+                params![order_id, total_amount, total_amount_cents, cashier_shift_id],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO order_payments (
-                    id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
-                 ) VALUES (?1, ?2, 'cash', ?3, 'completed', ?4, 'EUR', '2026-03-06T16:00:00Z', '2026-03-06T16:00:00Z')",
-                params![format!("pay-{order_id}"), order_id, total_amount, cashier_shift_id],
+                    id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
+                 ) VALUES (?1, ?2, 'cash', ?3, ?4, 'completed', ?5, 'EUR', '2026-03-06T16:00:00Z', '2026-03-06T16:00:00Z')",
+                params![format!("pay-{order_id}"), order_id, total_amount, total_amount_cents, cashier_shift_id],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO driver_earnings (
                     id, driver_id, staff_shift_id, order_id, branch_id,
-                    delivery_fee, tip_amount, total_earning, payment_method,
-                    cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+                    delivery_fee, delivery_fee_cents,
+                    tip_amount, tip_amount_cents,
+                    total_earning, total_earning_cents,
+                    payment_method,
+                    cash_collected, cash_collected_cents,
+                    card_amount, card_amount_cents,
+                    cash_to_return, cash_to_return_cents,
+                    settled, created_at, updated_at
                  ) VALUES (
                     ?1, 'driver-11', ?2, ?3, 'branch-1',
-                    2.5, 0.0, 2.5, 'cash',
-                    ?4, 0.0, ?4, 0, '2026-03-06T16:00:00Z', '2026-03-06T16:00:00Z'
+                    2.5, 250, 0.0, 0, 2.5, 250, 'cash',
+                    ?4, ?5, 0.0, 0, ?4, ?5,
+                    0, '2026-03-06T16:00:00Z', '2026-03-06T16:00:00Z'
                  )",
                 params![
                     format!("de-{suffix}"),
                     driver_shift_id,
                     order_id,
-                    cash_collected
+                    cash_collected,
+                    cash_collected_cents
                 ],
             )
             .unwrap();
@@ -5392,9 +5788,10 @@ mod tests {
         let z_reports_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM z_reports", [], |row| row.get(0))
             .unwrap();
+        // Wave 5 Session 6: z-report mutations now enqueue on parity.
         let queue_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'z_report'",
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name = 'z_reports'",
                 [],
                 |row| row.get(0),
             )
@@ -5559,48 +5956,66 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (100/170/170/0 → 10000/17000/17000/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'cashier-zr', 'cashier-1', 'Cashier One', 'branch-1', 'term-1', 'cashier',
-                100.0, 170.0, 170.0, 0.0,
+                100.0, 10000, 170.0, 17000, 170.0, 17000, 0.0, 0,
                 '2026-03-05T09:00:00Z', '2026-03-05T17:00:00Z', 'closed', 2,
                 'pending', '2026-03-05T17:00:00Z', '2026-03-05T17:00:00Z'
              )",
             [],
         )
         .unwrap();
+        // W4e Step 0: dual-populate every monetary column.
         conn.execute(
             "INSERT INTO cash_drawer_sessions (
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                opening_amount, closing_amount, expected_amount, variance_amount,
-                total_cash_sales, total_card_sales, total_refunds, total_expenses,
-                cash_drops, driver_cash_given, driver_cash_returned, total_staff_payments,
+                opening_amount, opening_amount_cents,
+                closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents,
+                variance_amount, variance_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                total_card_sales, total_card_sales_cents,
+                total_refunds, total_refunds_cents,
+                total_expenses, total_expenses_cents,
+                cash_drops, cash_drops_cents,
+                driver_cash_given, driver_cash_given_cents,
+                driver_cash_returned, driver_cash_returned_cents,
+                total_staff_payments, total_staff_payments_cents,
                 reconciled, opened_at, created_at, updated_at
              ) VALUES (
                 'drawer-zr', 'cashier-zr', 'cashier-1', 'branch-1', 'term-1',
-                100.0, 170.0, 170.0, 0.0,
-                0.0, 0.0, 0.0, 0.0,
-                0.0, 20.0, 70.0, 0.0,
+                100.0, 10000, 170.0, 17000, 170.0, 17000, 0.0, 0,
+                0.0, 0, 0.0, 0, 0.0, 0, 0.0, 0,
+                0.0, 0, 20.0, 2000, 70.0, 7000, 0.0, 0,
                 1, '2026-03-05T09:00:00Z', '2026-03-05T17:00:00Z', '2026-03-05T17:00:00Z'
              )",
             [],
         )
         .unwrap();
 
+        // W4e Step 0: dual-populate (20/70/70/0 → 2000/7000/7000/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'driver-zr', 'driver-1', 'Driver One', 'branch-1', 'term-1', 'driver',
-                20.0, 70.0, 70.0, 0.0,
+                20.0, 2000, 70.0, 7000, 70.0, 7000, 0.0, 0,
                 '2026-03-05T10:00:00Z', '2026-03-05T16:00:00Z', 'closed', 2,
                 'pending', '2026-03-05T16:00:00Z', '2026-03-05T16:00:00Z'
              )",
@@ -5612,21 +6027,23 @@ mod tests {
             ("delivery-order", "delivery", 50.0),
             ("pickup-order", "pickup", 40.0),
         ] {
+            // W4e Step 0: dual-populate via Cents::round_half_even.
+            let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
             conn.execute(
                 "INSERT INTO orders (
-                    id, order_number, items, total_amount, status, order_type,
-                    payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
-                 ) VALUES (?1, ?1, '[]', ?2, 'completed', ?3,
-                    'paid', 'cash', 'driver-zr', 'pending', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z')",
-                params![order_id, total_amount, order_type],
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                    payment_status, staff_shift_id, sync_status, created_at, updated_at
+                 ) VALUES (?1, ?1, '[]', ?2, ?3, 'completed', ?4,
+                    'paid', 'driver-zr', 'pending', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z')",
+                params![order_id, total_amount, total_amount_cents, order_type],
             )
             .unwrap();
 
             conn.execute(
                 "INSERT INTO order_payments (
-                    id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
-                 ) VALUES (?1, ?2, 'cash', ?3, 'completed', 'driver-zr', 'EUR', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z')",
-                params![format!("pay-{order_id}"), order_id, total_amount],
+                    id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
+                 ) VALUES (?1, ?2, 'cash', ?3, ?4, 'completed', 'driver-zr', 'EUR', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z')",
+                params![format!("pay-{order_id}"), order_id, total_amount, total_amount_cents],
             )
             .unwrap();
 
@@ -5634,14 +6051,26 @@ mod tests {
                 conn.execute(
                     "INSERT INTO driver_earnings (
                         id, driver_id, staff_shift_id, order_id, branch_id,
-                        delivery_fee, tip_amount, total_earning, payment_method,
-                        cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+                        delivery_fee, delivery_fee_cents,
+                        tip_amount, tip_amount_cents,
+                        total_earning, total_earning_cents,
+                        payment_method,
+                        cash_collected, cash_collected_cents,
+                        card_amount, card_amount_cents,
+                        cash_to_return, cash_to_return_cents,
+                        settled, created_at, updated_at
                      ) VALUES (
                         ?1, 'driver-1', 'driver-zr', ?2, 'branch-1',
-                        0.0, 0.0, ?3, 'cash',
-                        ?3, 0.0, ?3, 0, '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z'
+                        0.0, 0, 0.0, 0, ?3, ?4, 'cash',
+                        ?3, ?4, 0.0, 0, ?3, ?4,
+                        0, '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z'
                      )",
-                    params![format!("earning-{order_id}"), order_id, total_amount],
+                    params![
+                        format!("earning-{order_id}"),
+                        order_id,
+                        total_amount,
+                        total_amount_cents
+                    ],
                 )
                 .unwrap();
             }
@@ -5667,29 +6096,34 @@ mod tests {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
 
+        // W4e Step 0: dual-populate (20/65/65/0 → 2000/6500/6500/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'driver-zr-single', 'driver-9', 'Driver Nine', 'branch-9', 'term-9', 'driver',
-                20.0, 65.0, 65.0, 0.0,
+                20.0, 2000, 65.0, 6500, 65.0, 6500, 0.0, 0,
                 '2026-03-05T10:00:00Z', '2026-03-05T16:00:00Z', 'closed', 2,
                 'pending', '2026-03-05T16:00:00Z', '2026-03-05T16:00:00Z'
              )",
             [],
         )
         .unwrap();
+        // W4e Step 0: dual-populate (45.0 → 4500).
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, status, order_type,
-                payment_status, payment_method, staff_shift_id, staff_id, driver_id,
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id, staff_id, driver_id,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'delivery-zr-single', 'ORD-DRIVER-1', '[]', 45.0, 'completed', 'delivery',
-                'paid', 'cash', 'driver-zr-single', 'driver-9', 'driver-9',
+                'delivery-zr-single', 'ORD-DRIVER-1', '[]', 45.0, 4500, 'completed', 'delivery',
+                'paid', 'driver-zr-single', 'driver-9', 'driver-9',
                 'pending', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z'
              )",
             [],
@@ -5697,9 +6131,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO order_payments (
-                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at
              ) VALUES (
-                'pay-driver-zr-single', 'delivery-zr-single', 'cash', 45.0, 'completed',
+                'pay-driver-zr-single', 'delivery-zr-single', 'cash', 45.0, 4500, 'completed',
                 'driver-zr-single', 'EUR', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z'
              )",
             [],
@@ -6032,9 +6466,11 @@ mod tests {
             .unwrap();
         assert_eq!(z_count, 1, "z_report should be persisted");
 
+        // Wave 5 Session 6: z-report sync queue entries live on parity now.
         let queued_z_reports: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'z_report' AND status = 'pending'",
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'z_reports' AND status = 'pending'",
                 [],
                 |row| row.get(0),
             )
@@ -6071,15 +6507,19 @@ mod tests {
         let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
         let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
 
+        // W4e Step 0: dual-populate (200/235/235/0/10 → 20000/23500/23500/0/1000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'shift-current-business-day', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
-                200.0, 235.0, 235.0, 0.0,
+                200.0, 20000, 235.0, 23500, 235.0, 23500, 0.0, 0,
                 ?1, ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
@@ -6087,8 +6527,8 @@ mod tests {
         )
         .expect("insert closed shift");
         conn.execute(
-            "INSERT INTO orders (id, branch_id, order_number, order_type, status, total_amount, created_at, updated_at)
-             VALUES ('ord-current-business-day', 'branch-1', 1002, 'dine_in', 'completed', 10.0, ?1, ?1)",
+            "INSERT INTO orders (id, branch_id, order_number, order_type, status, total_amount, total_amount_cents, created_at, updated_at)
+             VALUES ('ord-current-business-day', 'branch-1', 1002, 'dine_in', 'completed', 10.0, 1000, ?1, ?1)",
             params![check_out],
         )
         .expect("insert order");
@@ -6117,15 +6557,19 @@ mod tests {
         let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
         let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
 
+        // W4e Step 0: dual-populate (200/235/235/0 → 20000/23500/23500/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'shift-overnight', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
-                200.0, 235.0, 235.0, 0.0,
+                200.0, 20000, 235.0, 23500, 235.0, 23500, 0.0, 0,
                 ?1, ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
@@ -6153,14 +6597,16 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
 
+        // W4e Step 0: dual-populate (200.0 → 20000).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, check_in_time, status, calculation_version,
+                opening_cash_amount, opening_cash_amount_cents,
+                check_in_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'shift-active-overnight', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
-                200.0, ?1, 'active', 2,
+                200.0, 20000, ?1, 'active', 2,
                 'pending', ?1, ?1
              )",
             params![check_in],
@@ -6303,18 +6749,21 @@ mod tests {
             "report_date": "2026-03-31",
             "report_data": report_json,
         });
+        // Wave 5 Session 6: generate_z_report now enqueues on parity, so
+        // the failed-state poison targets parity columns (data, attempts,
+        // error_message, last_attempt) instead of their legacy siblings.
         conn.execute(
-            "UPDATE sync_queue
-             SET payload = ?2,
+            "UPDATE parity_sync_queue
+             SET data = ?2,
                  status = 'failed',
-                 retry_count = 5,
-                 last_error = 'report_date must match the branch business date for periodStart (2026-04-02)',
+                 attempts = 5,
+                 error_message = 'report_date must match the branch business date for periodStart (2026-04-02)',
                  next_retry_at = '2026-04-02T00:00:00Z'
-             WHERE entity_type = 'z_report'
-               AND entity_id = ?1",
+             WHERE table_name = 'z_reports'
+               AND record_id = ?1",
             params![z_report_id.as_str(), poisoned_payload.to_string()],
         )
-        .expect("poison z_report queue row");
+        .expect("poison z_report parity queue row");
         drop(conn);
 
         let repaired =
@@ -6345,6 +6794,8 @@ mod tests {
                 },
             )
             .expect("load repaired z_report");
+        // Wave 5 Session 6: repair target is parity, so the post-repair
+        // state check reads parity columns (attempts, error_message, data).
         let (queue_status, queue_retry_count, queue_last_error, queue_payload): (
             String,
             i64,
@@ -6352,14 +6803,14 @@ mod tests {
             String,
         ) = conn
             .query_row(
-                "SELECT status, retry_count, last_error, payload
-                 FROM sync_queue
-                 WHERE entity_type = 'z_report'
-                   AND entity_id = ?1",
+                "SELECT status, attempts, error_message, data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'z_reports'
+                   AND record_id = ?1",
                 params![z_report_id.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .expect("load repaired queue row");
+            .expect("load repaired parity queue row");
 
         assert_eq!(report_date, expected_report_date);
         assert_eq!(sync_state, "pending");
@@ -6412,15 +6863,19 @@ mod tests {
 
         let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
         let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
+        // W4e Step 0: dual-populate (200/235/235/0 → 20000/23500/23500/0).
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
                 'shift-configured-boundary', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
-                200.0, 235.0, 235.0, 0.0,
+                200.0, 20000, 235.0, 23500, 235.0, 23500, 0.0, 0,
                 ?1, ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
@@ -6701,5 +7156,105 @@ mod tests {
             queued_z_reports, 0,
             "z_report sync queue entry should be discarded with its generated report"
         );
+    }
+
+    /// Wave 10 medium regression: a shift with a EUR 20 cash refund must
+    /// have that refund deducted from `cashToReturn` so the drawer
+    /// reconciliation matches the physical till.
+    ///
+    /// Before the fix, `cashToReturn` was `opening + cashCollected -
+    /// expenses`; after the fix it also subtracts `cashRefunds`. Card
+    /// refunds must NOT be deducted (they do not touch the drawer).
+    #[test]
+    fn test_build_staff_cash_breakdown_row_subtracts_cash_refunds() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let shift_id = "shift-cashref";
+        let now = "2026-02-16T18:00:00Z";
+
+        // W4e Step 0: dual-populate every monetary column.
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, opening_cash_amount_cents,
+                check_in_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                ?1, 'staff-1', 'Maria', 'branch-1', 'term-1', 'cashier',
+                100.0, 10000, '2026-02-16T09:00:00Z', 'closed', 2,
+                'pending', ?2, ?2
+             )",
+            params![shift_id, now],
+        )
+        .expect("insert shift");
+
+        // One paid-in-cash order, EUR 50 → 5000.
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id,
+                discount_amount, discount_amount_cents,
+                tip_amount, tip_amount_cents,
+                sync_status, created_at, updated_at
+             ) VALUES ('ord-cashref', '#1', '[]', 50.0, 5000, 'completed', 'dine-in',
+                'paid', ?1, 0.0, 0, 0.0, 0, 'pending', ?2, ?2)",
+            params![shift_id, now],
+        )
+        .expect("insert order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, staff_shift_id,
+                currency, created_at, updated_at
+             ) VALUES ('pay-cashref', 'ord-cashref', 'cash', 50.0, 5000, 'completed',
+                ?1, 'EUR', ?2, ?2)",
+            params![shift_id, now],
+        )
+        .expect("insert payment");
+
+        // The cash refund the drawer must give back to the customer (20.0 → 2000).
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
+                staff_shift_id, refund_method, sync_state, created_at, updated_at
+             ) VALUES ('adj-cash', 'pay-cashref', 'ord-cashref', 'refund', 20.0, 2000,
+                'too cold', ?1, 'cash', 'pending', ?2, ?2)",
+            params![shift_id, now],
+        )
+        .expect("insert cash refund");
+
+        // A card refund on the same shift (7.5 → 750) — must NOT be deducted
+        // from the cash drawer return amount.
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
+                staff_shift_id, refund_method, sync_state, created_at, updated_at
+             ) VALUES ('adj-card', 'pay-cashref', 'ord-cashref', 'refund', 7.5, 750,
+                'late delivery', ?1, 'card', 'pending', ?2, ?2)",
+            params![shift_id, now],
+        )
+        .expect("insert card refund");
+
+        // EUR 5 staff expense (5.0 → 500) for completeness — should also reduce
+        // cashToReturn.
+        conn.execute(
+            "INSERT INTO shift_expenses (
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, amount_cents,
+                description, sync_status, created_at, updated_at
+             ) VALUES ('exp-cashref', ?1, 'staff-1', 'branch-1', 'supplies',
+                5.0, 500, 'Receipt rolls', 'pending', ?2, ?2)",
+            params![shift_id, now],
+        )
+        .expect("insert expense");
+
+        let row = build_staff_cash_breakdown_row(&conn, shift_id, Some("Maria"), "cashier", 100.0)
+            .expect("build_staff_cash_breakdown_row");
+
+        // 100 opening + 50 cash collected - 5 expenses - 20 cash refund = 125.
+        // The 7.5 card refund must NOT factor into the drawer return.
+        assert_eq!(row["cashToReturn"].as_f64(), Some(125.0));
+        assert_eq!(row["cashRefunds"].as_f64(), Some(20.0));
+        assert_eq!(row["cashCollected"].as_f64(), Some(50.0));
+        assert_eq!(row["expenses"].as_f64(), Some(5.0));
+        assert_eq!(row["startingAmount"].as_f64(), Some(100.0));
     }
 }

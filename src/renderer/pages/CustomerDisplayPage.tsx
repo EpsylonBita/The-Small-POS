@@ -80,9 +80,13 @@ const CustomerDisplayPage: React.FC = () => {
       }, 150);
     };
 
+    // Wave 8 H25: `order-updated` is not in the event-bridge EVENT_MAP
+    // and Rust never emits `order_updated`, so the subscription was dead
+    // weight. The remaining three channels (status / created / sync:complete)
+    // already trigger `scheduleRefresh` for every event the customer
+    // display actually cares about.
     onEvent('order-status-updated', scheduleRefresh);
     onEvent('order-created', scheduleRefresh);
-    onEvent('order-updated', scheduleRefresh);
     onEvent('sync:complete', scheduleRefresh);
 
     return () => {
@@ -91,7 +95,6 @@ const CustomerDisplayPage: React.FC = () => {
       }
       offEvent('order-status-updated', scheduleRefresh);
       offEvent('order-created', scheduleRefresh);
-      offEvent('order-updated', scheduleRefresh);
       offEvent('sync:complete', scheduleRefresh);
     };
   }, [fetchRows]);

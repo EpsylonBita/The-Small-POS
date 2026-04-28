@@ -1211,7 +1211,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             if (!zReport) return;
             setPrinting(true);
             try {
-              const result = await bridge.invoke('report:print-z-report', {
+              const result = await bridge.reports.printZReport({
                 snapshot: zReport,
                 terminalName: typeof zReport.terminalName === 'string' ? zReport.terminalName : undefined,
               });

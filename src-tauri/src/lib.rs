@@ -45,6 +45,7 @@ mod drawer;
 mod ecr;
 mod escpos;
 mod hardware_manager;
+mod idempotency;
 mod loyalty;
 mod menu;
 mod money;
@@ -67,6 +68,9 @@ mod sync;
 mod sync_queue;
 mod terminal_helpers;
 mod zreport;
+
+#[cfg(test)]
+mod tests;
 
 const MODULE_CACHE_FILE: &str = "module-cache.json";
 pub(crate) const MODULE_CACHE_TTL_MS: i64 = 15 * 60 * 1000;
@@ -175,7 +179,10 @@ pub(crate) async fn maybe_lazy_warm_menu_cache(
         return;
     }
 
-    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+    // Wave 11 L: explicit `u64::try_from` spells out what `.max(0) as u64`
+    // implicitly does — rejecting negative timestamps by falling back to 0
+    // instead of silently wrapping via the `as` cast.
+    let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
     let last_attempt = MENU_WARMUP_LAST_ATTEMPT_MS.load(Ordering::Relaxed);
     if now_ms.saturating_sub(last_attempt) < MENU_WARMUP_THROTTLE_MS {
         return;
@@ -247,10 +254,16 @@ async fn admin_fetch(
         hydrate_terminal_credentials_from_local_settings(db_state);
     }
 
-    let mut raw_api_key = Zeroizing::new(
+    let mut raw_api_key: Zeroizing<String> = Zeroizing::new(
         storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
     );
-    let api_key_source = raw_api_key.clone();
+    // Wave 9 H1: explicit `Zeroizing<String>` annotation ensures the clone
+    // is also wrapped. `Zeroizing<T: Clone>` delegates `Clone` to produce
+    // another `Zeroizing<T>` (zeroize crate), but an implicit inference
+    // could drift if a future signature change on `Zeroizing` widens the
+    // Clone implementation. The annotation pins the wrapping so the cloned
+    // copy also zeroes on drop.
+    let api_key_source: Zeroizing<String> = raw_api_key.clone();
     if let Some(decoded_api_key) = api::extract_api_key_from_connection_string(&api_key_source) {
         if *decoded_api_key != **raw_api_key {
             let _ = storage::set_credential("pos_api_key", decoded_api_key.trim());
@@ -701,23 +714,10 @@ pub fn run() {
                 });
             }
 
-            // One-shot repair: re-derive payment_method for orders that
-            // got stuck on 'split' under the pre-fix stickiness path in
-            // refresh_order_payment_snapshot. Safe to run on every boot —
-            // only touches rows whose completed payments genuinely resolve
-            // to a single-method state under the new logic. Repaired rows
-            // get enqueued for sync so Supabase reflects the correction.
-            {
-                let db_state = app.state::<db::DbState>();
-                match commands::orders::repair_sticky_split_payment_methods(&db_state) {
-                    Ok(0) => {}
-                    Ok(repaired) => info!(
-                        repaired = repaired,
-                        "Repaired orders with sticky 'split' payment_method"
-                    ),
-                    Err(e) => warn!("Sticky-split repair skipped: {e}"),
-                }
-            }
+            // W6: `orders.payment_method` was dropped in migration v55;
+            // stickiness is structurally impossible now (no column to
+            // stick). The prior boot-time `repair_sticky_split_payment_methods`
+            // hook was removed along with the column.
 
             info!("Database, auth, sync, and print worker registered");
             Ok(())
@@ -774,6 +774,7 @@ pub fn run() {
             commands::settings::settings_set_language,
             commands::settings::update_settings,
             commands::settings::settings_get_pos_api_key,
+            commands::settings::settings_get_credential_status,
             // Terminal config
             commands::settings::terminal_config_get_settings,
             commands::settings::terminal_config_get_setting,

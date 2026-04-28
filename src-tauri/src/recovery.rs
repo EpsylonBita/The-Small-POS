@@ -26,6 +26,18 @@ const RESTORE_FILE_NAME: &str = "restore.json";
 const DENSE_RETENTION_HOURS: i64 = 24;
 const TOTAL_RETENTION_DAYS: i64 = 7;
 const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 15 * 60;
+// Wave 5 C18: `parity_sync_queue` (added in migration v44) and
+// `conflict_audit_log` were absent from both `POINT_TABLES` and
+// `FINGERPRINT_TABLES`. Snapshots taken while items were queued in those
+// tables under-reported sync backlog, so an operator evaluating a
+// recovery point might wrongly conclude the queue was drained. Adding
+// them here means recovery-point metadata and table-count fingerprints
+// reflect the full durable queue surface.
+//
+// Wave 5 Session 7 PR 2: `sync_queue` dropped in migration v56 and
+// removed from both arrays below. `parity_sync_queue` is now the sole
+// durable queue surface; `conflict_audit_log` stays for conflict-history
+// coverage.
 const POINT_TABLES: &[&str] = &[
     "orders",
     "staff_shifts",
@@ -35,7 +47,8 @@ const POINT_TABLES: &[&str] = &[
     "shift_expenses",
     "driver_earnings",
     "z_reports",
-    "sync_queue",
+    "parity_sync_queue",
+    "conflict_audit_log",
 ];
 const FINGERPRINT_TABLES: &[(&str, &[&str])] = &[
     ("orders", &["updated_at", "created_at"]),
@@ -52,7 +65,8 @@ const FINGERPRINT_TABLES: &[(&str, &[&str])] = &[
     ("shift_expenses", &["updated_at", "created_at"]),
     ("driver_earnings", &["updated_at", "created_at"]),
     ("z_reports", &["updated_at", "generated_at", "created_at"]),
-    ("sync_queue", &["updated_at", "created_at"]),
+    ("parity_sync_queue", &["updated_at", "created_at"]),
+    ("conflict_audit_log", &["created_at"]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -973,14 +987,18 @@ fn collect_sync_backlog(
 ) -> Result<BTreeMap<String, BTreeMap<String, i64>>, String> {
     let mut backlog = BTreeMap::new();
 
-    if table_exists(conn, "sync_queue")? {
+    // Wave 5 Session 7 PR 2: the legacy `sync_queue` branch was removed
+    // when migration v56 dropped the table. `parity_sync_queue` is the
+    // sole queue surface aggregated here; rows key on `table_name`
+    // (parity's analogue of the legacy `entity_type`).
+    if table_exists(conn, "parity_sync_queue")? {
         let mut stmt = conn
             .prepare(
-                "SELECT entity_type, status, COUNT(*)
-                 FROM sync_queue
-                 GROUP BY entity_type, status",
+                "SELECT table_name, status, COUNT(*)
+                 FROM parity_sync_queue
+                 GROUP BY table_name, status",
             )
-            .map_err(|e| format!("prepare sync queue backlog: {e}"))?;
+            .map_err(|e| format!("prepare parity_sync_queue backlog: {e}"))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -989,12 +1007,12 @@ fn collect_sync_backlog(
                     row.get::<_, i64>(2)?,
                 ))
             })
-            .map_err(|e| format!("query sync queue backlog: {e}"))?;
+            .map_err(|e| format!("query parity_sync_queue backlog: {e}"))?;
         for row in rows {
-            let (entity_type, status, count) =
-                row.map_err(|e| format!("read sync queue backlog row: {e}"))?;
+            let (table_name, status, count) =
+                row.map_err(|e| format!("read parity_sync_queue backlog row: {e}"))?;
             backlog
-                .entry(entity_type)
+                .entry(table_name)
                 .or_insert_with(BTreeMap::new)
                 .insert(status, count);
         }
@@ -1487,10 +1505,11 @@ mod tests {
         {
             let conn = db_state.conn.lock().expect("lock db");
             db::set_setting(&conn, "terminal", "terminal_id", "terminal-1").expect("set terminal");
+            // W4e Step 0: dual-populate (12.0 → 1200).
             conn.execute(
                 "INSERT INTO orders (
-                    id, items, total_amount, status, order_type, sync_status, created_at, updated_at
-                 ) VALUES (?1, '[]', 12.0, 'completed', 'pickup', 'pending', datetime('now'), datetime('now'))",
+                    id, items, total_amount, total_amount_cents, status, order_type, sync_status, created_at, updated_at
+                 ) VALUES (?1, '[]', 12.0, 1200, 'completed', 'pickup', 'pending', datetime('now'), datetime('now'))",
                 params!["order-1"],
             )
             .expect("insert order");
@@ -1530,10 +1549,11 @@ mod tests {
                 let conn = db_state.conn.lock().expect("lock db");
                 db::set_setting(&conn, "terminal", "terminal_id", "terminal-restore")
                     .expect("set terminal");
+                // W4e Step 0: dual-populate (8.5 → 850).
                 conn.execute(
                     "INSERT INTO orders (
-                        id, items, total_amount, status, order_type, sync_status, created_at, updated_at
-                     ) VALUES (?1, '[]', 8.5, 'completed', 'pickup', 'pending', datetime('now'), datetime('now'))",
+                        id, items, total_amount, total_amount_cents, status, order_type, sync_status, created_at, updated_at
+                     ) VALUES (?1, '[]', 8.5, 850, 'completed', 'pickup', 'pending', datetime('now'), datetime('now'))",
                     params!["order-before"],
                 )
                 .expect("insert original order");
@@ -1548,10 +1568,11 @@ mod tests {
             let point = create_manual_snapshot(&db_state).expect("create snapshot");
             {
                 let conn = db_state.conn.lock().expect("lock db");
+                // W4e Step 0: dual-populate (9.5 → 950).
                 conn.execute(
                     "INSERT INTO orders (
-                        id, items, total_amount, status, order_type, sync_status, created_at, updated_at
-                     ) VALUES (?1, '[]', 9.5, 'completed', 'pickup', 'pending', datetime('now'), datetime('now'))",
+                        id, items, total_amount, total_amount_cents, status, order_type, sync_status, created_at, updated_at
+                     ) VALUES (?1, '[]', 9.5, 950, 'completed', 'pickup', 'pending', datetime('now'), datetime('now'))",
                     params!["order-after"],
                 )
                 .expect("insert later order");
@@ -1568,5 +1589,71 @@ mod tests {
         assert_eq!(count_print_jobs_by_status(&app_data_dir, "pending"), 0);
 
         let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    // ----------------------------------------------------------------------
+    // Wave 5 C18 — collect_sync_backlog covers parity_sync_queue too
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn collect_sync_backlog_includes_parity_sync_queue_rows() {
+        let app_data_dir = temp_app_dir("recovery_parity_backlog");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        let conn = db_state.conn.lock().expect("lock db");
+
+        // Seed BOTH queues so the test proves the aggregation covers
+        // parity_sync_queue rows even when sync_queue is empty.
+        conn.execute(
+            "INSERT INTO parity_sync_queue
+                (id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status)
+             VALUES (?1, 'order_payments', 'pay-1', 'INSERT', '{}', 'org-1',
+                     datetime('now'), 0, 1000, 0, 'payments',
+                     'manual', 1, 'pending')",
+            params!["queue-w5-c18-1"],
+        )
+        .expect("seed pending parity row");
+        conn.execute(
+            "INSERT INTO parity_sync_queue
+                (id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status)
+             VALUES (?1, 'order_payments', 'pay-2', 'INSERT', '{}', 'org-1',
+                     datetime('now'), 0, 1000, 0, 'payments',
+                     'manual', 1, 'failed')",
+            params!["queue-w5-c18-2"],
+        )
+        .expect("seed failed parity row");
+
+        let backlog = collect_sync_backlog(&conn).expect("collect backlog");
+        let payments = backlog
+            .get("order_payments")
+            .expect("order_payments present in backlog after parity queue aggregation");
+        assert_eq!(payments.get("pending").copied(), Some(1));
+        assert_eq!(payments.get("failed").copied(), Some(1));
+
+        drop(conn);
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn point_tables_include_parity_sync_queue_and_conflict_audit_log() {
+        assert!(
+            POINT_TABLES.contains(&"parity_sync_queue"),
+            "W5 C18: POINT_TABLES must include parity_sync_queue so recovery \
+             snapshots reflect the active queue"
+        );
+        assert!(
+            POINT_TABLES.contains(&"conflict_audit_log"),
+            "W5 C18: POINT_TABLES must include conflict_audit_log so recovery \
+             snapshots reflect conflict history"
+        );
+        let fingerprint_tables: std::collections::HashSet<&str> =
+            FINGERPRINT_TABLES.iter().map(|(t, _)| *t).collect();
+        assert!(
+            fingerprint_tables.contains("parity_sync_queue"),
+            "W5 C18: FINGERPRINT_TABLES must include parity_sync_queue"
+        );
     }
 }

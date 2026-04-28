@@ -80,21 +80,21 @@ const ReportsPage: React.FC = () => {
 
         // Optional analytics commands may not be available in all runtime builds.
         try {
-          const hourlyResult = await bridge.invoke('report:get-hourly-sales', { branchId: staff.branchId });
+          const hourlyResult = await bridge.reports.getHourlySales({ branchId: staff.branchId });
           setHourlySales(hourlyResult?.data || hourlyResult || []);
         } catch {
           setHourlySales([]);
         }
 
         try {
-          const paymentResult = await bridge.invoke('report:get-payment-method-breakdown', { branchId: staff.branchId });
+          const paymentResult = await bridge.reports.getPaymentMethodBreakdown({ branchId: staff.branchId });
           setPaymentBreakdown(paymentResult?.data || paymentResult || null);
         } catch {
           setPaymentBreakdown(null);
         }
 
         try {
-          const orderTypeResult = await bridge.invoke('report:get-order-type-breakdown', { branchId: staff.branchId });
+          const orderTypeResult = await bridge.reports.getOrderTypeBreakdown({ branchId: staff.branchId });
           setOrderTypeBreakdown(orderTypeResult?.data || orderTypeResult || null);
         } catch {
           setOrderTypeBreakdown(null);

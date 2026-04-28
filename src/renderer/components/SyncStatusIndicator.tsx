@@ -2058,11 +2058,16 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         />
 
         <div
-          className={`absolute top-1/2 left-1/2 flex max-h-[88vh] w-[92vw] max-w-5xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[32px] liquid-glass-modal-shell transition-opacity ${
+          className={`absolute inset-0 z-[10050] flex items-center justify-center px-4 py-6 transition-opacity sm:px-6 sm:py-8 ${
             showFinancialPanel ? 'opacity-75' : 'opacity-100'
           }`}
-          style={{ backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
+          onClick={() => setShowDetailPanel(false)}
         >
+          <div
+            className="liquid-glass-modal-shell flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-[32px] !animate-none"
+            style={{ backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
+            onClick={(event) => event.stopPropagation()}
+          >
           <div className="flex shrink-0 items-center justify-between border-b border-slate-200/80 px-6 py-4 dark:border-white/10">
             <div className="flex min-w-0 items-center gap-3">
               <svg
@@ -2161,7 +2166,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             </div>
           </div>
         </div>
-      </div>,
+          </div>
+        </div>,
       document.body,
     );
 

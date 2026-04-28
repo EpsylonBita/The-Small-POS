@@ -1122,6 +1122,22 @@ fn parse_amount_and_options_payload(
     AmountOptionsCompatPayload { amount, options }
 }
 
+fn validate_ecr_amount(amount: f64) -> Result<i64, String> {
+    if !amount.is_finite() {
+        return Err("Invalid ECR amount: amount must be finite".to_string());
+    }
+    if amount <= 0.0 {
+        return Err("Invalid ECR amount: amount must be positive".to_string());
+    }
+
+    let amount_cents = (amount * 100.0).round();
+    if amount_cents <= 0.0 || amount_cents > 99_999_999.0 {
+        return Err("Invalid ECR amount: amount is outside supported bounds".to_string());
+    }
+
+    Ok(amount_cents as i64)
+}
+
 fn parse_void_transaction_payload(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
@@ -1560,6 +1576,7 @@ pub async fn ecr_process_payment(
 ) -> Result<serde_json::Value, String> {
     let parsed = parse_amount_and_options_payload(arg0, arg1);
     let amount = parsed.amount;
+    let amount_cents = validate_ecr_amount(amount)?;
     let options = parsed.options;
     let device_id = options
         .get("deviceId")
@@ -1581,7 +1598,6 @@ pub async fn ecr_process_payment(
     );
 
     let tx_id = format!("txn-{}", uuid::Uuid::new_v4());
-    let amount_cents = (amount * 100.0).round() as i64;
     let started = chrono::Utc::now().to_rfc3339();
 
     // Resolve device: explicit > default > first connected
@@ -1685,16 +1701,17 @@ pub async fn ecr_process_payment(
         }
     }
 
-    // No device connected — return mock-approved for backward compat
-    let transaction = serde_json::json!({
-        "id": tx_id,
-        "amount": amount,
-        "status": "approved"
-    });
-    let _ = app.emit("ecr_event_transaction_completed", transaction.clone());
+    let error = resolved_device_id
+        .as_ref()
+        .map(|did| format!("ECR device '{did}' is not connected"))
+        .unwrap_or_else(|| "No ECR device connected".to_string());
+    let _ = app.emit(
+        "ecr_event_error",
+        serde_json::json!({ "error": error, "deviceId": resolved_device_id }),
+    );
     Ok(serde_json::json!({
-        "success": true,
-        "transaction": transaction,
+        "success": false,
+        "error": error,
         "options": options
     }))
 }
@@ -1709,6 +1726,7 @@ pub async fn ecr_process_refund(
 ) -> Result<serde_json::Value, String> {
     let parsed = parse_amount_and_options_payload(arg0, arg1);
     let amount = parsed.amount;
+    let amount_cents = validate_ecr_amount(amount)?;
     let options = parsed.options;
     let device_id = options
         .get("deviceId")
@@ -1734,7 +1752,6 @@ pub async fn ecr_process_refund(
     );
 
     let tx_id = format!("txn-{}", uuid::Uuid::new_v4());
-    let amount_cents = (amount * 100.0).round() as i64;
     let started = chrono::Utc::now().to_rfc3339();
 
     let resolved_device_id = if let Some(ref did) = device_id {
@@ -1819,16 +1836,17 @@ pub async fn ecr_process_refund(
         }
     }
 
-    // No device connected — mock-approved for backward compat
-    let transaction = serde_json::json!({
-        "id": tx_id,
-        "amount": amount,
-        "status": "approved"
-    });
-    let _ = app.emit("ecr_event_transaction_completed", transaction.clone());
+    let error = resolved_device_id
+        .as_ref()
+        .map(|did| format!("ECR device '{did}' is not connected"))
+        .unwrap_or_else(|| "No ECR device connected".to_string());
+    let _ = app.emit(
+        "ecr_event_error",
+        serde_json::json!({ "error": error, "deviceId": resolved_device_id }),
+    );
     Ok(serde_json::json!({
-        "success": true,
-        "transaction": transaction,
+        "success": false,
+        "error": error,
         "options": options
     }))
 }

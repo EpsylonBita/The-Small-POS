@@ -237,11 +237,9 @@ export const OrderCard = memo<OrderCardProps>(({
   const customerPhoneNormalized = order.customer_phone || order.customerPhone || '';
   const deliveryAddressNormalized = order.delivery_address || order.address || (order as any).deliveryAddress || '';
   const paymentMethodNormalized = (order.payment_method || order.paymentMethod || '').toString().trim().toLowerCase();
-  const paymentStatusNormalized = (order.payment_status || order.paymentStatus || '').toString().trim().toLowerCase();
   const paymentMethodPresentation =
     paymentMethodNormalized === 'split' ||
-    paymentMethodNormalized === 'mixed' ||
-    paymentStatusNormalized === 'partially_paid'
+    paymentMethodNormalized === 'mixed'
       ? 'split'
       : paymentMethodNormalized;
   const [resolvedAddress, setResolvedAddress] = useState<string>('');

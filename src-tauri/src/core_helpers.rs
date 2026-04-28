@@ -26,15 +26,18 @@ pub(crate) fn payload_arg0_as_string(
 }
 
 pub(crate) fn build_admin_query(path: &str, options: Option<&serde_json::Value>) -> String {
-    fn enc(s: &str) -> String {
-        s.replace('%', "%25")
-            .replace('&', "%26")
-            .replace('=', "%3D")
-            .replace(' ', "%20")
-            .replace('+', "%2B")
-            .replace('?', "%3F")
-            .replace('#', "%23")
-    }
+    // Wave 11 Item 7 deferred follow-up: the prior implementation used a
+    // hand-rolled `.replace()` chain that only encoded 7 specific characters
+    // (`% & = space + ? #`). It missed every other reserved character RFC 3986
+    // requires (`< > " ' { }`, etc.) and any non-ASCII UTF-8 byte. Switching
+    // to `url::form_urlencoded::Serializer` gives proper application/
+    // x-www-form-urlencoded encoding for every byte, including UTF-8.
+    //
+    // Behavioural delta: spaces are now encoded as `+` (form-encoding
+    // standard) instead of `%20`. Both decode to a literal space on any
+    // RFC-compliant server (the admin dashboard uses Next.js URL parsing,
+    // which handles both). Reserved chars `& = + ?` are still percent-
+    // encoded to `%26 %3D %2B %3F` exactly as before.
     let mut query: Vec<(String, String)> = Vec::new();
     if let Some(serde_json::Value::Object(map)) = options {
         for (k, v) in map {
@@ -55,16 +58,67 @@ pub(crate) fn build_admin_query(path: &str, options: Option<&serde_json::Value>)
     if query.is_empty() {
         return path.to_string();
     }
+
+    let serialized = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(query.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .finish();
+
     let mut out = String::from(path);
     out.push('?');
-    out.push_str(
-        &query
-            .iter()
-            .map(|(k, v)| format!("{}={}", enc(k), enc(v)))
-            .collect::<Vec<String>>()
-            .join("&"),
-    );
+    out.push_str(&serialized);
     out
+}
+
+/// Reject any `terminal_id` value that cannot be safely interpolated into
+/// a URL path segment.
+///
+/// Today `terminal_id` is read from the OS keyring and interpolated
+/// directly into admin-API paths like `/api/pos/settings/{terminal_id}`
+/// (see `commands::api_bridge`, `commands::auth`). If the stored value
+/// ever contains `/`, `..`, `?`, `#`, `%2F`, or any control byte, that
+/// path can escape the allowlist enforced by `validate_admin_api_path`.
+///
+/// This validator enforces the canonical UUID shape (8-4-4-4-12 hex
+/// digits with hyphens at fixed positions) because that is the only
+/// shape the onboarding/provisioning pipeline ever writes. Strict shape
+/// check also rejects path-reserved characters implicitly — every
+/// disallowed byte fails the hex-digit rule.
+///
+/// Returns the input slice on success so call sites can thread it into
+/// `format!` without an extra borrow.
+#[allow(dead_code)] // Added ahead of consumers; see Wave 1 (C2, C3, C15).
+pub(crate) fn validate_terminal_id_path_safe(s: &str) -> Result<&str, String> {
+    if s.is_empty() {
+        return Err("terminal_id must not be empty".into());
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return Err(format!(
+            "terminal_id must be a 36-character UUID, got {} chars",
+            bytes.len()
+        ));
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if b != b'-' {
+                    return Err(format!(
+                        "terminal_id: expected '-' at position {i}, found {:?}",
+                        b as char
+                    ));
+                }
+            }
+            _ => {
+                if !b.is_ascii_hexdigit() {
+                    return Err(format!(
+                        "terminal_id: non-hex char at position {i}: {:?}",
+                        b as char
+                    ));
+                }
+            }
+        }
+    }
+    Ok(s)
 }
 
 pub(crate) fn validate_admin_api_path(path: &str) -> Result<(), String> {
@@ -268,7 +322,15 @@ pub(crate) async fn fetch_supabase_rows(
         .map_err(|e| format!("Supabase request failed: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        // Wave 9 H4: surface body-read errors instead of collapsing them to
+        // an empty string. A truncated body (e.g. network dropped mid-read)
+        // used to be indistinguishable from a legitimately empty error
+        // body, hiding the real cause. The fallback message keeps the
+        // status code visible so the caller still has actionable info.
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
         return Err(format!("Supabase error ({status}): {body}"));
     }
     resp.json::<serde_json::Value>()
@@ -388,4 +450,130 @@ pub(crate) fn stats_for_modules(modules: &[serde_json::Value]) -> serde_json::Va
         "core_modules_count": core_modules_count,
         "purchased_modules_count": purchased_modules_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_terminal_id_accepts_canonical_uuid() {
+        let t = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(validate_terminal_id_path_safe(t).unwrap(), t);
+    }
+
+    #[test]
+    fn validate_terminal_id_accepts_uppercase_hex() {
+        let t = "550E8400-E29B-41D4-A716-446655440000";
+        assert_eq!(validate_terminal_id_path_safe(t).unwrap(), t);
+    }
+
+    #[test]
+    fn validate_terminal_id_rejects_empty() {
+        assert!(validate_terminal_id_path_safe("").is_err());
+    }
+
+    #[test]
+    fn validate_terminal_id_rejects_short_and_long() {
+        assert!(validate_terminal_id_path_safe("too-short").is_err());
+        assert!(
+            validate_terminal_id_path_safe("550e8400-e29b-41d4-a716-4466554400001").is_err(),
+            "37-char string must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_terminal_id_rejects_path_traversal_chars() {
+        // Each of these is 36 chars total, placing a dangerous character
+        // where a hex digit must be.
+        let cases = [
+            "550e8400-e29b-41d4-a716-44665544/000",
+            "550e8400-e29b-41d4-a716-446655.4000.",
+            "550e8400-e29b-41d4-a716-446655?40000",
+            "550e8400-e29b-41d4-a716-446655#40000",
+            "550e8400-e29b-41d4-a716-446655%40000",
+            "550e8400-e29b-41d4-a716-446655 40000",
+        ];
+        for c in cases {
+            assert!(
+                validate_terminal_id_path_safe(c).is_err(),
+                "should reject {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_terminal_id_rejects_missing_hyphens() {
+        // 36 chars but hyphen positions are wrong.
+        assert!(validate_terminal_id_path_safe("550e8400xe29bx41d4xa716x446655440000").is_err());
+    }
+
+    #[test]
+    fn validate_terminal_id_rejects_control_bytes() {
+        // null byte embedded at byte offset 32 (the 33rd byte). `\x00`
+        // is written as a hex escape to avoid the octal-escape lint.
+        let t = "550e8400-e29b-41d4-a716-44665544\x00000";
+        assert_eq!(t.len(), 36, "must still be 36 bytes");
+        assert!(validate_terminal_id_path_safe(t).is_err());
+    }
+
+    /// W11 Item 7 deferred follow-up: verify the URL-encoding swap from the
+    /// hand-rolled `enc()` to `url::form_urlencoded::Serializer` preserves
+    /// percent-encoding for the documented reserved-character set
+    /// (`& = + ? #`) and adds proper handling for UTF-8 multi-byte and
+    /// previously-unhandled reserved chars (`< > " ' { }`).
+    #[test]
+    fn build_admin_query_form_encodes_reserved_chars_and_utf8() {
+        let options = serde_json::json!({
+            // Reserved chars from the prior implementation's coverage:
+            // `&` `=` `+` `?` are documented as targets in the W11 spec.
+            "reserved": "a&b=c+d?e",
+            // `#` is a fragment delimiter — also previously percent-encoded.
+            "frag": "x#y",
+            // Spaces switch from `%20` (prior) to `+` (form-encoded). Both
+            // decode to a literal space; this test pins the new wire format
+            // so a future revert is loud.
+            "with_space": "hello world",
+            // UTF-8 multi-byte: Greek letter alpha (U+03B1) is two bytes
+            // (0xCE 0xB1) and percent-encodes to `%CE%B1`. The prior impl
+            // would have left this unencoded — a real bug for anyone
+            // sending Greek text in a query value.
+            "greek": "α",
+            // Previously-unhandled reserved char (curly braces).
+            "tmpl": "{x}",
+        });
+        let actual = build_admin_query("/api/pos/probe", Some(&options));
+
+        // Form-encoding sorts pairs by insertion order from
+        // serde_json::Map (which preserves key order). Assert each pair
+        // appears with the expected encoded value.
+        for expected in [
+            "reserved=a%26b%3Dc%2Bd%3Fe",
+            "frag=x%23y",
+            "with_space=hello+world",
+            "greek=%CE%B1",
+            "tmpl=%7Bx%7D",
+        ] {
+            assert!(
+                actual.contains(expected),
+                "expected `{expected}` in `{actual}`"
+            );
+        }
+        // Path is preserved and `?` separator is added before the pairs.
+        assert!(actual.starts_with("/api/pos/probe?"));
+    }
+
+    #[test]
+    fn build_admin_query_returns_path_unchanged_when_no_options() {
+        assert_eq!(
+            build_admin_query("/api/pos/orders", None),
+            "/api/pos/orders"
+        );
+        // Empty object also yields no `?` suffix.
+        let empty = serde_json::json!({});
+        assert_eq!(
+            build_admin_query("/api/pos/orders", Some(&empty)),
+            "/api/pos/orders"
+        );
+    }
 }

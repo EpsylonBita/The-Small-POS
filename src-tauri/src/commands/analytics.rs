@@ -360,7 +360,10 @@ fn load_report_rows_for_day(
 ) -> Result<Vec<(String, String, Option<String>, Option<String>, f64, String)>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT status, created_at, payment_method, order_type, COALESCE(total_amount, 0), items
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT status, created_at, payment_method, order_type,
+                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
+                    items
              FROM orders
              WHERE (?1 = '' OR branch_id = ?1)
                AND COALESCE(is_ghost, 0) = 0
@@ -374,7 +377,7 @@ fn load_report_rows_for_day(
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
-                row.get::<_, f64>(4)?,
+                crate::money::Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
                 row.get::<_, String>(5)?,
             ))
         })
