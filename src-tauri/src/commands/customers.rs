@@ -906,7 +906,10 @@ fn extract_privacy_tombstones(response: &serde_json::Value) -> Vec<serde_json::V
         .unwrap_or_default()
 }
 
-fn sqlite_table_columns(conn: &rusqlite::Connection, table: &str) -> std::collections::HashSet<String> {
+fn sqlite_table_columns(
+    conn: &rusqlite::Connection,
+    table: &str,
+) -> std::collections::HashSet<String> {
     let mut columns = std::collections::HashSet::new();
     let pragma = format!("PRAGMA table_info({table})");
     if let Ok(mut statement) = conn.prepare(&pragma) {
@@ -1011,7 +1014,9 @@ fn apply_privacy_tombstones_to_cache(
             "customer_address" | "customer_addresses" | "address" => {
                 for entry in &mut cache {
                     if let Some(obj) = entry.as_object_mut() {
-                        if let Some(addresses) = obj.get_mut("addresses").and_then(|v| v.as_array_mut()) {
+                        if let Some(addresses) =
+                            obj.get_mut("addresses").and_then(|v| v.as_array_mut())
+                        {
                             addresses.retain(|address| {
                                 value_str(address, &["id", "addressId"])
                                     .map(|id| id != target_id)
@@ -1037,10 +1042,7 @@ fn apply_privacy_tombstones_to_cache(
     Ok(applied_ids)
 }
 
-async fn acknowledge_privacy_tombstones(
-    db: &db::DbState,
-    ids: Vec<String>,
-) -> Result<(), String> {
+async fn acknowledge_privacy_tombstones(db: &db::DbState, ids: Vec<String>) -> Result<(), String> {
     if ids.is_empty() {
         return Ok(());
     }

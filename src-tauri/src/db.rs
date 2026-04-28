@@ -4887,6 +4887,10 @@ mod tests {
             );
             INSERT INTO schema_version (version) VALUES (58);
 
+            CREATE TABLE orders (
+                id TEXT PRIMARY KEY
+            );
+
             CREATE TABLE parity_sync_queue (
                 id              TEXT PRIMARY KEY,
                 table_name      TEXT NOT NULL,

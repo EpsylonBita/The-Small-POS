@@ -233,7 +233,7 @@ These ingest pos-tauri money via Supabase replication after the route lands the 
 | Surface | Status | Notes |
 |---|---|---|
 | `POSSystemMobile/` | **Not a wire consumer.** | Grep for `/api/pos/(payments\|financial\|z-reports\|loyalty\|shifts\|cash-drawer)` returned 0 files. Mobile is supabase-direct per `MEMORY.md`. After 4e drops REAL columns, any mobile screen that queries `orders.total_amount` directly via Supabase will break — flag as a 4e pre-flight item to grep mobile too. |
-| `pos-system/` (legacy Electron) | **Retired 2026-04-23** per `feedback_electron_pos_untouched.md`. | Confirmed by user as the basis for the W4d "no dual-shape, single coordinated cutover" decision. |
+| Legacy Electron desktop path | **Retired 2026-04-23** per `feedback_electron_pos_untouched.md`. | Confirmed by user as the basis for the W4d "no dual-shape, single coordinated cutover" decision. |
 | `Landing/` | Not a money consumer. | Marketing site only. |
 | Background jobs (cron, queues) | **Verify during 4e pre-flight.** | Search `admin-dashboard/src/app/api/cron/` and `admin-dashboard/src/lib/jobs/` for SELECTs against the dropping columns. |
 

@@ -1605,15 +1605,23 @@ fn build_order_insert_body(
                 &[&["address", "name_on_ringer"], &["address", "nameOnRinger"]],
             )
         });
-    let delivery_latitude =
-        number_field_from_sources(&sources, &["delivery_latitude", "deliveryLatitude", "latitude"])
-            .filter(|value| value.is_finite() && (-90.0..=90.0).contains(value));
-    let delivery_longitude =
-        number_field_from_sources(&sources, &["delivery_longitude", "deliveryLongitude", "longitude"])
-            .filter(|value| value.is_finite() && (-180.0..=180.0).contains(value));
+    let delivery_latitude = number_field_from_sources(
+        &sources,
+        &["delivery_latitude", "deliveryLatitude", "latitude"],
+    )
+    .filter(|value| value.is_finite() && (-90.0..=90.0).contains(value));
+    let delivery_longitude = number_field_from_sources(
+        &sources,
+        &["delivery_longitude", "deliveryLongitude", "longitude"],
+    )
+    .filter(|value| value.is_finite() && (-180.0..=180.0).contains(value));
     let delivery_address_fingerprint = string_field_from_sources(
         &sources,
-        &["delivery_address_fingerprint", "deliveryAddressFingerprint", "address_fingerprint"],
+        &[
+            "delivery_address_fingerprint",
+            "deliveryAddressFingerprint",
+            "address_fingerprint",
+        ],
     );
     let delivery_zone_id =
         string_field_from_sources(&sources, &["delivery_zone_id", "deliveryZoneId"])

@@ -1195,8 +1195,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     if let Some(ref v) = delivery_address {
         validate_string_length("delivery_address", v, 500)?;
     }
-    if delivery_latitude
-        .is_some_and(|value| !value.is_finite() || !(-90.0..=90.0).contains(&value))
+    if delivery_latitude.is_some_and(|value| !value.is_finite() || !(-90.0..=90.0).contains(&value))
     {
         return Err("Invalid deliveryLatitude".into());
     }
@@ -1466,8 +1465,14 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             obj.insert("delivery_address".to_string(), Value::String(value.clone()));
         }
         if let Some(value) = delivery_address_id.as_ref() {
-            obj.insert("deliveryAddressId".to_string(), Value::String(value.clone()));
-            obj.insert("delivery_address_id".to_string(), Value::String(value.clone()));
+            obj.insert(
+                "deliveryAddressId".to_string(),
+                Value::String(value.clone()),
+            );
+            obj.insert(
+                "delivery_address_id".to_string(),
+                Value::String(value.clone()),
+            );
         }
         if let Some(value) = delivery_latitude {
             obj.insert("deliveryLatitude".to_string(), serde_json::json!(value));
@@ -11204,13 +11209,12 @@ async fn sync_order_batch_via_direct_api(
             ("nameOnRinger", "name_on_ringer"),
             ("deliveryLatitude", "delivery_latitude"),
             ("deliveryLongitude", "delivery_longitude"),
-            (
-                "deliveryAddressFingerprint",
-                "delivery_address_fingerprint",
-            ),
+            ("deliveryAddressFingerprint", "delivery_address_fingerprint"),
             ("deliveryZoneId", "delivery_zone_id"),
         ] {
-            let value = payload_value.get(camel).or_else(|| payload_value.get(snake));
+            let value = payload_value
+                .get(camel)
+                .or_else(|| payload_value.get(snake));
             if let Some(value) = value {
                 if !value.is_null() {
                     body.as_object_mut()

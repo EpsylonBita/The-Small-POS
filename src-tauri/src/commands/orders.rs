@@ -1851,7 +1851,7 @@ pub async fn order_update_customer_info(
     let payload = parse_order_update_customer_info_payload(arg0)?;
     let now = Utc::now().to_rfc3339();
 
-        let OrderUpdateCustomerInfoPayload {
+    let OrderUpdateCustomerInfoPayload {
         order_id,
         customer_id,
         customer_name,
