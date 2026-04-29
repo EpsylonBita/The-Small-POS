@@ -3776,6 +3776,7 @@ fn prepare_payment_request(
         "idempotency_key": canonical_idempotency_key.clone(),
         "metadata": {
             "terminal_id": terminal_id,
+            "local_order_id": local_order_id,
             "local_payment_id": item.record_id,
             "canonical_idempotency_key": canonical_idempotency_key.clone(),
             "payment_origin": string_field(payload, &["paymentOrigin", "payment_origin"]),
@@ -3819,6 +3820,27 @@ fn prepare_payment_request(
         {
             body["items"] = items.clone();
         }
+    }
+    if let Some(settlement_adjustments) = payload
+        .get("settlement_adjustments")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+    {
+        let settlement_refund_total = settlement_adjustments
+            .iter()
+            .filter_map(|row| {
+                row.get("amount_cents")
+                    .and_then(Value::as_i64)
+                    .map(|cents| Cents::new(cents).to_f64_dp2())
+                    .or_else(|| row.get("amount").and_then(Value::as_f64))
+            })
+            .sum::<f64>();
+        body["settlement_adjustments"] = Value::Array(settlement_adjustments.clone());
+        body["metadata"]["settlement_adjustments"] = Value::Array(settlement_adjustments.clone());
+        body["metadata"]["settlement_refund_total"] =
+            Value::from(Cents::round_half_even(settlement_refund_total).to_f64_dp2());
+        body["metadata"]["settlement_net_payment_amount"] =
+            Value::from(Cents::round_half_even(amount - settlement_refund_total).to_f64_dp2());
     }
 
     let _ = conn.execute(
@@ -6292,6 +6314,11 @@ mod tests {
             Some("pay-identity")
         );
         assert_eq!(
+            body.pointer("/metadata/local_order_id")
+                .and_then(Value::as_str),
+            Some("order-payment-identity")
+        );
+        assert_eq!(
             body.pointer("/metadata/legacy_idempotency_key")
                 .and_then(Value::as_str),
             Some("legacy-payment-key")
@@ -6305,6 +6332,78 @@ mod tests {
             body.pointer("/metadata/transaction_ref")
                 .and_then(Value::as_str),
             Some("CARD-IDENTITY-1")
+        );
+    }
+
+    #[test]
+    fn prepare_payment_request_includes_settlement_adjustments() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-payment-settlement', 'remote-order-payment-settlement', '[]', 4.89, 489, 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'pay-settlement', 'order-payment-settlement', 'card', 15.19, 1519, 'completed', 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed payment");
+
+        let settlement_adjustment = json!({
+            "adjustment_id": "adj-settlement",
+            "payment_id": "pay-settlement",
+            "order_id": "order-payment-settlement",
+            "adjustment_type": "refund",
+            "adjustment_context": "edit_settlement",
+            "amount": 10.30,
+            "amount_cents": 1030,
+            "idempotency_key": "adjustment:adj-settlement",
+        });
+        let payload = json!({
+            "paymentId": "pay-settlement",
+            "orderId": "order-payment-settlement",
+            "amount": 15.19,
+            "method": "card",
+            "settlement_adjustments": [settlement_adjustment],
+        });
+        let item = queue_item("payments", "INSERT", "pay-settlement", payload.clone());
+        let request = match prepare_payment_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare payment request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready payment request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        let proof_rows = body
+            .get("settlement_adjustments")
+            .and_then(Value::as_array)
+            .expect("settlement proof rows");
+
+        assert_eq!(proof_rows.len(), 1);
+        assert_eq!(
+            proof_rows[0].get("amount_cents").and_then(Value::as_i64),
+            Some(1030)
+        );
+        assert_eq!(
+            body.pointer("/metadata/settlement_refund_total")
+                .and_then(Value::as_f64),
+            Some(10.3)
+        );
+        assert_eq!(
+            body.pointer("/metadata/settlement_net_payment_amount")
+                .and_then(Value::as_f64),
+            Some(4.89)
         );
     }
 

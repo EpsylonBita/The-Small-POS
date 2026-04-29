@@ -4959,6 +4959,7 @@
       "remoteOrderTotal": "Admin-Summe",
       "paymentAmount": "Zahlungsbetrag",
       "existingCompleted": "Bereits bezahlt",
+      "settlementMath": "Abrechnungsrechnung",
       "remotePayment": "Remote-Zahlung",
       "issueCount_one": "{{count}} Problem",
       "issueCount_other": "{{count}} Probleme",
@@ -4984,10 +4985,14 @@
       "openConnectionSettings": { "label": "Verbindungseinstellungen öffnen" },
       "runParitySyncNow": { "label": "Synchronisierung jetzt ausführen" },
       "retryParityItem": { "label": "Parity-Eintrag erneut versuchen" },
+      "retryCatalogAvailabilitySync": {
+        "label": "Katalogverfügbarkeit erneut versuchen",
+        "description": "Wiederholt das blockierte Verfügbarkeits-Flag nach dem Admin-Kompatibilitätsfix."
+      },
       "retryParityModule": { "label": "Parity-Modul erneut versuchen" },
       "repairPaymentTotalConflict": {
         "label": "Zahlungs-/Bestellabgleich reparieren",
-        "description": "Aktualisiert die Bestellung, verknüpft die bekannte Zahlung und versucht nur diese Zahlung erneut."
+        "description": "Aktualisiert die Bestellung, sendet den Abrechnungsnachweis, verknüpft die Zahlung und wiederholt die wartende Erstattung."
       },
       "retrySync": { "label": "Sync-Zeile erneut versuchen" },
       "validatePendingOrders": { "label": "Ausstehende Bestellungen prüfen" },
@@ -5061,6 +5066,11 @@
         "title": "Zahlung und Bestellung passen nicht zusammen",
         "summary": "Admin hat Zahlung {{paymentAmount}} abgelehnt, weil die aktuelle Bestellsumme {{remoteOrderTotal}} ist und bereits {{existingCompleted}} bezahlt sind.",
         "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie löscht keine lokalen Daten, aktualisiert bei Bedarf die übergeordnete Bestellung, sendet die Zahlungsidentität und versucht diese Zahlungszeile erneut."
+      },
+      "catalogAvailabilityRetry": {
+        "title": "Katalogverfügbarkeit erneut versuchen",
+        "summary": "{{count}} Katalogverfügbarkeits-Update ist fehlgeschlagen, weil Admin die alte generische Sync-Route abgelehnt hat.",
+        "guidance": "Nutzen Sie den empfohlenen erneuten Versuch nach dem Admin-Deployment. Nur Verfügbarkeits-Flags werden wiederholt; Namen, Preise und Menüstruktur bleiben blockiert."
       },
       "parityModuleFailed": {
         "title": "Parity-Fehler in {{moduleLabel}}",

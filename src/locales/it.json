@@ -4959,6 +4959,7 @@
       "remoteOrderTotal": "Totale admin",
       "paymentAmount": "Importo pagamento",
       "existingCompleted": "Gia pagato",
+      "settlementMath": "Calcolo saldo",
       "remotePayment": "Pagamento remoto",
       "issueCount_one": "{{count}} problema",
       "issueCount_other": "{{count}} problemi",
@@ -4984,10 +4985,14 @@
       "openConnectionSettings": { "label": "Apri impostazioni di connessione" },
       "runParitySyncNow": { "label": "Esegui sincronizzazione ora" },
       "retryParityItem": { "label": "Riprova elemento parity" },
+      "retryCatalogAvailabilitySync": {
+        "label": "Riprova disponibilita catalogo",
+        "description": "Riprova il flag di disponibilita bloccato dopo la correzione di compatibilita admin."
+      },
       "retryParityModule": { "label": "Riprova modulo parity" },
       "repairPaymentTotalConflict": {
         "label": "Correggi differenza pagamento/ordine",
-        "description": "Aggiorna l'ordine, collega il pagamento noto e riprova solo questo pagamento."
+        "description": "Aggiorna l'ordine, invia la prova di saldo, collega il pagamento e riprova il rimborso in attesa."
       },
       "retrySync": { "label": "Riprova riga di sincronizzazione" },
       "validatePendingOrders": { "label": "Valida ordini in attesa" },
@@ -5061,6 +5066,11 @@
         "title": "Differenza pagamento/ordine",
         "summary": "Admin ha rifiutato il pagamento {{paymentAmount}} perché il totale ordine attuale è {{remoteOrderTotal}} e l'importo già pagato è {{existingCompleted}}.",
         "guidance": "Usa prima la correzione consigliata. Non elimina dati locali, aggiorna l'ordine padre se necessario, invia l'identità del pagamento e riprova questa riga."
+      },
+      "catalogAvailabilityRetry": {
+        "title": "Riprova disponibilita catalogo",
+        "summary": "{{count}} aggiornamento disponibilita catalogo è fallito perché admin ha rifiutato il vecchio percorso di sincronizzazione generico.",
+        "guidance": "Usa il tentativo consigliato dopo il deploy admin. Vengono riprovati solo i flag di disponibilita; nomi, prezzi e struttura menu restano bloccati."
       },
       "parityModuleFailed": {
         "title": "Errori parity in {{moduleLabel}}",

@@ -177,6 +177,11 @@ const RecoveryIssueCard: React.FC<{
       value: issue.params?.existingCompleted,
     },
     {
+      key: 'settlementMath',
+      labelKey: 'recovery.common.settlementMath',
+      value: issue.params?.settlementMath,
+    },
+    {
       key: 'remotePaymentId',
       labelKey: 'recovery.common.remotePayment',
       value: issue.params?.remotePaymentId,

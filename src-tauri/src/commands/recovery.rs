@@ -169,6 +169,121 @@ fn prepare_payment_total_conflict_repair(
     Ok((local_order_id, queued_parent_order))
 }
 
+fn format_cents(cents: i64) -> String {
+    format!("{:.2}", cents as f64 / 100.0)
+}
+
+fn load_payment_settlement_equation(
+    conn: &rusqlite::Connection,
+    payment_id: &str,
+) -> Result<Option<String>, String> {
+    let row: Option<(i64, i64, i64)> = conn
+        .query_row(
+            "SELECT COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
+                    COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
+                    COALESCE((
+                        SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = op.id
+                          AND pa.order_id = op.order_id
+                          AND pa.adjustment_type = 'refund'
+                          AND COALESCE(pa.adjustment_context, '') = 'edit_settlement'
+                    ), 0)
+             FROM order_payments op
+             JOIN orders o ON o.id = op.order_id
+             WHERE op.id = ?1",
+            rusqlite::params![payment_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load payment settlement equation: {e}"))?;
+
+    let Some((payment_cents, order_total_cents, refund_cents)) = row else {
+        return Ok(None);
+    };
+    if refund_cents <= 0 {
+        return Ok(Some(format!(
+            "{} - 0.00 = {}; local order total {}",
+            format_cents(payment_cents),
+            format_cents(payment_cents),
+            format_cents(order_total_cents),
+        )));
+    }
+    Ok(Some(format!(
+        "{} - {} = {}; local order total {}",
+        format_cents(payment_cents),
+        format_cents(refund_cents),
+        format_cents(payment_cents - refund_cents),
+        format_cents(order_total_cents),
+    )))
+}
+
+fn promote_waiting_settlement_refunds_for_payment(
+    conn: &rusqlite::Connection,
+    payment_id: &str,
+) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT pa.id
+             FROM payment_adjustments pa
+             JOIN order_payments op ON op.id = pa.payment_id
+             WHERE pa.payment_id = ?1
+               AND pa.sync_state = 'waiting_parent'
+               AND pa.adjustment_type = 'refund'
+               AND COALESCE(pa.adjustment_context, '') = 'edit_settlement'
+               AND op.sync_state = 'applied'
+               AND NULLIF(TRIM(COALESCE(op.remote_payment_id, '')), '') IS NOT NULL",
+        )
+        .map_err(|e| format!("prepare waiting settlement refunds: {e}"))?;
+
+    let adjustment_ids: Vec<String> = stmt
+        .query_map(rusqlite::params![payment_id], |row| row.get(0))
+        .map_err(|e| format!("query waiting settlement refunds: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut promoted = 0usize;
+    for adjustment_id in adjustment_ids {
+        let updated = conn
+            .execute(
+                "UPDATE payment_adjustments
+                 SET sync_state = 'pending',
+                     sync_retry_count = 0,
+                     sync_last_error = NULL,
+                     sync_next_retry_at = NULL,
+                     updated_at = ?1
+                 WHERE id = ?2
+                   AND sync_state = 'waiting_parent'",
+                rusqlite::params![now, adjustment_id.as_str()],
+            )
+            .map_err(|e| format!("promote waiting settlement refund: {e}"))?;
+        if updated == 0 {
+            continue;
+        }
+        promoted += 1;
+
+        let _ = conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 attempts = 0,
+                 last_attempt = NULL,
+                 error_message = NULL,
+                 next_retry_at = NULL,
+                 retry_delay_ms = 1000,
+                 priority = CASE WHEN priority > 1 THEN priority ELSE 1 END,
+                 claim_generation = claim_generation + 1
+             WHERE table_name = 'payment_adjustments'
+               AND record_id = ?1
+               AND status IN ('pending', 'processing', 'failed', 'conflict')",
+            rusqlite::params![adjustment_id.as_str()],
+        );
+    }
+
+    Ok(promoted)
+}
+
 #[tauri::command]
 pub async fn recovery_list_points(
     db: tauri::State<'_, db::DbState>,
@@ -502,6 +617,20 @@ pub async fn recovery_execute_action(
             let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
                 .await
                 .map_err(auth::GuardedCommandError::from)?;
+            let promoted_adjustments = {
+                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                promote_waiting_settlement_refunds_for_payment(&conn, payment_id.as_str())
+                    .map_err(auth::GuardedCommandError::from)?
+            };
+            let adjustment_result = if promoted_adjustments > 0 {
+                Some(
+                    sync_queue::process_queue(&db.conn, &admin_url, &api_key)
+                        .await
+                        .map_err(auth::GuardedCommandError::from)?,
+                )
+            } else {
+                None
+            };
             let remaining_conflict = {
                 let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
                 failed_payment_total_conflict_for_payment(&conn, payment_id.as_str())
@@ -509,8 +638,16 @@ pub async fn recovery_execute_action(
             };
 
             if let Some(error) = remaining_conflict {
+                let equation = {
+                    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                    load_payment_settlement_equation(&conn, payment_id.as_str())
+                        .map_err(auth::GuardedCommandError::from)?
+                };
                 return Err(format!(
-                    "Payment/order mismatch still exists for payment {payment_id}: {error}"
+                    "Payment/order mismatch still exists for payment {payment_id}: {error}. {}",
+                    equation
+                        .map(|value| format!("Settlement math: {value}."))
+                        .unwrap_or_else(|| "Settlement math unavailable.".to_string())
                 )
                 .into());
             }
@@ -519,11 +656,15 @@ pub async fn recovery_execute_action(
                 "success": true,
                 "requiresRefresh": true,
                 "message": format!(
-                    "Payment/order mismatch repair retried payment {payment_id} for order {order_id}. Parent order update queued: {}. Processed {}, failed {}, conflicts {}.",
+                    "Payment/order mismatch repair retried payment {payment_id} for order {order_id}. Parent order update queued: {}. Processed {}, failed {}, conflicts {}. Promoted refund adjustments: {}. Adjustment pass processed {}, failed {}, conflicts {}.",
                     if queued_parent_order { "yes" } else { "no" },
                     result.processed,
                     result.failed,
                     result.conflicts,
+                    promoted_adjustments,
+                    adjustment_result.as_ref().map(|value| value.processed).unwrap_or(0),
+                    adjustment_result.as_ref().map(|value| value.failed).unwrap_or(0),
+                    adjustment_result.as_ref().map(|value| value.conflicts).unwrap_or(0),
                 ),
             }))
         }
@@ -893,5 +1034,123 @@ pub async fn recovery_execute_action(
         }
 
         _ => Err(format!("Unknown recovery action: {action_id}").into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    fn test_db() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    #[test]
+    fn payment_total_conflict_repair_promotes_waiting_settlement_refund_parity_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-recovery-settlement', 'remote-order-recovery-settlement', '[]', 4.89, 489, 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, remote_payment_id, created_at, updated_at
+             ) VALUES (
+                 'pay-recovery-settlement', 'order-recovery-settlement', 'card', 15.19, 1519, 'completed', 'synced', 'applied',
+                 '42d3701a-6b2f-4fbb-b803-36216bf2df44', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed payment");
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
+                 adjustment_context, idempotency_key, sync_state, created_at, updated_at
+             ) VALUES (
+                 'adj-recovery-settlement', 'pay-recovery-settlement', 'order-recovery-settlement',
+                 'refund', 10.30, 1030, 'Order edit settlement',
+                 'edit_settlement', 'adjustment:adj-recovery-settlement',
+                 'waiting_parent', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed adjustment");
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "payment_adjustments",
+            "adj-recovery-settlement",
+            "INSERT",
+            &json!({
+                "paymentId": "pay-recovery-settlement",
+                "orderId": "order-recovery-settlement",
+                "adjustmentType": "refund",
+                "adjustmentContext": "edit_settlement",
+                "amount": 10.30,
+            }),
+            Some(1),
+            Some("payment"),
+            Some("manual"),
+            Some(1),
+        )
+        .expect("enqueue adjustment");
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 error_message = 'Waiting for parent payment sync'
+             WHERE table_name = 'payment_adjustments'
+               AND record_id = 'adj-recovery-settlement'",
+            [],
+        )
+        .expect("defer adjustment parity row");
+
+        let promoted =
+            promote_waiting_settlement_refunds_for_payment(&conn, "pay-recovery-settlement")
+                .expect("promote waiting refund");
+        assert_eq!(promoted, 1);
+
+        let sync_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM payment_adjustments WHERE id = 'adj-recovery-settlement'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load adjustment state");
+        assert_eq!(sync_state, "pending");
+
+        let queue_state: (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, error_message
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payment_adjustments'
+                   AND record_id = 'adj-recovery-settlement'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load parity row state");
+        assert_eq!(queue_state, ("pending".to_string(), None));
+
+        let equation = load_payment_settlement_equation(&conn, "pay-recovery-settlement")
+            .expect("load settlement equation")
+            .expect("settlement equation");
+        assert_eq!(equation, "15.19 - 10.30 = 4.89; local order total 4.89");
     }
 }

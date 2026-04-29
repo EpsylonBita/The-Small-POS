@@ -64,6 +64,81 @@ fn load_payment_items_for_payment(
     Ok(items)
 }
 
+fn load_edit_settlement_refund_proof_for_payment(
+    conn: &rusqlite::Connection,
+    payment_id: &str,
+    order_id: &str,
+) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, payment_id, order_id,
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
+                    refund_method, cash_handler, adjustment_context, idempotency_key
+             FROM payment_adjustments
+             WHERE payment_id = ?1
+               AND order_id = ?2
+               AND adjustment_type = 'refund'
+               AND COALESCE(adjustment_context, '') = 'edit_settlement'
+               AND COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0) > 0
+               AND sync_state IN ('waiting_parent', 'pending', 'syncing', 'failed')
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare settlement refund proof lookup: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![payment_id, order_id], |row| {
+            let adjustment_id: String = row.get(0)?;
+            let payment_id: String = row.get(1)?;
+            let order_id: String = row.get(2)?;
+            let amount_cents: i64 = row.get(3)?;
+            let refund_method: Option<String> = row.get(4)?;
+            let cash_handler: Option<String> = row.get(5)?;
+            let adjustment_context: Option<String> = row.get(6)?;
+            let idempotency_key: Option<String> = row.get(7)?;
+            let stable_idempotency_key = idempotency_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("adjustment:{adjustment_id}"));
+            Ok(serde_json::json!({
+                "adjustment_id": adjustment_id.clone(),
+                "adjustmentId": adjustment_id,
+                "payment_id": payment_id.clone(),
+                "paymentId": payment_id.clone(),
+                "local_payment_id": payment_id,
+                "order_id": order_id.clone(),
+                "orderId": order_id.clone(),
+                "client_order_id": order_id.clone(),
+                "clientOrderId": order_id.clone(),
+                "local_order_id": order_id,
+                "adjustment_type": "refund",
+                "adjustmentType": "refund",
+                "adjustment_context": adjustment_context.unwrap_or_else(|| "edit_settlement".to_string()),
+                "adjustmentContext": "edit_settlement",
+                "amount": Cents::new(amount_cents).to_f64_dp2(),
+                "amount_cents": amount_cents,
+                "idempotency_key": stable_idempotency_key.clone(),
+                "idempotencyKey": stable_idempotency_key,
+                "refund_method": refund_method.clone(),
+                "refundMethod": refund_method,
+                "cash_handler": cash_handler.clone(),
+                "cashHandler": cash_handler,
+            }))
+        })
+        .map_err(|e| format!("query settlement refund proof rows: {e}"))?;
+
+    let mut adjustments = Vec::new();
+    for row in rows {
+        match row {
+            Ok(adjustment) => adjustments.push(adjustment),
+            Err(e) => warn!("skipping malformed settlement refund proof row: {e}"),
+        }
+    }
+
+    Ok(adjustments)
+}
+
 #[derive(Clone, Debug)]
 struct HistoricalPaymentRepairContext {
     shift_id: String,
@@ -1406,6 +1481,8 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         .map_err(|e| format!("load payment sync payload context: {e}"))?;
 
     let items = load_payment_items_for_payment(conn, payment_id)?;
+    let settlement_adjustments =
+        load_edit_settlement_refund_proof_for_payment(conn, payment_id, order_id.as_str())?;
     // W4d-i: additive cents emission alongside legacy float keys.
     // Admin-dashboard's Zod schema currently requires `amount` (float);
     // adding `amount_cents` (integer) lets a follow-up admin update
@@ -1434,6 +1511,11 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         "staffId": staff_id,
         "staffShiftId": staff_shift_id,
         "items": if items.is_empty() { Value::Null } else { Value::Array(items) },
+        "settlement_adjustments": if settlement_adjustments.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(settlement_adjustments)
+        },
     })
     .to_string())
 }
@@ -2087,6 +2169,78 @@ mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    #[test]
+    fn build_payment_sync_payload_includes_edit_settlement_refund_proof() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-settlement-proof', '[]', 4.89, 489, 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'pay-settlement-proof', 'order-settlement-proof', 'card', 15.19, 1519, 'completed', 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed payment");
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
+                 refund_method, adjustment_context, idempotency_key, sync_state, created_at, updated_at
+             ) VALUES (
+                 'adj-settlement-proof', 'pay-settlement-proof', 'order-settlement-proof',
+                 'refund', 10.30, 1030, 'Order edit settlement', 'card',
+                 'edit_settlement', 'adjustment:adj-settlement-proof',
+                 'waiting_parent', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed adjustment");
+
+        let payload = serde_json::from_str::<Value>(
+            &build_payment_sync_payload_for_payment(&conn, "pay-settlement-proof")
+                .expect("build payload"),
+        )
+        .expect("parse payload");
+        let adjustments = payload
+            .get("settlement_adjustments")
+            .and_then(Value::as_array)
+            .expect("settlement adjustments");
+
+        assert_eq!(adjustments.len(), 1);
+        assert_eq!(
+            adjustments[0]
+                .get("adjustment_type")
+                .and_then(Value::as_str),
+            Some("refund")
+        );
+        assert_eq!(
+            adjustments[0]
+                .get("adjustment_context")
+                .and_then(Value::as_str),
+            Some("edit_settlement")
+        );
+        assert_eq!(
+            adjustments[0].get("amount_cents").and_then(Value::as_i64),
+            Some(1030)
+        );
+        assert_eq!(
+            adjustments[0]
+                .get("idempotency_key")
+                .and_then(Value::as_str),
+            Some("adjustment:adj-settlement-proof")
+        );
     }
 
     #[test]

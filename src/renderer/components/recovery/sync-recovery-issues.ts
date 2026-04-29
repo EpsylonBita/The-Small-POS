@@ -73,6 +73,13 @@ const createRunParitySyncAction = (): RecoveryActionDescriptor =>
 const createRetryParityItemAction = (): RecoveryActionDescriptor =>
   createAction('retryParityItem', 'recovery.actions.retryParityItem.label');
 
+const createRetryCatalogAvailabilityAction = (): RecoveryActionDescriptor =>
+  createAction('retryParityItem', 'recovery.actions.retryCatalogAvailabilitySync.label', {
+    descriptionKey: 'recovery.actions.retryCatalogAvailabilitySync.description',
+    recommended: true,
+    requiresOnline: true,
+  });
+
 const createRetryParityModuleAction = (): RecoveryActionDescriptor =>
   createAction('retryParityModule', 'recovery.actions.retryParityModule.label');
 
@@ -536,6 +543,52 @@ const extractPaymentTotalConflictMetric = (
 const formatAmountParam = (value: number | null): string | null =>
   value === null ? null : value.toFixed(2);
 
+const payloadArray = (
+  payload: Record<string, unknown>,
+  keys: string[],
+): Record<string, unknown>[] => {
+  for (const key of keys) {
+    const value = payload[key];
+    if (Array.isArray(value)) {
+      return value.filter(
+        (row): row is Record<string, unknown> =>
+          !!row && typeof row === 'object' && !Array.isArray(row),
+      );
+    }
+  }
+  return [];
+};
+
+const settlementRefundTotalFromPayload = (payload: Record<string, unknown>): number | null => {
+  const rows = payloadArray(payload, ['settlement_adjustments', 'settlementAdjustments']);
+  if (rows.length === 0) {
+    return null;
+  }
+  const refundTotal = rows.reduce((sum, row) => {
+    const cents = payloadNumber(row, ['amount_cents', 'amountCents']);
+    if (cents !== null) {
+      return sum + cents / 100;
+    }
+    return sum + (payloadNumber(row, ['amount']) ?? 0);
+  }, 0);
+  return Number.isFinite(refundTotal) && refundTotal > 0 ? refundTotal : null;
+};
+
+const formatSettlementMath = (
+  paymentAmount: string | null,
+  settlementRefundTotal: number | null,
+): string | null => {
+  if (!paymentAmount || settlementRefundTotal === null) {
+    return null;
+  }
+  const gross = Number(paymentAmount);
+  if (!Number.isFinite(gross)) {
+    return null;
+  }
+  const net = gross - settlementRefundTotal;
+  return `${gross.toFixed(2)} - ${settlementRefundTotal.toFixed(2)} = ${net.toFixed(2)}`;
+};
+
 const buildPaymentTotalConflictIssues = (
   parityItems: SyncQueueItem[],
 ): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
@@ -570,6 +623,8 @@ const buildPaymentTotalConflictIssues = (
       extractPaymentTotalConflictMetric(error, 'payment:') ??
         payloadNumber(payload, ['amount', 'paymentAmount']),
     );
+    const settlementRefundTotal = settlementRefundTotalFromPayload(payload);
+    const settlementMath = formatSettlementMath(paymentAmount, settlementRefundTotal);
 
     suppressedRows.add(`${item.tableName}:${item.recordId}`);
     issues.push({
@@ -601,6 +656,8 @@ const buildPaymentTotalConflictIssues = (
         orderTotal: remoteOrderTotal,
         paymentAmount,
         existingCompleted,
+        settlementMath,
+        settlementRefundTotal: formatAmountParam(settlementRefundTotal),
       },
       orderId,
       paymentId,
@@ -610,9 +667,62 @@ const buildPaymentTotalConflictIssues = (
   return { issues, suppressedRows };
 };
 
+const isCatalogAvailabilityPatchFailure = (item: SyncQueueItem): boolean => {
+  if (item.status !== 'failed') {
+    return false;
+  }
+  if (!['menu_categories', 'subcategories', 'menu_subcategories'].includes(item.tableName)) {
+    return false;
+  }
+  const normalized = item.errorMessage?.toLowerCase() ?? '';
+  return normalized.includes('generic pos sync updates are not allowed') ||
+    normalized.includes('http 405');
+};
+
+const buildCatalogAvailabilityIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isCatalogAvailabilityPatchFailure);
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+
+  const sample = rows[0];
+  const suppressedRows = new Set(rows.map((item) => `${item.tableName}:${item.recordId}`));
+  return {
+    suppressedRows,
+    issues: [
+      {
+        id: `catalog-availability-retry-${sample.id}`,
+        code: 'catalog_availability_retry',
+        severity: 'error',
+        status: 'blocking',
+        entityType: 'catalog',
+        entityId: sample.recordId,
+        titleKey: 'recovery.issues.catalogAvailabilityRetry.title',
+        summaryKey: 'recovery.issues.catalogAvailabilityRetry.summary',
+        guidanceKey: 'recovery.issues.catalogAvailabilityRetry.guidance',
+        actions: [
+          createRetryCatalogAvailabilityAction(),
+          createRetryParityModuleAction(),
+          createRunParitySyncAction(),
+        ],
+        params: {
+          count: rows.length,
+          sampleItemId: sample.id,
+          sampleTableName: sample.tableName,
+          sampleRecordId: sample.recordId,
+          sampleError: sample.errorMessage ?? null,
+          moduleType: sample.moduleType || 'catalog',
+        },
+      },
+    ],
+  };
+};
+
 const buildParityModuleIssues = (
   parityItems: SyncQueueItem[],
-  suppressedLegacyFinancialRows: Set<string>,
+  suppressedRows: Set<string>,
 ): RecoveryIssue[] => {
   if (parityItems.length === 0) {
     return [];
@@ -620,10 +730,7 @@ const buildParityModuleIssues = (
 
   const grouped = new Map<string, { pending: SyncQueueItem[]; failed: SyncQueueItem[] }>();
   for (const item of parityItems) {
-    if (
-      LEGACY_FINANCIAL_PARITY_TABLES.has(item.tableName) &&
-      suppressedLegacyFinancialRows.has(`${item.tableName}:${item.recordId}`)
-    ) {
+    if (suppressedRows.has(`${item.tableName}:${item.recordId}`)) {
       continue;
     }
     const moduleType = item.moduleType || 'orders';
@@ -1001,6 +1108,10 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of paymentTotalConflictResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const catalogAvailabilityResult = buildCatalogAvailabilityIssues(parityItems);
+  for (const suppressedRow of catalogAvailabilityResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth)) {
     pushIssue(issues, issue);
@@ -1012,6 +1123,9 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, issue);
   }
   for (const issue of paymentTotalConflictResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of catalogAvailabilityResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {

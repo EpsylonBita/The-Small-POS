@@ -4959,6 +4959,7 @@
       "remoteOrderTotal": "Admin total",
       "paymentAmount": "Payment amount",
       "existingCompleted": "Already paid",
+      "settlementMath": "Settlement math",
       "remotePayment": "Remote payment",
       "issueCount_one": "{{count}} issue",
       "issueCount_other": "{{count}} issues",
@@ -4984,10 +4985,14 @@
       "openConnectionSettings": { "label": "Open connection settings" },
       "runParitySyncNow": { "label": "Run sync now" },
       "retryParityItem": { "label": "Retry parity item" },
+      "retryCatalogAvailabilitySync": {
+        "label": "Retry catalog availability",
+        "description": "Retries the blocked availability flag after the admin compatibility fix."
+      },
       "retryParityModule": { "label": "Retry parity module" },
       "repairPaymentTotalConflict": {
         "label": "Fix payment/order mismatch",
-        "description": "Refreshes the order update, rebinds the known payment, then retries only this payment."
+        "description": "Refreshes the order, sends settlement proof, rebinds the payment, then retries the waiting refund."
       },
       "retrySync": { "label": "Retry sync row" },
       "validatePendingOrders": { "label": "Validate pending orders" },
@@ -5061,6 +5066,11 @@
         "title": "Payment/order mismatch",
         "summary": "Admin rejected payment {{paymentAmount}} because its current order total is {{remoteOrderTotal}} and already paid amount is {{existingCompleted}}.",
         "guidance": "Use the recommended fix first. It keeps local records intact, refreshes the parent order update if needed, sends the payment identity, and retries this payment row."
+      },
+      "catalogAvailabilityRetry": {
+        "title": "Catalog availability retry",
+        "summary": "{{count}} catalog availability update failed because admin rejected the old generic sync route.",
+        "guidance": "Use the recommended retry after admin is deployed. Only availability flags are retried; menu names, prices, and structure edits stay blocked."
       },
       "parityModuleFailed": {
         "title": "{{moduleLabel}} parity failures",

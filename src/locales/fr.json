@@ -4959,6 +4959,7 @@
       "remoteOrderTotal": "Total admin",
       "paymentAmount": "Montant du paiement",
       "existingCompleted": "Déjà payé",
+      "settlementMath": "Calcul du règlement",
       "remotePayment": "Paiement distant",
       "issueCount_one": "{{count}} problème",
       "issueCount_other": "{{count}} problèmes",
@@ -4984,10 +4985,14 @@
       "openConnectionSettings": { "label": "Ouvrir les paramètres de connexion" },
       "runParitySyncNow": { "label": "Lancer la synchronisation maintenant" },
       "retryParityItem": { "label": "Réessayer l'élément parity" },
+      "retryCatalogAvailabilitySync": {
+        "label": "Réessayer la disponibilité du catalogue",
+        "description": "Réessaie le flag de disponibilité bloqué après le correctif de compatibilité admin."
+      },
       "retryParityModule": { "label": "Réessayer le module parity" },
       "repairPaymentTotalConflict": {
         "label": "Réparer l'écart paiement/commande",
-        "description": "Actualise la commande, rattache le paiement connu, puis réessaie uniquement ce paiement."
+        "description": "Actualise la commande, envoie la preuve de règlement, rattache le paiement puis réessaie le remboursement en attente."
       },
       "retrySync": { "label": "Réessayer la ligne de synchro" },
       "validatePendingOrders": { "label": "Valider les commandes en attente" },
@@ -5061,6 +5066,11 @@
         "title": "Écart paiement/commande",
         "summary": "Admin a rejeté le paiement {{paymentAmount}} car le total actuel de la commande est {{remoteOrderTotal}} et le montant déjà payé est {{existingCompleted}}.",
         "guidance": "Utilisez d'abord la réparation recommandée. Elle ne supprime aucune donnée locale, actualise la commande parente si nécessaire, envoie l'identité du paiement et réessaie cette ligne."
+      },
+      "catalogAvailabilityRetry": {
+        "title": "Réessai de disponibilité du catalogue",
+        "summary": "{{count}} mise à jour de disponibilité du catalogue a échoué car admin a rejeté l'ancienne route de synchronisation générique.",
+        "guidance": "Utilisez le réessai recommandé après le déploiement admin. Seuls les flags de disponibilité sont réessayés ; les noms, prix et structure du menu restent bloqués."
       },
       "parityModuleFailed": {
         "title": "Échecs parity dans {{moduleLabel}}",

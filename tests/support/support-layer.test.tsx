@@ -612,6 +612,17 @@ test('recovery maps payment total conflicts to the guided repair action and supp
           orderId: 'local-order-1',
           remote_payment_id: 'remote-payment-1',
           amount: 10.4,
+          settlement_adjustments: [
+            {
+              adjustment_id: 'adjustment-1',
+              payment_id: 'local-payment-1',
+              order_id: 'local-order-1',
+              adjustment_type: 'refund',
+              adjustment_context: 'edit_settlement',
+              amount_cents: 222,
+              idempotency_key: 'adjustment:adjustment-1',
+            },
+          ],
         }),
       }),
     ],
@@ -623,9 +634,49 @@ test('recovery maps payment total conflicts to the guided repair action and supp
   assert.equal(issue?.orderId, 'local-order-1');
   assert.equal(issue?.params?.remoteOrderTotal, '8.18');
   assert.equal(issue?.params?.paymentAmount, '10.40');
+  assert.equal(issue?.params?.settlementMath, '10.40 - 2.22 = 8.18');
   assert.deepEqual(
     issue?.actions.map((action) => action.id),
     ['repairPaymentTotalConflict', 'retryParityItem', 'runParitySyncNow'],
+  );
+  assert.equal(issue?.actions[0]?.recommended, true);
+  assert.equal(
+    result.issues.some((candidate) => candidate.code === 'parity_module_failed_items'),
+    false,
+  );
+});
+
+test('recovery maps catalog availability 405 failures to a guided retry and suppresses generic catalog card', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 0, failed: 1, conflicts: 0, total: 1 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'catalog-405-row',
+        tableName: 'subcategories',
+        recordId: 'subcategory-1',
+        moduleType: 'catalog',
+        status: 'failed',
+        errorMessage:
+          "HTTP 405: Generic POS sync updates are not allowed for 'subcategories'",
+      }),
+    ],
+  });
+
+  const issue = result.issues.find(
+    (candidate) => candidate.code === 'catalog_availability_retry',
+  );
+  assert.ok(issue, 'guided catalog availability issue should be present');
+  assert.equal(issue?.params?.sampleTableName, 'subcategories');
+  assert.deepEqual(
+    issue?.actions.map((action) => action.id),
+    ['retryParityItem', 'retryParityModule', 'runParitySyncNow'],
   );
   assert.equal(issue?.actions[0]?.recommended, true);
   assert.equal(
