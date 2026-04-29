@@ -2465,6 +2465,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const result = await bridge.reports.resolvePaymentBlocker({
         orderId: blocker.orderId,
         method,
+        staffShiftId: effectiveShift?.id,
+        staffId:
+          staff?.databaseStaffId ||
+          (isUuidValue(staff?.staffId) ? staff.staffId.trim() : undefined),
       });
 
       if (result?.success === false) {

@@ -853,6 +853,8 @@ export interface RecordPaymentParams {
 export interface ResolvePaymentBlockerParams {
   orderId: string;
   method: "cash" | "card";
+  staffShiftId?: string;
+  staffId?: string;
 }
 
 export interface UpdatePaymentMethodResult {

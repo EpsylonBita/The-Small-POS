@@ -87,6 +87,16 @@ struct ResolvePaymentBlockerPayload {
     #[serde(alias = "order_id")]
     order_id: String,
     method: String,
+    #[serde(
+        default,
+        alias = "staffShiftId",
+        alias = "staff_shift_id",
+        alias = "shiftId",
+        alias = "shift_id"
+    )]
+    staff_shift_id: Option<String>,
+    #[serde(default, alias = "staffId", alias = "staff_id")]
+    staff_id: Option<String>,
 }
 
 fn normalize_payload_with_branch(arg0: Option<serde_json::Value>) -> serde_json::Value {
@@ -135,6 +145,14 @@ fn parse_resolve_payment_blocker_payload(
         .map_err(|e| format!("Invalid payment blocker repair payload: {e}"))?;
     parsed.order_id = parsed.order_id.trim().to_string();
     parsed.method = parsed.method.trim().to_ascii_lowercase();
+    parsed.staff_shift_id = parsed
+        .staff_shift_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    parsed.staff_id = parsed
+        .staff_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     if parsed.order_id.is_empty() {
         return Err("Missing orderId".into());
     }
@@ -144,6 +162,8 @@ fn parse_resolve_payment_blocker_payload(
     Ok(serde_json::json!({
         "orderId": parsed.order_id,
         "method": parsed.method,
+        "staffShiftId": parsed.staff_shift_id,
+        "staffId": parsed.staff_id,
     }))
 }
 

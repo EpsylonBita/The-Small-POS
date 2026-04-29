@@ -6831,6 +6831,17 @@ pub(crate) fn resolve_payment_total_conflict_with_server_hint_with_conn(
         return Ok(None);
     }
 
+    if defer_payment_total_conflict_while_parent_order_lags_with_conn(
+        conn,
+        payment_id,
+        error_message,
+        resolved_at,
+    )?
+    .is_some()
+    {
+        return Ok(None);
+    }
+
     if (payment_context.amount - server_hint.payment_amount).abs() > 0.02 {
         return Ok(None);
     }
@@ -6856,6 +6867,147 @@ pub(crate) fn resolve_payment_total_conflict_with_server_hint_with_conn(
         amount: payment_context.amount,
         outstanding_before,
     }))
+}
+
+#[derive(Debug, Clone)]
+struct DeferredLaggedPaymentTotalConflict {
+    order_id: String,
+    payment_amount: f64,
+    local_total: f64,
+    remote_total: f64,
+    queued_order_update: bool,
+}
+
+fn defer_payment_total_conflict_while_parent_order_lags_with_conn(
+    conn: &Connection,
+    payment_id: &str,
+    error_message: &str,
+    deferred_at: &str,
+) -> Result<Option<DeferredLaggedPaymentTotalConflict>, String> {
+    if !is_payment_total_conflict_error(error_message) {
+        return Ok(None);
+    }
+
+    let Some(server_hint) = parse_payment_total_conflict_server_hint(error_message) else {
+        return Ok(None);
+    };
+
+    let Some(payment_context) = load_local_payment_total_conflict_context(conn, payment_id)? else {
+        return Ok(None);
+    };
+
+    if !can_auto_void_local_payment_total_conflict(&payment_context) {
+        return Ok(None);
+    }
+
+    let payment_amount_cents = Cents::round_half_even(payment_context.amount).as_i64();
+    let server_payment_cents = Cents::round_half_even(server_hint.payment_amount).as_i64();
+    if (payment_amount_cents - server_payment_cents).abs() > 1 {
+        return Ok(None);
+    }
+
+    let local_total_cents: i64 = conn
+        .query_row(
+            "SELECT COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+             FROM orders
+             WHERE id = ?1
+             LIMIT 1",
+            params![payment_context.order_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load local total for lagged payment conflict: {e}"))?;
+    let remote_total_cents = Cents::round_half_even(server_hint.order_total).as_i64();
+    if local_total_cents <= remote_total_cents {
+        return Ok(None);
+    }
+
+    let other_completed_cents: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(
+                 COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0)
+             ), 0)
+             FROM order_payments
+             WHERE order_id = ?1
+               AND id != ?2
+               AND status = 'completed'",
+            params![payment_context.order_id.as_str(), payment_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load local paid total for lagged payment conflict: {e}"))?;
+
+    let server_existing_cents = Cents::round_half_even(server_hint.existing_completed).as_i64();
+    let local_delta_cents = local_total_cents - remote_total_cents;
+    let payment_matches_local_delta = (payment_amount_cents - local_delta_cents).abs() <= 1;
+    let payment_fills_local_total =
+        (other_completed_cents + payment_amount_cents - local_total_cents).abs() <= 1;
+    let server_existing_matches_local_base =
+        (other_completed_cents - server_existing_cents).abs() <= 1;
+
+    if !(payment_matches_local_delta
+        && payment_fills_local_total
+        && server_existing_matches_local_base)
+    {
+        return Ok(None);
+    }
+
+    let queued_order_update =
+        enqueue_local_order_update_after_lagged_snapshot(conn, &payment_context.order_id)?;
+    let last_error = format!(
+        "Deferred payment because admin order total is stale (local {:.2}, remote {:.2}); parent order update must sync first",
+        Cents::new(local_total_cents).to_f64_dp2(),
+        server_hint.order_total
+    );
+
+    conn.execute(
+        "UPDATE sync_queue
+         SET status = 'deferred',
+             retry_count = 0,
+             last_error = ?1,
+             next_retry_at = NULL,
+             updated_at = ?2
+         WHERE entity_type IN ('payment', 'order_payments')
+           AND entity_id = ?3
+           AND status != 'synced'",
+        params![last_error, deferred_at, payment_id],
+    )
+    .map_err(|e| format!("defer lagged payment total conflict queue row: {e}"))?;
+
+    conn.execute(
+        "UPDATE order_payments
+         SET sync_status = 'pending',
+             sync_state = 'waiting_parent',
+             sync_retry_count = 0,
+             sync_last_error = ?1,
+             sync_next_retry_at = NULL,
+             updated_at = ?2
+         WHERE id = ?3
+           AND status = 'completed'",
+        params![last_error, deferred_at, payment_id],
+    )
+    .map_err(|e| format!("defer lagged payment total conflict payment row: {e}"))?;
+
+    Ok(Some(DeferredLaggedPaymentTotalConflict {
+        order_id: payment_context.order_id,
+        payment_amount: payment_context.amount,
+        local_total: Cents::new(local_total_cents).to_f64_dp2(),
+        remote_total: server_hint.order_total,
+        queued_order_update,
+    }))
+}
+
+fn defer_payment_total_conflict_while_parent_order_lags(
+    db: &DbState,
+    payment_id: &str,
+    error_message: &str,
+) -> Result<Option<DeferredLaggedPaymentTotalConflict>, String> {
+    let deferred_at = Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    defer_payment_total_conflict_while_parent_order_lags_with_conn(
+        &conn,
+        payment_id,
+        error_message,
+        &deferred_at,
+    )
 }
 
 pub(crate) fn resolve_stale_local_payment_total_conflict(
@@ -8361,6 +8513,100 @@ fn remote_order_snapshot_lags_local_pending_payment_delta(
     Ok(false)
 }
 
+fn parse_json_array_or_empty(raw: &str) -> Value {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .filter(Value::is_array)
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+fn build_local_order_update_payload_for_lagged_snapshot(
+    conn: &Connection,
+    local_order_id: &str,
+) -> Result<Value, String> {
+    conn.query_row(
+        "SELECT
+             COALESCE(status, 'pending'),
+             COALESCE(order_type, 'pickup'),
+             COALESCE(items, '[]'),
+             COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
+             COALESCE(subtotal_cents, CAST(ROUND(subtotal * 100) AS INTEGER), 0),
+             COALESCE(discount_amount_cents, CAST(ROUND(discount_amount * 100) AS INTEGER), 0),
+             COALESCE(discount_percentage, 0),
+             COALESCE(tax_amount_cents, CAST(ROUND(tax_amount * 100) AS INTEGER), 0),
+             COALESCE(delivery_fee_cents, CAST(ROUND(delivery_fee * 100) AS INTEGER), 0),
+             COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
+             COALESCE(payment_status, 'pending'),
+             customer_id,
+             customer_name,
+             customer_email,
+             customer_phone,
+             delivery_address,
+             delivery_address_id,
+             delivery_city,
+             delivery_postal_code,
+             delivery_floor,
+             delivery_notes,
+             name_on_ringer,
+             delivery_latitude,
+             delivery_longitude,
+             delivery_address_fingerprint,
+             delivery_zone_id
+         FROM orders
+         WHERE id = ?1
+         LIMIT 1",
+        params![local_order_id],
+        |row| {
+            let items_raw: String = row.get(2)?;
+            let total_cents: i64 = row.get(3)?;
+            let subtotal_cents: i64 = row.get(4)?;
+            let discount_cents: i64 = row.get(5)?;
+            let tax_cents: i64 = row.get(7)?;
+            let delivery_fee_cents: i64 = row.get(8)?;
+            let tip_cents: i64 = row.get(9)?;
+            Ok(serde_json::json!({
+                "orderId": local_order_id,
+                "status": row.get::<_, String>(0)?,
+                "orderType": row.get::<_, String>(1)?,
+                "items": parse_json_array_or_empty(&items_raw),
+                "totalAmount": Cents::new(total_cents).to_f64_dp2(),
+                "total_amount_cents": total_cents,
+                "subtotal": Cents::new(subtotal_cents).to_f64_dp2(),
+                "subtotal_cents": subtotal_cents,
+                "discountAmount": Cents::new(discount_cents).to_f64_dp2(),
+                "discount_amount_cents": discount_cents,
+                "discountPercentage": row.get::<_, f64>(6)?,
+                "taxAmount": Cents::new(tax_cents).to_f64_dp2(),
+                "tax_amount_cents": tax_cents,
+                "deliveryFee": Cents::new(delivery_fee_cents).to_f64_dp2(),
+                "delivery_fee_cents": delivery_fee_cents,
+                "tipAmount": Cents::new(tip_cents).to_f64_dp2(),
+                "tip_amount_cents": tip_cents,
+                "paymentStatus": row.get::<_, String>(10)?,
+                "customerId": row.get::<_, Option<String>>(11)?,
+                "customerName": row.get::<_, Option<String>>(12)?,
+                "customerEmail": row.get::<_, Option<String>>(13)?,
+                "customerPhone": row.get::<_, Option<String>>(14)?,
+                "deliveryAddress": row.get::<_, Option<String>>(15)?,
+                "deliveryAddressId": row.get::<_, Option<String>>(16)?,
+                "deliveryCity": row.get::<_, Option<String>>(17)?,
+                "deliveryPostalCode": row.get::<_, Option<String>>(18)?,
+                "deliveryFloor": row.get::<_, Option<String>>(19)?,
+                "deliveryNotes": row.get::<_, Option<String>>(20)?,
+                "nameOnRinger": row.get::<_, Option<String>>(21)?,
+                "deliveryLatitude": row.get::<_, Option<f64>>(22)?,
+                "deliveryLongitude": row.get::<_, Option<f64>>(23)?,
+                "deliveryAddressFingerprint": row.get::<_, Option<String>>(24)?,
+                "deliveryZoneId": row.get::<_, Option<String>>(25)?,
+                "syncRecoveryReason": "remote_snapshot_lags_local_delivery_payment_delta",
+            }))
+        },
+    )
+    .optional()
+    .map_err(|e| format!("load lagged local order update payload: {e}"))?
+    .ok_or_else(|| format!("Order {local_order_id} not found for lagged snapshot recovery"))
+}
+
 fn enqueue_local_order_update_after_lagged_snapshot(
     conn: &Connection,
     local_order_id: &str,
@@ -8369,11 +8615,7 @@ fn enqueue_local_order_update_after_lagged_snapshot(
         return Ok(false);
     }
 
-    let payload = serde_json::json!({
-        "id": local_order_id,
-        "orderId": local_order_id,
-        "syncRecoveryReason": "remote_snapshot_lags_local_delivery_payment_delta",
-    });
+    let payload = build_local_order_update_payload_for_lagged_snapshot(conn, local_order_id)?;
     let queue_id = crate::sync_queue::enqueue_payload_item(
         conn,
         "orders",
@@ -9267,21 +9509,22 @@ async fn recover_payment_total_conflicts(
     admin_url: &str,
     api_key: &str,
 ) -> Result<usize, String> {
-    let pending_conflicts: Vec<(String, String)> = {
+    let pending_conflicts: Vec<(String, String, String)> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT DISTINCT op.id, op.order_id
+                "SELECT op.id, op.order_id, COALESCE(MAX(sq.last_error), 'Payment exceeds order total')
                  FROM sync_queue sq
                  JOIN order_payments op ON op.id = sq.entity_id
                  WHERE sq.entity_type IN ('payment', 'order_payments')
                    AND sq.status != 'synced'
-                   AND LOWER(COALESCE(sq.last_error, '')) LIKE '%payment exceeds order total%'",
+                   AND LOWER(COALESCE(sq.last_error, '')) LIKE '%payment exceeds order total%'
+                 GROUP BY op.id, op.order_id",
             )
             .map_err(|e| format!("prepare payment conflict recovery query: {e}"))?;
 
         let rows = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .map_err(|e| format!("query payment conflict recovery rows: {e}"))?
             .filter_map(|row| row.ok())
             .collect();
@@ -9295,7 +9538,7 @@ async fn recover_payment_total_conflicts(
     let mut stale_overpay_resolved = 0usize;
     let mut tax_inflated_total_repaired = 0usize;
 
-    for (payment_id, local_order_id) in pending_conflicts {
+    for (payment_id, local_order_id, last_error) in pending_conflicts {
         let remote_outcome = reconcile_remote_payments_for_local_order_with_context(
             db,
             admin_url,
@@ -9353,6 +9596,21 @@ async fn recover_payment_total_conflicts(
                 repaired_total_cents = repair.repaired_total_cents,
                 voided_payment_cents = repair.voided_payment_cents,
                 "Corrected tax-inflated local order total after payment total conflict"
+            );
+            continue;
+        }
+
+        if let Some(deferred) =
+            defer_payment_total_conflict_while_parent_order_lags(db, &payment_id, &last_error)?
+        {
+            info!(
+                payment_id = %payment_id,
+                order_id = %deferred.order_id,
+                amount = deferred.payment_amount,
+                local_total = deferred.local_total,
+                remote_total = deferred.remote_total,
+                queued_order_update = deferred.queued_order_update,
+                "Deferred payment total conflict while parent order update catches up"
             );
             continue;
         }
@@ -9942,6 +10200,77 @@ fn str_any(v: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+fn nested_str_any<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = v;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str()
+}
+
+fn order_customization_key(value: &Value, index: usize) -> String {
+    value
+        .get("customizationId")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("optionId").and_then(Value::as_str))
+        .or_else(|| value.get("name").and_then(Value::as_str))
+        .or_else(|| nested_str_any(value, &["ingredient", "id"]))
+        .or_else(|| nested_str_any(value, &["ingredient", "name"]))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("item-{index}"))
+}
+
+fn normalize_order_customizations_for_sync(value: Option<&Value>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+
+    match value {
+        Value::Object(object) => Value::Object(object.clone()),
+        Value::Array(items) => {
+            let mut normalized = serde_json::Map::new();
+            for (index, item) in items.iter().enumerate() {
+                normalized.insert(order_customization_key(item, index), item.clone());
+            }
+            Value::Object(normalized)
+        }
+        Value::String(raw) => serde_json::from_str::<Value>(raw)
+            .ok()
+            .map(|parsed| normalize_order_customizations_for_sync(Some(&parsed)))
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+fn normalize_order_items_customizations_for_sync(items: &Value) -> Value {
+    match items {
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .cloned()
+                .map(|mut item| {
+                    if let Value::Object(ref mut object) = item {
+                        if object.contains_key("customizations") {
+                            let normalized = normalize_order_customizations_for_sync(
+                                object.get("customizations"),
+                            );
+                            object.insert("customizations".to_string(), normalized);
+                        }
+                    }
+                    item
+                })
+                .collect(),
+        ),
+        Value::String(raw) => serde_json::from_str::<Value>(raw)
+            .ok()
+            .map(|parsed| normalize_order_items_customizations_for_sync(&parsed))
+            .unwrap_or_else(|| items.clone()),
+        _ => items.clone(),
+    }
+}
+
 fn mark_adjustment_waiting_on_parent(
     conn: &Connection,
     queue_id: i64,
@@ -10454,11 +10783,7 @@ fn normalize_order_items_for_sync(items: &Value) -> Vec<Value> {
         } else {
             (unit_price * quantity as f64).max(0.0)
         };
-        let customizations = item
-            .get("customizations")
-            .filter(|v| v.is_object())
-            .cloned()
-            .unwrap_or(Value::Null);
+        let customizations = normalize_order_customizations_for_sync(item.get("customizations"));
 
         let notes = str_any(&item, &["notes"]);
 
@@ -11248,9 +11573,10 @@ async fn sync_order_batch_via_direct_api(
         // Forward item updates when present (from order_update_items)
         if let Some(items) = payload_value.get("items") {
             if !items.is_null() {
-                body.as_object_mut()
-                    .unwrap()
-                    .insert("items".to_string(), items.clone());
+                body.as_object_mut().unwrap().insert(
+                    "items".to_string(),
+                    normalize_order_items_customizations_for_sync(items),
+                );
             }
         }
         if let Some(order_notes) = payload_value.get("orderNotes") {
@@ -13112,6 +13438,66 @@ async fn sync_payment_items(
                                 order_id = %local_order_id,
                                 error = %resolve_error,
                                 "Failed to resolve stale duplicate local payment conflict"
+                            );
+                        }
+                    }
+
+                    let repaired_tax_inflated_total = {
+                        let repaired_at = Utc::now().to_rfc3339();
+                        match db.conn.lock() {
+                            Ok(conn) => repair_tax_inflated_local_order_total_for_payment_conflict(
+                                &conn,
+                                local_order_id,
+                                entity_id,
+                                &repaired_at,
+                            ),
+                            Err(err) => Err(format!("db lock: {err}")),
+                        }
+                    };
+                    match repaired_tax_inflated_total {
+                        Ok(Some(repair)) => {
+                            info!(
+                                payment_id = %repair.payment_id,
+                                order_id = %repair.order_id,
+                                previous_total_cents = repair.previous_total_cents,
+                                repaired_total_cents = repair.repaired_total_cents,
+                                voided_payment_cents = repair.voided_payment_cents,
+                                "Payment sync conflict resolved by correcting tax-inflated local order total"
+                            );
+                            synced += 1;
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(resolve_error) => {
+                            warn!(
+                                payment_id = %entity_id,
+                                order_id = %local_order_id,
+                                error = %resolve_error,
+                                "Failed to correct tax-inflated local order total after payment conflict"
+                            );
+                        }
+                    }
+
+                    match defer_payment_total_conflict_while_parent_order_lags(db, entity_id, &e) {
+                        Ok(Some(deferred)) => {
+                            info!(
+                                payment_id = %entity_id,
+                                order_id = %deferred.order_id,
+                                amount = deferred.payment_amount,
+                                local_total = deferred.local_total,
+                                remote_total = deferred.remote_total,
+                                queued_order_update = deferred.queued_order_update,
+                                "Payment sync conflict deferred while parent order update catches up"
+                            );
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(resolve_error) => {
+                            warn!(
+                                payment_id = %entity_id,
+                                order_id = %local_order_id,
+                                error = %resolve_error,
+                                "Failed to defer payment total conflict behind parent order update"
                             );
                         }
                     }
@@ -15786,6 +16172,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn normalize_order_items_customizations_for_sync_converts_arrays_to_objects() {
+        let items = serde_json::json!([{
+            "menu_item_id": "00000000-0000-0000-0000-000000000001",
+            "quantity": 1,
+            "unit_price": 6.4,
+            "name": "Crepe",
+            "customizations": [{
+                "optionId": "extra-honey",
+                "name": "Extra Honey"
+            }]
+        }]);
+
+        let normalized = normalize_order_items_customizations_for_sync(&items);
+        let customizations = normalized
+            .get(0)
+            .and_then(|item| item.get("customizations"))
+            .and_then(Value::as_object)
+            .expect("customizations object");
+
+        assert_eq!(
+            customizations.get("extra-honey"),
+            Some(&serde_json::json!({
+                "optionId": "extra-honey",
+                "name": "Extra Honey"
+            }))
+        );
+    }
+
     fn insert_order_sync_queue_row(db: &DbState, order_id: &str, max_retries: i64) -> i64 {
         let conn = db.conn.lock().unwrap();
         let idem = format!("order:{order_id}:insert");
@@ -17817,6 +18232,128 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "completed");
+    }
+
+    #[test]
+    fn test_payment_total_conflict_defers_when_remote_order_total_lags_local_delivery_delta() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, order_number, items, total_amount, total_amount_cents,
+                subtotal, subtotal_cents, delivery_fee, delivery_fee_cents,
+                status, payment_status, order_type, sync_status, branch_id,
+                delivery_address, created_at, updated_at
+            ) VALUES (
+                'ord-lagged-delta', 'remote-lagged-delta', 'ORD-LAGGED', '[]', 6.4, 640,
+                6.4, 640, 0.4, 40,
+                'completed', 'paid', 'delivery', 'synced', 'branch-1',
+                'Lagged Street 1', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-lagged-base', 'ord-lagged-delta', 'cash', 6.0, 600, 'EUR', 'completed',
+                'remote-pay-lagged-base', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                sync_status, sync_state, sync_last_error, created_at, updated_at
+            ) VALUES (
+                'pay-lagged-delta', 'ord-lagged-delta', 'cash', 0.4, 40, 'EUR', 'completed',
+                'failed', 'failed', 'Payment exceeds order total', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+            ) VALUES (
+                'payment', 'pay-lagged-delta', 'insert', '{}', 'payment:pay-lagged-delta',
+                'failed', 5, 5,
+                'Payment exceeds order total (HTTP 422): \"Order total: 6, tip: 0, existing completed: 6, payment: 0.4\"'
+            )",
+            [],
+        )
+        .unwrap();
+
+        let deferred = defer_payment_total_conflict_while_parent_order_lags_with_conn(
+            &conn,
+            "pay-lagged-delta",
+            "Payment exceeds order total (HTTP 422): \"Order total: 6, tip: 0, existing completed: 6, payment: 0.4\"",
+            "2026-04-28T10:00:00Z",
+        )
+        .expect("defer lagged payment conflict")
+        .expect("lagged payment should defer");
+
+        assert_eq!(deferred.order_id, "ord-lagged-delta");
+        assert!(deferred.queued_order_update);
+        assert!((deferred.local_total - 6.4).abs() < 0.001);
+        assert!((deferred.remote_total - 6.0).abs() < 0.001);
+
+        let (payment_status, sync_status, sync_state): (String, String, String) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = 'pay-lagged-delta'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_status, "completed");
+        assert_eq!(sync_status, "pending");
+        assert_eq!(sync_state, "waiting_parent");
+
+        let queue_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = 'pay-lagged-delta'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queue_status, "deferred");
+
+        let order_update_payload: String = conn
+            .query_row(
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'ord-lagged-delta'
+                   AND operation = 'UPDATE'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&order_update_payload).unwrap();
+        assert_eq!(payload["orderType"], "delivery");
+        assert_eq!(payload["totalAmount"].as_f64().unwrap(), 6.4);
+        assert_eq!(payload["deliveryFee"].as_f64().unwrap(), 0.4);
+        assert_eq!(payload["deliveryAddress"], "Lagged Street 1");
+
+        let blockers =
+            crate::payment_integrity::load_order_payment_blockers(&conn, "ord-lagged-delta")
+                .expect("load blockers");
+        assert!(
+            blockers.is_empty(),
+            "deferred local repair still settles the order"
+        );
     }
 
     #[test]

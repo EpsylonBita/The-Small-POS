@@ -132,24 +132,23 @@ fn resolve_historical_cashier_repair_context(
 
     let recorded_at = business_day::resolve_order_financial_effective_at(conn, order_id)?;
 
-    if order_type.eq_ignore_ascii_case("delivery") {
-        if let Some(driver_shift_id) = order_staff_shift_id
+    let delivery_driver_owned = if order_type.eq_ignore_ascii_case("delivery") {
+        order_staff_shift_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
-            if let Some((role_type, _, _)) =
-                load_shift_role_status_and_staff(conn, driver_shift_id)?
-            {
-                if role_type == "driver" {
-                    return Err(
-                        "This blocked delivery order must be repaired from its driver/order settlement flow."
-                            .to_string(),
-                    );
-                }
-            }
-        }
-    }
+            .map(|driver_shift_id| {
+                load_shift_role_status_and_staff(conn, driver_shift_id).map(|shift| {
+                    shift
+                        .map(|(role_type, _, _)| role_type == "driver")
+                        .unwrap_or(false)
+                })
+            })
+            .transpose()?
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     if let Some(shift_id) = order_staff_shift_id
         .as_deref()
@@ -182,6 +181,12 @@ fn resolve_historical_cashier_repair_context(
     let Some((shift_id, staff_id)) =
         business_day::find_cashier_owner_for_timestamp(conn, &branch_id, &recorded_at)?
     else {
+        if delivery_driver_owned {
+            return Err(
+                "This blocked delivery order is attached to a driver shift, and no cashier drawer covered the original financial timestamp."
+                    .to_string(),
+            );
+        }
         return Err(
             "No historical cashier drawer was found for this blocked order. Reopen the order or ask support to repair it."
                 .to_string(),
@@ -196,6 +201,12 @@ fn resolve_historical_cashier_repair_context(
     };
 
     if role_type != "cashier" && role_type != "manager" {
+        if delivery_driver_owned {
+            return Err(
+                "This blocked delivery order is attached to a driver shift, and the historical owner is not a cashier drawer."
+                    .to_string(),
+            );
+        }
         return Err(
             "The original business-day owner is not a cashier drawer, so this blocker cannot be repaired automatically from Z-report."
                 .to_string(),
@@ -204,6 +215,79 @@ fn resolve_historical_cashier_repair_context(
 
     Ok(HistoricalPaymentRepairContext {
         shift_id,
+        staff_id,
+        shift_status,
+        recorded_at,
+    })
+}
+
+fn resolve_checkout_cashier_repair_context(
+    conn: &Connection,
+    order_id: &str,
+    shift_id: &str,
+    requested_staff_id: Option<String>,
+) -> Result<HistoricalPaymentRepairContext, String> {
+    let shift_id = shift_id.trim();
+    if shift_id.is_empty() {
+        return Err("Missing cashier shift for payment repair".to_string());
+    }
+
+    let financial_at = business_day::resolve_order_financial_effective_at(conn, order_id)?;
+    let order_branch_id: String = conn
+        .query_row(
+            "SELECT COALESCE(branch_id, '')
+             FROM orders
+             WHERE id = ?1
+             LIMIT 1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load order branch for payment repair: {e}"))?;
+
+    let (role_type, shift_staff_id, shift_status, shift_branch_id): (
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT role_type, staff_id, status, COALESCE(branch_id, '')
+             FROM staff_shifts
+             WHERE id = ?1
+             LIMIT 1",
+            params![shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load cashier shift for payment repair: {e}"))?
+        .ok_or_else(|| format!("Cashier shift {shift_id} was not found"))?;
+
+    if role_type != "cashier" && role_type != "manager" {
+        return Err(
+            "Payment repair from checkout requires a cashier or manager drawer".to_string(),
+        );
+    }
+    if !order_branch_id.trim().is_empty()
+        && !shift_branch_id.trim().is_empty()
+        && order_branch_id != shift_branch_id
+    {
+        return Err("Payment repair shift belongs to a different branch".to_string());
+    }
+
+    let staff_id = requested_staff_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or(shift_staff_id);
+    let recorded_at = if business_day::shift_contains_timestamp(conn, shift_id, &financial_at)? {
+        financial_at
+    } else {
+        Utc::now().to_rfc3339()
+    };
+
+    Ok(HistoricalPaymentRepairContext {
+        shift_id: shift_id.to_string(),
         staff_id,
         shift_status,
         recorded_at,
@@ -755,9 +839,7 @@ pub(crate) fn record_payment_in_connection(
                 .filter(|value| !value.is_empty())
                 .is_some();
 
-    let (resolved_shift_id, resolved_staff_id) = if keep_delivery_unassigned {
-        (None, None)
-    } else if explicit_cashier_drawer_shift {
+    let (resolved_shift_id, resolved_staff_id) = if explicit_cashier_drawer_shift {
         let shift_id = input
             .requested_staff_shift_id
             .as_deref()
@@ -785,6 +867,8 @@ pub(crate) fn record_payment_in_connection(
             .map(|value| value.to_string())
             .or(Some(shift_staff_id));
         (Some(shift_id), staff_id)
+    } else if keep_delivery_unassigned {
+        (None, None)
     } else if cashier_collected_delivery_cash {
         return Err(
             "Cashier-collected delivery payments require a cashier shift context".to_string(),
@@ -1154,9 +1238,28 @@ pub fn resolve_unsettled_payment_blocker_payment(
             &blockers,
         ));
     }
-    let repair_context = match resolve_historical_cashier_repair_context(&conn, &actual_order_id) {
-        Ok(context) => context,
-        Err(error) => return Ok(build_payment_blocker_failure(error, &blockers)),
+    let requested_shift_id = str_field(payload, "staffShiftId")
+        .or_else(|| str_field(payload, "staff_shift_id").or_else(|| str_field(payload, "shiftId")));
+    let requested_staff_id =
+        str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
+    let repair_context = match requested_shift_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(shift_id) => match resolve_checkout_cashier_repair_context(
+            &conn,
+            &actual_order_id,
+            shift_id,
+            requested_staff_id,
+        ) {
+            Ok(context) => context,
+            Err(error) => return Ok(build_payment_blocker_failure(error, &blockers)),
+        },
+        None => match resolve_historical_cashier_repair_context(&conn, &actual_order_id) {
+            Ok(context) => context,
+            Err(error) => return Ok(build_payment_blocker_failure(error, &blockers)),
+        },
     };
 
     let now = repair_context.recorded_at.clone();
@@ -3140,6 +3243,349 @@ mod tests {
         let blockers = payment_integrity::load_order_payment_blockers(&conn, "ord-z-block")
             .expect("load blockers after repair");
         assert!(blockers.is_empty(), "repair should clear payment blockers");
+    }
+
+    #[test]
+    fn test_resolve_unsettled_payment_blocker_uses_checkout_cashier_shift_for_delivery_delta() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let check_in = "2026-04-27T17:00:00Z";
+        let order_at = "2026-04-27T20:00:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'shift-checkout-repair', 'cashier-repair', 'cashier', 'branch-repair', 'terminal-repair', ?1,
+                100.0, 10000, 'active', 2, 'synced', ?1, ?1
+            )",
+            params![check_in],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                total_card_sales, total_card_sales_cents,
+                opened_at, reconciled, created_at, updated_at
+            ) VALUES (
+                'drawer-checkout-repair', 'shift-checkout-repair', 'cashier-repair', 'branch-repair', 'terminal-repair',
+                100.0, 10000, 0.0, 0, 0.0, 0, ?1, 0, ?1, ?1
+            )",
+            params![check_in],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, payment_status,
+                order_type, sync_status, branch_id, terminal_id, created_at, updated_at
+            ) VALUES (
+                'ord-delivery-delta', 'ORD-DELTA', '[]', 6.40, 640, 'completed', 'partially_paid',
+                'delivery', 'synced', 'branch-repair', 'terminal-repair', ?1, ?1
+            )",
+            params![order_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                cash_received, cash_received_cents, change_given, change_given_cents,
+                sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-delivery-existing', 'ord-delivery-delta', 'cash', 6.0, 600, 'EUR', 'completed',
+                6.0, 600, 0.0, 0, 'synced', 'applied', ?1, ?1
+            )",
+            params![order_at],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = resolve_unsettled_payment_blocker_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-delivery-delta",
+                "method": "cash",
+                "staffShiftId": "shift-checkout-repair",
+                "staffId": "cashier-repair",
+            }),
+        )
+        .expect("repair delivery delta from cashier checkout");
+        assert_eq!(result["success"], true);
+        let repaired_amount = result["amount"].as_f64().expect("repair amount");
+        assert!(
+            (repaired_amount - 0.4).abs() < 0.001,
+            "expected 0.40 repair amount, got {repaired_amount}"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let (payment_shift_id, payment_staff_id, amount_cents): (
+            Option<String>,
+            Option<String>,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT staff_shift_id, staff_id, amount_cents
+                 FROM order_payments
+                 WHERE order_id = 'ord-delivery-delta'
+                   AND id != 'pay-delivery-existing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_shift_id.as_deref(), Some("shift-checkout-repair"));
+        assert_eq!(payment_staff_id.as_deref(), Some("cashier-repair"));
+        assert_eq!(amount_cents, 40);
+
+        let drawer_cash_sales_cents: i64 = conn
+            .query_row(
+                "SELECT total_cash_sales_cents
+                 FROM cash_drawer_sessions
+                 WHERE staff_shift_id = 'shift-checkout-repair'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(drawer_cash_sales_cents, 40);
+
+        let blockers = payment_integrity::load_order_payment_blockers(&conn, "ord-delivery-delta")
+            .expect("load blockers after delivery repair");
+        assert!(blockers.is_empty(), "repair should clear payment blockers");
+    }
+
+    #[test]
+    fn test_resolve_unsettled_payment_blocker_checkout_shift_repairs_driver_delivery_delta() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let check_in = "2026-04-27T17:00:00Z";
+        let order_at = "2026-04-27T20:00:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'shift-driver-owner', 'driver-owner', 'driver', 'branch-repair', 'terminal-repair', ?1,
+                20.0, 2000, 'active', 2, 'synced', ?1, ?1
+            )",
+            params![check_in],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'shift-cashier-owner', 'cashier-owner', 'cashier', 'branch-repair', 'terminal-repair', ?1,
+                100.0, 10000, 'active', 2, 'synced', ?1, ?1
+            )",
+            params![check_in],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                total_card_sales, total_card_sales_cents,
+                opened_at, reconciled, created_at, updated_at
+            ) VALUES (
+                'drawer-cashier-owner', 'shift-cashier-owner', 'cashier-owner', 'branch-repair', 'terminal-repair',
+                100.0, 10000, 0.0, 0, 0.0, 0, ?1, 0, ?1, ?1
+            )",
+            params![check_in],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, payment_status,
+                order_type, driver_id, sync_status, branch_id, terminal_id, staff_shift_id,
+                created_at, updated_at
+            ) VALUES (
+                'ord-driver-delta', 'ORD-DRIVER-DELTA', '[]', 6.40, 640, 'completed', 'partially_paid',
+                'delivery', 'driver-owner', 'synced', 'branch-repair', 'terminal-repair', 'shift-driver-owner',
+                ?1, ?1
+            )",
+            params![order_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                cash_received, cash_received_cents, change_given, change_given_cents,
+                staff_shift_id, staff_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-driver-existing', 'ord-driver-delta', 'cash', 6.0, 600, 'EUR', 'completed',
+                6.0, 600, 0.0, 0, 'shift-driver-owner', 'driver-owner', 'synced', 'applied', ?1, ?1
+            )",
+            params![order_at],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = resolve_unsettled_payment_blocker_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-driver-delta",
+                "method": "cash",
+                "staffShiftId": "shift-cashier-owner",
+                "staffId": "cashier-owner",
+            }),
+        )
+        .expect("repair driver delivery delta from cashier checkout");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let (payment_shift_id, amount_cents): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT staff_shift_id, amount_cents
+                 FROM order_payments
+                 WHERE order_id = 'ord-driver-delta'
+                   AND id != 'pay-driver-existing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_shift_id.as_deref(), Some("shift-cashier-owner"));
+        assert_eq!(amount_cents, 40);
+
+        let blockers = payment_integrity::load_order_payment_blockers(&conn, "ord-driver-delta")
+            .expect("load blockers after driver delivery repair");
+        assert!(
+            blockers.is_empty(),
+            "repair should clear driver delivery blockers"
+        );
+    }
+
+    #[test]
+    fn test_resolve_unsettled_payment_blocker_z_report_uses_cashier_drawer_for_driver_delivery_delta(
+    ) {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let check_in = "2026-04-22T20:00:00Z";
+        let driver_check_in = "2026-04-27T16:00:00Z";
+        let order_at = "2026-04-27T19:08:38Z";
+        let checkout_at = "2026-04-28T20:08:01Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                check_out_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'shift-z-cashier-delivery', 'cashier-z-delivery', 'cashier', 'branch-z-delivery', 'terminal-z-delivery', ?1,
+                ?2, 100.0, 10000, 'closed', 2, 'synced', ?1, ?2
+            )",
+            params![check_in, checkout_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                check_out_time, opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'shift-z-driver-delivery', 'driver-z-delivery', 'driver', 'branch-z-delivery', 'terminal-z-delivery', ?1,
+                ?2, 20.0, 2000, 'closed', 2, 'synced', ?1, ?2
+            )",
+            params![driver_check_in, checkout_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                total_cash_sales, total_cash_sales_cents,
+                total_card_sales, total_card_sales_cents,
+                opened_at, closed_at, reconciled, created_at, updated_at
+            ) VALUES (
+                'drawer-z-cashier-delivery', 'shift-z-cashier-delivery', 'cashier-z-delivery', 'branch-z-delivery', 'terminal-z-delivery',
+                100.0, 10000, 0.0, 0, 0.0, 0, ?1, ?2, 1, ?1, ?2
+            )",
+            params![check_in, checkout_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, payment_status,
+                order_type, driver_id, sync_status, branch_id, terminal_id, staff_shift_id,
+                created_at, updated_at
+            ) VALUES (
+                'ord-z-driver-delivery', 'ORD-Z-DRIVER-DELIVERY', '[]', 6.40, 640, 'delivered', 'partially_paid',
+                'delivery', 'driver-z-delivery', 'synced', 'branch-z-delivery', 'terminal-z-delivery', 'shift-z-driver-delivery',
+                ?1, ?1
+            )",
+            params![order_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                cash_received, cash_received_cents, change_given, change_given_cents,
+                staff_shift_id, staff_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-z-driver-base', 'ord-z-driver-delivery', 'cash', 6.0, 600, 'EUR', 'completed',
+                6.0, 600, 0.0, 0, 'shift-z-driver-delivery', 'driver-z-delivery', 'synced', 'applied', ?1, ?1
+            )",
+            params![order_at],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = resolve_unsettled_payment_blocker_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-z-driver-delivery",
+                "method": "cash",
+            }),
+        )
+        .expect("repair driver delivery delta from z-report");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let (payment_shift_id, payment_staff_id, amount_cents): (
+            Option<String>,
+            Option<String>,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT staff_shift_id, staff_id, amount_cents
+                 FROM order_payments
+                 WHERE order_id = 'ord-z-driver-delivery'
+                   AND id != 'pay-z-driver-base'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            payment_shift_id.as_deref(),
+            Some("shift-z-cashier-delivery")
+        );
+        assert_eq!(payment_staff_id.as_deref(), Some("cashier-z-delivery"));
+        assert_eq!(amount_cents, 40);
+
+        let drawer_cash_sales_cents: i64 = conn
+            .query_row(
+                "SELECT total_cash_sales_cents
+                 FROM cash_drawer_sessions
+                 WHERE staff_shift_id = 'shift-z-cashier-delivery'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(drawer_cash_sales_cents, 40);
+
+        let blockers =
+            payment_integrity::load_order_payment_blockers(&conn, "ord-z-driver-delivery")
+                .expect("load blockers after z-report delivery repair");
+        assert!(
+            blockers.is_empty(),
+            "z-report repair should clear driver delivery blockers when a cashier drawer covered the timestamp"
+        );
     }
 
     #[test]

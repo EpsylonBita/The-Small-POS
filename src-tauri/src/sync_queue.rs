@@ -1070,6 +1070,27 @@ fn normalize_customizations_for_insert(value: Option<&Value>) -> Value {
     }
 }
 
+fn normalize_order_items_customizations_for_request(items: &Value) -> Value {
+    match jsonish_value(items) {
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|mut item| {
+                    if let Value::Object(ref mut object) = item {
+                        if object.contains_key("customizations") {
+                            let normalized =
+                                normalize_customizations_for_insert(object.get("customizations"));
+                            object.insert("customizations".to_string(), normalized);
+                        }
+                    }
+                    item
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
     let mut normalized = Vec::new();
 
@@ -1696,14 +1717,16 @@ fn build_order_insert_body(
     }))
 }
 
-fn is_retryable_legacy_order_insert_error(error: &str) -> bool {
+fn is_order_customizations_schema_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    let legacy_shape_error = lower.contains("validation failed")
+    lower.contains("validation failed")
         && lower.contains("expected object, received array")
         && lower.contains("customizations")
-        && lower.contains("order_type")
-        && lower.contains("payment_method")
-        && lower.contains("total_amount");
+}
+
+fn is_retryable_legacy_order_insert_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let customizations_shape_error = is_order_customizations_schema_error(error);
     let missing_tip_error = lower.contains("validation failed")
         && lower.contains("tip_amount")
         && lower.contains("expected number, received null");
@@ -1714,7 +1737,7 @@ fn is_retryable_legacy_order_insert_error(error: &str) -> bool {
         .contains("duplicate key value violates unique constraint")
         && lower.contains("uq_orders_order_number");
 
-    legacy_shape_error
+    customizations_shape_error
         || missing_tip_error
         || stale_schema_cache_error
         || duplicate_canonical_number_error
@@ -1994,24 +2017,29 @@ fn retry_failed_legacy_order_insert_items_limited(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, record_id, data, error_message
+            "SELECT id, record_id, operation, data, error_message
              FROM parity_sync_queue
              WHERE table_name = 'orders'
-               AND operation = 'INSERT'
                AND status = 'failed'
                AND error_message IS NOT NULL",
         )
         .map_err(|e| format!("sync_queue retry_failed_legacy_order_insert_items prepare: {e}"))?;
-    let candidates: Vec<(String, String, String, String)> = stmt
+    let candidates: Vec<(String, String, String, String, String)> = stmt
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .map_err(|e| format!("sync_queue retry_failed_legacy_order_insert_items query: {e}"))?
         .filter_map(|row| row.ok())
         .collect();
 
     let mut queue_ids = Vec::new();
-    for (queue_id, record_id, payload_raw, error_message) in candidates {
+    for (queue_id, record_id, operation, payload_raw, error_message) in candidates {
         if queue_ids.len() >= limit {
             break;
         }
@@ -2021,7 +2049,12 @@ fn retry_failed_legacy_order_insert_items_limited(
 
         let payload = serde_json::from_str::<Value>(&payload_raw)
             .unwrap_or_else(|_| Value::Object(Map::new()));
-        if build_order_insert_body(conn, record_id.as_str(), &payload).is_err() {
+        if operation.eq_ignore_ascii_case("INSERT")
+            && build_order_insert_body(conn, record_id.as_str(), &payload).is_err()
+        {
+            continue;
+        }
+        if !operation.eq_ignore_ascii_case("INSERT") && !operation.eq_ignore_ascii_case("UPDATE") {
             continue;
         }
 
@@ -2031,7 +2064,7 @@ fn retry_failed_legacy_order_insert_items_limited(
     requeue_failed_items(
         conn,
         &queue_ids,
-        "Requeued legacy order insert parity rows after canonical request auto-heal",
+        "Requeued order parity rows after canonical request auto-heal",
     )
 }
 
@@ -3638,7 +3671,10 @@ fn prepare_order_request(
     for source in &sources {
         if let Some(items) = source.get("items") {
             if !items.is_null() {
-                body.insert("items".to_string(), items.clone());
+                body.insert(
+                    "items".to_string(),
+                    normalize_order_items_customizations_for_request(items),
+                );
             }
             break;
         }
@@ -5871,7 +5907,7 @@ mod tests {
                 delivery_fee, delivery_fee_cents, status, sync_status, created_at, updated_at
              ) VALUES (
                 'order-convert-1', 'remote-order-convert-1',
-                '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"quantity\":1,\"unit_price\":12.0,\"total_price\":12.0,\"name\":\"Crepe\"}]',
+                '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"quantity\":1,\"unit_price\":12.0,\"total_price\":12.0,\"name\":\"Crepe\",\"customizations\":[{\"optionId\":\"extra-honey\",\"name\":\"Extra Honey\"}]}]',
                 12.80, 1280,
                 'Anon', '6974011314', 'Xenofontos 36', 'delivery',
                 0.80, 80, 'pending', 'pending', datetime('now'), datetime('now')
@@ -5907,7 +5943,11 @@ mod tests {
                     "menu_item_id": TEST_MENU_ITEM_ID,
                     "quantity": 1,
                     "unit_price": 12.0,
-                    "name": "Crepe"
+                    "name": "Crepe",
+                    "customizations": [{
+                        "optionId": "extra-honey",
+                        "name": "Extra Honey"
+                    }]
                 }]
             }),
         );
@@ -5957,6 +5997,20 @@ mod tests {
         assert_eq!(
             body.get("items").and_then(Value::as_array).map(Vec::len),
             Some(1)
+        );
+        let customizations = body
+            .get("items")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("customizations"))
+            .and_then(Value::as_object)
+            .expect("update item customizations should be object");
+        assert_eq!(
+            customizations.get("extra-honey"),
+            Some(&json!({
+                "optionId": "extra-honey",
+                "name": "Extra Honey"
+            }))
         );
     }
 
@@ -6247,6 +6301,60 @@ mod tests {
             )
             .expect("read unrelated queue row");
         assert_eq!(unrelated_status, "failed");
+    }
+
+    #[test]
+    fn retry_failed_order_update_requeues_customizations_shape_failures() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "UPDATE",
+            "order-update-customizations",
+            json!({
+                "orderId": "order-update-customizations",
+                "status": "pending",
+                "items": [{
+                    "menu_item_id": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "unit_price": 6.4,
+                    "name": "Crepe",
+                    "customizations": []
+                }]
+            }),
+        );
+
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 1,
+                 error_message = ?2
+             WHERE id = ?1",
+            params![
+                queue_id,
+                r#"HTTP 400: {"success":false,"error":"Validation failed","details":[{"field":"items.0.customizations","message":"Expected object, received array"}]}"#
+            ],
+        )
+        .expect("seed failed update validation error");
+
+        let result = retry_failed_legacy_order_insert_items_limited(&conn, 1)
+            .expect("retry failed order update row");
+        assert_eq!(result.retried, 1);
+
+        let retried_row: (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read retried queue row");
+        assert_eq!(retried_row.0, "pending");
+        assert_eq!(retried_row.1, 0);
+        assert_eq!(retried_row.2, None);
     }
 
     #[test]
