@@ -4994,6 +4994,10 @@
         "label": "Correggi differenza pagamento/ordine",
         "description": "Aggiorna l'ordine, invia la prova di saldo, collega il pagamento e riprova il rimborso in attesa."
       },
+      "repairInvalidDriverOrderUpdate": {
+        "label": "Correggi sync autista/ordine",
+        "description": "Riprova l'aggiornamento dell'ordine senza reinviare il vecchio ID autista locale."
+      },
       "retrySync": { "label": "Riprova riga di sincronizzazione" },
       "validatePendingOrders": { "label": "Valida ordini in attesa" },
       "removeInvalidOrders": {
@@ -5066,6 +5070,11 @@
         "title": "Differenza pagamento/ordine",
         "summary": "Admin ha rifiutato il pagamento {{paymentAmount}} perché il totale ordine attuale è {{remoteOrderTotal}} e l'importo già pagato è {{existingCompleted}}.",
         "guidance": "Usa prima la correzione consigliata. Non elimina dati locali, aggiorna l'ordine padre se necessario, invia l'identità del pagamento e riprova questa riga."
+      },
+      "orderInvalidDriverUpdate": {
+        "title": "Differenza autista/ordine",
+        "summary": "Admin ha rifiutato {{count}} aggiornamento ordine perché l'ID autista locale {{driverId}} non è più un autista admin attivo.",
+        "guidance": "Usa prima la correzione consigliata. Mantiene l'aggiornamento dell'ordine, rimuove solo il vecchio ID autista dal payload di retry e conserva il nome autista quando disponibile."
       },
       "catalogAvailabilityRetry": {
         "title": "Riprova disponibilita catalogo",

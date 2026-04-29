@@ -284,6 +284,68 @@ fn promote_waiting_settlement_refunds_for_payment(
     Ok(promoted)
 }
 
+fn sanitize_invalid_driver_order_payload(raw: &str) -> Result<String, String> {
+    let mut payload: Value =
+        serde_json::from_str(raw).map_err(|e| format!("parse order parity payload: {e}"))?;
+    let Some(object) = payload.as_object_mut() else {
+        return Ok(raw.to_string());
+    };
+
+    object.remove("driverId");
+    object.remove("driver_id");
+
+    Ok(payload.to_string())
+}
+
+fn prepare_invalid_driver_order_repair(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+) -> Result<String, String> {
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT record_id, data, COALESCE(error_message, '')
+             FROM parity_sync_queue
+             WHERE id = ?1
+               AND table_name = 'orders'
+               AND operation = 'UPDATE'",
+            rusqlite::params![item_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load invalid-driver order parity row: {e}"))?;
+
+    let Some((order_id, data, error_message)) = row else {
+        return Err("Invalid-driver order parity row was not found".to_string());
+    };
+    if !error_message
+        .to_ascii_lowercase()
+        .contains("invalid driver")
+    {
+        return Err("Selected order parity row is not blocked by an invalid driver".to_string());
+    }
+
+    let sanitized = sanitize_invalid_driver_order_payload(&data)?;
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET data = ?1,
+             status = 'pending',
+             attempts = 0,
+             last_attempt = NULL,
+             error_message = NULL,
+             next_retry_at = NULL,
+             retry_delay_ms = 1000,
+             priority = CASE WHEN priority > 2 THEN priority ELSE 2 END,
+             claim_generation = claim_generation + 1
+         WHERE id = ?2
+           AND table_name = 'orders'
+           AND operation = 'UPDATE'",
+        rusqlite::params![sanitized, item_id],
+    )
+    .map_err(|e| format!("requeue invalid-driver order parity row: {e}"))?;
+
+    Ok(order_id)
+}
+
 #[tauri::command]
 pub async fn recovery_list_points(
     db: tauri::State<'_, db::DbState>,
@@ -665,6 +727,39 @@ pub async fn recovery_execute_action(
                     adjustment_result.as_ref().map(|value| value.processed).unwrap_or(0),
                     adjustment_result.as_ref().map(|value| value.failed).unwrap_or(0),
                     adjustment_result.as_ref().map(|value| value.conflicts).unwrap_or(0),
+                ),
+            }))
+        }
+        "repairInvalidDriverOrderUpdate" => {
+            let item_id = request_param_str(&request, "sampleItemId")
+                .or_else(|| request_field_str(&request, "queueId").map(ToOwned::to_owned))
+                .ok_or_else(|| "Missing invalid-driver parity item id".to_string())?;
+            let order_id = {
+                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                prepare_invalid_driver_order_repair(&conn, item_id.as_str())
+                    .map_err(auth::GuardedCommandError::from)?
+            };
+
+            let admin_url = load_admin_url(&db)?;
+            let api_key = load_pos_api_key()?;
+            let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
+            let status = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                sync_queue::get_status(&conn)
+            }
+            .map_err(auth::GuardedCommandError::from)?;
+
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "message": format!(
+                    "Retried order {order_id} without replaying the stale driver id. Processed {}, failed {}, conflicts {}, remaining {}.",
+                    result.processed,
+                    result.failed,
+                    result.conflicts,
+                    status.total,
                 ),
             }))
         }
@@ -1152,5 +1247,57 @@ mod tests {
             .expect("load settlement equation")
             .expect("settlement equation");
         assert_eq!(equation, "15.19 - 10.30 = 4.89; local order total 4.89");
+    }
+
+    #[test]
+    fn invalid_driver_order_repair_strips_driver_id_and_requeues_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, error_message, status, module_type
+             ) VALUES (
+                 'queue-invalid-driver', 'orders', 'order-invalid-driver', 'UPDATE', ?1,
+                 'org-recovery', datetime('now'), 4,
+                 'HTTP 400: {\"success\":false,\"error\":\"Invalid driver\"}',
+                 'failed', 'orders'
+             )",
+            [json!({
+                "orderId": "order-invalid-driver",
+                "status": "delivered",
+                "driverId": "b96b6236-8164-4881-b45f-b75c1c79859c",
+                "driver_id": "b96b6236-8164-4881-b45f-b75c1c79859c",
+                "driverName": "Driver Name",
+            })
+            .to_string()],
+        )
+        .expect("seed invalid-driver parity row");
+
+        let order_id = prepare_invalid_driver_order_repair(&conn, "queue-invalid-driver")
+            .expect("prepare invalid driver repair");
+        assert_eq!(order_id, "order-invalid-driver");
+
+        let (status, attempts, error_message, data): (String, i64, Option<String>, String) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, data
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-invalid-driver'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load repaired row");
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert_eq!(error_message, None);
+
+        let payload: Value = serde_json::from_str(&data).expect("parse repaired payload");
+        assert!(payload.get("driverId").is_none());
+        assert!(payload.get("driver_id").is_none());
+        assert_eq!(
+            payload.get("driverName").and_then(Value::as_str),
+            Some("Driver Name")
+        );
     }
 }

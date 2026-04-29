@@ -4994,6 +4994,10 @@
         "label": "Fix payment/order mismatch",
         "description": "Refreshes the order, sends settlement proof, rebinds the payment, then retries the waiting refund."
       },
+      "repairInvalidDriverOrderUpdate": {
+        "label": "Fix driver/order sync",
+        "description": "Retries the order update without replaying the stale local driver id."
+      },
       "retrySync": { "label": "Retry sync row" },
       "validatePendingOrders": { "label": "Validate pending orders" },
       "removeInvalidOrders": {
@@ -5066,6 +5070,11 @@
         "title": "Payment/order mismatch",
         "summary": "Admin rejected payment {{paymentAmount}} because its current order total is {{remoteOrderTotal}} and already paid amount is {{existingCompleted}}.",
         "guidance": "Use the recommended fix first. It keeps local records intact, refreshes the parent order update if needed, sends the payment identity, and retries this payment row."
+      },
+      "orderInvalidDriverUpdate": {
+        "title": "Driver/order sync mismatch",
+        "summary": "Admin rejected {{count}} order update because the local driver id {{driverId}} is no longer an active admin driver.",
+        "guidance": "Use the recommended fix first. It keeps the order update, removes only the stale driver id from the retry payload, and preserves the driver name when available."
       },
       "catalogAvailabilityRetry": {
         "title": "Catalog availability retry",

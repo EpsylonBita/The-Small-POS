@@ -94,6 +94,17 @@ const createRepairPaymentTotalConflictAction = (): RecoveryActionDescriptor =>
     },
   );
 
+const createRepairInvalidDriverOrderUpdateAction = (): RecoveryActionDescriptor =>
+  createAction(
+    'repairInvalidDriverOrderUpdate',
+    'recovery.actions.repairInvalidDriverOrderUpdate.label',
+    {
+      descriptionKey: 'recovery.actions.repairInvalidDriverOrderUpdate.description',
+      recommended: true,
+      requiresOnline: true,
+    },
+  );
+
 const createRetrySyncAction = (): RecoveryActionDescriptor =>
   createAction('retrySync', 'recovery.actions.retrySync.label');
 
@@ -521,6 +532,17 @@ const isPaymentTotalConflictMessage = (message?: string | null): boolean => {
     (normalized.includes('http 422') && normalized.includes('existing completed'));
 };
 
+const isInvalidDriverOrderPatchFailure = (item: SyncQueueItem): boolean => {
+  if (item.tableName !== 'orders' || item.operation !== 'UPDATE') {
+    return false;
+  }
+  if (item.status !== 'failed' && item.status !== 'conflict') {
+    return false;
+  }
+  const normalized = item.errorMessage?.toLowerCase() ?? '';
+  return normalized.includes('invalid driver');
+};
+
 const extractPaymentTotalConflictMetric = (
   message: string,
   label: string,
@@ -665,6 +687,57 @@ const buildPaymentTotalConflictIssues = (
   }
 
   return { issues, suppressedRows };
+};
+
+const buildInvalidDriverOrderIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isInvalidDriverOrderPatchFailure);
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+
+  const sample = rows[0];
+  const payload = parseJsonPayload(sample.data);
+  const driverId = payloadString(payload, ['driverId', 'driver_id']);
+  const driverName = payloadString(payload, ['driverName', 'driver_name']);
+  const orderId = payloadString(payload, ['orderId', 'order_id']) || sample.recordId;
+  const suppressedRows = new Set(rows.map((item) => `${item.tableName}:${item.recordId}`));
+
+  return {
+    suppressedRows,
+    issues: [
+      {
+        id: `order-invalid-driver-${sample.id}`,
+        code: 'order_invalid_driver_update',
+        severity: 'error',
+        status: 'blocking',
+        entityType: 'order',
+        entityId: orderId,
+        titleKey: 'recovery.issues.orderInvalidDriverUpdate.title',
+        summaryKey: 'recovery.issues.orderInvalidDriverUpdate.summary',
+        guidanceKey: 'recovery.issues.orderInvalidDriverUpdate.guidance',
+        actions: [
+          createRepairInvalidDriverOrderUpdateAction(),
+          createRetryParityItemAction(),
+          createRunParitySyncAction(),
+        ],
+        params: {
+          count: rows.length,
+          sampleItemId: sample.id,
+          sampleTableName: sample.tableName,
+          sampleRecordId: sample.recordId,
+          moduleType: sample.moduleType || 'orders',
+          sampleError: sample.errorMessage ?? null,
+          lastError: sample.errorMessage ?? null,
+          orderId,
+          driverId,
+          driverName,
+        },
+        orderId,
+      },
+    ],
+  };
 };
 
 const isCatalogAvailabilityPatchFailure = (item: SyncQueueItem): boolean => {
@@ -1108,6 +1181,10 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of paymentTotalConflictResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const invalidDriverOrderResult = buildInvalidDriverOrderIssues(parityItems);
+  for (const suppressedRow of invalidDriverOrderResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   const catalogAvailabilityResult = buildCatalogAvailabilityIssues(parityItems);
   for (const suppressedRow of catalogAvailabilityResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
@@ -1123,6 +1200,9 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, issue);
   }
   for (const issue of paymentTotalConflictResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of invalidDriverOrderResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of catalogAvailabilityResult.issues) {

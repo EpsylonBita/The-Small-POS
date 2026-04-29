@@ -685,6 +685,54 @@ test('recovery maps catalog availability 405 failures to a guided retry and supp
   );
 });
 
+test('recovery maps invalid driver order failures to a guided repair and suppresses generic order card', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 0, failed: 1, conflicts: 0, total: 1 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'order-invalid-driver-row',
+        tableName: 'orders',
+        recordId: 'local-order-1',
+        moduleType: 'orders',
+        operation: 'UPDATE',
+        status: 'failed',
+        nextRetryAt: null,
+        errorMessage: 'HTTP 400: {"success":false,"error":"Invalid driver"}',
+        data: JSON.stringify({
+          orderId: 'local-order-1',
+          status: 'delivered',
+          driverId: 'b96b6236-8164-4881-b45f-b75c1c79859c',
+          driverName: 'Driver Name',
+        }),
+      }),
+    ],
+  });
+
+  const issue = result.issues.find(
+    (candidate) => candidate.code === 'order_invalid_driver_update',
+  );
+  assert.ok(issue, 'guided invalid-driver order issue should be present');
+  assert.equal(issue?.orderId, 'local-order-1');
+  assert.equal(issue?.params?.driverId, 'b96b6236-8164-4881-b45f-b75c1c79859c');
+  assert.equal(issue?.params?.driverName, 'Driver Name');
+  assert.deepEqual(
+    issue?.actions.map((action) => action.id),
+    ['repairInvalidDriverOrderUpdate', 'retryParityItem', 'runParitySyncNow'],
+  );
+  assert.equal(issue?.actions[0]?.recommended, true);
+  assert.equal(
+    result.issues.some((candidate) => candidate.code === 'parity_module_failed_items'),
+    false,
+  );
+});
+
 test('recovery maps legacy financial parity orphans to the local clear action', () => {
   const result = buildSyncRecoveryIssues({
     systemHealth: {

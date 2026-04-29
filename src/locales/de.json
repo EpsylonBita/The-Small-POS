@@ -4994,6 +4994,10 @@
         "label": "Zahlungs-/Bestellabgleich reparieren",
         "description": "Aktualisiert die Bestellung, sendet den Abrechnungsnachweis, verknüpft die Zahlung und wiederholt die wartende Erstattung."
       },
+      "repairInvalidDriverOrderUpdate": {
+        "label": "Fahrer/Bestellung-Sync beheben",
+        "description": "Wiederholt die Bestellaktualisierung ohne die alte lokale Fahrer-ID erneut zu senden."
+      },
       "retrySync": { "label": "Sync-Zeile erneut versuchen" },
       "validatePendingOrders": { "label": "Ausstehende Bestellungen prüfen" },
       "removeInvalidOrders": {
@@ -5066,6 +5070,11 @@
         "title": "Zahlung und Bestellung passen nicht zusammen",
         "summary": "Admin hat Zahlung {{paymentAmount}} abgelehnt, weil die aktuelle Bestellsumme {{remoteOrderTotal}} ist und bereits {{existingCompleted}} bezahlt sind.",
         "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie löscht keine lokalen Daten, aktualisiert bei Bedarf die übergeordnete Bestellung, sendet die Zahlungsidentität und versucht diese Zahlungszeile erneut."
+      },
+      "orderInvalidDriverUpdate": {
+        "title": "Fahrer und Bestellung passen nicht zusammen",
+        "summary": "Admin hat {{count}} Bestellaktualisierung abgelehnt, weil die lokale Fahrer-ID {{driverId}} kein aktiver Admin-Fahrer mehr ist.",
+        "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie behält die Bestellaktualisierung, entfernt nur die alte Fahrer-ID aus dem Wiederholungs-Payload und behält den Fahrernamen, falls vorhanden."
       },
       "catalogAvailabilityRetry": {
         "title": "Katalogverfügbarkeit erneut versuchen",

@@ -4994,6 +4994,10 @@
         "label": "Réparer l'écart paiement/commande",
         "description": "Actualise la commande, envoie la preuve de règlement, rattache le paiement puis réessaie le remboursement en attente."
       },
+      "repairInvalidDriverOrderUpdate": {
+        "label": "Réparer la synchro chauffeur/commande",
+        "description": "Réessaie la mise à jour de commande sans renvoyer l'ancien ID chauffeur local."
+      },
       "retrySync": { "label": "Réessayer la ligne de synchro" },
       "validatePendingOrders": { "label": "Valider les commandes en attente" },
       "removeInvalidOrders": {
@@ -5066,6 +5070,11 @@
         "title": "Écart paiement/commande",
         "summary": "Admin a rejeté le paiement {{paymentAmount}} car le total actuel de la commande est {{remoteOrderTotal}} et le montant déjà payé est {{existingCompleted}}.",
         "guidance": "Utilisez d'abord la réparation recommandée. Elle ne supprime aucune donnée locale, actualise la commande parente si nécessaire, envoie l'identité du paiement et réessaie cette ligne."
+      },
+      "orderInvalidDriverUpdate": {
+        "title": "Écart chauffeur/commande",
+        "summary": "Admin a rejeté {{count}} mise à jour de commande car l'ID chauffeur local {{driverId}} n'est plus un chauffeur admin actif.",
+        "guidance": "Utilisez d'abord la réparation recommandée. Elle conserve la mise à jour de commande, retire uniquement l'ancien ID chauffeur du payload de réessai et garde le nom du chauffeur s'il existe."
       },
       "catalogAvailabilityRetry": {
         "title": "Réessai de disponibilité du catalogue",

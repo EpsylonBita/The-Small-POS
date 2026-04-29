@@ -3615,13 +3615,11 @@ fn prepare_order_request(
         "table_number",
         true,
     );
-    copy_payload_field(
-        &mut body,
-        payload,
-        &["driverId", "driver_id"],
-        "driver_id",
-        false,
-    );
+    // Driver ids stored in local delivery rows are staff ids bound to the
+    // driver's local shift lifecycle. Replaying them on a status PATCH after
+    // checkout can make admin reject the whole order update as "Invalid
+    // driver". Keep delivery/status edits flowing and leave driver assignment
+    // validation to the dedicated assignment/create paths.
     copy_payload_field(
         &mut body,
         payload,
@@ -6057,6 +6055,65 @@ mod tests {
                 "optionId": "extra-honey",
                 "name": "Extra Honey"
             }))
+        );
+    }
+
+    #[test]
+    fn prepare_order_request_omits_driver_id_on_delivery_status_replay() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents,
+                order_type, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'order-driver-replay', 'remote-order-driver-replay',
+                '[]', 9.20, 920, 'delivery', 'delivered', 'pending',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced delivery order");
+
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-driver-replay",
+            json!({
+                "orderId": "order-driver-replay",
+                "orderType": "delivery",
+                "status": "delivered",
+                "driverId": "b96b6236-8164-4881-b45f-b75c1c79859c",
+                "driverName": "Driver Name",
+                "deliveryNotes": Value::Null,
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(request.method, Method::PATCH);
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some("remote-order-driver-replay")
+        );
+        assert_eq!(
+            body.get("status").and_then(Value::as_str),
+            Some("delivered")
+        );
+        assert!(
+            body.get("driver_id").is_none(),
+            "stale local driver ids must not be replayed to admin status PATCH"
+        );
+        assert_eq!(
+            body.get("driver_name").and_then(Value::as_str),
+            Some("Driver Name")
         );
     }
 
