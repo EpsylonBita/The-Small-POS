@@ -94,6 +94,9 @@ const entityLabelKey: Record<string, string> = {
 };
 
 const actionButtonTone = (action: RecoveryActionDescriptor) => {
+  if (action.recommended) {
+    return 'border-emerald-300/80 bg-emerald-50/90 text-emerald-800 hover:bg-emerald-100 dark:border-emerald-400/30 dark:bg-emerald-500/15 dark:text-emerald-100 dark:hover:bg-emerald-500/20';
+  }
   if (action.safetyLevel === 'destructive_server') {
     return 'border-red-300/80 bg-red-50/90 text-red-700 hover:bg-red-100 dark:border-red-400/25 dark:bg-red-500/10 dark:text-red-200 dark:hover:bg-red-500/15';
   }
@@ -152,6 +155,37 @@ const RecoveryIssueCard: React.FC<{
     (typeof issue.params?.reportDate === 'string' ? issue.params.reportDate : null) ||
     issue.shiftId ||
     issue.entityId;
+  const diagnosticTiles = [
+    {
+      key: 'localOrderTotal',
+      labelKey: 'recovery.common.localOrderTotal',
+      value: issue.params?.localOrderTotal,
+    },
+    {
+      key: 'remoteOrderTotal',
+      labelKey: 'recovery.common.remoteOrderTotal',
+      value: issue.params?.remoteOrderTotal || issue.params?.orderTotal,
+    },
+    {
+      key: 'paymentAmount',
+      labelKey: 'recovery.common.paymentAmount',
+      value: issue.params?.paymentAmount,
+    },
+    {
+      key: 'existingCompleted',
+      labelKey: 'recovery.common.existingCompleted',
+      value: issue.params?.existingCompleted,
+    },
+    {
+      key: 'remotePaymentId',
+      labelKey: 'recovery.common.remotePayment',
+      value: issue.params?.remotePaymentId,
+      mono: true,
+    },
+  ].filter((tile) => typeof tile.value === 'string' && tile.value.trim().length > 0);
+  const sortedActions = [...issue.actions].sort(
+    (left, right) => Number(Boolean(right.recommended)) - Number(Boolean(left.recommended)),
+  );
 
   return (
     <div className={cn('rounded-[24px] border p-5 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:shadow-none', style.panel)}>
@@ -249,10 +283,30 @@ const RecoveryIssueCard: React.FC<{
               </div>
             </div>
           )}
+          {diagnosticTiles.map((tile) => (
+            <div
+              key={tile.key}
+              className="rounded-2xl border border-white/50 bg-white/70 px-3 py-3 dark:border-white/10 dark:bg-white/[0.04]"
+            >
+              <div className="uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                {t(tile.labelKey, { defaultValue: tile.key })}
+              </div>
+              <div
+                className={cn(
+                  'mt-2 text-slate-800 dark:text-slate-100',
+                  tile.mono
+                    ? 'break-all font-mono text-[11px]'
+                    : 'font-semibold',
+                )}
+              >
+                {tile.value as string}
+              </div>
+            </div>
+          ))}
         </div>
 
         <div className="flex flex-wrap gap-2">
-          {issue.actions.map((action) => {
+          {sortedActions.map((action) => {
             const actionBusy = busyActionId === `${issue.id}:${action.id}`;
             return (
               <button
@@ -272,7 +326,23 @@ const RecoveryIssueCard: React.FC<{
                 ) : (
                   <Wrench className="h-4 w-4" />
                 )}
-                {t(action.labelKey, { defaultValue: action.id })}
+                <span className="flex min-w-0 flex-col items-start leading-tight">
+                  <span className="flex items-center gap-2">
+                    {t(action.labelKey, { defaultValue: action.id })}
+                    {action.recommended && (
+                      <span className="rounded-full border border-current/25 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em]">
+                        {t('recovery.common.recommended', {
+                          defaultValue: 'Recommended',
+                        })}
+                      </span>
+                    )}
+                  </span>
+                  {action.descriptionKey && (
+                    <span className="mt-0.5 max-w-[18rem] text-left text-[11px] font-medium opacity-80">
+                      {t(action.descriptionKey, { defaultValue: '' })}
+                    </span>
+                  )}
+                </span>
               </button>
             );
           })}

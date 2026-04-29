@@ -8357,6 +8357,12 @@ fn build_remote_order_repair_since_cursor(lookup: &LocalOrderRemoteLookup) -> St
     "1970-01-01T00:00:00Z".to_string()
 }
 
+fn normalize_remote_order_repair_since_cursor(raw_value: &str) -> String {
+    parse_remote_order_repair_timestamp(raw_value)
+        .map(|parsed| parsed.to_rfc3339_opts(SecondsFormat::Secs, true))
+        .unwrap_or_else(|| ORDER_SYNC_SINCE_FALLBACK.to_string())
+}
+
 fn remote_order_snapshot_is_older_than_local(
     conn: &Connection,
     local_order_id: &str,
@@ -8607,7 +8613,7 @@ fn build_local_order_update_payload_for_lagged_snapshot(
     .ok_or_else(|| format!("Order {local_order_id} not found for lagged snapshot recovery"))
 }
 
-fn enqueue_local_order_update_after_lagged_snapshot(
+pub(crate) fn enqueue_local_order_update_after_lagged_snapshot(
     conn: &Connection,
     local_order_id: &str,
 ) -> Result<bool, String> {
@@ -8643,6 +8649,67 @@ fn enqueue_local_order_update_after_lagged_snapshot(
     );
 
     Ok(true)
+}
+
+pub(crate) fn force_requeue_local_order_update_after_lagged_snapshot(
+    conn: &Connection,
+    local_order_id: &str,
+) -> Result<bool, String> {
+    let payload = build_local_order_update_payload_for_lagged_snapshot(conn, local_order_id)?;
+    let refreshed = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET operation = 'UPDATE',
+                 data = ?1,
+                 status = 'pending',
+                 attempts = 0,
+                 last_attempt = NULL,
+                 error_message = NULL,
+                 next_retry_at = NULL,
+                 retry_delay_ms = 1000,
+                 priority = 2,
+                 module_type = 'orders',
+                 conflict_strategy = 'server-wins',
+                 version = COALESCE(version, 1),
+                 claim_generation = claim_generation + 1
+             WHERE table_name = 'orders'
+               AND record_id = ?2
+               AND status IN ('pending', 'processing', 'failed', 'conflict')",
+            params![payload.to_string(), local_order_id],
+        )
+        .map_err(|e| format!("refresh lagged local order parity row: {e}"))?;
+
+    let queued = if refreshed > 0 {
+        true
+    } else {
+        let queue_id = crate::sync_queue::enqueue_payload_item(
+            conn,
+            "orders",
+            local_order_id,
+            "UPDATE",
+            &payload,
+            Some(2),
+            Some("orders"),
+            Some("server-wins"),
+            Some(1),
+        )?;
+        info!(
+            order_id = %local_order_id,
+            queue_id = %queue_id,
+            "Force-enqueued local order update for payment/order mismatch repair"
+        );
+        true
+    };
+
+    conn.execute(
+        "UPDATE orders
+         SET sync_status = 'pending'
+         WHERE id = ?1",
+        params![local_order_id],
+    )
+    .map_err(|e| format!("mark forced lagged local order update pending: {e}"))?;
+
+    Ok(queued)
 }
 
 fn select_remote_order_match<'a>(
@@ -9037,16 +9104,18 @@ async fn resolve_remote_order_for_local_order(
 
     let mut sync_since_cursor = build_remote_order_repair_since_cursor(&lookup);
     for _page in 0..3 {
+        let normalized_since_cursor =
+            normalize_remote_order_repair_since_cursor(sync_since_cursor.trim());
         let path = format!(
             "/api/pos/orders/sync?limit=200&since={}",
-            percent_encode(sync_since_cursor.trim())
+            percent_encode(&normalized_since_cursor)
         );
         let response = match api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await {
             Ok(response) => response,
             Err(error) if is_non_authoritative_terminal_lookup_miss(&error) => {
                 warn!(
                     local_order_id = %local_order_id,
-                    since_cursor = sync_since_cursor.trim(),
+                    since_cursor = %normalized_since_cursor,
                     error = %error,
                     "Remote order recovery sync-history scan returned a generic terminal lookup miss; keeping terminal credentials intact"
                 );
@@ -9092,7 +9161,7 @@ async fn resolve_remote_order_for_local_order(
         else {
             break;
         };
-        sync_since_cursor = next_cursor;
+        sync_since_cursor = normalize_remote_order_repair_since_cursor(&next_cursor);
     }
 
     if let Some(remote_order_id) = lookup.supabase_id {
@@ -16666,6 +16735,87 @@ mod tests {
     }
 
     #[test]
+    fn force_requeue_local_order_update_refreshes_failed_order_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "organization_id", "org-test").expect("set org setting");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, order_number, items,
+                 total_amount, total_amount_cents, subtotal, subtotal_cents,
+                 tax_amount, tax_amount_cents, delivery_fee, delivery_fee_cents,
+                 order_type, status, sync_status, payment_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-force-repair', 'remote-order-force-repair', 'ORD-FORCE-REPAIR',
+                 '[{\"name\":\"Crepe\",\"quantity\":1,\"unit_price\":6.6,\"total_price\":6.6}]',
+                 6.6, 660, 6.6, 660, 1.28, 128, 0, 0,
+                 'pickup', 'completed', 'synced', 'paid',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert force repair order");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-force-repair-order', 'orders', 'order-force-repair', 'UPDATE',
+                 '{\"totalAmount\":8.18}', 'org-test',
+                 '2000-01-01T00:00:00Z', 3, 1000, 0, 'orders',
+                 'server-wins', 1, 'failed', 'old failure'
+             )",
+            [],
+        )
+        .expect("insert failed order parity row");
+
+        let queued =
+            force_requeue_local_order_update_after_lagged_snapshot(&conn, "order-force-repair")
+                .expect("force requeue order");
+
+        assert!(queued);
+        let (status, attempts, priority, error_message, data): (
+            String,
+            i64,
+            i64,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, attempts, priority, error_message, data
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-force-repair-order'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&data).unwrap();
+
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert_eq!(priority, 2);
+        assert_eq!(error_message, None);
+        assert_eq!(
+            payload.get("totalAmount").and_then(Value::as_f64),
+            Some(6.6)
+        );
+        assert_eq!(
+            payload.get("syncRecoveryReason").and_then(Value::as_str),
+            Some("remote_snapshot_lags_local_delivery_payment_delta")
+        );
+    }
+
+    #[test]
     fn tax_inflated_payment_conflict_repairs_total_and_voids_bad_delta() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -17336,6 +17486,30 @@ mod tests {
 
         let since_cursor = build_remote_order_repair_since_cursor(&lookup);
         assert_eq!(since_cursor, "2026-03-24T05:10:00Z");
+    }
+
+    #[test]
+    fn test_normalize_remote_order_repair_since_cursor_accepts_offset_timestamps() {
+        assert_eq!(
+            normalize_remote_order_repair_since_cursor("2026-04-29T01:49:11.103145+02:00"),
+            "2026-04-28T23:49:11Z"
+        );
+        assert_eq!(
+            normalize_remote_order_repair_since_cursor("2026-04-28T23:49:11+00:00"),
+            "2026-04-28T23:49:11Z"
+        );
+    }
+
+    #[test]
+    fn test_normalize_remote_order_repair_since_cursor_falls_back_for_invalid_values() {
+        assert_eq!(
+            normalize_remote_order_repair_since_cursor("not-a-date"),
+            ORDER_SYNC_SINCE_FALLBACK
+        );
+        assert_eq!(
+            normalize_remote_order_repair_since_cursor(""),
+            ORDER_SYNC_SINCE_FALLBACK
+        );
     }
 
     #[test]

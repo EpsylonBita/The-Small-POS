@@ -658,6 +658,8 @@ export type RecoveryActionSafetyLevel =
 export interface RecoveryActionDescriptor {
   id: string;
   labelKey: string;
+  descriptionKey?: string;
+  recommended?: boolean;
   safetyLevel: RecoveryActionSafetyLevel;
   requiresOnline: boolean;
   confirmationRequired: boolean;

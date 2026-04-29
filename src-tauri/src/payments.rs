@@ -1345,6 +1345,8 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
+        Option<String>,
     );
 
     let (
@@ -1357,6 +1359,8 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         transaction_ref,
         discount_amount,
         payment_origin,
+        remote_payment_id,
+        idempotency_key,
         terminal_device_id,
         staff_id,
         staff_shift_id,
@@ -1373,7 +1377,7 @@ pub(crate) fn build_payment_sync_payload_for_payment(
                     COALESCE(change_given_cents, CAST(ROUND(change_given * 100) AS INTEGER)),
                     transaction_ref,
                     COALESCE(discount_amount_cents, CAST(ROUND(discount_amount * 100) AS INTEGER), 0),
-                    COALESCE(payment_origin, 'manual'), terminal_device_id,
+                    COALESCE(payment_origin, 'manual'), remote_payment_id, idempotency_key, terminal_device_id,
                     staff_id, staff_shift_id
              FROM order_payments
              WHERE id = ?1",
@@ -1394,6 +1398,8 @@ pub(crate) fn build_payment_sync_payload_for_payment(
                     row.get(9)?,
                     row.get(10)?,
                     row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
                 ))
             },
         )
@@ -1406,6 +1412,11 @@ pub(crate) fn build_payment_sync_payload_for_payment(
     // switch to cents preference. 4d-cleanup later removes the float keys.
     Ok(serde_json::json!({
         "paymentId": payment_id,
+        "payment_id": payment_id,
+        "local_payment_id": payment_id,
+        "remote_payment_id": remote_payment_id,
+        "canonical_payment_id": remote_payment_id,
+        "idempotency_key": idempotency_key,
         "orderId": order_id,
         "method": method,
         "amount": amount,
@@ -2592,6 +2603,31 @@ mod tests {
             .expect("query refreshed canonical payment parity row");
         assert_eq!(queue_status, "pending");
         assert!(payload.contains("\"method\":\"card\""));
+        let payload_json: Value = serde_json::from_str(&payload).expect("payment payload json");
+        assert_eq!(
+            payload_json
+                .get("remote_payment_id")
+                .and_then(Value::as_str),
+            Some("remote-payment-1")
+        );
+        assert_eq!(
+            payload_json
+                .get("canonical_payment_id")
+                .and_then(Value::as_str),
+            Some("remote-payment-1")
+        );
+        assert_eq!(
+            payload_json.get("payment_id").and_then(Value::as_str),
+            Some(payment_id.as_str())
+        );
+        assert!(
+            payload_json
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+            "payment payload should include persisted local idempotency identity"
+        );
     }
 
     #[test]

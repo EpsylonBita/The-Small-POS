@@ -4954,6 +4954,12 @@
       "order": "Bestellung",
       "payment": "Zahlung",
       "adjustment": "Anpassung",
+      "recommended": "Empfohlen",
+      "localOrderTotal": "Lokale Summe",
+      "remoteOrderTotal": "Admin-Summe",
+      "paymentAmount": "Zahlungsbetrag",
+      "existingCompleted": "Bereits bezahlt",
+      "remotePayment": "Remote-Zahlung",
       "issueCount_one": "{{count}} Problem",
       "issueCount_other": "{{count}} Probleme",
       "unknownActor": "Unbekannter Benutzer"
@@ -4979,6 +4985,10 @@
       "runParitySyncNow": { "label": "Synchronisierung jetzt ausführen" },
       "retryParityItem": { "label": "Parity-Eintrag erneut versuchen" },
       "retryParityModule": { "label": "Parity-Modul erneut versuchen" },
+      "repairPaymentTotalConflict": {
+        "label": "Zahlungs-/Bestellabgleich reparieren",
+        "description": "Aktualisiert die Bestellung, verknüpft die bekannte Zahlung und versucht nur diese Zahlung erneut."
+      },
       "retrySync": { "label": "Sync-Zeile erneut versuchen" },
       "validatePendingOrders": { "label": "Ausstehende Bestellungen prüfen" },
       "removeInvalidOrders": {
@@ -5046,6 +5056,11 @@
         "title": "Parity-Prozessor hängt",
         "summary": "Der letzte Parity-Zyklus hat {{processed}} Elemente verarbeitet und {{remaining}} weiter in der Warteschlange gelassen. Aktueller Blocker: {{reason}}.",
         "guidance": "Führen Sie die Parity-Synchronisierung jetzt aus. Wenn derselbe Rückstau bleibt, prüfen Sie die Parity-Probleme auf Modulebene unten oder kontaktieren Sie den Operator. Letzter Parity-Fehler: {{reason}}."
+      },
+      "paymentTotalConflict": {
+        "title": "Zahlung und Bestellung passen nicht zusammen",
+        "summary": "Admin hat Zahlung {{paymentAmount}} abgelehnt, weil die aktuelle Bestellsumme {{remoteOrderTotal}} ist und bereits {{existingCompleted}} bezahlt sind.",
+        "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie löscht keine lokalen Daten, aktualisiert bei Bedarf die übergeordnete Bestellung, sendet die Zahlungsidentität und versucht diese Zahlungszeile erneut."
       },
       "parityModuleFailed": {
         "title": "Parity-Fehler in {{moduleLabel}}",

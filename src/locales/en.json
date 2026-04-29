@@ -4954,6 +4954,12 @@
       "order": "Order",
       "payment": "Payment",
       "adjustment": "Adjustment",
+      "recommended": "Recommended",
+      "localOrderTotal": "Local total",
+      "remoteOrderTotal": "Admin total",
+      "paymentAmount": "Payment amount",
+      "existingCompleted": "Already paid",
+      "remotePayment": "Remote payment",
       "issueCount_one": "{{count}} issue",
       "issueCount_other": "{{count}} issues",
       "unknownActor": "Unknown actor"
@@ -4979,6 +4985,10 @@
       "runParitySyncNow": { "label": "Run sync now" },
       "retryParityItem": { "label": "Retry parity item" },
       "retryParityModule": { "label": "Retry parity module" },
+      "repairPaymentTotalConflict": {
+        "label": "Fix payment/order mismatch",
+        "description": "Refreshes the order update, rebinds the known payment, then retries only this payment."
+      },
       "retrySync": { "label": "Retry sync row" },
       "validatePendingOrders": { "label": "Validate pending orders" },
       "removeInvalidOrders": {
@@ -5046,6 +5056,11 @@
         "title": "Parity processor stalled",
         "summary": "The last parity cycle processed {{processed}} items and still left {{remaining}} queued. Current blocker: {{reason}}.",
         "guidance": "Run parity sync now. If the same backlog remains, inspect the module-level parity issues below or contact operator. Latest parity error: {{reason}}."
+      },
+      "paymentTotalConflict": {
+        "title": "Payment/order mismatch",
+        "summary": "Admin rejected payment {{paymentAmount}} because its current order total is {{remoteOrderTotal}} and already paid amount is {{existingCompleted}}.",
+        "guidance": "Use the recommended fix first. It keeps local records intact, refreshes the parent order update if needed, sends the payment identity, and retries this payment row."
       },
       "parityModuleFailed": {
         "title": "{{moduleLabel}} parity failures",

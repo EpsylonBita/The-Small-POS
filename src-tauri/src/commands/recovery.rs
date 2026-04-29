@@ -1,3 +1,4 @@
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use tracing::info;
 
@@ -121,6 +122,51 @@ fn load_pos_api_key() -> Result<String, String> {
         return Err("POS API key not configured".into());
     }
     Ok(normalized)
+}
+
+fn failed_payment_total_conflict_for_payment(
+    conn: &rusqlite::Connection,
+    payment_id: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT error_message
+         FROM parity_sync_queue
+         WHERE table_name = 'payments'
+           AND record_id = ?1
+           AND status = 'failed'
+           AND error_message IS NOT NULL
+           AND lower(error_message) LIKE '%payment exceeds order total%'
+         ORDER BY COALESCE(last_attempt, created_at) DESC, created_at DESC
+         LIMIT 1",
+        rusqlite::params![payment_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|e| format!("load payment total conflict row: {e}"))
+}
+
+fn prepare_payment_total_conflict_repair(
+    conn: &rusqlite::Connection,
+    payment_id: &str,
+) -> Result<(String, bool), String> {
+    let local_order_id: String = conn
+        .query_row(
+            "SELECT order_id FROM order_payments WHERE id = ?1",
+            rusqlite::params![payment_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load payment repair context: {e}"))?;
+
+    let queued_parent_order =
+        sync::force_requeue_local_order_update_after_lagged_snapshot(conn, &local_order_id)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let payload = payments::build_payment_sync_payload_for_payment(conn, payment_id)?;
+    sync::upsert_payment_sync_queue_row(
+        conn, payment_id, &payload, "pending", 0, None, None, None, &now,
+    )
+    .map_err(|e| format!("requeue repaired payment parity row: {e}"))?;
+
+    Ok((local_order_id, queued_parent_order))
 }
 
 #[tauri::command]
@@ -427,6 +473,57 @@ pub async fn recovery_execute_action(
                     result.failed,
                     result.conflicts,
                     status.total,
+                ),
+            }))
+        }
+        "repairPaymentTotalConflict" => {
+            // Safe recovery only: this requeues the parent order update and the
+            // known payment parity row. It does not void, delete, or mutate
+            // drawer cash, so it must be available from Recovery Center even
+            // when no staff shift session is active.
+            let payment_id = request_field_str(&request, "paymentId")
+                .map(ToOwned::to_owned)
+                .or_else(|| request_param_str(&request, "paymentId"))
+                .or_else(|| request_param_str(&request, "sampleRecordId"))
+                .or_else(|| request_param_str(&request, "payment_id"))
+                .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
+                .ok_or_else(|| {
+                    "Missing payment id for payment/order mismatch repair".to_string()
+                })?;
+
+            let (order_id, queued_parent_order) = {
+                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                prepare_payment_total_conflict_repair(&conn, payment_id.as_str())
+                    .map_err(auth::GuardedCommandError::from)?
+            };
+
+            let admin_url = load_admin_url(&db)?;
+            let api_key = load_pos_api_key()?;
+            let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
+            let remaining_conflict = {
+                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                failed_payment_total_conflict_for_payment(&conn, payment_id.as_str())
+                    .map_err(auth::GuardedCommandError::from)?
+            };
+
+            if let Some(error) = remaining_conflict {
+                return Err(format!(
+                    "Payment/order mismatch still exists for payment {payment_id}: {error}"
+                )
+                .into());
+            }
+
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "message": format!(
+                    "Payment/order mismatch repair retried payment {payment_id} for order {order_id}. Parent order update queued: {}. Processed {}, failed {}, conflicts {}.",
+                    if queued_parent_order { "yes" } else { "no" },
+                    result.processed,
+                    result.failed,
+                    result.conflicts,
                 ),
             }))
         }

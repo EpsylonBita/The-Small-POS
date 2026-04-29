@@ -5068,6 +5068,12 @@
       "order": "Παραγγελία",
       "payment": "Πληρωμή",
       "adjustment": "Προσαρμογή",
+      "recommended": "Προτεινόμενο",
+      "localOrderTotal": "Τοπικό σύνολο",
+      "remoteOrderTotal": "Σύνολο admin",
+      "paymentAmount": "Ποσό πληρωμής",
+      "existingCompleted": "Ήδη πληρωμένο",
+      "remotePayment": "Remote πληρωμή",
       "issueCount_one": "{{count}} ζήτημα",
       "issueCount_other": "{{count}} ζητήματα",
       "unknownActor": "Άγνωστος χρήστης"
@@ -5102,6 +5108,10 @@
       },
       "retryParityModule": {
         "label": "Επανάληψη ενότητας parity"
+      },
+      "repairPaymentTotalConflict": {
+        "label": "Επιδιόρθωση ασυμφωνίας πληρωμής/παραγγελίας",
+        "description": "Ανανεώνει την παραγγελία, συνδέει τη γνωστή πληρωμή και επαναλαμβάνει μόνο αυτή την πληρωμή."
       },
       "retrySync": {
         "label": "Επανάληψη γραμμής συγχρονισμού"
@@ -5192,6 +5202,11 @@
         "title": "Ο επεξεργαστής parity έχει κολλήσει",
         "summary": "Ο τελευταίος κύκλος parity επεξεργάστηκε {{processed}} στοιχεία και άφησε ακόμη {{remaining}} στην ουρά. Τρέχον μπλοκάρισμα: {{reason}}.",
         "guidance": "Εκτελέστε συγχρονισμό parity τώρα. Αν το ίδιο backlog παραμείνει, ελέγξτε τα parity ζητήματα ανά ενότητα παρακάτω ή επικοινωνήστε με operator. Τελευταίο σφάλμα parity: {{reason}}."
+      },
+      "paymentTotalConflict": {
+        "title": "Ασυμφωνία πληρωμής/παραγγελίας",
+        "summary": "Το admin απέρριψε πληρωμή {{paymentAmount}} επειδή το τρέχον σύνολο παραγγελίας είναι {{remoteOrderTotal}} και το ήδη πληρωμένο ποσό είναι {{existingCompleted}}.",
+        "guidance": "Χρησιμοποιήστε πρώτα την προτεινόμενη επιδιόρθωση. Δεν διαγράφει τοπικά δεδομένα, ανανεώνει τη γονική παραγγελία όπου χρειάζεται, στέλνει την ταυτότητα πληρωμής και επαναλαμβάνει αυτή τη γραμμή."
       },
       "parityModuleFailed": {
         "title": "Αποτυχίες parity στην ενότητα {{moduleLabel}}",

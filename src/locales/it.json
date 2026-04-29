@@ -4954,6 +4954,12 @@
       "order": "Ordine",
       "payment": "Pagamento",
       "adjustment": "Rettifica",
+      "recommended": "Consigliato",
+      "localOrderTotal": "Totale locale",
+      "remoteOrderTotal": "Totale admin",
+      "paymentAmount": "Importo pagamento",
+      "existingCompleted": "Gia pagato",
+      "remotePayment": "Pagamento remoto",
       "issueCount_one": "{{count}} problema",
       "issueCount_other": "{{count}} problemi",
       "unknownActor": "Attore sconosciuto"
@@ -4979,6 +4985,10 @@
       "runParitySyncNow": { "label": "Esegui sincronizzazione ora" },
       "retryParityItem": { "label": "Riprova elemento parity" },
       "retryParityModule": { "label": "Riprova modulo parity" },
+      "repairPaymentTotalConflict": {
+        "label": "Correggi differenza pagamento/ordine",
+        "description": "Aggiorna l'ordine, collega il pagamento noto e riprova solo questo pagamento."
+      },
       "retrySync": { "label": "Riprova riga di sincronizzazione" },
       "validatePendingOrders": { "label": "Valida ordini in attesa" },
       "removeInvalidOrders": {
@@ -5046,6 +5056,11 @@
         "title": "Il processore parity è bloccato",
         "summary": "L'ultimo ciclo parity ha elaborato {{processed}} elementi e ne ha lasciati ancora {{remaining}} in coda. Blocco attuale: {{reason}}.",
         "guidance": "Esegui ora la sincronizzazione parity. Se lo stesso backlog rimane, controlla i problemi parity a livello di modulo qui sotto o contatta l'operatore. Ultimo errore parity: {{reason}}."
+      },
+      "paymentTotalConflict": {
+        "title": "Differenza pagamento/ordine",
+        "summary": "Admin ha rifiutato il pagamento {{paymentAmount}} perché il totale ordine attuale è {{remoteOrderTotal}} e l'importo già pagato è {{existingCompleted}}.",
+        "guidance": "Usa prima la correzione consigliata. Non elimina dati locali, aggiorna l'ordine padre se necessario, invia l'identità del pagamento e riprova questa riga."
       },
       "parityModuleFailed": {
         "title": "Errori parity in {{moduleLabel}}",

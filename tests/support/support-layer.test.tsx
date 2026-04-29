@@ -587,6 +587,53 @@ test('recovery suppresses duplicate financial parity cards when canonical paymen
   );
 });
 
+test('recovery maps payment total conflicts to the guided repair action and suppresses generic payment card', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 0, failed: 1, conflicts: 0, total: 1 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'payment-conflict-row',
+        tableName: 'payments',
+        recordId: 'local-payment-1',
+        moduleType: 'payment',
+        status: 'failed',
+        nextRetryAt: null,
+        errorMessage:
+          'HTTP 422: {"success":false,"error":"Payment exceeds order total","details":"Order total: 8.18, tip: 0, existing completed: 0, payment: 10.4"}',
+        data: JSON.stringify({
+          paymentId: 'local-payment-1',
+          orderId: 'local-order-1',
+          remote_payment_id: 'remote-payment-1',
+          amount: 10.4,
+        }),
+      }),
+    ],
+  });
+
+  const issue = result.issues.find((candidate) => candidate.code === 'payment_total_conflict');
+  assert.ok(issue, 'guided payment total conflict issue should be present');
+  assert.equal(issue?.paymentId, 'local-payment-1');
+  assert.equal(issue?.orderId, 'local-order-1');
+  assert.equal(issue?.params?.remoteOrderTotal, '8.18');
+  assert.equal(issue?.params?.paymentAmount, '10.40');
+  assert.deepEqual(
+    issue?.actions.map((action) => action.id),
+    ['repairPaymentTotalConflict', 'retryParityItem', 'runParitySyncNow'],
+  );
+  assert.equal(issue?.actions[0]?.recommended, true);
+  assert.equal(
+    result.issues.some((candidate) => candidate.code === 'parity_module_failed_items'),
+    false,
+  );
+});
+
 test('recovery maps legacy financial parity orphans to the local clear action', () => {
   const result = buildSyncRecoveryIssues({
     systemHealth: {

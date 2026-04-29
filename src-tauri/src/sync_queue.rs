@@ -3761,24 +3761,48 @@ fn prepare_payment_request(
     }
     let payment_method = string_field(payload, &["method", "paymentMethod", "payment_method"])
         .unwrap_or_else(|| "other".to_string());
+    let canonical_idempotency_key = format!("payment:{}", item.record_id);
 
     // W4d-iv additive emission: payment-sync POST body now ships `amount_cents`
     // alongside the legacy `amount` float. tip_amount gets the same treatment
     // when present.
     let mut body = serde_json::json!({
         "order_id": remote_order_id,
+        "paymentId": item.record_id,
+        "payment_id": item.record_id,
         "amount": amount,
         "amount_cents": Cents::round_half_even(amount).as_i64(),
         "payment_method": payment_method,
-        "idempotency_key": format!("payment:{}", item.record_id),
+        "idempotency_key": canonical_idempotency_key.clone(),
         "metadata": {
             "terminal_id": terminal_id,
             "local_payment_id": item.record_id,
+            "canonical_idempotency_key": canonical_idempotency_key.clone(),
             "payment_origin": string_field(payload, &["paymentOrigin", "payment_origin"]),
         }
     });
+    if let Some(value) = string_field(
+        payload,
+        &[
+            "remote_payment_id",
+            "remotePaymentId",
+            "canonical_payment_id",
+            "canonicalPaymentId",
+        ],
+    ) {
+        body["remote_payment_id"] = Value::String(value.clone());
+        body["canonical_payment_id"] = Value::String(value.clone());
+        body["metadata"]["remote_payment_id"] = Value::String(value.clone());
+        body["metadata"]["canonical_payment_id"] = Value::String(value);
+    }
+    if let Some(value) = string_field(payload, &["idempotency_key", "idempotencyKey"]) {
+        if value != canonical_idempotency_key {
+            body["metadata"]["legacy_idempotency_key"] = Value::String(value);
+        }
+    }
     if let Some(value) = string_field(payload, &["transactionRef", "transaction_ref"]) {
         body["external_transaction_id"] = Value::String(value);
+        body["metadata"]["transaction_ref"] = body["external_transaction_id"].clone();
     }
     if let Some(value) = payload.get("tipAmount").and_then(Value::as_f64) {
         body["tip_amount"] = Value::from(value);
@@ -6204,6 +6228,84 @@ mod tests {
             .expect("read payment state");
         assert_eq!(sync_state, "waiting_parent");
         assert_eq!(sync_error.as_deref(), Some("Order update not yet synced"));
+    }
+
+    #[test]
+    fn prepare_payment_request_includes_remote_and_local_payment_identity() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-payment-identity', 'remote-order-payment-identity', '[]', 10.4, 1040, 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, remote_payment_id, idempotency_key, created_at, updated_at
+             ) VALUES (
+                 'pay-identity', 'order-payment-identity', 'card', 10.4, 1040, 'completed', 'pending', 'pending', 'remote-payment-identity', 'legacy-payment-key', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed payment");
+
+        let payload = json!({
+            "paymentId": "pay-identity",
+            "orderId": "order-payment-identity",
+            "amount": 10.4,
+            "method": "card",
+            "remote_payment_id": "remote-payment-identity",
+            "canonical_payment_id": "remote-payment-identity",
+            "idempotency_key": "legacy-payment-key",
+            "transactionRef": "CARD-IDENTITY-1",
+        });
+        let item = queue_item("payments", "INSERT", "pay-identity", payload.clone());
+        let request = match prepare_payment_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare payment request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready payment request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(
+            body.get("remote_payment_id").and_then(Value::as_str),
+            Some("remote-payment-identity")
+        );
+        assert_eq!(
+            body.get("canonical_payment_id").and_then(Value::as_str),
+            Some("remote-payment-identity")
+        );
+        assert_eq!(
+            body.get("paymentId").and_then(Value::as_str),
+            Some("pay-identity")
+        );
+        assert_eq!(
+            body.pointer("/metadata/local_payment_id")
+                .and_then(Value::as_str),
+            Some("pay-identity")
+        );
+        assert_eq!(
+            body.pointer("/metadata/legacy_idempotency_key")
+                .and_then(Value::as_str),
+            Some("legacy-payment-key")
+        );
+        assert_eq!(
+            body.pointer("/metadata/canonical_idempotency_key")
+                .and_then(Value::as_str),
+            Some("payment:pay-identity")
+        );
+        assert_eq!(
+            body.pointer("/metadata/transaction_ref")
+                .and_then(Value::as_str),
+            Some("CARD-IDENTITY-1")
+        );
     }
 
     #[test]

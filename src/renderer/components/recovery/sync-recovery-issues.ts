@@ -46,6 +46,8 @@ const createAction = (
 ): RecoveryActionDescriptor => ({
   id,
   labelKey,
+  descriptionKey: options.descriptionKey,
+  recommended: options.recommended ?? false,
   safetyLevel: options.safetyLevel ?? 'safe',
   requiresOnline: options.requiresOnline ?? false,
   confirmationRequired: options.confirmationRequired ?? false,
@@ -73,6 +75,17 @@ const createRetryParityItemAction = (): RecoveryActionDescriptor =>
 
 const createRetryParityModuleAction = (): RecoveryActionDescriptor =>
   createAction('retryParityModule', 'recovery.actions.retryParityModule.label');
+
+const createRepairPaymentTotalConflictAction = (): RecoveryActionDescriptor =>
+  createAction(
+    'repairPaymentTotalConflict',
+    'recovery.actions.repairPaymentTotalConflict.label',
+    {
+      descriptionKey: 'recovery.actions.repairPaymentTotalConflict.description',
+      recommended: true,
+      requiresOnline: true,
+    },
+  );
 
 const createRetrySyncAction = (): RecoveryActionDescriptor =>
   createAction('retrySync', 'recovery.actions.retrySync.label');
@@ -447,6 +460,154 @@ const buildParityProcessorIssue = (
       reason: effectiveReason,
     },
   };
+};
+
+const parseJsonPayload = (raw?: string | null): Record<string, unknown> => {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const payloadString = (
+  payload: Record<string, unknown>,
+  keys: string[],
+): string | null => {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+};
+
+const payloadNumber = (
+  payload: Record<string, unknown>,
+  keys: string[],
+): number | null => {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+};
+
+const isPaymentTotalConflictMessage = (message?: string | null): boolean => {
+  const normalized = message?.toLowerCase() ?? '';
+  return normalized.includes('payment exceeds order total') ||
+    (normalized.includes('http 422') && normalized.includes('existing completed'));
+};
+
+const extractPaymentTotalConflictMetric = (
+  message: string,
+  label: string,
+): number | null => {
+  const normalized = message.toLowerCase();
+  const needle = label.toLowerCase();
+  const start = normalized.indexOf(needle);
+  if (start < 0) {
+    return null;
+  }
+  const tail = message.slice(start + label.length).trimStart();
+  const match = tail.match(/^-?\d+(?:\.\d+)?/);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const formatAmountParam = (value: number | null): string | null =>
+  value === null ? null : value.toFixed(2);
+
+const buildPaymentTotalConflictIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const issues: RecoveryIssue[] = [];
+  const suppressedRows = new Set<string>();
+
+  for (const item of parityItems) {
+    if (item.tableName !== 'payments' || !isPaymentTotalConflictMessage(item.errorMessage)) {
+      continue;
+    }
+
+    const payload = parseJsonPayload(item.data);
+    const error = item.errorMessage ?? '';
+    const paymentId =
+      payloadString(payload, ['paymentId', 'payment_id', 'local_payment_id']) ||
+      item.recordId;
+    const orderId =
+      payloadString(payload, ['orderId', 'order_id', 'localOrderId', 'clientOrderId']) ||
+      null;
+    const remotePaymentId =
+      payloadString(payload, ['remote_payment_id', 'canonical_payment_id']) || null;
+    const localOrderTotal = formatAmountParam(
+      payloadNumber(payload, ['orderTotal', 'order_total', 'totalAmount', 'total_amount']),
+    );
+    const remoteOrderTotal = formatAmountParam(
+      extractPaymentTotalConflictMetric(error, 'order total:'),
+    );
+    const existingCompleted = formatAmountParam(
+      extractPaymentTotalConflictMetric(error, 'existing completed:'),
+    );
+    const paymentAmount = formatAmountParam(
+      extractPaymentTotalConflictMetric(error, 'payment:') ??
+        payloadNumber(payload, ['amount', 'paymentAmount']),
+    );
+
+    suppressedRows.add(`${item.tableName}:${item.recordId}`);
+    issues.push({
+      id: `payment-total-conflict-${item.id}`,
+      code: 'payment_total_conflict',
+      severity: 'error',
+      status: 'blocking',
+      entityType: 'payment',
+      entityId: paymentId,
+      titleKey: 'recovery.issues.paymentTotalConflict.title',
+      summaryKey: 'recovery.issues.paymentTotalConflict.summary',
+      guidanceKey: 'recovery.issues.paymentTotalConflict.guidance',
+      actions: [
+        createRepairPaymentTotalConflictAction(),
+        createRetryParityItemAction(),
+        createRunParitySyncAction(),
+      ],
+      params: {
+        sampleItemId: item.id,
+        sampleTableName: item.tableName,
+        sampleRecordId: item.recordId,
+        moduleType: item.moduleType || 'payment',
+        lastError: item.errorMessage ?? null,
+        paymentId,
+        orderId,
+        remotePaymentId,
+        localOrderTotal,
+        remoteOrderTotal,
+        orderTotal: remoteOrderTotal,
+        paymentAmount,
+        existingCompleted,
+      },
+      orderId,
+      paymentId,
+    });
+  }
+
+  return { issues, suppressedRows };
 };
 
 const buildParityModuleIssues = (
@@ -836,6 +997,10 @@ export function buildSyncRecoveryIssues({
       );
     }
   }
+  const paymentTotalConflictResult = buildPaymentTotalConflictIssues(parityItems);
+  for (const suppressedRow of paymentTotalConflictResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth)) {
     pushIssue(issues, issue);
@@ -844,6 +1009,9 @@ export function buildSyncRecoveryIssues({
   pushIssue(issues, buildParityProcessorIssue(systemHealth, parityItems, lastParitySync));
 
   for (const issue of buildSyncBlockerIssues(systemHealth)) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of paymentTotalConflictResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {
