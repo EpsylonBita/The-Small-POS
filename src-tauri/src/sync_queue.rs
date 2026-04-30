@@ -3390,7 +3390,7 @@ fn prepare_order_request(
         }));
     }
 
-    let remote_id: Option<String> = conn
+    let local_remote_id: Option<String> = conn
         .query_row(
             "SELECT NULLIF(TRIM(COALESCE(supabase_id, '')), '')
              FROM orders
@@ -3401,6 +3401,18 @@ fn prepare_order_request(
         .optional()
         .map_err(|e| format!("sync_queue prepare_order_request remote id: {e}"))?
         .flatten();
+    let remote_id = local_remote_id.or_else(|| {
+        string_field(
+            payload,
+            &[
+                "remote_order_id",
+                "remoteOrderId",
+                "canonical_order_id",
+                "canonicalOrderId",
+                "supabase_id",
+            ],
+        )
+    });
 
     let Some(remote_id) = remote_id else {
         return Ok(RequestPreparation::Deferred {
@@ -6259,6 +6271,55 @@ mod tests {
         assert!(
             body.get("items").is_none(),
             "status-only replay must not hydrate fallback order_items"
+        );
+    }
+
+    #[test]
+    fn prepare_order_request_uses_repaired_remote_order_id_when_local_order_rolled_over() {
+        let conn = test_connection();
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-rolled-over",
+            json!({
+                "orderId": "order-rolled-over",
+                "remoteOrderId": "remote-order-rolled-over",
+                "status": "completed",
+                "paymentStatus": "paid",
+                "totalAmount": 7.7,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "name": "Water",
+                    "quantity": 1,
+                    "unit_price": 1.0,
+                    "total_price": 1.0
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(request.method, Method::PATCH);
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some("remote-order-rolled-over")
+        );
+        assert_eq!(
+            body.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(7.7));
+        assert_eq!(
+            body.get("items").and_then(Value::as_array).map(Vec::len),
+            Some(1)
         );
     }
 

@@ -3863,6 +3863,115 @@ fn requeue_resolved_order_update_parent_wait_rows(conn: &Connection) -> Result<u
         .map_err(|e| format!("requeue resolved order update parent wait rows: {e}"))
 }
 
+fn infer_repaired_order_update_status(payload: &Value, remote_order: &Value) -> String {
+    str_any(payload, &["status"])
+        .or_else(|| str_any(remote_order, &["status"]))
+        .or_else(|| {
+            let payment_status = str_any(payload, &["paymentStatus", "payment_status"])
+                .or_else(|| str_any(remote_order, &["paymentStatus", "payment_status"]));
+            payment_status
+                .as_deref()
+                .filter(|value| value.eq_ignore_ascii_case("paid"))
+                .map(|_| "completed".to_string())
+        })
+        .unwrap_or_else(|| "pending".to_string())
+}
+
+fn requeue_order_update_parent_wait_rows_with_remote_order(
+    conn: &Connection,
+    local_order_id: &str,
+    remote_order: &Value,
+) -> Result<usize, String> {
+    let Some(remote_order_id) = str_any(remote_order, &["id"]) else {
+        return Ok(0);
+    };
+
+    let sql = format!(
+        "SELECT id, data
+         FROM parity_sync_queue
+         WHERE record_id = ?1
+           AND {}
+         ORDER BY created_at ASC",
+        is_order_update_parent_wait_sql()
+    );
+    let rows = {
+        let mut stmt = conn
+            .prepare(sql.as_str())
+            .map_err(|e| format!("prepare queued parent-wait order rows: {e}"))?;
+        let mapped = stmt
+            .query_map(params![local_order_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("query queued parent-wait order rows: {e}"))?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|e| format!("read queued parent-wait order row: {e}"))?);
+        }
+        rows
+    };
+
+    let mut requeued = 0usize;
+    for (queue_id, raw_payload) in rows {
+        let mut payload = match serde_json::from_str::<Value>(&raw_payload) {
+            Ok(Value::Object(map)) => Value::Object(map),
+            _ => continue,
+        };
+        let status = infer_repaired_order_update_status(&payload, remote_order);
+        let order_number = str_any(remote_order, &["order_number", "orderNumber"]);
+
+        let Some(object) = payload.as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            "remote_order_id".to_string(),
+            Value::String(remote_order_id.clone()),
+        );
+        object.insert(
+            "remoteOrderId".to_string(),
+            Value::String(remote_order_id.clone()),
+        );
+        object.insert(
+            "syncRecoveryReason".to_string(),
+            Value::String("z_report_rollover_parent_remote_relinked".to_string()),
+        );
+        if !object
+            .get("status")
+            .and_then(Value::as_str)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            object.insert("status".to_string(), Value::String(status));
+        }
+        if let Some(order_number) = order_number {
+            object
+                .entry("order_number".to_string())
+                .or_insert_with(|| Value::String(order_number.clone()));
+            object
+                .entry("orderNumber".to_string())
+                .or_insert_with(|| Value::String(order_number));
+        }
+
+        let updated = conn
+            .execute(
+                "UPDATE parity_sync_queue
+                 SET data = ?1,
+                     status = 'pending',
+                     attempts = 0,
+                     last_attempt = NULL,
+                     error_message = NULL,
+                     next_retry_at = NULL,
+                     retry_delay_ms = 1000,
+                     claim_generation = claim_generation + 1
+                 WHERE id = ?2",
+                params![payload.to_string(), queue_id],
+            )
+            .map_err(|e| format!("requeue parent-wait order row with remote identity: {e}"))?;
+        requeued += updated;
+    }
+
+    Ok(requeued)
+}
+
 pub(crate) async fn repair_order_update_parent_wait_blockers(
     db: &DbState,
     admin_url: &str,
@@ -3874,11 +3983,21 @@ pub(crate) async fn repair_order_update_parent_wait_blockers(
     };
 
     let mut repaired = 0usize;
+    let mut requeued_from_remote_payload = 0usize;
     for record_id in record_ids {
         match resolve_remote_order_for_local_order(db, admin_url, api_key, record_id.as_str()).await
         {
-            Ok(Some((_remote_order_id, _remote_order))) => {
+            Ok(Some((_remote_order_id, remote_order))) => {
                 repaired += 1;
+                if let Some(remote_order) = remote_order.as_ref() {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    requeued_from_remote_payload +=
+                        requeue_order_update_parent_wait_rows_with_remote_order(
+                            &conn,
+                            record_id.as_str(),
+                            remote_order,
+                        )?;
+                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -3893,7 +4012,7 @@ pub(crate) async fn repair_order_update_parent_wait_blockers(
 
     let requeued = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        requeue_resolved_order_update_parent_wait_rows(&conn)?
+        requeued_from_remote_payload + requeue_resolved_order_update_parent_wait_rows(&conn)?
     };
 
     Ok((repaired, requeued))
@@ -8519,6 +8638,68 @@ fn load_local_order_remote_lookup(
     .map_err(|e| format!("load local order lookup context for payment recovery: {e}"))
 }
 
+fn load_order_update_parent_wait_lookup_from_queue(
+    conn: &Connection,
+    requested_local_order_id: &str,
+) -> Result<Option<LocalOrderRemoteLookup>, String> {
+    let sql = format!(
+        "SELECT data, NULLIF(TRIM(COALESCE(created_at, '')), '')
+         FROM parity_sync_queue
+         WHERE record_id = ?1
+           AND {}
+         ORDER BY created_at ASC
+         LIMIT 1",
+        is_order_update_parent_wait_sql()
+    );
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(sql.as_str(), params![requested_local_order_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(|e| format!("load queued order parent-wait lookup context: {e}"))?;
+
+    let Some((raw_payload, queued_at)) = row else {
+        return Ok(None);
+    };
+    let payload = serde_json::from_str::<Value>(&raw_payload).unwrap_or(Value::Null);
+    let local_order_id = str_any(
+        &payload,
+        &[
+            "orderId",
+            "order_id",
+            "clientOrderId",
+            "client_order_id",
+            "id",
+        ],
+    )
+    .unwrap_or_else(|| requested_local_order_id.to_string());
+
+    Ok(Some(LocalOrderRemoteLookup {
+        local_order_id,
+        supabase_id: str_any(
+            &payload,
+            &[
+                "remote_order_id",
+                "remoteOrderId",
+                "canonical_order_id",
+                "canonicalOrderId",
+                "supabase_id",
+            ],
+        ),
+        order_number: str_any(
+            &payload,
+            &[
+                "orderNumber",
+                "order_number",
+                "displayOrderNumber",
+                "display_order_number",
+            ],
+        ),
+        created_at: str_any(&payload, &["createdAt", "created_at"]).or_else(|| queued_at.clone()),
+        updated_at: str_any(&payload, &["updatedAt", "updated_at"]).or(queued_at),
+    }))
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct OrphanedFinancialRepairStats {
     pub repaired: usize,
@@ -9249,7 +9430,10 @@ async fn resolve_remote_order_for_local_order(
 ) -> Result<Option<(String, Option<Value>)>, String> {
     let lookup = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        load_local_order_remote_lookup(&conn, local_order_id)?
+        match load_local_order_remote_lookup(&conn, local_order_id)? {
+            Some(lookup) => Some(lookup),
+            None => load_order_update_parent_wait_lookup_from_queue(&conn, local_order_id)?,
+        }
     };
 
     let Some(lookup) = lookup else {
@@ -23212,6 +23396,112 @@ mod tests {
         assert_eq!(attempts, 0);
         assert!(error_message.is_none());
         assert!(next_retry_at.is_none());
+    }
+
+    #[test]
+    fn order_update_parent_wait_repair_relinks_rolled_over_queue_payload() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message, next_retry_at
+             ) VALUES (
+                 'queue-z-rollover-parent-wait', 'orders', 'ord-z-rollover', 'UPDATE',
+                 '{\"orderId\":\"ord-z-rollover\",\"items\":[{\"name\":\"Water\",\"quantity\":1,\"unit_price\":1.0}],\"paymentStatus\":\"paid\",\"totalAmount\":7.7}',
+                 'org-test', '2026-04-28T23:49:11+00:00', 29, 60000, 1, 'orders',
+                 'server-wins', 1, 'pending', 'Waiting for parent order sync',
+                 '2026-04-30T01:41:54Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let search_body = serde_json::json!({
+            "success": true,
+            "orders": []
+        })
+        .to_string();
+        let sync_body = serde_json::json!({
+            "success": true,
+            "orders": [{
+                "id": "remote-z-rollover",
+                "client_order_id": "ord-z-rollover",
+                "order_number": "ORD-Z-ROLLOVER",
+                "status": "completed",
+                "updated_at": "2026-04-28T23:49:12Z"
+            }],
+            "has_more": false
+        })
+        .to_string();
+        let (mock_url, server_handle) = spawn_json_sequence_server(vec![
+            (
+                "/api/pos/orders?limit=25&search=ord-z-rollover".to_string(),
+                search_body,
+            ),
+            (
+                "/api/pos/orders/sync?limit=200&since=2026-04-27T23%3A49%3A11Z".to_string(),
+                sync_body,
+            ),
+        ]);
+
+        let (repaired, requeued) = tauri::async_runtime::block_on(
+            repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
+        )
+        .expect("repair rolled-over parent-wait order update");
+        server_handle.join().expect("join mock server");
+
+        assert_eq!(repaired, 1);
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, attempts, error_message, next_retry_at, raw_data): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, next_retry_at, data
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-z-rollover-parent-wait'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let data: Value = serde_json::from_str(&raw_data).unwrap();
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(attempts, 0);
+        assert!(error_message.is_none());
+        assert!(next_retry_at.is_none());
+        assert_eq!(
+            data.get("remoteOrderId").and_then(Value::as_str),
+            Some("remote-z-rollover")
+        );
+        assert_eq!(
+            data.get("remote_order_id").and_then(Value::as_str),
+            Some("remote-z-rollover")
+        );
+        assert_eq!(
+            data.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+        assert_eq!(
+            data.get("orderNumber").and_then(Value::as_str),
+            Some("ORD-Z-ROLLOVER")
+        );
     }
 
     #[test]
