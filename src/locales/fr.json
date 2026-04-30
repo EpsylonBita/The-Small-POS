@@ -5000,7 +5000,9 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Réparer les blocages de replay commande",
-        "description": "Lie les commandes distantes manquantes, réessaie les mises à jour de commande bloquées, puis promeut les paiements en attente derrière elles."
+        "description": "Lie les commandes distantes manquantes, réessaie les mises à jour de commande bloquées, puis archive les anciennes commandes de synchro quand la commande parente locale a disparu.",
+        "confirmTitle": "Réparer les blocages de replay commande ?",
+        "confirmMessage": "Cette action peut archiver les anciennes commandes de synchronisation pour {{orderId}} lorsque la commande parente locale a disparu. Elle ne supprime pas les commandes, paiements ni Z-reports."
       },
       "retrySync": { "label": "Réessayer la ligne de synchro" },
       "validatePendingOrders": { "label": "Valider les commandes en attente" },
@@ -5089,6 +5091,11 @@
         "title": "Mise à jour commande en attente de la commande distante",
         "summary": "{{count}} ligne de mise à jour commande attend car ce terminal n'a pas encore lié la commande admin distante.",
         "guidance": "Utilisez d'abord la réparation recommandée. Elle recherche la commande existante dans admin, enregistre localement l'ID distant de la commande, puis réessaie uniquement cette mise à jour bloquée."
+      },
+      "staleOrderUpdateParentWait": {
+        "title": "Ancienne mise à jour commande en attente de parent",
+        "summary": "{{count}} ancienne ligne de mise à jour commande ne retrouve plus sa commande parente locale.",
+        "guidance": "Utilisez d'abord la réparation recommandée. Elle recherche une dernière fois la commande dans admin, puis archive uniquement l'ancienne commande de synchro si la commande parente a disparu. Elle ne supprime pas les commandes, paiements ni Z-reports."
       },
       "catalogAvailabilityRetry": {
         "title": "Réessai de disponibilité du catalogue",

@@ -5000,7 +5000,9 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Fix order replay blockers",
-        "description": "Links missing remote parent orders, retries blocked order updates, then promotes payments waiting behind them."
+        "description": "Links missing remote parent orders, retries blocked order updates, then archives stale sync commands when the local parent order is gone.",
+        "confirmTitle": "Fix order replay blockers?",
+        "confirmMessage": "This action may archive stale order sync commands for {{orderId}} when the local parent order is gone. It does not delete orders, payments, or Z-reports."
       },
       "retrySync": { "label": "Retry sync row" },
       "validatePendingOrders": { "label": "Validate pending orders" },
@@ -5089,6 +5091,11 @@
         "title": "Order update waiting for remote parent",
         "summary": "{{count}} order update row is waiting because this terminal has not linked the remote admin order yet.",
         "guidance": "Use the recommended fix first. It searches admin for the existing order, attaches the remote order id locally, and retries only the blocked order update."
+      },
+      "staleOrderUpdateParentWait": {
+        "title": "Stale order update waiting for parent",
+        "summary": "{{count}} old order update row cannot find its local parent order anymore.",
+        "guidance": "Use the recommended fix first. It searches admin one last time, then archives only the stale sync command if the parent order is gone. It does not delete orders, payments, or Z-reports."
       },
       "catalogAvailabilityRetry": {
         "title": "Catalog availability retry",

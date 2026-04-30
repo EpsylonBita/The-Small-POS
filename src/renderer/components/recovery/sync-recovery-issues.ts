@@ -113,6 +113,9 @@ const createRepairOrderUpdateReplayBlockersAction = (): RecoveryActionDescriptor
       descriptionKey: 'recovery.actions.repairOrderUpdateReplayBlockers.description',
       recommended: true,
       requiresOnline: true,
+      confirmationRequired: true,
+      confirmTitleKey: 'recovery.actions.repairOrderUpdateReplayBlockers.confirmTitle',
+      confirmMessageKey: 'recovery.actions.repairOrderUpdateReplayBlockers.confirmMessage',
     },
   );
 
@@ -584,7 +587,17 @@ const isOrderUpdateWaitingForParentOrderSync = (item: SyncQueueItem): boolean =>
     return false;
   }
   const normalized = item.errorMessage?.toLowerCase() ?? '';
-  return normalized.includes('waiting for parent order sync');
+  return normalized.includes('waiting for parent order sync') ||
+    normalized.includes('stale order update replay') ||
+    normalized.includes('local parent order missing');
+};
+
+const isStaleOrderUpdateParentWait = (item: SyncQueueItem): boolean => {
+  const normalized = item.errorMessage?.toLowerCase() ?? '';
+  return normalized.includes('stale order update replay') ||
+    normalized.includes('local parent order missing') ||
+    (normalized.includes('deferred too many times') &&
+      normalized.includes('waiting for parent order sync'));
 };
 
 const extractPaymentTotalConflictMetric = (
@@ -800,20 +813,27 @@ const buildOrderUpdateParentWaitIssues = (
     payloadNumber(payload, ['totalAmount', 'total_amount']),
   );
   const suppressedRows = new Set(rows.map((item) => `${item.tableName}:${item.recordId}`));
+  const stale = rows.some(isStaleOrderUpdateParentWait);
 
   return {
     suppressedRows,
     issues: [
       {
         id: `order-update-parent-wait-${sample.id}`,
-        code: 'order_update_parent_wait',
-        severity: 'warning',
+        code: stale ? 'stale_order_update_parent_wait' : 'order_update_parent_wait',
+        severity: stale ? 'error' : 'warning',
         status: 'blocking',
         entityType: 'order',
         entityId: orderId,
-        titleKey: 'recovery.issues.orderUpdateParentWait.title',
-        summaryKey: 'recovery.issues.orderUpdateParentWait.summary',
-        guidanceKey: 'recovery.issues.orderUpdateParentWait.guidance',
+        titleKey: stale
+          ? 'recovery.issues.staleOrderUpdateParentWait.title'
+          : 'recovery.issues.orderUpdateParentWait.title',
+        summaryKey: stale
+          ? 'recovery.issues.staleOrderUpdateParentWait.summary'
+          : 'recovery.issues.orderUpdateParentWait.summary',
+        guidanceKey: stale
+          ? 'recovery.issues.staleOrderUpdateParentWait.guidance'
+          : 'recovery.issues.orderUpdateParentWait.guidance',
         actions: [
           createRepairOrderUpdateReplayBlockersAction(),
           createRetryParityItemAction(),
@@ -1350,12 +1370,20 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of catalogAvailabilityResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const hasSpecificParityRecoveryIssue =
+    paymentTotalConflictResult.issues.length > 0 ||
+    invalidDriverOrderResult.issues.length > 0 ||
+    orderUpdateParentWaitResult.issues.length > 0 ||
+    orderUpdateReplayResult.issues.length > 0 ||
+    catalogAvailabilityResult.issues.length > 0;
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth)) {
     pushIssue(issues, issue);
   }
   pushIssue(issues, buildInvalidOrdersIssue(systemHealth));
-  pushIssue(issues, buildParityProcessorIssue(systemHealth, parityItems, lastParitySync));
+  if (!hasSpecificParityRecoveryIssue) {
+    pushIssue(issues, buildParityProcessorIssue(systemHealth, parityItems, lastParitySync));
+  }
 
   for (const issue of buildSyncBlockerIssues(systemHealth)) {
     pushIssue(issues, issue);

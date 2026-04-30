@@ -3733,6 +3733,7 @@ pub(crate) struct OrderUpdateReplayRepairStats {
     pub requeued_orders: usize,
     pub repaired_parent_orders: usize,
     pub requeued_parent_wait_orders: usize,
+    pub quarantined_stale_parent_wait_orders: usize,
     pub first_pass: sync_queue::SyncResult,
     pub promoted_payments: usize,
     pub second_pass: Option<sync_queue::SyncResult>,
@@ -3759,7 +3760,11 @@ fn is_order_update_parent_wait_sql() -> &'static str {
        AND upper(operation) = 'UPDATE'
        AND status IN ('pending', 'processing', 'failed', 'conflict')
        AND error_message IS NOT NULL
-       AND lower(error_message) LIKE '%waiting for parent order sync%'"
+       AND (
+         lower(error_message) LIKE '%waiting for parent order sync%'
+         OR lower(error_message) LIKE '%stale order update replay%'
+         OR lower(error_message) LIKE '%local parent order missing%'
+       )"
 }
 
 pub(crate) fn requeue_order_update_replay_blockers(db: &DbState) -> Result<usize, String> {
@@ -3972,11 +3977,151 @@ fn requeue_order_update_parent_wait_rows_with_remote_order(
     Ok(requeued)
 }
 
+fn quarantine_stale_order_update_parent_wait_rows(conn: &Connection) -> Result<usize, String> {
+    let sql = format!(
+        "SELECT id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, last_attempt, error_message, next_retry_at,
+                retry_delay_ms, priority, module_type, conflict_strategy, version, status
+         FROM parity_sync_queue
+         WHERE {}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM orders
+             WHERE orders.id = parity_sync_queue.record_id
+           )
+         ORDER BY created_at ASC, id ASC",
+        is_order_update_parent_wait_sql()
+    );
+
+    let rows = {
+        let mut stmt = conn
+            .prepare(sql.as_str())
+            .map_err(|e| format!("prepare stale order parent-wait quarantine rows: {e}"))?;
+        let mapped = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, String>(16)?,
+                ))
+            })
+            .map_err(|e| format!("query stale order parent-wait quarantine rows: {e}"))?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|e| format!("read stale order parent-wait row: {e}"))?);
+        }
+        rows
+    };
+
+    let mut quarantined = 0usize;
+    for (
+        queue_id,
+        table_name,
+        record_id,
+        operation,
+        data,
+        organization_id,
+        created_at,
+        attempts,
+        last_attempt,
+        error_message,
+        next_retry_at,
+        retry_delay_ms,
+        priority,
+        module_type,
+        conflict_strategy,
+        version,
+        status,
+    ) in rows
+    {
+        let discarded_payload = serde_json::json!({
+            "queue_id": queue_id,
+            "table_name": table_name,
+            "record_id": record_id,
+            "operation": operation,
+            "data": data,
+            "organization_id": organization_id,
+            "created_at": created_at,
+            "attempts": attempts,
+            "last_attempt": last_attempt,
+            "error_message": error_message,
+            "next_retry_at": next_retry_at,
+            "retry_delay_ms": retry_delay_ms,
+            "priority": priority,
+            "module_type": module_type,
+            "conflict_strategy": conflict_strategy,
+            "version": version,
+            "status": status,
+            "quarantine_reason": "local parent order missing and no remote parent could be resolved",
+        })
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO conflict_audit_log (
+                 id, operation_type, entity_id, entity_type, local_version,
+                 server_version, timestamp, discarded_payload, resolution,
+                 is_monetary, reviewed_by_operator
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, 0, 1)",
+            params![
+                Uuid::new_v4().to_string(),
+                operation,
+                record_id,
+                table_name,
+                version,
+                Utc::now().to_rfc3339(),
+                discarded_payload,
+                "stale_order_parent_wait_quarantined",
+            ],
+        )
+        .map_err(|e| format!("audit stale order parent-wait quarantine: {e}"))?;
+
+        let removed = conn
+            .execute(
+                "DELETE FROM parity_sync_queue
+                 WHERE id = ?1
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM orders
+                     WHERE orders.id = parity_sync_queue.record_id
+                   )",
+                params![queue_id],
+            )
+            .map_err(|e| format!("remove stale order parent-wait row: {e}"))?;
+
+        if removed > 0 {
+            quarantined += removed;
+        }
+    }
+
+    if quarantined > 0 {
+        info!(
+            quarantined,
+            "Quarantined stale order update parent-wait parity rows"
+        );
+    }
+
+    Ok(quarantined)
+}
+
 pub(crate) async fn repair_order_update_parent_wait_blockers(
     db: &DbState,
     admin_url: &str,
     api_key: &str,
-) -> Result<(usize, usize), String> {
+) -> Result<(usize, usize, usize), String> {
     let record_ids = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         load_order_update_parent_wait_record_ids(&conn)?
@@ -4014,8 +4159,12 @@ pub(crate) async fn repair_order_update_parent_wait_blockers(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         requeued_from_remote_payload + requeue_resolved_order_update_parent_wait_rows(&conn)?
     };
+    let quarantined = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        quarantine_stale_order_update_parent_wait_rows(&conn)?
+    };
 
-    Ok((repaired, requeued))
+    Ok((repaired, requeued, quarantined))
 }
 
 pub(crate) async fn repair_order_update_replay_blockers(
@@ -4023,7 +4172,7 @@ pub(crate) async fn repair_order_update_replay_blockers(
     admin_url: &str,
     api_key: &str,
 ) -> Result<OrderUpdateReplayRepairStats, String> {
-    let (repaired_parent_orders, requeued_parent_wait_orders) =
+    let (repaired_parent_orders, requeued_parent_wait_orders, quarantined_stale_parent_wait_orders) =
         repair_order_update_parent_wait_blockers(db, admin_url, api_key).await?;
     let requeued_orders = requeue_order_update_replay_blockers(db)?;
     let first_pass = sync_queue::process_queue(&db.conn, admin_url, api_key).await?;
@@ -4046,6 +4195,7 @@ pub(crate) async fn repair_order_update_replay_blockers(
         requeued_orders,
         repaired_parent_orders,
         requeued_parent_wait_orders,
+        quarantined_stale_parent_wait_orders,
         first_pass,
         promoted_payments,
         second_pass,
@@ -23354,7 +23504,7 @@ mod tests {
             body,
         )]);
 
-        let (repaired, requeued) = tauri::async_runtime::block_on(
+        let (repaired, requeued, quarantined) = tauri::async_runtime::block_on(
             repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
         )
         .expect("repair parent-wait order update");
@@ -23362,6 +23512,7 @@ mod tests {
 
         assert_eq!(repaired, 1);
         assert_eq!(requeued, 1);
+        assert_eq!(quarantined, 0);
 
         let conn = db.conn.lock().unwrap();
         let (supabase_id, queue_status, attempts, error_message, next_retry_at): (
@@ -23447,7 +23598,7 @@ mod tests {
             ),
         ]);
 
-        let (repaired, requeued) = tauri::async_runtime::block_on(
+        let (repaired, requeued, quarantined) = tauri::async_runtime::block_on(
             repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
         )
         .expect("repair rolled-over parent-wait order update");
@@ -23455,6 +23606,7 @@ mod tests {
 
         assert_eq!(repaired, 1);
         assert_eq!(requeued, 1);
+        assert_eq!(quarantined, 0);
 
         let conn = db.conn.lock().unwrap();
         let (queue_status, attempts, error_message, next_retry_at, raw_data): (
@@ -23502,6 +23654,231 @@ mod tests {
             data.get("orderNumber").and_then(Value::as_str),
             Some("ORD-Z-ROLLOVER")
         );
+    }
+
+    #[test]
+    fn stale_order_parent_wait_repair_quarantines_missing_local_parent_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents,
+                 status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-unrelated', 'ORD-UNRELATED', '[]', 1.0, 100,
+                 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'pay-unrelated', 'ord-unrelated', 'cash', 1.0, 100, 'completed',
+                 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                 check_in_time, check_out_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-unrelated', 'staff-1', 'Cashier One', 'branch-1', 'term-1', 'cashier',
+                 '2026-04-29T20:00:00Z', '2026-04-29T23:00:00Z', 'closed', 'synced',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO z_reports (
+                 id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                 gross_sales, gross_sales_cents, net_sales, net_sales_cents,
+                 total_orders, cash_sales, cash_sales_cents, card_sales, card_sales_cents,
+                 payments_breakdown_json, report_json, sync_state, created_at, updated_at
+             ) VALUES (
+                 'zr-unrelated', 'shift-unrelated', 'branch-1', 'term-1', '2026-04-29',
+                 '2026-04-30T03:03:44Z', 1.0, 100, 1.0, 100, 1, 1.0, 100, 0, 0,
+                 '{}', '{}', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message, next_retry_at
+             ) VALUES (
+                 'queue-stale-parent-wait', 'orders', 'ord-stale-parent', 'UPDATE',
+                 '{\"orderId\":\"ord-stale-parent\",\"items\":[{\"name\":\"Water\",\"quantity\":1,\"unit_price\":1.0}],\"paymentStatus\":\"paid\",\"totalAmount\":7.7}',
+                 'org-test', '2026-04-28T23:49:11+00:00', 50, 60000, 1, 'orders',
+                 'server-wins', 1, 'conflict',
+                 'Deferred too many times (50× \"Waiting for parent order sync\"); escalated to conflict',
+                 '2026-04-30T01:41:54Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let search_body = serde_json::json!({
+            "success": true,
+            "orders": []
+        })
+        .to_string();
+        let sync_body = serde_json::json!({
+            "success": true,
+            "orders": [],
+            "has_more": false
+        })
+        .to_string();
+        let (mock_url, server_handle) = spawn_json_sequence_server(vec![
+            (
+                "/api/pos/orders?limit=25&search=ord-stale-parent".to_string(),
+                search_body,
+            ),
+            (
+                "/api/pos/orders/sync?limit=200&since=2026-04-27T23%3A49%3A11Z".to_string(),
+                sync_body,
+            ),
+        ]);
+
+        let (repaired, requeued, quarantined) = tauri::async_runtime::block_on(
+            repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
+        )
+        .expect("repair stale parent-wait order update");
+        server_handle.join().expect("join mock server");
+
+        assert_eq!(repaired, 0);
+        assert_eq!(requeued, 0);
+        assert_eq!(quarantined, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_rows, audit_rows, order_rows, payment_rows, z_report_rows): (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'queue-stale-parent-wait'),
+                    (SELECT COUNT(*) FROM conflict_audit_log
+                     WHERE entity_id = 'ord-stale-parent'
+                       AND resolution = 'stale_order_parent_wait_quarantined'),
+                    (SELECT COUNT(*) FROM orders WHERE id = 'ord-unrelated'),
+                    (SELECT COUNT(*) FROM order_payments WHERE id = 'pay-unrelated'),
+                    (SELECT COUNT(*) FROM z_reports WHERE id = 'zr-unrelated')",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(queue_rows, 0);
+        assert_eq!(audit_rows, 1);
+        assert_eq!(order_rows, 1);
+        assert_eq!(payment_rows, 1);
+        assert_eq!(z_report_rows, 1);
+    }
+
+    #[test]
+    fn stale_order_parent_wait_repair_keeps_live_local_parent_rows_blocked() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents,
+                 status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-live-parent', 'ORD-LIVE-PARENT', '[]', 7.7, 770,
+                 'completed', 'pending', '2026-04-28T22:38:22Z', '2026-04-28T23:49:11+00:00'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message, next_retry_at
+             ) VALUES (
+                 'queue-live-parent-wait', 'orders', 'ord-live-parent', 'UPDATE',
+                 '{\"orderId\":\"ord-live-parent\",\"status\":\"completed\",\"totalAmount\":7.7}',
+                 'org-test', '2026-04-28T23:49:11+00:00', 50, 60000, 1, 'orders',
+                 'server-wins', 1, 'conflict',
+                 'Deferred too many times (50× \"Waiting for parent order sync\"); escalated to conflict',
+                 '2026-04-30T01:41:54Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let search_body = serde_json::json!({
+            "success": true,
+            "orders": []
+        })
+        .to_string();
+        let sync_body = serde_json::json!({
+            "success": true,
+            "orders": [],
+            "has_more": false
+        })
+        .to_string();
+        let (mock_url, server_handle) = spawn_json_sequence_server(vec![
+            (
+                "/api/pos/orders?limit=25&search=ORD-LIVE-PARENT".to_string(),
+                search_body,
+            ),
+            (
+                "/api/pos/orders?limit=25&search=ord-live-parent".to_string(),
+                serde_json::json!({ "success": true, "orders": [] }).to_string(),
+            ),
+            (
+                "/api/pos/orders/sync?limit=200&since=2026-04-27T23%3A49%3A11Z".to_string(),
+                sync_body,
+            ),
+        ]);
+
+        let (repaired, requeued, quarantined) = tauri::async_runtime::block_on(
+            repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
+        )
+        .expect("repair live parent-wait order update");
+        server_handle.join().expect("join mock server");
+
+        assert_eq!(repaired, 0);
+        assert_eq!(requeued, 0);
+        assert_eq!(quarantined, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_rows, audit_rows): (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'queue-live-parent-wait'),
+                    (SELECT COUNT(*) FROM conflict_audit_log
+                     WHERE entity_id = 'ord-live-parent'
+                       AND resolution = 'stale_order_parent_wait_quarantined')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(queue_rows, 1);
+        assert_eq!(audit_rows, 0);
     }
 
     #[test]

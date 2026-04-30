@@ -5000,7 +5000,9 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Correggi blocchi replay ordine",
-        "description": "Collega gli ordini remoti mancanti, riprova gli aggiornamenti ordine bloccati e poi promuove i pagamenti in attesa dietro di loro."
+        "description": "Collega gli ordini remoti mancanti, riprova gli aggiornamenti ordine bloccati e archivia i vecchi comandi sync quando l'ordine padre locale non esiste più.",
+        "confirmTitle": "Correggere i blocchi replay ordine?",
+        "confirmMessage": "Questa azione può archiviare vecchi comandi di sincronizzazione per {{orderId}} quando l'ordine padre locale non esiste più. Non elimina ordini, pagamenti o Z-report."
       },
       "retrySync": { "label": "Riprova riga di sincronizzazione" },
       "validatePendingOrders": { "label": "Valida ordini in attesa" },
@@ -5089,6 +5091,11 @@
         "title": "Aggiornamento ordine in attesa dell'ordine remoto",
         "summary": "{{count}} riga di aggiornamento ordine è in attesa perché questo terminale non ha ancora collegato l'ordine admin remoto.",
         "guidance": "Usa prima la correzione consigliata. Cerca l'ordine esistente in admin, salva localmente l'ID ordine remoto e riprova solo l'aggiornamento bloccato."
+      },
+      "staleOrderUpdateParentWait": {
+        "title": "Vecchio aggiornamento ordine in attesa del padre",
+        "summary": "{{count}} vecchia riga di aggiornamento ordine non trova più l'ordine padre locale.",
+        "guidance": "Usa prima la correzione consigliata. Cerca un'ultima volta l'ordine in admin, poi archivia solo il vecchio comando sync se l'ordine padre non esiste più. Non elimina ordini, pagamenti o Z-report."
       },
       "catalogAvailabilityRetry": {
         "title": "Riprova disponibilita catalogo",

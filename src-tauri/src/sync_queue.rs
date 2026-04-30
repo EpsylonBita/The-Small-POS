@@ -266,6 +266,9 @@ struct RequestSpec {
     terminal_id: String,
 }
 
+const STALE_ORDER_UPDATE_PARENT_WAIT_REASON: &str =
+    "Stale order update replay: local parent order missing";
+
 // ---------------------------------------------------------------------------
 // Schema initialization
 // ---------------------------------------------------------------------------
@@ -3390,7 +3393,7 @@ fn prepare_order_request(
         }));
     }
 
-    let local_remote_id: Option<String> = conn
+    let local_order_remote_id: Option<Option<String>> = conn
         .query_row(
             "SELECT NULLIF(TRIM(COALESCE(supabase_id, '')), '')
              FROM orders
@@ -3399,8 +3402,9 @@ fn prepare_order_request(
             |row| row.get(0),
         )
         .optional()
-        .map_err(|e| format!("sync_queue prepare_order_request remote id: {e}"))?
-        .flatten();
+        .map_err(|e| format!("sync_queue prepare_order_request remote id: {e}"))?;
+    let local_order_missing = local_order_remote_id.is_none();
+    let local_remote_id = local_order_remote_id.flatten();
     let remote_id = local_remote_id.or_else(|| {
         string_field(
             payload,
@@ -3415,6 +3419,11 @@ fn prepare_order_request(
     });
 
     let Some(remote_id) = remote_id else {
+        if local_order_missing {
+            return Ok(RequestPreparation::Failed {
+                reason: STALE_ORDER_UPDATE_PARENT_WAIT_REASON.to_string(),
+            });
+        }
         return Ok(RequestPreparation::Deferred {
             reason: "Waiting for parent order sync".to_string(),
         });
@@ -6321,6 +6330,39 @@ mod tests {
             body.get("items").and_then(Value::as_array).map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn prepare_order_request_marks_missing_parent_update_as_stale() {
+        let conn = test_connection();
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-missing-parent",
+            json!({
+                "orderId": "order-missing-parent",
+                "status": "completed",
+                "totalAmount": 7.7,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "name": "Water",
+                    "quantity": 1,
+                    "unit_price": 1.0,
+                    "total_price": 1.0
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request");
+
+        match request {
+            RequestPreparation::Failed { reason } => {
+                assert_eq!(reason, STALE_ORDER_UPDATE_PARENT_WAIT_REASON);
+            }
+            other => panic!("expected stale missing-parent failure, got {other:?}"),
+        }
     }
 
     #[test]

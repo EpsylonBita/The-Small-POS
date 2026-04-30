@@ -5000,7 +5000,9 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Bestell-Replay-Blocker beheben",
-        "description": "Verknüpft fehlende Remote-Bestellungen, wiederholt blockierte Bestellaktualisierungen und gibt danach wartende Zahlungen frei."
+        "description": "Verknüpft fehlende Remote-Bestellungen, wiederholt blockierte Bestellaktualisierungen und archiviert veraltete Sync-Befehle, wenn die lokale Elternbestellung fehlt.",
+        "confirmTitle": "Bestell-Replay-Blocker beheben?",
+        "confirmMessage": "Diese Aktion kann veraltete Bestell-Sync-Befehle für {{orderId}} archivieren, wenn die lokale Elternbestellung fehlt. Sie löscht keine Bestellungen, Zahlungen oder Z-Reports."
       },
       "retrySync": { "label": "Sync-Zeile erneut versuchen" },
       "validatePendingOrders": { "label": "Ausstehende Bestellungen prüfen" },
@@ -5089,6 +5091,11 @@
         "title": "Bestellaktualisierung wartet auf Remote-Bestellung",
         "summary": "{{count}} Bestellaktualisierung wartet, weil dieses Terminal die Admin-Bestellung noch nicht verknüpft hat.",
         "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie sucht die bestehende Bestellung im Admin, speichert die Remote-Bestell-ID lokal und wiederholt nur die blockierte Aktualisierung."
+      },
+      "staleOrderUpdateParentWait": {
+        "title": "Veraltete Bestellaktualisierung wartet auf Elternbestellung",
+        "summary": "{{count}} alte Bestellaktualisierung findet die lokale Elternbestellung nicht mehr.",
+        "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie sucht ein letztes Mal im Admin und archiviert dann nur den veralteten Sync-Befehl, wenn die Elternbestellung fehlt. Sie löscht keine Bestellungen, Zahlungen oder Z-Reports."
       },
       "catalogAvailabilityRetry": {
         "title": "Katalogverfügbarkeit erneut versuchen",

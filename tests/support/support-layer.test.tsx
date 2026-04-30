@@ -777,6 +777,69 @@ test('recovery maps order updates waiting for remote parent to the guided repair
   );
 });
 
+test('recovery maps stale parent-wait order updates and suppresses processor duplicate', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 0, failed: 0, conflicts: 1, total: 1 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    lastParitySync: {
+      status: 'completed',
+      processed: 0,
+      failed: 0,
+      conflicts: 0,
+      remaining: 1,
+      finishedAt: '2026-04-30T03:44:06.494Z',
+    } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'stale-order-parent-wait-row',
+        tableName: 'orders',
+        recordId: '53288fdd-c217-4c80-b87c-5132d6ff3de2',
+        moduleType: 'orders',
+        operation: 'UPDATE',
+        status: 'conflict',
+        nextRetryAt: null,
+        attempts: 50,
+        errorMessage:
+          'Deferred too many times (50× "Waiting for parent order sync"); escalated to conflict',
+        data: JSON.stringify({
+          orderId: '53288fdd-c217-4c80-b87c-5132d6ff3de2',
+          totalAmount: 7.7,
+        }),
+      }),
+    ],
+  });
+
+  const issue = result.issues.find(
+    (candidate) => candidate.code === 'stale_order_update_parent_wait',
+  );
+  assert.ok(issue, 'guided stale parent-wait order issue should be present');
+  assert.equal(issue?.severity, 'error');
+  assert.equal(issue?.orderId, '53288fdd-c217-4c80-b87c-5132d6ff3de2');
+  assert.equal(issue?.params?.totalAmount, '7.70');
+  assert.deepEqual(
+    issue?.actions.map((action) => action.id),
+    ['repairOrderUpdateReplayBlockers', 'retryParityItem', 'runParitySyncNow'],
+  );
+  assert.equal(issue?.actions[0]?.recommended, true);
+  assert.equal(issue?.actions[0]?.confirmationRequired, true);
+  assert.equal(
+    result.issues.some(
+      (candidate) => candidate.code === 'parity_processor_stalled_zero_progress',
+    ),
+    false,
+  );
+  assert.equal(
+    result.issues.some((candidate) => candidate.code === 'parity_module_failed_items'),
+    false,
+  );
+});
+
 test('recovery maps order update replay blockers to the guided repair and suppresses dependent generic cards', () => {
   const result = buildSyncRecoveryIssues({
     systemHealth: {

@@ -775,9 +775,10 @@ pub async fn recovery_execute_action(
 
             if stats.remaining_order_blockers > 0 || stats.remaining_parent_wait_blockers > 0 {
                 return Err(format!(
-                    "Order replay repair retried {} row(s) and repaired {} parent link(s), but {} order update row(s) still fail and {} row(s) still wait for a parent remote order. Last order error: {}{}",
+                    "Order replay repair retried {} row(s), repaired {} parent link(s), and quarantined {} stale parent-wait row(s), but {} order update row(s) still fail and {} row(s) still wait for a parent remote order. Last order error: {}{}",
                     stats.requeued_orders,
                     stats.repaired_parent_orders,
+                    stats.quarantined_stale_parent_wait_orders,
                     stats.remaining_order_blockers,
                     stats.remaining_parent_wait_blockers,
                     stats
@@ -797,9 +798,10 @@ pub async fn recovery_execute_action(
                 "success": true,
                 "requiresRefresh": true,
                 "message": format!(
-                    "Order replay repair attached {} parent remote order link(s), requeued {} parent-wait row(s), retried {} order row(s). First pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Second pass processed {}, failed {}, conflicts {}.",
+                    "Order replay repair attached {} parent remote order link(s), requeued {} parent-wait row(s), quarantined {} stale parent-wait row(s), retried {} order row(s). First pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Second pass processed {}, failed {}, conflicts {}.",
                     stats.repaired_parent_orders,
                     stats.requeued_parent_wait_orders,
+                    stats.quarantined_stale_parent_wait_orders,
                     stats.requeued_orders,
                     stats.first_pass.processed,
                     stats.first_pass.failed,
