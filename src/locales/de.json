@@ -5000,7 +5000,7 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Bestell-Replay-Blocker beheben",
-        "description": "Wiederholt zuerst blockierte Bestellaktualisierungen und gibt danach Zahlungen frei, die auf diese Bestellungen warten."
+        "description": "Verknüpft fehlende Remote-Bestellungen, wiederholt blockierte Bestellaktualisierungen und gibt danach wartende Zahlungen frei."
       },
       "retrySync": { "label": "Sync-Zeile erneut versuchen" },
       "validatePendingOrders": { "label": "Ausstehende Bestellungen prüfen" },
@@ -5084,6 +5084,11 @@
         "title": "Bestellaktualisierung-Replay blockiert",
         "summary": "{{count}} Bestellaktualisierungen sind durch Admin-Artikelkompatibilität blockiert. {{dependentPaymentCount}} Zahlungszeile wartet dahinter.",
         "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie wiederholt die Bestellaktualisierungen ohne lokale Bereinigung und gibt abhängige Zahlungen erst frei, wenn die Bestellungen durchgelaufen sind."
+      },
+      "orderUpdateParentWait": {
+        "title": "Bestellaktualisierung wartet auf Remote-Bestellung",
+        "summary": "{{count}} Bestellaktualisierung wartet, weil dieses Terminal die Admin-Bestellung noch nicht verknüpft hat.",
+        "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie sucht die bestehende Bestellung im Admin, speichert die Remote-Bestell-ID lokal und wiederholt nur die blockierte Aktualisierung."
       },
       "catalogAvailabilityRetry": {
         "title": "Katalogverfügbarkeit erneut versuchen",

@@ -3731,11 +3731,15 @@ pub(crate) fn requeue_failed_order_validation_rows(db: &DbState) -> Result<usize
 #[derive(Debug)]
 pub(crate) struct OrderUpdateReplayRepairStats {
     pub requeued_orders: usize,
+    pub repaired_parent_orders: usize,
+    pub requeued_parent_wait_orders: usize,
     pub first_pass: sync_queue::SyncResult,
     pub promoted_payments: usize,
     pub second_pass: Option<sync_queue::SyncResult>,
     pub remaining_order_blockers: usize,
+    pub remaining_parent_wait_blockers: usize,
     pub last_order_error: Option<String>,
+    pub last_parent_wait_error: Option<String>,
 }
 
 fn is_order_update_replay_blocker_sql() -> &'static str {
@@ -3748,6 +3752,14 @@ fn is_order_update_replay_blocker_sql() -> &'static str {
          OR lower(error_message) LIKE '%menu_item_id%'
          OR lower(error_message) LIKE '%order_items%'
        )"
+}
+
+fn is_order_update_parent_wait_sql() -> &'static str {
+    "table_name = 'orders'
+       AND upper(operation) = 'UPDATE'
+       AND status IN ('pending', 'processing', 'failed', 'conflict')
+       AND error_message IS NOT NULL
+       AND lower(error_message) LIKE '%waiting for parent order sync%'"
 }
 
 pub(crate) fn requeue_order_update_replay_blockers(db: &DbState) -> Result<usize, String> {
@@ -3786,11 +3798,114 @@ fn count_order_update_replay_blockers(
     .map_err(|e| format!("count order update replay blockers: {e}"))
 }
 
+fn count_order_update_parent_wait_blockers(
+    conn: &Connection,
+) -> Result<(usize, Option<String>), String> {
+    let sql = format!(
+        "SELECT COUNT(*), MAX(error_message)
+         FROM parity_sync_queue
+         WHERE {}",
+        is_order_update_parent_wait_sql()
+    );
+    conn.query_row(sql.as_str(), [], |row| {
+        Ok((
+            row.get::<_, i64>(0)? as usize,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    })
+    .map_err(|e| format!("count order update parent wait blockers: {e}"))
+}
+
+fn load_order_update_parent_wait_record_ids(conn: &Connection) -> Result<Vec<String>, String> {
+    let sql = format!(
+        "SELECT DISTINCT record_id
+         FROM parity_sync_queue
+         WHERE {}
+         ORDER BY record_id",
+        is_order_update_parent_wait_sql()
+    );
+    let mut stmt = conn
+        .prepare(sql.as_str())
+        .map_err(|e| format!("prepare order update parent wait rows: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query order update parent wait rows: {e}"))?;
+    let mut record_ids = Vec::new();
+    for row in rows {
+        let record_id = row.map_err(|e| format!("read order update parent wait row: {e}"))?;
+        if !record_id.trim().is_empty() {
+            record_ids.push(record_id);
+        }
+    }
+    Ok(record_ids)
+}
+
+fn requeue_resolved_order_update_parent_wait_rows(conn: &Connection) -> Result<usize, String> {
+    let sql = format!(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             attempts = 0,
+             last_attempt = NULL,
+             error_message = NULL,
+             next_retry_at = NULL,
+             retry_delay_ms = 1000,
+             claim_generation = claim_generation + 1
+         WHERE {}
+           AND EXISTS (
+             SELECT 1
+             FROM orders
+             WHERE orders.id = parity_sync_queue.record_id
+               AND NULLIF(TRIM(COALESCE(orders.supabase_id, '')), '') IS NOT NULL
+           )",
+        is_order_update_parent_wait_sql()
+    );
+    conn.execute(sql.as_str(), [])
+        .map_err(|e| format!("requeue resolved order update parent wait rows: {e}"))
+}
+
+pub(crate) async fn repair_order_update_parent_wait_blockers(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+) -> Result<(usize, usize), String> {
+    let record_ids = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        load_order_update_parent_wait_record_ids(&conn)?
+    };
+
+    let mut repaired = 0usize;
+    for record_id in record_ids {
+        match resolve_remote_order_for_local_order(db, admin_url, api_key, record_id.as_str()).await
+        {
+            Ok(Some((_remote_order_id, _remote_order))) => {
+                repaired += 1;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    order_id = %record_id,
+                    error = %error,
+                    "Order update parent wait repair could not attach remote order identity"
+                );
+            }
+        }
+    }
+
+    let requeued = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        requeue_resolved_order_update_parent_wait_rows(&conn)?
+    };
+
+    Ok((repaired, requeued))
+}
+
 pub(crate) async fn repair_order_update_replay_blockers(
     db: &DbState,
     admin_url: &str,
     api_key: &str,
 ) -> Result<OrderUpdateReplayRepairStats, String> {
+    let (repaired_parent_orders, requeued_parent_wait_orders) =
+        repair_order_update_parent_wait_blockers(db, admin_url, api_key).await?;
     let requeued_orders = requeue_order_update_replay_blockers(db)?;
     let first_pass = sync_queue::process_queue(&db.conn, admin_url, api_key).await?;
     let promoted_payments = reconcile_deferred_payments(db)?;
@@ -3803,14 +3918,22 @@ pub(crate) async fn repair_order_update_replay_blockers(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         count_order_update_replay_blockers(&conn)?
     };
+    let (remaining_parent_wait_blockers, last_parent_wait_error) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        count_order_update_parent_wait_blockers(&conn)?
+    };
 
     Ok(OrderUpdateReplayRepairStats {
         requeued_orders,
+        repaired_parent_orders,
+        requeued_parent_wait_orders,
         first_pass,
         promoted_payments,
         second_pass,
         remaining_order_blockers,
+        remaining_parent_wait_blockers,
         last_order_error,
+        last_parent_wait_error,
     })
 }
 
@@ -22998,6 +23121,97 @@ mod tests {
         assert_eq!(order_attempts, 0);
         assert!(order_error.is_none());
         assert_eq!(payment_status, "conflict");
+    }
+
+    #[test]
+    fn order_update_replay_parent_wait_repair_attaches_remote_id_and_requeues() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents,
+                 status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-parent-wait', 'ORD-PARENT-WAIT', '[]', 7.7, 770,
+                 'completed', 'pending', '2026-04-28T22:38:22Z', '2026-04-28T23:49:11+00:00'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message, next_retry_at
+             ) VALUES (
+                 'queue-parent-wait', 'orders', 'ord-parent-wait', 'UPDATE',
+                 '{\"orderId\":\"ord-parent-wait\",\"status\":\"completed\",\"totalAmount\":7.7}',
+                 'org-test', datetime('now'), 29, 60000, 1, 'orders',
+                 'server-wins', 1, 'pending', 'Waiting for parent order sync',
+                 '2026-04-30T01:41:54Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let body = serde_json::json!({
+            "success": true,
+            "orders": [{
+                "id": "remote-parent-wait",
+                "client_order_id": "ord-parent-wait",
+                "order_number": "ORD-PARENT-WAIT",
+                "updated_at": "2026-04-28T23:49:12Z"
+            }]
+        })
+        .to_string();
+        let (mock_url, server_handle) = spawn_json_sequence_server(vec![(
+            "/api/pos/orders?limit=25&search=ORD-PARENT-WAIT".to_string(),
+            body,
+        )]);
+
+        let (repaired, requeued) = tauri::async_runtime::block_on(
+            repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
+        )
+        .expect("repair parent-wait order update");
+        server_handle.join().expect("join mock server");
+
+        assert_eq!(repaired, 1);
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (supabase_id, queue_status, attempts, error_message, next_retry_at): (
+            Option<String>,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT supabase_id FROM orders WHERE id = 'ord-parent-wait'),
+                    (SELECT status FROM parity_sync_queue WHERE id = 'queue-parent-wait'),
+                    (SELECT attempts FROM parity_sync_queue WHERE id = 'queue-parent-wait'),
+                    (SELECT error_message FROM parity_sync_queue WHERE id = 'queue-parent-wait'),
+                    (SELECT next_retry_at FROM parity_sync_queue WHERE id = 'queue-parent-wait')",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(supabase_id.as_deref(), Some("remote-parent-wait"));
+        assert_eq!(queue_status, "pending");
+        assert_eq!(attempts, 0);
+        assert!(error_message.is_none());
+        assert!(next_retry_at.is_none());
     }
 
     #[test]

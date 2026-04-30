@@ -5000,7 +5000,7 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Réparer les blocages de replay commande",
-        "description": "Réessaie d'abord les mises à jour de commande bloquées, puis promeut les paiements qui attendent ces commandes parentes."
+        "description": "Lie les commandes distantes manquantes, réessaie les mises à jour de commande bloquées, puis promeut les paiements en attente derrière elles."
       },
       "retrySync": { "label": "Réessayer la ligne de synchro" },
       "validatePendingOrders": { "label": "Valider les commandes en attente" },
@@ -5084,6 +5084,11 @@
         "title": "Replay de mise à jour commande bloqué",
         "summary": "{{count}} lignes de mise à jour commande sont bloquées par la compatibilité des articles côté admin. {{dependentPaymentCount}} ligne de paiement attend derrière elles.",
         "guidance": "Utilisez d'abord la réparation recommandée. Elle réessaie les mises à jour de commande sans nettoyage local, puis promeut le paiement dépendant seulement après la résolution des commandes parentes."
+      },
+      "orderUpdateParentWait": {
+        "title": "Mise à jour commande en attente de la commande distante",
+        "summary": "{{count}} ligne de mise à jour commande attend car ce terminal n'a pas encore lié la commande admin distante.",
+        "guidance": "Utilisez d'abord la réparation recommandée. Elle recherche la commande existante dans admin, enregistre localement l'ID distant de la commande, puis réessaie uniquement cette mise à jour bloquée."
       },
       "catalogAvailabilityRetry": {
         "title": "Réessai de disponibilité du catalogue",

@@ -576,6 +576,17 @@ const isPaymentWaitingForParentOrderUpdate = (item: SyncQueueItem): boolean => {
     normalized.includes('order update not yet synced');
 };
 
+const isOrderUpdateWaitingForParentOrderSync = (item: SyncQueueItem): boolean => {
+  if (item.tableName !== 'orders' || item.operation?.toUpperCase() !== 'UPDATE') {
+    return false;
+  }
+  if (!['pending', 'failed', 'conflict', 'processing'].includes(item.status)) {
+    return false;
+  }
+  const normalized = item.errorMessage?.toLowerCase() ?? '';
+  return normalized.includes('waiting for parent order sync');
+};
+
 const extractPaymentTotalConflictMetric = (
   message: string,
   label: string,
@@ -768,6 +779,60 @@ const buildInvalidDriverOrderIssues = (
           driverName,
         },
         orderId,
+      },
+    ],
+  };
+};
+
+const buildOrderUpdateParentWaitIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isOrderUpdateWaitingForParentOrderSync);
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+
+  const sample = rows[0];
+  const payload = parseJsonPayload(sample.data);
+  const orderId = payloadString(payload, ['orderId', 'order_id']) || sample.recordId;
+  const orderNumber = payloadString(payload, ['orderNumber', 'order_number']);
+  const totalAmount = formatAmountParam(
+    payloadNumber(payload, ['totalAmount', 'total_amount']),
+  );
+  const suppressedRows = new Set(rows.map((item) => `${item.tableName}:${item.recordId}`));
+
+  return {
+    suppressedRows,
+    issues: [
+      {
+        id: `order-update-parent-wait-${sample.id}`,
+        code: 'order_update_parent_wait',
+        severity: 'warning',
+        status: 'blocking',
+        entityType: 'order',
+        entityId: orderId,
+        titleKey: 'recovery.issues.orderUpdateParentWait.title',
+        summaryKey: 'recovery.issues.orderUpdateParentWait.summary',
+        guidanceKey: 'recovery.issues.orderUpdateParentWait.guidance',
+        actions: [
+          createRepairOrderUpdateReplayBlockersAction(),
+          createRetryParityItemAction(),
+          createRunParitySyncAction(),
+        ],
+        params: {
+          count: rows.length,
+          sampleItemId: sample.id,
+          sampleTableName: sample.tableName,
+          sampleRecordId: sample.recordId,
+          sampleError: sample.errorMessage ?? null,
+          lastError: sample.errorMessage ?? null,
+          moduleType: sample.moduleType || 'orders',
+          orderId,
+          orderNumber,
+          totalAmount,
+        },
+        orderId,
+        orderNumber,
       },
     ],
   };
@@ -1273,6 +1338,10 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of invalidDriverOrderResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const orderUpdateParentWaitResult = buildOrderUpdateParentWaitIssues(parityItems);
+  for (const suppressedRow of orderUpdateParentWaitResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   const orderUpdateReplayResult = buildOrderUpdateReplayBlockerIssues(parityItems);
   for (const suppressedRow of orderUpdateReplayResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
@@ -1295,6 +1364,9 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, issue);
   }
   for (const issue of invalidDriverOrderResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of orderUpdateParentWaitResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of orderUpdateReplayResult.issues) {

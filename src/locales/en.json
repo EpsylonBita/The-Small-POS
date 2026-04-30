@@ -5000,7 +5000,7 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Fix order replay blockers",
-        "description": "Retries blocked order updates first, then promotes payments waiting for those parent orders."
+        "description": "Links missing remote parent orders, retries blocked order updates, then promotes payments waiting behind them."
       },
       "retrySync": { "label": "Retry sync row" },
       "validatePendingOrders": { "label": "Validate pending orders" },
@@ -5084,6 +5084,11 @@
         "title": "Order update replay blocked",
         "summary": "{{count}} order update replay rows are blocked by admin item compatibility. {{dependentPaymentCount}} payment row is waiting behind them.",
         "guidance": "Use the recommended fix first. It retries the order updates without destructive cleanup, then promotes the dependent payment only after the parent order rows clear."
+      },
+      "orderUpdateParentWait": {
+        "title": "Order update waiting for remote parent",
+        "summary": "{{count}} order update row is waiting because this terminal has not linked the remote admin order yet.",
+        "guidance": "Use the recommended fix first. It searches admin for the existing order, attaches the remote order id locally, and retries only the blocked order update."
       },
       "catalogAvailabilityRetry": {
         "title": "Catalog availability retry",

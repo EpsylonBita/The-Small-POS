@@ -773,15 +773,22 @@ pub async fn recovery_execute_action(
                 .await
                 .map_err(auth::GuardedCommandError::from)?;
 
-            if stats.remaining_order_blockers > 0 {
+            if stats.remaining_order_blockers > 0 || stats.remaining_parent_wait_blockers > 0 {
                 return Err(format!(
-                    "Order replay repair retried {} row(s), but {} order update row(s) still fail. Last order error: {}",
+                    "Order replay repair retried {} row(s) and repaired {} parent link(s), but {} order update row(s) still fail and {} row(s) still wait for a parent remote order. Last order error: {}{}",
                     stats.requeued_orders,
+                    stats.repaired_parent_orders,
                     stats.remaining_order_blockers,
+                    stats.remaining_parent_wait_blockers,
                     stats
                         .last_order_error
                         .as_deref()
-                        .unwrap_or("unknown")
+                        .unwrap_or("unknown"),
+                    stats
+                        .last_parent_wait_error
+                        .as_deref()
+                        .map(|value| format!(" Last parent-wait error: {value}"))
+                        .unwrap_or_default()
                 )
                 .into());
             }
@@ -790,7 +797,9 @@ pub async fn recovery_execute_action(
                 "success": true,
                 "requiresRefresh": true,
                 "message": format!(
-                    "Order replay repair retried {} order row(s). First pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Second pass processed {}, failed {}, conflicts {}.",
+                    "Order replay repair attached {} parent remote order link(s), requeued {} parent-wait row(s), retried {} order row(s). First pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Second pass processed {}, failed {}, conflicts {}.",
+                    stats.repaired_parent_orders,
+                    stats.requeued_parent_wait_orders,
                     stats.requeued_orders,
                     stats.first_pass.processed,
                     stats.first_pass.failed,
@@ -806,13 +815,35 @@ pub async fn recovery_execute_action(
             let item_id = request_param_str(&request, "sampleItemId")
                 .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
                 .ok_or_else(|| "Missing parity item id".to_string())?;
+            let should_repair_parent_wait = {
+                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                conn.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM parity_sync_queue
+                         WHERE id = ?1
+                           AND table_name = 'orders'
+                           AND upper(operation) = 'UPDATE'
+                           AND error_message IS NOT NULL
+                           AND lower(error_message) LIKE '%waiting for parent order sync%'
+                     )",
+                    rusqlite::params![item_id.as_str()],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+            };
+            let admin_url = load_admin_url(&db)?;
+            let api_key = load_pos_api_key()?;
+            if should_repair_parent_wait {
+                let _ = sync::repair_order_update_parent_wait_blockers(&db, &admin_url, &api_key)
+                    .await
+                    .map_err(auth::GuardedCommandError::from)?;
+            }
             {
                 let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
                 sync_queue::retry_item(&conn, item_id.as_str())
                     .map_err(auth::GuardedCommandError::from)?;
             }
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
             let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
                 .await
                 .map_err(auth::GuardedCommandError::from)?;
@@ -837,13 +868,18 @@ pub async fn recovery_execute_action(
             let module_type = request_param_str(&request, "moduleType")
                 .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
                 .ok_or_else(|| "Missing parity module type".to_string())?;
+            let admin_url = load_admin_url(&db)?;
+            let api_key = load_pos_api_key()?;
+            if module_type.eq_ignore_ascii_case("orders") {
+                let _ = sync::repair_order_update_parent_wait_blockers(&db, &admin_url, &api_key)
+                    .await
+                    .map_err(auth::GuardedCommandError::from)?;
+            }
             let result = {
                 let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
                 sync_queue::retry_items_by_module(&conn, module_type.as_str())
             }
             .map_err(auth::GuardedCommandError::from)?;
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
             let process_result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
                 .await
                 .map_err(auth::GuardedCommandError::from)?;

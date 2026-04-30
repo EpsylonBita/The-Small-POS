@@ -733,6 +733,50 @@ test('recovery maps invalid driver order failures to a guided repair and suppres
   );
 });
 
+test('recovery maps order updates waiting for remote parent to the guided repair', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 1, failed: 0, conflicts: 0, total: 1 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'order-parent-wait-row',
+        tableName: 'orders',
+        recordId: '53288fdd-c217-4c80-b87c-5132d6ff3de2',
+        moduleType: 'orders',
+        operation: 'UPDATE',
+        status: 'pending',
+        errorMessage: 'Waiting for parent order sync',
+        data: JSON.stringify({
+          orderId: '53288fdd-c217-4c80-b87c-5132d6ff3de2',
+          totalAmount: 7.7,
+        }),
+      }),
+    ],
+  });
+
+  const issue = result.issues.find(
+    (candidate) => candidate.code === 'order_update_parent_wait',
+  );
+  assert.ok(issue, 'guided parent-wait order issue should be present');
+  assert.equal(issue?.orderId, '53288fdd-c217-4c80-b87c-5132d6ff3de2');
+  assert.equal(issue?.params?.totalAmount, '7.70');
+  assert.deepEqual(
+    issue?.actions.map((action) => action.id),
+    ['repairOrderUpdateReplayBlockers', 'retryParityItem', 'runParitySyncNow'],
+  );
+  assert.equal(issue?.actions[0]?.recommended, true);
+  assert.equal(
+    result.issues.some((candidate) => candidate.code === 'parity_module_pending_items'),
+    false,
+  );
+});
+
 test('recovery maps order update replay blockers to the guided repair and suppresses dependent generic cards', () => {
   const result = buildSyncRecoveryIssues({
     systemHealth: {

@@ -5000,7 +5000,7 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Correggi blocchi replay ordine",
-        "description": "Riprova prima gli aggiornamenti ordine bloccati, poi promuove i pagamenti che aspettano quegli ordini padre."
+        "description": "Collega gli ordini remoti mancanti, riprova gli aggiornamenti ordine bloccati e poi promuove i pagamenti in attesa dietro di loro."
       },
       "retrySync": { "label": "Riprova riga di sincronizzazione" },
       "validatePendingOrders": { "label": "Valida ordini in attesa" },
@@ -5084,6 +5084,11 @@
         "title": "Replay aggiornamento ordine bloccato",
         "summary": "{{count}} righe di aggiornamento ordine sono bloccate dalla compatibilita articoli lato admin. {{dependentPaymentCount}} riga pagamento aspetta dietro di loro.",
         "guidance": "Usa prima la correzione consigliata. Riprova gli aggiornamenti ordine senza pulizia locale, poi promuove il pagamento dipendente solo dopo che gli ordini padre sono risolti."
+      },
+      "orderUpdateParentWait": {
+        "title": "Aggiornamento ordine in attesa dell'ordine remoto",
+        "summary": "{{count}} riga di aggiornamento ordine è in attesa perché questo terminale non ha ancora collegato l'ordine admin remoto.",
+        "guidance": "Usa prima la correzione consigliata. Cerca l'ordine esistente in admin, salva localmente l'ID ordine remoto e riprova solo l'aggiornamento bloccato."
       },
       "catalogAvailabilityRetry": {
         "title": "Riprova disponibilita catalogo",
