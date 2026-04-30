@@ -14,7 +14,7 @@ import {
   resolveOrderDisplayTitle,
 } from '../../utils/orderDisplay';
 import { getVisibleOrderNumber } from '../../utils/orderNumberUtils';
-import { openExternalUrl } from '../../utils/electron-api';
+import { openExternalUrl } from '../../utils/external-url';
 import {
   buildGoogleMapsDirectionsUrl,
   buildSingleDeliveryRouteStop,

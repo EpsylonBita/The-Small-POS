@@ -17,7 +17,7 @@ interface UseErrorHandlerReturn {
   retryLastOperation: () => Promise<void>
 }
 
-// POS-specific notification function (since we don't have react-hot-toast in Electron)
+// POS-specific notification function (since we don't have react-hot-toast in the desktop renderer)
 function showPOSNotification(message: string, type: 'info' | 'warning' | 'error' = 'info') {
   try {
     void bridge.notifications.show({

@@ -1,11 +1,11 @@
-// Polyfills for both Electron and Web environments
+// Polyfills for both desktop and Web environments
 // This ensures the POS system works in both contexts
 
-// Detect if we're in Electron or Web browser
-const isElectron = typeof window !== 'undefined' &&
+// Detect if we're in the desktop runtime or a Web browser
+const isDesktopRuntime = typeof window !== 'undefined' &&
   window.process &&
   (window.process as any).type === 'renderer';
-const isWeb = typeof window !== 'undefined' && !isElectron;
+const isWeb = typeof window !== 'undefined' && !isDesktopRuntime;
 
 // Global polyfills for web environment
 if (isWeb) {
@@ -113,10 +113,10 @@ if (typeof console === 'undefined') {
 
 // Export environment detection utilities
 export const environment = {
-  isElectron,
+  isDesktopRuntime,
   isWeb,
   isBrowser: isWeb,
-  isDesktop: isElectron
+  isDesktop: isDesktopRuntime
 };
 
 // Export empty to make TypeScript happy

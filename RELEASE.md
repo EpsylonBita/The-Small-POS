@@ -9,7 +9,7 @@ This document defines the release contract for the native-only desktop app in `p
 - Desktop source of truth: `pos-tauri/`
 - Public distribution repo: `EpsylonBita/The-Small-POS`
 - Active workflow: `.github/workflows/pos-tauri-auto-release.yml` (`workflow_dispatch` only)
-- Runtime model: Tauri-native only (no Electron desktop fallback in `pos-tauri`)
+- Runtime model: Tauri-native only
 
 ## Required Secrets (GitHub Actions)
 

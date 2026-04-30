@@ -17,7 +17,7 @@
 7. Tauri startup hydrates context without localStorage dependency.
 8. External URL open requests are blocked unless host/scheme pass Rust allowlist validation.
 9. Renderer critical paths resolve `terminal_id` / `branch_id` / `organization_id` from secure IPC/cache, not localStorage persistence.
-10. Native-only runtime contract blocks any reintroduction of `window.electron*`, `window.isElectron`, or `import 'electron'` surfaces.
+10. Native-only runtime contract blocks any reintroduction of legacy desktop globals or non-Tauri desktop module imports.
 11. Startup bootstrap is bridge-only (`src/main.tsx` has no compat/bootstrap shims).
 
 ## Validation Commands

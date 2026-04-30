@@ -2,9 +2,9 @@
  * Web Bluetooth Printer Discovery Utility
  *
  * Uses the Web Bluetooth API to discover Bluetooth printers.
- * This works in Electron's renderer process when Bluetooth permissions are enabled.
+ * This works in the desktop renderer process when Bluetooth permissions are enabled.
  *
- * Requirements: Electron 35+ with Web Bluetooth enabled
+ * Requirements: a Chromium-based desktop runtime with Web Bluetooth enabled.
  */
 
 // Type definitions for Web Bluetooth API
@@ -77,7 +77,7 @@ export async function discoverBluetoothPrinters(): Promise<BluetoothPrinterDevic
     // Request Bluetooth devices
     // We use optional services to allow communication with any device
     const device = await navigator.bluetooth!.requestDevice({
-      // Accept all devices - Electron will filter them in select-bluetooth-device event
+      // Accept all devices - the desktop runtime will filter them in select-bluetooth-device event
       acceptAllDevices: true,
       optionalServices: ['battery_service', 'device_information'] // Common services
     });

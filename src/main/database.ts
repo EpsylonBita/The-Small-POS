@@ -1,6 +1,5 @@
 /**
  * DatabaseManager stub for Tauri.
- * In Electron, this wraps better-sqlite3 in the main process.
  * In Tauri, the SQLite database is managed by the Rust backend.
  * This stub exists only to satisfy TypeScript imports from copied services.
  */

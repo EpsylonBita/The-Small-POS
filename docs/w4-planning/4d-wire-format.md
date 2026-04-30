@@ -6,7 +6,7 @@
 
 You are continuing the 11-wave remediation of `pos-tauri` (Rust/Tauri POS at `D:\The-Small-002\pos-tauri`). The remaining work is **Wave 4 b–e**, the money migration. This session is **4d — switch every JSON wire payload from float `amount` to integer `amount_cents`**, in a single coordinated release across pos-tauri AND admin-dashboard.
 
-**Why single coordinated PR:** Electron POS was retired 2026-04-23 (per `~/.claude/projects/D--The-Small-002/memory/feedback_electron_pos_untouched.md`). pos-tauri is the only consumer of `/api/pos/**` admin routes. There is no compat window concern — change both sides in lockstep.
+**Why single coordinated PR:** the prior desktop POS was retired 2026-04-23 (see project memory under `~/.claude/projects/D--The-Small-002/memory/`). pos-tauri is the only consumer of `/api/pos/**` admin routes. There is no compat window concern — change both sides in lockstep.
 
 **Sequencing:** 4d ships AFTER 4b (read path on cents) and 4c (write path dual-write). See [dependencies.md](dependencies.md) for the full order rationale. The internal Rust math is already on `Cents` after 4b; this session changes only what crosses the wire.
 

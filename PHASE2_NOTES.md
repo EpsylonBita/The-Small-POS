@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Historical record of the early UI parity import phase where renderer assets were mirrored from Electron into `pos-tauri`.
+Historical record of the early UI parity import phase where renderer assets were mirrored from the prior desktop framework into `pos-tauri`.
 
 ## Overview
 
@@ -17,7 +17,7 @@ Phase 2 established a compile-ready renderer baseline in Tauri by copying the UI
 ## What Changed Since Then
 
 - Desktop runtime is now native-only.
-- Electron preload/compat stubs referenced in early Phase 2 are fully decommissioned from active runtime.
+- Legacy preload/compat stubs referenced in early Phase 2 are fully decommissioned from active runtime.
 - Renderer flows now use typed native bridge and native event bridge contracts.
 
 ## Verification Context

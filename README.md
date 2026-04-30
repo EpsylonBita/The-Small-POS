@@ -6,7 +6,7 @@ Tauri desktop runtime for The Small POS.
 
 ## Status Snapshot (2026-02-23)
 
-- Native-only cutover is complete in `pos-tauri` (no desktop runtime dependency on Electron globals or preload surfaces).
+- Native-only cutover is complete in `pos-tauri` (Tauri 2 + Rust runtime; no legacy desktop globals or preload surfaces).
 - Desktop runtime path is bridge-only: renderer -> typed bridge -> Tauri commands/events -> Rust services.
 - Offline-first behavior is active: local SQLite write + sync queue first, remote sync deferred while offline, automatic queue drain on reconnect.
 - Security/native migration implementation is complete except for the planned 24-hour staging soak run.

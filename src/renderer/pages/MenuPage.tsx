@@ -233,7 +233,7 @@ const MenuPage: React.FC = () => {
       // Continue without real-time updates
     }
   }, []);
-  // Resolve branchId from Electron main (TerminalConfigService)
+  // Resolve branchId from the native backend (TerminalConfigService)
   useEffect(() => {
     bridge.terminalConfig.getBranchId()
       .then((bid: string | null) => setBranchId(bid || null))

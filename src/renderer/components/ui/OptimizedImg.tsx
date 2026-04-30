@@ -5,7 +5,7 @@ export type OptimizedImgProps = React.ImgHTMLAttributes<HTMLImageElement> & {
   fallbackSrc?: string;
 };
 
-// Lightweight <img> wrapper for Electron renderer
+// Lightweight <img> wrapper for the desktop renderer
 // - Defaults: loading="lazy", decoding="async"
 // - Graceful fallback when src is missing or fails
 export const OptimizedImg: React.FC<OptimizedImgProps> = ({

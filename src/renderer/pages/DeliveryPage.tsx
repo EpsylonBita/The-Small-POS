@@ -23,7 +23,7 @@ import {
   type StoreMapOrigin,
 } from '../utils/delivery-routing';
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
-import { openExternalUrl } from '../utils/electron-api';
+import { openExternalUrl } from '../utils/external-url';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import {
   Truck,

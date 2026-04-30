@@ -14,7 +14,7 @@
 6. Sensitive credentials (`pos_api_key`, `supabase_anon_key`) removed from plaintext `local_settings` mirroring; startup migrates then scrubs old plaintext keys.
 7. Legacy plaintext `staff.simple_pin` flow removed from settings modal/login checks; migrated to hashed PIN flow.
 8. `OrderService` no longer uses `localStorage` for terminal/org credential resolution.
-9. Electron compatibility/preload surfaces removed from `pos-tauri` runtime; desktop is now bridge-only Tauri.
+9. Legacy compatibility/preload surfaces removed from `pos-tauri` runtime; desktop is now bridge-only Tauri.
 
 ## Open Risks (Not Fully Eliminated In This Pass)
 - Renderer still uses localStorage for non-identity UX/session caches (theme, prompt dismissal, active shift continuity).
@@ -30,7 +30,7 @@
 - `pos-tauri/src-tauri/src/auth.rs`
 - `pos-tauri/src-tauri/src/lib.rs`
 - `pos-tauri/src/lib/ipc-adapter.ts`
-- `pos-tauri/src/renderer/utils/electron-api.ts`
+- `pos-tauri/src/renderer/utils/` (legacy desktop-API helper module)
 - `pos-tauri/src/renderer/components/order/OrderCard.tsx`
 - `pos-tauri/src/renderer/components/OrderDashboard.tsx`
 - `pos-tauri/src/renderer/components/modules/TrialModulePrompt.tsx`
@@ -51,4 +51,4 @@
 
 ## Next Priority
 - Begin domain extraction from `src-tauri/src/lib.rs`.
-- Reduce remaining Electron-compat direct method surface in core flows.
+- Reduce remaining legacy-compat direct method surface in core flows.

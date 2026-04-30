@@ -1026,7 +1026,7 @@ class MenuService {
     }
 
     try {
-      // Reuse cached menu items source (IPC in Electron, Supabase fallback otherwise).
+      // Reuse cached menu items source (native bridge IPC, Supabase fallback otherwise).
       const allItems = await this.getMenuItems();
       const normalized = allItems.filter((item) => item.category_id === categoryId);
       this.setCache(cacheKey, normalized);

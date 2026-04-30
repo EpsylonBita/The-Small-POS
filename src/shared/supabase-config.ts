@@ -35,7 +35,7 @@ function getEnv(key: string): string | undefined {
     const meta = (import.meta as any).env;
     if (meta && meta[key]) return meta[key];
   } catch { /* not in a Vite context */ }
-  // Node.js / Electron
+  // Node.js / native runtime
   if (typeof process !== 'undefined' && process.env) {
     return process.env[key];
   }
@@ -81,7 +81,7 @@ function getConfig() {
 
 function setRuntimeEnv(url: string, anonKey: string): void {
   // IMPORTANT: Do not mutate process.env here.
-  // In webpack Electron bundles, DefinePlugin can inline selected process.env keys
+  // In bundled builds, DefinePlugin can inline selected process.env keys
   // (e.g. process.env.SUPABASE_URL) as literals, which breaks assignment expressions.
   runtimeSupabaseUrlOverride = url;
   runtimeSupabaseAnonKeyOverride = anonKey;

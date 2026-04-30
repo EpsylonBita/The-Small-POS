@@ -81,5 +81,5 @@ node scripts/tauri-smoke.mjs --auto skip --report docs/security-native-migration
 1. No critical gate failures in report.
 2. `npm run soak:report` exits with success (`Soak gate approved`).
 3. Offline-created data persists across restart and syncs after reconnect.
-4. No Electron compatibility/runtime dependencies observed.
+4. No legacy desktop compatibility/runtime dependencies observed.
 5. No blocking regressions in print/sync/auth core flows.

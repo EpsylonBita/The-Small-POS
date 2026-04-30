@@ -621,7 +621,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         console.warn('[Paste Both] Browser clipboard failed, will fall back to manual paste:', clipboardError?.message)
       }
 
-      // If browser clipboard failed or returned empty, try Electron clipboard (if available)
+      // If browser clipboard failed or returned empty, try native clipboard via bridge (if available)
       if (!clipboardText && typeof window !== 'undefined') {
         try {
           clipboardText = await bridge.clipboard.readText()

@@ -14,7 +14,7 @@ This document defines the active parity gate set for `pos-tauri` after native-on
 |---|---|---|---|
 | A1 | Type safety and frontend build integrity | `npm run type-check && npm run build` | PASS |
 | A2 | Renderer invoke/event parity contract | `npm run parity:contract` | PASS |
-| A3 | Native-only runtime guardrails (no Electron surfaces) | `npm run test:native-runtime` | PASS |
+| A3 | Native-only runtime guardrails (Tauri 2 + Rust only) | `npm run test:native-runtime` | PASS |
 | A4 | Rust backend compile integrity | `cargo check --keep-going --manifest-path src-tauri/Cargo.toml` | PASS |
 
 ## Manual Functional Gates

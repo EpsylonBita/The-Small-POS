@@ -316,7 +316,7 @@ const splitOrdersForState = (orders: Order[]): { orders: Order[]; pendingExterna
   return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
 };
 
-const invokeElectronIpc = async (channel: string, ...args: any[]): Promise<any> => {
+const invokeBridgeIpc = async (channel: string, ...args: any[]): Promise<any> => {
   return bridge.invoke(channel, ...args);
 };
 
@@ -803,7 +803,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
     getOrderById: async (orderId: string) => {
       try {
-        // Use local state since electron API is simplified
+        // Use local state since native API is simplified
         const state = get();
         return (
           state.orders.find(order => order.id === orderId) ||
@@ -1113,7 +1113,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
         get()._invalidateCache();
 
-        const response = await invokeElectronIpc('payment:update-payment-status', {
+        const response = await invokeBridgeIpc('payment:update-payment-status', {
           orderId,
           paymentStatus,
           paymentMethod,
@@ -1142,7 +1142,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
            ? paymentData.method
            : 'other';
          const transactionId = paymentData.transactionId || paymentData.transactionRef || `txn_${Date.now()}`;
-         const response = await invokeElectronIpc('payment:record', {
+         const response = await invokeBridgeIpc('payment:record', {
            orderId,
            method: normalizedMethod,
            amount: paymentData.amount,
@@ -1179,7 +1179,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           throw new Error('Order not found');
         }
 
-        const result = await invokeElectronIpc('kitchen:print-ticket', {
+        const result = await invokeBridgeIpc('kitchen:print-ticket', {
           id: order.id,
           orderId: order.id,
           orderNumber: order.orderNumber || order.order_number,
@@ -1232,7 +1232,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         }
 
         const currentStatus = mapStatusForPOS(order.status);
-        const response = await invokeElectronIpc('order:update-status', {
+        const response = await invokeBridgeIpc('order:update-status', {
           orderId,
           status: currentStatus,
           estimatedTime,

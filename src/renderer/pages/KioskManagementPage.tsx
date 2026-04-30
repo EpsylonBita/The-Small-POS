@@ -29,7 +29,7 @@ import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { formatCurrency, formatTime } from '../utils/format';
 import { getBridge } from '../../lib';
-import { openExternalUrl } from '../utils/electron-api';
+import { openExternalUrl } from '../utils/external-url';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 
 interface KioskOrder {

@@ -70,7 +70,7 @@ import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
 import { useKioskOrderAutoPrint } from "../hooks/useKioskOrderAutoPrint";
-import { openExternalUrl } from "../utils/electron-api";
+import { openExternalUrl } from "../utils/external-url";
 import { getVisibleOrderNumber } from "../utils/orderNumberUtils";
 import {
   buildSingleDeliveryRouteStop,

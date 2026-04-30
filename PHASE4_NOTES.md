@@ -18,7 +18,7 @@ Phase 4 introduced the first domain-complete native flows (notably shifts and sh
 ## What Changed Since Then
 
 - Gate model has been consolidated and refreshed in `PARITY_GATES.md`.
-- Native-only cutover removed Electron-specific assumptions from runtime and checks.
+- Native-only cutover removed prior-desktop-framework-specific assumptions from runtime and checks.
 - Current verification stack is centered on parity contract, native runtime checks, and rust compile gates.
 
 ## Verification Context

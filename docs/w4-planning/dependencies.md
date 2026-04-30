@@ -88,7 +88,7 @@ After 4e ships:
 - The REAL column is gone from the SQLite schema; rolling back 4e requires another migration.
 - Re-introducing `MONEY_EPSILON` would mean re-introducing float money, which is a reversal of the entire wave.
 
-**Safety net**: a one-week staging bake between 4d shipping and 4e shipping is recommended (per the original plan's W4 verification section). Electron is retired so there's no compat window concern, but a week of staging traffic catches any accidentally-missed admin route or background job.
+**Safety net**: a one-week staging bake between 4d shipping and 4e shipping is recommended (per the original plan's W4 verification section). The prior desktop runtime is retired so there's no compat window concern, but a week of staging traffic catches any accidentally-missed admin route or background job.
 
 ---
 
@@ -180,7 +180,7 @@ The 4c and 4b sub-prompts each ship as a standalone PR by default. The 4c prompt
 - Extend to the deferred sites listed in that doc's tail: zreport.rs emissions, sync_queue.rs order body, admin-dashboard route schemas + Supabase column references.
 - Add admin-dashboard Zod schema renames: `amount` → `amount_cents` (integer), with a transitional accept-both window inside this PR.
 - Update parity-contract fixtures and shared TS types.
-- Single coordinated PR — Electron is retired so no dual-shape parser.
+- Single coordinated PR — the prior desktop runtime is retired so no dual-shape parser.
 
 ### [4e-drop-columns.md](4e-drop-columns.md)
 

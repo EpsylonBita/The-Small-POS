@@ -12,7 +12,7 @@ import {
   formatUpsellCurrency,
   calculateAnnualSavings,
 } from '@shared/services/upsellUrlService'
-import { openExternalUrl } from '../../utils/electron-api'
+import { openExternalUrl } from '../../utils/external-url'
 
 interface LockedFeatureScreenProps {
   /** Module ID that's locked */
@@ -30,7 +30,7 @@ interface LockedFeatureScreenProps {
 }
 
 /**
- * LockedFeatureScreen - Full-page locked feature screen for POS Electron
+ * LockedFeatureScreen - Full-page locked feature screen for POS desktop
  *
  * Features:
  * - Large lock icon with LiquidGlass styling

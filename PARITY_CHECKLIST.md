@@ -15,7 +15,7 @@ This checklist is intentionally concise and operational. The old exhaustive migr
 
 | Area | Status | Notes |
 |---|---|---|
-| Desktop runtime cutover | COMPLETE | Native-only (`tauri|browser`) runtime; no Electron desktop surface in `pos-tauri` |
+| Desktop runtime cutover | COMPLETE | Native-only (`tauri|browser`) runtime in `pos-tauri` |
 | Typed bridge migration | COMPLETE | Renderer command/event paths use `ipc-adapter` and `event-bridge` |
 | Core POS workflows | COMPLETE | Auth, orders, shifts, payments, menu, print, diagnostics, updates |
 | Offline-first sync behavior | COMPLETE | Queue-first local writes; offline deferral; reconnect catch-up |

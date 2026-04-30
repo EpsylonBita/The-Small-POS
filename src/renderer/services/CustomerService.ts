@@ -8,8 +8,8 @@ import {
 /**
  * CustomerService - Renderer-side customer service
  *
- * Exposes customer lookup functionality by calling the main-process
- * CustomerService via IPC (Electron's inter-process communication).
+ * Exposes customer lookup functionality by calling the backend
+ * CustomerService via IPC (Tauri's inter-process communication).
  *
  * This service runs in the renderer process and provides a clean API
  * for UI components to interact with customer data.

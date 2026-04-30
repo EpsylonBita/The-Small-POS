@@ -8,7 +8,7 @@ You are continuing the 11-wave remediation of `pos-tauri` (Rust/Tauri POS at `D:
 
 **This is the irreversible step.** After 4e ships, any consumer (admin-dashboard route, mobile app screen, Supabase analytics query, background job) that still reads the legacy REAL column breaks at runtime with "no such column". Rolling back requires another migration.
 
-**Pre-condition: 4d has been baked in staging for at least one week** with no incidents. If 4d shipped recently and there's pressure to ship 4e now, **push back** — the bake catches forgotten consumers (the only protection we have, since Electron is retired and there's no compat window).
+**Pre-condition: 4d has been baked in staging for at least one week** with no incidents. If 4d shipped recently and there's pressure to ship 4e now, **push back** — the bake catches forgotten consumers (the only protection we have, since the prior desktop runtime is retired and there's no compat window).
 
 Background already in place (post-2026-04-26 work):
 

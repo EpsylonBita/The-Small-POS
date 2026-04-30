@@ -1,7 +1,7 @@
 /**
  * ECR Components
  *
- * Components for Electronic Cash Register (ECR) / Payment Terminal management.
+ * Components for the Cash Register (ECR) / Payment Terminal management.
  *
  * @module components/ecr
  */

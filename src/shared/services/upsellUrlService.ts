@@ -2,7 +2,7 @@
  * Upsell URL Service
  *
  * Generates URLs for cross-platform module purchase redirects.
- * Used by POS (Electron) and Mobile apps to redirect to admin dashboard for purchases.
+ * Used by POS (Tauri desktop) and Mobile apps to redirect to admin dashboard for purchases.
  */
 
 import type {
@@ -287,7 +287,7 @@ export function getAdminBaseUrl(): string {
     return process.env.ADMIN_DASHBOARD_URL;
   }
 
-  // Check for window-based config (Electron)
+  // Check for window-based config (desktop runtime)
   if (typeof window !== 'undefined') {
     const windowConfig = (window as any).__ADMIN_CONFIG__;
     if (windowConfig?.baseUrl) {

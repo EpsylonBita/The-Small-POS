@@ -12,7 +12,7 @@ import {
   generateTrialUpgradeUrl,
   getAdminBaseUrl,
 } from '@shared/services/upsellUrlService'
-import { openExternalUrl } from '../../utils/electron-api'
+import { openExternalUrl } from '../../utils/external-url'
 
 interface TrialModulePromptProps {
   /** Trial end date (ISO timestamp) */

@@ -7,7 +7,7 @@ import React, { createContext, useContext, useCallback, ReactNode } from 'react'
  *
  * Provides a centralized navigation function for the POS application.
  * This allows dashboard cards and other components to navigate to different views
- * without using hash-based routing (which doesn't work in this Electron app).
+ * without using hash-based routing (which doesn't work in this desktop app).
  *
  * The navigation function includes route guard logic to prevent access to locked modules.
  */

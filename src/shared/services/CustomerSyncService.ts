@@ -29,7 +29,7 @@ type SupabaseConflict = any
  * - Optimistic locking with version control
  * - Conflict detection and resolution
  * - Address management
- * - Platform-agnostic (Node.js, Electron, Browser)
+ * - Platform-agnostic (Node.js, Tauri, Browser)
  */
 export class CustomerSyncService {
   private supabase: SupabaseClient<any>

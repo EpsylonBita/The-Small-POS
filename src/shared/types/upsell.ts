@@ -3,7 +3,7 @@
  *
  * Core type definitions for module upsell components across all platforms:
  * - Admin Dashboard (Next.js)
- * - POS System (Electron)
+ * - POS System (Tauri desktop)
  * - Mobile App (React Native)
  */
 

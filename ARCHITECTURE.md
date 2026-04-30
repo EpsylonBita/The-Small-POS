@@ -2,7 +2,7 @@
 
 ## Runtime Status (2026-02-23)
 
-- Desktop runtime in `pos-tauri` is native-only (`tauri | browser` platform detection, no Electron desktop path).
+- Desktop runtime in `pos-tauri` is native-only (`tauri | browser` platform detection, Tauri 2 + Rust only).
 - Renderer command/event access is standardized through typed bridge contracts.
 - Core POS workflows are Rust-backed (auth, orders, shifts, payments, sync, print, diagnostics, updates).
 - Offline-first sync semantics are active with deferred remote sync and reconnect catch-up.
@@ -48,7 +48,7 @@ Rust Event Emitters
 ### Contract verification
 
 - `npm run parity:contract` validates invoke/event channel parity.
-- `npm run test:native-runtime` blocks reintroduction of Electron desktop surfaces.
+- `npm run test:native-runtime` blocks reintroduction of legacy non-Tauri desktop surfaces.
 
 ## Rust Backend Architecture
 
@@ -90,7 +90,7 @@ Rust Event Emitters
 
 ## Security Boundaries
 
-- Desktop renderer has no `window.electron*` runtime dependency.
+- Desktop renderer talks to Rust through the typed Tauri command bridge only — no legacy desktop globals are required at runtime.
 - Secrets/terminal credentials are held in secure storage (keyring/OS credential manager), not renderer local storage.
 - Tauri command layer defines callable desktop operations; unsupported channels are blocked by contract.
 - External URL opening is mediated through native allowlist policy commands.
@@ -122,7 +122,7 @@ Rust Event Emitters
 
 Completed:
 
-- Native desktop cutover and Electron surface decommission in `pos-tauri`.
+- Native desktop cutover (Tauri 2 + Rust) complete in `pos-tauri`; no legacy desktop surfaces remain.
 - Typed bridge migration for runtime-critical renderer flows.
 - Security hardening items tracked in execution backlog.
 - Native runtime/parity contract checks integrated into npm scripts.

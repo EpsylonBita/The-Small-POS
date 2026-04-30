@@ -84,7 +84,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
   // Detect platform
   useEffect(() => {
     // Check if we're on Windows by trying to detect the platform
-    // In Electron renderer, we can check the user agent or use a different method
+    // In the desktop renderer, we can check the user agent or use a different method
     const platform = navigator.platform || navigator.userAgent;
     const isWin = platform.toLowerCase().includes('win');
     console.log('[CustomTitleBar] Platform detected:', platform, 'isWindows:', isWin);

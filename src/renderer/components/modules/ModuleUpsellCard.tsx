@@ -12,7 +12,7 @@ import {
   formatUpsellCurrency,
   calculateAnnualSavings,
 } from '@shared/services/upsellUrlService'
-import { openExternalUrl } from '../../utils/electron-api'
+import { openExternalUrl } from '../../utils/external-url'
 
 interface ModuleUpsellCardProps {
   /** Module ID to display */

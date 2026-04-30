@@ -257,8 +257,8 @@ const OrdersPage: React.FC = () => {
 
   const fetchOrders = useCallback(async () => {
     if (isBrowser()) {
-      console.error('[OrdersPage] Electron API not available');
-      toast.error('Electron API not available');
+      console.error('[OrdersPage] Desktop API not available');
+      toast.error('Desktop API not available');
       setLoading(false);
       return;
     }
