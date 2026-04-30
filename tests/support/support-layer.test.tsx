@@ -733,6 +733,77 @@ test('recovery maps invalid driver order failures to a guided repair and suppres
   );
 });
 
+test('recovery maps order update replay blockers to the guided repair and suppresses dependent generic cards', () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: {
+      parityQueueStatus: { pending: 2, failed: 1, conflicts: 1, total: 4 },
+      syncBacklog: {},
+      syncBlockerDetails: [],
+      invalidOrders: { count: 0, details: [] },
+      credentialState: { hasAdminUrl: true, hasApiKey: true },
+      isOnline: true,
+    } as never,
+    parityItems: [
+      makeParityItem({
+        id: 'order-replay-row-a',
+        tableName: 'orders',
+        recordId: 'local-order-a',
+        moduleType: 'orders',
+        operation: 'UPDATE',
+        status: 'failed',
+        nextRetryAt: null,
+        errorMessage: 'HTTP 500: {"success":false,"error":"Failed to update order"}',
+        data: JSON.stringify({ orderId: 'local-order-a', status: 'completed' }),
+      }),
+      makeParityItem({
+        id: 'order-replay-row-b',
+        tableName: 'orders',
+        recordId: 'local-order-b',
+        moduleType: 'orders',
+        operation: 'UPDATE',
+        status: 'pending',
+        nextRetryAt: null,
+        errorMessage:
+          'HTTP 500: null value in column "menu_item_id" of relation "order_items"',
+        data: JSON.stringify({ orderId: 'local-order-b', status: 'delivered' }),
+      }),
+      makeParityItem({
+        id: 'payment-waiting-parent-row',
+        tableName: 'payments',
+        recordId: 'payment-waits',
+        moduleType: 'payment',
+        operation: 'INSERT',
+        status: 'conflict',
+        nextRetryAt: null,
+        errorMessage:
+          'Deferred too many times (50x "Waiting for parent order update sync"); escalated to conflict',
+        data: JSON.stringify({ orderId: 'local-order-b', paymentId: 'payment-waits' }),
+      }),
+    ],
+  });
+
+  const issue = result.issues.find(
+    (candidate) => candidate.code === 'order_update_replay_blocked',
+  );
+  assert.ok(issue, 'guided order replay issue should be present');
+  assert.equal(issue?.orderId, 'local-order-a');
+  assert.equal(issue?.params?.count, 2);
+  assert.equal(issue?.params?.dependentPaymentCount, 1);
+  assert.deepEqual(
+    issue?.actions.map((action) => action.id),
+    ['repairOrderUpdateReplayBlockers', 'retryParityModule', 'runParitySyncNow'],
+  );
+  assert.equal(issue?.actions[0]?.recommended, true);
+  assert.equal(
+    result.issues.some((candidate) => candidate.code === 'parity_module_failed_items'),
+    false,
+  );
+  assert.equal(
+    result.issues.some((candidate) => candidate.code === 'parity_module_pending_items'),
+    false,
+  );
+});
+
 test('recovery maps legacy financial parity orphans to the local clear action', () => {
   const result = buildSyncRecoveryIssues({
     systemHealth: {

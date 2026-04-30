@@ -4998,6 +4998,10 @@
         "label": "Fix driver/order sync",
         "description": "Retries the order update without replaying the stale local driver id."
       },
+      "repairOrderUpdateReplayBlockers": {
+        "label": "Fix order replay blockers",
+        "description": "Retries blocked order updates first, then promotes payments waiting for those parent orders."
+      },
       "retrySync": { "label": "Retry sync row" },
       "validatePendingOrders": { "label": "Validate pending orders" },
       "removeInvalidOrders": {
@@ -5075,6 +5079,11 @@
         "title": "Driver/order sync mismatch",
         "summary": "Admin rejected {{count}} order update because the local driver id {{driverId}} is no longer an active admin driver.",
         "guidance": "Use the recommended fix first. It keeps the order update, removes only the stale driver id from the retry payload, and preserves the driver name when available."
+      },
+      "orderUpdateReplayBlocked": {
+        "title": "Order update replay blocked",
+        "summary": "{{count}} order update replay rows are blocked by admin item compatibility. {{dependentPaymentCount}} payment row is waiting behind them.",
+        "guidance": "Use the recommended fix first. It retries the order updates without destructive cleanup, then promotes the dependent payment only after the parent order rows clear."
       },
       "catalogAvailabilityRetry": {
         "title": "Catalog availability retry",

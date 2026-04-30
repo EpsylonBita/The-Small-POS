@@ -763,6 +763,45 @@ pub async fn recovery_execute_action(
                 ),
             }))
         }
+        "repairOrderUpdateReplayBlockers" => {
+            // Safe recovery only: this retries failed order UPDATE replays and
+            // then promotes payments that were waiting on those parent updates.
+            // It does not delete, void, or mutate local order/payment rows.
+            let admin_url = load_admin_url(&db)?;
+            let api_key = load_pos_api_key()?;
+            let stats = sync::repair_order_update_replay_blockers(&db, &admin_url, &api_key)
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
+
+            if stats.remaining_order_blockers > 0 {
+                return Err(format!(
+                    "Order replay repair retried {} row(s), but {} order update row(s) still fail. Last order error: {}",
+                    stats.requeued_orders,
+                    stats.remaining_order_blockers,
+                    stats
+                        .last_order_error
+                        .as_deref()
+                        .unwrap_or("unknown")
+                )
+                .into());
+            }
+
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "message": format!(
+                    "Order replay repair retried {} order row(s). First pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Second pass processed {}, failed {}, conflicts {}.",
+                    stats.requeued_orders,
+                    stats.first_pass.processed,
+                    stats.first_pass.failed,
+                    stats.first_pass.conflicts,
+                    stats.promoted_payments,
+                    stats.second_pass.as_ref().map(|value| value.processed).unwrap_or(0),
+                    stats.second_pass.as_ref().map(|value| value.failed).unwrap_or(0),
+                    stats.second_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
+                ),
+            }))
+        }
         "retryParityItem" => {
             let item_id = request_param_str(&request, "sampleItemId")
                 .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))

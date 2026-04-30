@@ -4998,6 +4998,10 @@
         "label": "Réparer la synchro chauffeur/commande",
         "description": "Réessaie la mise à jour de commande sans renvoyer l'ancien ID chauffeur local."
       },
+      "repairOrderUpdateReplayBlockers": {
+        "label": "Réparer les blocages de replay commande",
+        "description": "Réessaie d'abord les mises à jour de commande bloquées, puis promeut les paiements qui attendent ces commandes parentes."
+      },
       "retrySync": { "label": "Réessayer la ligne de synchro" },
       "validatePendingOrders": { "label": "Valider les commandes en attente" },
       "removeInvalidOrders": {
@@ -5075,6 +5079,11 @@
         "title": "Écart chauffeur/commande",
         "summary": "Admin a rejeté {{count}} mise à jour de commande car l'ID chauffeur local {{driverId}} n'est plus un chauffeur admin actif.",
         "guidance": "Utilisez d'abord la réparation recommandée. Elle conserve la mise à jour de commande, retire uniquement l'ancien ID chauffeur du payload de réessai et garde le nom du chauffeur s'il existe."
+      },
+      "orderUpdateReplayBlocked": {
+        "title": "Replay de mise à jour commande bloqué",
+        "summary": "{{count}} lignes de mise à jour commande sont bloquées par la compatibilité des articles côté admin. {{dependentPaymentCount}} ligne de paiement attend derrière elles.",
+        "guidance": "Utilisez d'abord la réparation recommandée. Elle réessaie les mises à jour de commande sans nettoyage local, puis promeut le paiement dépendant seulement après la résolution des commandes parentes."
       },
       "catalogAvailabilityRetry": {
         "title": "Réessai de disponibilité du catalogue",

@@ -4998,6 +4998,10 @@
         "label": "Fahrer/Bestellung-Sync beheben",
         "description": "Wiederholt die Bestellaktualisierung ohne die alte lokale Fahrer-ID erneut zu senden."
       },
+      "repairOrderUpdateReplayBlockers": {
+        "label": "Bestell-Replay-Blocker beheben",
+        "description": "Wiederholt zuerst blockierte Bestellaktualisierungen und gibt danach Zahlungen frei, die auf diese Bestellungen warten."
+      },
       "retrySync": { "label": "Sync-Zeile erneut versuchen" },
       "validatePendingOrders": { "label": "Ausstehende Bestellungen prüfen" },
       "removeInvalidOrders": {
@@ -5075,6 +5079,11 @@
         "title": "Fahrer und Bestellung passen nicht zusammen",
         "summary": "Admin hat {{count}} Bestellaktualisierung abgelehnt, weil die lokale Fahrer-ID {{driverId}} kein aktiver Admin-Fahrer mehr ist.",
         "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie behält die Bestellaktualisierung, entfernt nur die alte Fahrer-ID aus dem Wiederholungs-Payload und behält den Fahrernamen, falls vorhanden."
+      },
+      "orderUpdateReplayBlocked": {
+        "title": "Bestellaktualisierung-Replay blockiert",
+        "summary": "{{count}} Bestellaktualisierungen sind durch Admin-Artikelkompatibilität blockiert. {{dependentPaymentCount}} Zahlungszeile wartet dahinter.",
+        "guidance": "Nutzen Sie zuerst die empfohlene Reparatur. Sie wiederholt die Bestellaktualisierungen ohne lokale Bereinigung und gibt abhängige Zahlungen erst frei, wenn die Bestellungen durchgelaufen sind."
       },
       "catalogAvailabilityRetry": {
         "title": "Katalogverfügbarkeit erneut versuchen",

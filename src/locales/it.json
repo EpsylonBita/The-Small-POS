@@ -4998,6 +4998,10 @@
         "label": "Correggi sync autista/ordine",
         "description": "Riprova l'aggiornamento dell'ordine senza reinviare il vecchio ID autista locale."
       },
+      "repairOrderUpdateReplayBlockers": {
+        "label": "Correggi blocchi replay ordine",
+        "description": "Riprova prima gli aggiornamenti ordine bloccati, poi promuove i pagamenti che aspettano quegli ordini padre."
+      },
       "retrySync": { "label": "Riprova riga di sincronizzazione" },
       "validatePendingOrders": { "label": "Valida ordini in attesa" },
       "removeInvalidOrders": {
@@ -5075,6 +5079,11 @@
         "title": "Differenza autista/ordine",
         "summary": "Admin ha rifiutato {{count}} aggiornamento ordine perché l'ID autista locale {{driverId}} non è più un autista admin attivo.",
         "guidance": "Usa prima la correzione consigliata. Mantiene l'aggiornamento dell'ordine, rimuove solo il vecchio ID autista dal payload di retry e conserva il nome autista quando disponibile."
+      },
+      "orderUpdateReplayBlocked": {
+        "title": "Replay aggiornamento ordine bloccato",
+        "summary": "{{count}} righe di aggiornamento ordine sono bloccate dalla compatibilita articoli lato admin. {{dependentPaymentCount}} riga pagamento aspetta dietro di loro.",
+        "guidance": "Usa prima la correzione consigliata. Riprova gli aggiornamenti ordine senza pulizia locale, poi promuove il pagamento dipendente solo dopo che gli ordini padre sono risolti."
       },
       "catalogAvailabilityRetry": {
         "title": "Riprova disponibilita catalogo",

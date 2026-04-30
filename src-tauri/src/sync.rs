@@ -3728,6 +3728,92 @@ pub(crate) fn requeue_failed_order_validation_rows(db: &DbState) -> Result<usize
     .map_err(|e| format!("requeue failed order validation rows: {e}"))
 }
 
+#[derive(Debug)]
+pub(crate) struct OrderUpdateReplayRepairStats {
+    pub requeued_orders: usize,
+    pub first_pass: sync_queue::SyncResult,
+    pub promoted_payments: usize,
+    pub second_pass: Option<sync_queue::SyncResult>,
+    pub remaining_order_blockers: usize,
+    pub last_order_error: Option<String>,
+}
+
+fn is_order_update_replay_blocker_sql() -> &'static str {
+    "table_name = 'orders'
+       AND upper(operation) = 'UPDATE'
+       AND status IN ('pending', 'processing', 'failed', 'conflict')
+       AND error_message IS NOT NULL
+       AND (
+         lower(error_message) LIKE '%failed to update order%'
+         OR lower(error_message) LIKE '%menu_item_id%'
+         OR lower(error_message) LIKE '%order_items%'
+       )"
+}
+
+pub(crate) fn requeue_order_update_replay_blockers(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let sql = format!(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             attempts = 0,
+             last_attempt = NULL,
+             error_message = NULL,
+             next_retry_at = NULL,
+             retry_delay_ms = 1000,
+             claim_generation = claim_generation + 1
+         WHERE {}",
+        is_order_update_replay_blocker_sql()
+    );
+    conn.execute(sql.as_str(), [])
+        .map_err(|e| format!("requeue order update replay blockers: {e}"))
+}
+
+fn count_order_update_replay_blockers(
+    conn: &Connection,
+) -> Result<(usize, Option<String>), String> {
+    let sql = format!(
+        "SELECT COUNT(*), MAX(error_message)
+         FROM parity_sync_queue
+         WHERE {}",
+        is_order_update_replay_blocker_sql()
+    );
+    conn.query_row(sql.as_str(), [], |row| {
+        Ok((
+            row.get::<_, i64>(0)? as usize,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    })
+    .map_err(|e| format!("count order update replay blockers: {e}"))
+}
+
+pub(crate) async fn repair_order_update_replay_blockers(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+) -> Result<OrderUpdateReplayRepairStats, String> {
+    let requeued_orders = requeue_order_update_replay_blockers(db)?;
+    let first_pass = sync_queue::process_queue(&db.conn, admin_url, api_key).await?;
+    let promoted_payments = reconcile_deferred_payments(db)?;
+    let second_pass = if promoted_payments > 0 {
+        Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
+    } else {
+        None
+    };
+    let (remaining_order_blockers, last_order_error) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        count_order_update_replay_blockers(&conn)?
+    };
+
+    Ok(OrderUpdateReplayRepairStats {
+        requeued_orders,
+        first_pass,
+        promoted_payments,
+        second_pass,
+        remaining_order_blockers,
+        last_order_error,
+    })
+}
+
 /// Maximum age (in days) for failed sync entries before they are pruned.
 const SYNC_FAILURE_MAX_AGE_DAYS: i64 = 30;
 
@@ -14826,9 +14912,33 @@ pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String>
             params![payment_id],
         );
 
+        let parity_promoted = conn
+            .execute(
+                "UPDATE parity_sync_queue
+                 SET status = 'pending',
+                     attempts = 0,
+                     last_attempt = NULL,
+                     error_message = NULL,
+                     next_retry_at = NULL,
+                     retry_delay_ms = 1000,
+                     claim_generation = claim_generation + 1
+                 WHERE table_name = 'payments'
+                   AND record_id = ?1
+                   AND status IN ('pending', 'failed', 'conflict')
+                   AND (
+                     error_message IS NULL
+                     OR lower(error_message) LIKE '%waiting for parent order update sync%'
+                     OR lower(error_message) LIKE '%order update not yet synced%'
+                     OR lower(error_message) LIKE '%waiting for parent order sync%'
+                   )",
+                params![payment_id],
+            )
+            .unwrap_or(0);
+
         info!(
             payment_id = %payment_id,
             order_id = %order_id,
+            parity_promoted,
             "Reconciled deferred payment -> pending (parent order synced)"
         );
         promoted += 1;
@@ -19893,6 +20003,75 @@ mod tests {
         assert_eq!(queue_status, "deferred");
     }
 
+    #[test]
+    fn waiting_parent_payment_conflict_is_promoted_after_order_update_clears() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-waiting-parent-clear', 'remote-waiting-parent-clear', '[]', 0.6, 60, 'completed', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, sync_last_error, created_at, updated_at)
+             VALUES ('pay-waiting-parent-clear', 'ord-waiting-parent-clear', 'cash', 0.6, 60, 'pending', 'waiting_parent', 'Order update not yet synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, last_error)
+             VALUES ('payment', 'pay-waiting-parent-clear', 'insert', '{\"orderId\":\"ord-waiting-parent-clear\"}', 'payment:pay-waiting-parent-clear', 'deferred', 'Order update not yet synced')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-pay-waiting-parent-clear', 'payments', 'pay-waiting-parent-clear', 'INSERT',
+                 '{\"orderId\":\"ord-waiting-parent-clear\",\"paymentId\":\"pay-waiting-parent-clear\"}',
+                 'org-test', datetime('now'), 50, 1000, 1, 'payment', 'server-wins', 1,
+                 'conflict', 'Deferred too many times (50x \"Waiting for parent order update sync\"); escalated to conflict'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_payments(&db).unwrap();
+        assert_eq!(promoted, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (payment_state, sync_queue_status, parity_status, parity_attempts, parity_error): (
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT sync_state FROM order_payments WHERE id = 'pay-waiting-parent-clear'),
+                    (SELECT status FROM sync_queue WHERE entity_id = 'pay-waiting-parent-clear'),
+                    (SELECT status FROM parity_sync_queue WHERE id = 'queue-pay-waiting-parent-clear'),
+                    (SELECT attempts FROM parity_sync_queue WHERE id = 'queue-pay-waiting-parent-clear'),
+                    (SELECT error_message FROM parity_sync_queue WHERE id = 'queue-pay-waiting-parent-clear')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+
+        assert_eq!(payment_state, "pending");
+        assert_eq!(sync_queue_status, "pending");
+        assert_eq!(parity_status, "pending");
+        assert_eq!(parity_attempts, 0);
+        assert!(parity_error.is_none());
+    }
+
     // Wave 5 Session 7 PR 0: `test_reconcile_legacy_payment_parity_rows_migrates_to_canonical_queue`
     // was removed together with the reconcile function's bridging logic. The
     // function is now a callable no-op (see `reconcile_legacy_financial_parity_rows`
@@ -22758,6 +22937,67 @@ mod tests {
 
         assert!(has_outstanding_local_order_queue(&conn, "ord-queued"));
         assert!(!has_outstanding_local_order_queue(&conn, "ord-missing"));
+    }
+
+    #[test]
+    fn order_update_replay_blockers_are_requeued_without_touching_other_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-order-replay-blocked', 'orders', 'ord-replay-blocked', 'UPDATE',
+                 '{\"status\":\"completed\"}', 'org-test', datetime('now'), 7, 60000,
+                 1, 'orders', 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to update order\"}'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-payment-unchanged', 'payments', 'pay-unchanged', 'INSERT',
+                 '{}', 'org-test', datetime('now'), 3, 1000,
+                 1, 'payment', 'server-wins', 1, 'conflict',
+                 'Waiting for parent order update sync'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_order_update_replay_blockers(&db).unwrap();
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (order_status, order_attempts, order_error, payment_status): (
+            String,
+            i64,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT status FROM parity_sync_queue WHERE id = 'queue-order-replay-blocked'),
+                    (SELECT attempts FROM parity_sync_queue WHERE id = 'queue-order-replay-blocked'),
+                    (SELECT error_message FROM parity_sync_queue WHERE id = 'queue-order-replay-blocked'),
+                    (SELECT status FROM parity_sync_queue WHERE id = 'queue-payment-unchanged')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(order_status, "pending");
+        assert_eq!(order_attempts, 0);
+        assert!(order_error.is_none());
+        assert_eq!(payment_status, "conflict");
     }
 
     #[test]

@@ -105,6 +105,17 @@ const createRepairInvalidDriverOrderUpdateAction = (): RecoveryActionDescriptor 
     },
   );
 
+const createRepairOrderUpdateReplayBlockersAction = (): RecoveryActionDescriptor =>
+  createAction(
+    'repairOrderUpdateReplayBlockers',
+    'recovery.actions.repairOrderUpdateReplayBlockers.label',
+    {
+      descriptionKey: 'recovery.actions.repairOrderUpdateReplayBlockers.description',
+      recommended: true,
+      requiresOnline: true,
+    },
+  );
+
 const createRetrySyncAction = (): RecoveryActionDescriptor =>
   createAction('retrySync', 'recovery.actions.retrySync.label');
 
@@ -543,6 +554,28 @@ const isInvalidDriverOrderPatchFailure = (item: SyncQueueItem): boolean => {
   return normalized.includes('invalid driver');
 };
 
+const isOrderUpdateReplayBlocker = (item: SyncQueueItem): boolean => {
+  if (item.tableName !== 'orders' || item.operation !== 'UPDATE') {
+    return false;
+  }
+  if (!['pending', 'failed', 'conflict', 'processing'].includes(item.status)) {
+    return false;
+  }
+  const normalized = item.errorMessage?.toLowerCase() ?? '';
+  return normalized.includes('failed to update order') ||
+    normalized.includes('menu_item_id') ||
+    normalized.includes('order_items');
+};
+
+const isPaymentWaitingForParentOrderUpdate = (item: SyncQueueItem): boolean => {
+  if (item.tableName !== 'payments') {
+    return false;
+  }
+  const normalized = item.errorMessage?.toLowerCase() ?? '';
+  return normalized.includes('waiting for parent order update sync') ||
+    normalized.includes('order update not yet synced');
+};
+
 const extractPaymentTotalConflictMetric = (
   message: string,
   label: string,
@@ -735,6 +768,61 @@ const buildInvalidDriverOrderIssues = (
           driverName,
         },
         orderId,
+      },
+    ],
+  };
+};
+
+const buildOrderUpdateReplayBlockerIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isOrderUpdateReplayBlocker);
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+
+  const dependentPayments = parityItems.filter(isPaymentWaitingForParentOrderUpdate);
+  const sample = rows[0];
+  const payload = parseJsonPayload(sample.data);
+  const orderId = payloadString(payload, ['orderId', 'order_id']) || sample.recordId;
+  const orderNumber = payloadString(payload, ['orderNumber', 'order_number']);
+  const suppressedRows = new Set([
+    ...rows.map((item) => `${item.tableName}:${item.recordId}`),
+    ...dependentPayments.map((item) => `${item.tableName}:${item.recordId}`),
+  ]);
+
+  return {
+    suppressedRows,
+    issues: [
+      {
+        id: `order-update-replay-blocked-${sample.id}`,
+        code: 'order_update_replay_blocked',
+        severity: 'error',
+        status: 'blocking',
+        entityType: 'order',
+        entityId: orderId,
+        titleKey: 'recovery.issues.orderUpdateReplayBlocked.title',
+        summaryKey: 'recovery.issues.orderUpdateReplayBlocked.summary',
+        guidanceKey: 'recovery.issues.orderUpdateReplayBlocked.guidance',
+        actions: [
+          createRepairOrderUpdateReplayBlockersAction(),
+          createRetryParityModuleAction(),
+          createRunParitySyncAction(),
+        ],
+        params: {
+          count: rows.length,
+          dependentPaymentCount: dependentPayments.length,
+          sampleItemId: sample.id,
+          sampleTableName: sample.tableName,
+          sampleRecordId: sample.recordId,
+          sampleError: sample.errorMessage ?? null,
+          lastError: sample.errorMessage ?? null,
+          moduleType: sample.moduleType || 'orders',
+          orderId,
+          orderNumber,
+        },
+        orderId,
+        orderNumber,
       },
     ],
   };
@@ -1185,6 +1273,10 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of invalidDriverOrderResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const orderUpdateReplayResult = buildOrderUpdateReplayBlockerIssues(parityItems);
+  for (const suppressedRow of orderUpdateReplayResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   const catalogAvailabilityResult = buildCatalogAvailabilityIssues(parityItems);
   for (const suppressedRow of catalogAvailabilityResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
@@ -1203,6 +1295,9 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, issue);
   }
   for (const issue of invalidDriverOrderResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of orderUpdateReplayResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of catalogAvailabilityResult.issues) {

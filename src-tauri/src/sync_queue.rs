@@ -3408,17 +3408,94 @@ fn prepare_order_request(
         });
     };
 
-    let local_order_fallback = load_local_order_insert_fallback(conn, item.record_id.as_str())?;
+    fn payload_has_any(payload: &Value, keys: &[&str]) -> bool {
+        keys.iter().any(|key| payload.get(*key).is_some())
+    }
+
+    let payload_requests_order_hydration = payload_has_any(
+        payload,
+        &[
+            "items",
+            "totalAmount",
+            "total_amount",
+            "totalAmountCents",
+            "total_amount_cents",
+            "subtotal",
+            "subtotalCents",
+            "subtotal_cents",
+            "discountAmount",
+            "discount_amount",
+            "discountAmountCents",
+            "discount_amount_cents",
+            "discountPercentage",
+            "discount_percentage",
+            "taxAmount",
+            "tax_amount",
+            "taxAmountCents",
+            "tax_amount_cents",
+            "deliveryFee",
+            "delivery_fee",
+            "deliveryFeeCents",
+            "delivery_fee_cents",
+            "tipAmount",
+            "tip_amount",
+            "tipAmountCents",
+            "tip_amount_cents",
+            "paymentStatus",
+            "payment_status",
+            "paymentMethod",
+            "payment_method",
+            "customerId",
+            "customer_id",
+            "customerName",
+            "customer_name",
+            "customerPhone",
+            "customer_phone",
+            "customerEmail",
+            "customer_email",
+            "deliveryAddress",
+            "delivery_address",
+            "deliveryAddressId",
+            "delivery_address_id",
+            "deliveryCity",
+            "delivery_city",
+            "deliveryPostalCode",
+            "delivery_postal_code",
+            "deliveryFloor",
+            "delivery_floor",
+            "deliveryLatitude",
+            "delivery_latitude",
+            "deliveryLongitude",
+            "delivery_longitude",
+            "deliveryAddressFingerprint",
+            "delivery_address_fingerprint",
+            "deliveryZoneId",
+            "delivery_zone_id",
+            "nameOnRinger",
+            "name_on_ringer",
+            "tableNumber",
+            "table_number",
+        ],
+    );
+
+    let local_order_fallback = if payload_requests_order_hydration {
+        load_local_order_insert_fallback(conn, item.record_id.as_str())?
+    } else {
+        None
+    };
     let mut sources = Vec::new();
     if let Some(local_order_fallback) = local_order_fallback.as_ref() {
         sources.push(local_order_fallback);
     }
     sources.push(payload);
 
-    let mut status = sources
-        .iter()
-        .find_map(|source| string_field(source, &["status"]))
-        .unwrap_or_default();
+    let mut status = string_field(payload, &["status"]).unwrap_or_default();
+    if status.is_empty() {
+        status = sources
+            .iter()
+            .find_map(|source| string_field(source, &["status"]))
+            .unwrap_or_default();
+    }
     if status.is_empty() {
         status = conn
             .query_row(
@@ -3666,15 +3743,12 @@ fn prepare_order_request(
             }
         }
     }
-    for source in &sources {
-        if let Some(items) = source.get("items") {
-            if !items.is_null() {
-                body.insert(
-                    "items".to_string(),
-                    normalize_order_items_customizations_for_request(items),
-                );
-            }
-            break;
+    if let Some(items) = payload.get("items") {
+        if !items.is_null() {
+            body.insert(
+                "items".to_string(),
+                normalize_order_items_customizations_for_request(items),
+            );
         }
     }
     copy_source_field(
@@ -6118,7 +6192,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_order_request_hydrates_sparse_update_from_local_order() {
+    fn order_update_replay_status_only_does_not_hydrate_local_order_payload() {
         let conn = test_connection();
         conn.execute(
             "INSERT INTO orders (
@@ -6158,22 +6232,33 @@ mod tests {
             .expect("parse request body");
 
         assert_eq!(
-            body.get("order_type").and_then(Value::as_str),
-            Some("delivery")
+            body.get("id").and_then(Value::as_str),
+            Some("remote-order-sparse-update")
         );
-        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(7.4));
-        assert_eq!(
-            body.get("total_amount_cents").and_then(Value::as_i64),
-            Some(740)
+        assert_eq!(body.get("status").and_then(Value::as_str), Some("pending"));
+        assert!(
+            body.get("order_type").is_none(),
+            "status-only replay must not hydrate fallback order type"
         );
-        assert_eq!(body.get("delivery_fee").and_then(Value::as_f64), Some(0.4));
-        assert_eq!(
-            body.get("delivery_fee_cents").and_then(Value::as_i64),
-            Some(40)
+        assert!(
+            body.get("total_amount").is_none(),
+            "status-only replay must not hydrate fallback totals"
         );
-        assert_eq!(
-            body.get("items").and_then(Value::as_array).map(Vec::len),
-            Some(1)
+        assert!(
+            body.get("total_amount_cents").is_none(),
+            "status-only replay must not hydrate fallback cents totals"
+        );
+        assert!(
+            body.get("delivery_fee").is_none(),
+            "status-only replay must not hydrate fallback delivery fee"
+        );
+        assert!(
+            body.get("delivery_address").is_none(),
+            "status-only replay must not hydrate fallback address"
+        );
+        assert!(
+            body.get("items").is_none(),
+            "status-only replay must not hydrate fallback order_items"
         );
     }
 
