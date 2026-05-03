@@ -419,11 +419,11 @@ pub(crate) fn top_sellers_aggregate_into_rolling(
     let rows = stmt
         .query_map([], |row| {
             Ok((
-                row.get::<_, String>(0)?,           // id (unused but kept for clarity)
-                row.get::<_, String>(1)?,           // status
-                row.get::<_, Option<String>>(2)?,   // branch_id
-                row.get::<_, Option<String>>(3)?,   // created_at
-                row.get::<_, String>(4)?,           // items JSON
+                row.get::<_, String>(0)?,         // id (unused but kept for clarity)
+                row.get::<_, String>(1)?,         // status
+                row.get::<_, Option<String>>(2)?, // branch_id
+                row.get::<_, Option<String>>(3)?, // created_at
+                row.get::<_, String>(4)?,         // items JSON
             ))
         })
         .map_err(|e| format!("top_sellers_rolling: query: {e}"))?;
@@ -2042,7 +2042,13 @@ mod dto_tests {
         conn
     }
 
-    fn insert_order(conn: &rusqlite::Connection, id: &str, branch: &str, status: &str, items: &str) {
+    fn insert_order(
+        conn: &rusqlite::Connection,
+        id: &str,
+        branch: &str,
+        status: &str,
+        items: &str,
+    ) {
         conn.execute(
             "INSERT INTO orders (id, status, branch_id, created_at, items)
              VALUES (?1, ?2, ?3, '2026-05-03T12:00:00Z', ?4)",
@@ -2079,8 +2085,7 @@ mod dto_tests {
             ]"#,
         );
 
-        let upserts =
-            top_sellers_aggregate_into_rolling(&conn).expect("aggregator should succeed");
+        let upserts = top_sellers_aggregate_into_rolling(&conn).expect("aggregator should succeed");
         assert_eq!(upserts, 2, "two distinct menu items");
 
         let burger: (f64, f64, String, Option<String>) = conn

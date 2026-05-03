@@ -1269,9 +1269,10 @@ pub fn resolve_customer_id_from_cache_conn(
     let raw = db::get_setting(conn, "local", "customer_cache_v1")?;
     let cache: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
     for entry in cache {
-        let entry_phone_norm = value_str(&entry, &["phone", "customerPhone", "mobile", "telephone"])
-            .map(|s| normalize_phone(&s))
-            .unwrap_or_default();
+        let entry_phone_norm =
+            value_str(&entry, &["phone", "customerPhone", "mobile", "telephone"])
+                .map(|s| normalize_phone(&s))
+                .unwrap_or_default();
         if !entry_phone_norm.is_empty() && entry_phone_norm == normalized {
             let id = value_str(&entry, &["id", "customerId"])?;
             if uuid::Uuid::parse_str(&id).is_ok() {

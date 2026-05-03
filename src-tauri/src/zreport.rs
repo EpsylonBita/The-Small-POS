@@ -4528,7 +4528,10 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     // JSON, and UPSERTs per-(branch, menu_item) totals.
     match crate::commands::analytics::top_sellers_aggregate_into_rolling(conn) {
         Ok(upserts) => {
-            info!(upserts, "Z-report: rolled order items into top_sellers_rolling");
+            info!(
+                upserts,
+                "Z-report: rolled order items into top_sellers_rolling"
+            );
         }
         Err(e) => {
             // Don't block the Z-report on a leaderboard hiccup — log
