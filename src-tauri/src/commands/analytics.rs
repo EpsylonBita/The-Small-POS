@@ -372,6 +372,246 @@ fn top_items_to_json(items: Vec<AggregatedTopItem>, limit: usize) -> Vec<serde_j
         .collect()
 }
 
+// =====================================================================
+// Persistent rolling top-sellers leaderboard
+// =====================================================================
+//
+// The "Επιλεγμένα" (Featured) menu tab needs to stay populated across
+// Z-report rollovers, but `apply_local_day_rollover` deletes the
+// closed-out orders that the existing top-items report queries against.
+//
+// To preserve the leaderboard, the Z-report flow now folds the
+// about-to-be-deleted orders into a persistent `top_sellers_rolling`
+// table just before deletion (see `top_sellers_aggregate_into_rolling`
+// below). The reports queries then merge live orders + this rolling
+// table so the Featured tab is always populated, weighted by all-time
+// sales plus the current day's activity.
+
+/// Reads order rows whose ids are in `temp_z_report_order_ids`,
+/// aggregates their items into per-(branch, menu_item) totals using
+/// the same logic as the live top-items reports, and UPSERTs into
+/// the persistent `top_sellers_rolling` table. Called from the Z-report
+/// flow immediately before the `DELETE FROM orders WHERE id IN
+/// (SELECT id FROM temp_z_report_order_ids)` statement so the totals
+/// don't get lost when the source rows are removed.
+///
+/// Idempotent in the sense that calling it twice with the same id-set
+/// would double-count — but the Z-report flow only calls it once per
+/// rollover, and the temp table is dropped at the end of the same
+/// rollover, so there's no risk of repeat invocation in practice.
+pub(crate) fn top_sellers_aggregate_into_rolling(
+    conn: &rusqlite::Connection,
+) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT o.id, o.status, o.branch_id, o.created_at, o.items
+             FROM orders o
+             WHERE o.id IN (SELECT id FROM temp_z_report_order_ids)",
+        )
+        .map_err(|e| format!("top_sellers_rolling: prepare select: {e}"))?;
+
+    // (branch_id, menu_item_id) -> aggregated row
+    let mut by_branch_item: std::collections::HashMap<
+        (String, String),
+        (AggregatedTopItem, String),
+    > = std::collections::HashMap::new();
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,           // id (unused but kept for clarity)
+                row.get::<_, String>(1)?,           // status
+                row.get::<_, Option<String>>(2)?,   // branch_id
+                row.get::<_, Option<String>>(3)?,   // created_at
+                row.get::<_, String>(4)?,           // items JSON
+            ))
+        })
+        .map_err(|e| format!("top_sellers_rolling: query: {e}"))?;
+
+    for row in rows {
+        let (_id, status, branch_id_opt, created_at_opt, items_json) =
+            row.map_err(|e| format!("top_sellers_rolling: row: {e}"))?;
+        if is_cancelled_status(&status) {
+            continue;
+        }
+        let branch_id = branch_id_opt.unwrap_or_default();
+        let created_at = created_at_opt.unwrap_or_default();
+
+        let parsed: Value =
+            serde_json::from_str(&items_json).unwrap_or_else(|_| serde_json::json!([]));
+        let Some(items) = parsed.as_array() else {
+            continue;
+        };
+
+        for item in items {
+            // Mirror the existing aggregate logic — skip manual line
+            // items, combos, and combo children (they don't represent
+            // a single discrete menu item that "Featured" should
+            // surface).
+            if truthy_from_keys(item, &["is_manual", "isManual"])
+                || truthy_from_keys(item, &["is_combo", "isCombo"])
+                || value_str(item, &["combo_id", "comboId"]).is_some()
+            {
+                continue;
+            }
+            let Some(menu_item_id) = normalize_top_item_menu_item_id(item) else {
+                continue;
+            };
+            let quantity = parse_top_item_quantity(item);
+            let revenue = parse_top_item_revenue(item, quantity);
+            let item_name = value_str(item, &["name", "item_name", "title"])
+                .unwrap_or_else(|| "Item".to_string());
+            let category_id = value_str(item, &["category_id", "categoryId"]);
+
+            let key = (branch_id.clone(), menu_item_id.clone());
+            let entry = by_branch_item.entry(key).or_insert_with(|| {
+                (
+                    AggregatedTopItem {
+                        menu_item_id: menu_item_id.clone(),
+                        name: item_name.clone(),
+                        quantity: 0.0,
+                        revenue: 0.0,
+                        category_id: category_id.clone(),
+                    },
+                    created_at.clone(),
+                )
+            });
+            entry.0.quantity += quantity;
+            entry.0.revenue += revenue;
+            // Track the most-recent created_at for last_sold_at.
+            if created_at > entry.1 {
+                entry.1 = created_at.clone();
+            }
+            if (entry.0.name.trim().is_empty() || entry.0.name == "Item")
+                && !item_name.trim().is_empty()
+            {
+                entry.0.name = item_name;
+            }
+            if entry.0.category_id.is_none() && category_id.is_some() {
+                entry.0.category_id = category_id;
+            }
+        }
+    }
+    drop(stmt); // release the prepared statement before reusing the conn for upserts
+
+    let mut upserts = 0usize;
+    for ((branch_id, menu_item_id), (item, last_sold_at)) in by_branch_item {
+        // UPSERT: increment counters when the (branch, menu_item) row
+        // already exists. The COALESCE on name/category_id keeps any
+        // previously-stored value if the new aggregate happens to have
+        // a placeholder.
+        conn.execute(
+            "INSERT INTO top_sellers_rolling
+                (branch_id, menu_item_id, name, category_id,
+                 total_quantity, total_revenue, last_sold_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+             ON CONFLICT (branch_id, menu_item_id) DO UPDATE SET
+                total_quantity = top_sellers_rolling.total_quantity + excluded.total_quantity,
+                total_revenue  = top_sellers_rolling.total_revenue  + excluded.total_revenue,
+                name           = CASE WHEN top_sellers_rolling.name = 'Item' OR top_sellers_rolling.name = ''
+                                      THEN excluded.name ELSE top_sellers_rolling.name END,
+                category_id    = COALESCE(top_sellers_rolling.category_id, excluded.category_id),
+                last_sold_at   = CASE WHEN excluded.last_sold_at > COALESCE(top_sellers_rolling.last_sold_at, '')
+                                      THEN excluded.last_sold_at ELSE top_sellers_rolling.last_sold_at END,
+                updated_at     = datetime('now')",
+            rusqlite::params![
+                branch_id,
+                menu_item_id,
+                item.name,
+                item.category_id,
+                item.quantity,
+                item.revenue,
+                last_sold_at,
+            ],
+        )
+        .map_err(|e| format!("top_sellers_rolling upsert {menu_item_id}: {e}"))?;
+        upserts += 1;
+    }
+
+    Ok(upserts)
+}
+
+/// Loads aggregated rows from the persistent `top_sellers_rolling`
+/// table for the given branch (or all branches when empty). The
+/// returned items are merged with live-order aggregates by the
+/// reports query so the Featured tab combines historical weight with
+/// current-day activity.
+fn load_rolling_top_items(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+) -> Result<Vec<AggregatedTopItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT menu_item_id, name, category_id, total_quantity, total_revenue
+             FROM top_sellers_rolling
+             WHERE (?1 = '' OR branch_id = ?1)",
+        )
+        .map_err(|e| format!("load_rolling_top_items prepare: {e}"))?;
+
+    let rows = stmt
+        .query_map([branch_id], |row| {
+            Ok(AggregatedTopItem {
+                menu_item_id: row.get::<_, String>(0)?,
+                name: row.get::<_, String>(1)?,
+                category_id: row.get::<_, Option<String>>(2)?,
+                quantity: row.get::<_, f64>(3)?,
+                revenue: row.get::<_, f64>(4)?,
+            })
+        })
+        .map_err(|e| format!("load_rolling_top_items query: {e}"))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("load_rolling_top_items row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Merges two AggregatedTopItem lists (live + rolling), summing
+/// per-menu-item counters. Used by `report_get_top_items` and
+/// `report_get_weekly_top_items` so the Featured tab reflects both
+/// historical and current activity.
+fn merge_aggregated_top_items(
+    primary: Vec<AggregatedTopItem>,
+    secondary: Vec<AggregatedTopItem>,
+) -> Vec<AggregatedTopItem> {
+    let mut by_id: std::collections::HashMap<String, AggregatedTopItem> =
+        std::collections::HashMap::new();
+    for item in primary.into_iter().chain(secondary.into_iter()) {
+        let key = item.menu_item_id.clone();
+        let entry = by_id.entry(key).or_insert_with(|| AggregatedTopItem {
+            menu_item_id: item.menu_item_id.clone(),
+            name: item.name.clone(),
+            quantity: 0.0,
+            revenue: 0.0,
+            category_id: item.category_id.clone(),
+        });
+        entry.quantity += item.quantity;
+        entry.revenue += item.revenue;
+        if (entry.name.trim().is_empty() || entry.name == "Item") && !item.name.trim().is_empty() {
+            entry.name = item.name;
+        }
+        if entry.category_id.is_none() {
+            entry.category_id = item.category_id;
+        }
+    }
+    let mut items: Vec<AggregatedTopItem> = by_id.into_values().collect();
+    items.sort_by(|left, right| {
+        right
+            .quantity
+            .partial_cmp(&left.quantity)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                right
+                    .revenue
+                    .partial_cmp(&left.revenue)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    items
+}
+
 #[allow(clippy::type_complexity)]
 fn load_report_rows_for_day(
     conn: &rusqlite::Connection,
@@ -1004,12 +1244,18 @@ pub async fn report_get_top_items(
     let limit = payload.limit.unwrap_or(10).clamp(1, 50) as usize;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
-    let aggregated = aggregate_top_items_from_order_rows(
+    let live = aggregate_top_items_from_order_rows(
         orders
             .into_iter()
             .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
     );
-    let top = top_items_to_json(aggregated, limit);
+    // Merge in the persistent rolling leaderboard so the Featured tab
+    // stays populated across Z-report rollovers (the rollover deletes
+    // closed-out orders from the orders table; without this merge the
+    // tab would go blank until enough new orders accumulate today).
+    let rolling = load_rolling_top_items(&conn, &branch_id).unwrap_or_default();
+    let merged = merge_aggregated_top_items(live, rolling);
+    let top = top_items_to_json(merged, limit);
     Ok(serde_json::json!({ "success": true, "data": top }))
 }
 
@@ -1031,12 +1277,18 @@ pub async fn report_get_weekly_top_items(
         .to_string();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let orders = crate::load_orders_for_period(&conn, &branch_id, &from, &today)?;
-    let aggregated = aggregate_top_items_from_order_rows(
+    let live = aggregate_top_items_from_order_rows(
         orders
             .into_iter()
             .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
     );
-    let top = top_items_to_json(aggregated, limit);
+    // Merge in the persistent rolling leaderboard. The weekly window
+    // (last 7 days) often spans a Z-report rollover, so the rolling
+    // table is essential here — without it the Featured tab would
+    // forget items sold before the most-recent rollover.
+    let rolling = load_rolling_top_items(&conn, &branch_id).unwrap_or_default();
+    let merged = merge_aggregated_top_items(live, rolling);
+    let top = top_items_to_json(merged, limit);
     Ok(serde_json::json!({ "success": true, "data": top }))
 }
 
@@ -1756,5 +2008,214 @@ mod dto_tests {
         assert_eq!(flattened["periodEnd"], "2026-03-15T18:00:00Z");
         assert_eq!(flattened["period"]["start"], "2026-03-15T08:00:00Z");
         assert_eq!(flattened["period"]["end"], "2026-03-15T18:00:00Z");
+    }
+
+    // ===================================================================
+    // top_sellers_rolling: aggregator + merge coverage
+    // ===================================================================
+
+    fn setup_top_sellers_test_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE orders (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                branch_id TEXT,
+                created_at TEXT,
+                items TEXT,
+                is_ghost INTEGER DEFAULT 0
+            );
+            CREATE TABLE top_sellers_rolling (
+                branch_id TEXT NOT NULL,
+                menu_item_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT 'Item',
+                category_id TEXT,
+                total_quantity REAL NOT NULL DEFAULT 0,
+                total_revenue REAL NOT NULL DEFAULT 0,
+                last_sold_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (branch_id, menu_item_id)
+            );
+            CREATE TEMP TABLE temp_z_report_order_ids (id TEXT PRIMARY KEY);",
+        )
+        .expect("setup tables");
+        conn
+    }
+
+    fn insert_order(conn: &rusqlite::Connection, id: &str, branch: &str, status: &str, items: &str) {
+        conn.execute(
+            "INSERT INTO orders (id, status, branch_id, created_at, items)
+             VALUES (?1, ?2, ?3, '2026-05-03T12:00:00Z', ?4)",
+            rusqlite::params![id, status, branch, items],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO temp_z_report_order_ids (id) VALUES (?1)",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn top_sellers_aggregate_rolls_quantity_and_revenue_per_menu_item() {
+        let conn = setup_top_sellers_test_db();
+        insert_order(
+            &conn,
+            "ord-1",
+            "branch-A",
+            "completed",
+            r#"[
+                {"menu_item_id": "m1", "name": "Burger", "quantity": 2, "unit_price": 5.0, "category_id": "cat-food"},
+                {"menu_item_id": "m2", "name": "Fries", "quantity": 1, "total_price": 3.5}
+            ]"#,
+        );
+        insert_order(
+            &conn,
+            "ord-2",
+            "branch-A",
+            "completed",
+            r#"[
+                {"menu_item_id": "m1", "name": "Burger", "quantity": 3, "unit_price": 5.0}
+            ]"#,
+        );
+
+        let upserts =
+            top_sellers_aggregate_into_rolling(&conn).expect("aggregator should succeed");
+        assert_eq!(upserts, 2, "two distinct menu items");
+
+        let burger: (f64, f64, String, Option<String>) = conn
+            .query_row(
+                "SELECT total_quantity, total_revenue, name, category_id
+                 FROM top_sellers_rolling WHERE menu_item_id = 'm1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(burger.0, 5.0, "2+3 burgers");
+        assert_eq!(burger.1, 25.0, "5 burgers @ €5");
+        assert_eq!(burger.2, "Burger");
+        assert_eq!(burger.3.as_deref(), Some("cat-food"));
+    }
+
+    #[test]
+    fn top_sellers_aggregate_skips_cancelled_orders() {
+        let conn = setup_top_sellers_test_db();
+        insert_order(
+            &conn,
+            "ord-cancelled",
+            "branch-A",
+            "cancelled",
+            r#"[{"menu_item_id": "m1", "name": "Burger", "quantity": 99}]"#,
+        );
+
+        top_sellers_aggregate_into_rolling(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM top_sellers_rolling", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "cancelled orders must not contribute");
+    }
+
+    #[test]
+    fn top_sellers_aggregate_skips_manual_and_combo_lines() {
+        let conn = setup_top_sellers_test_db();
+        insert_order(
+            &conn,
+            "ord-1",
+            "branch-A",
+            "completed",
+            r#"[
+                {"menu_item_id": "m1", "name": "Real Item", "quantity": 1, "unit_price": 5},
+                {"menu_item_id": "m2", "name": "Manual", "quantity": 1, "is_manual": true, "unit_price": 99},
+                {"menu_item_id": "m3", "name": "Combo", "quantity": 1, "is_combo": true, "unit_price": 50},
+                {"menu_item_id": "m4", "name": "Combo child", "quantity": 1, "combo_id": "c-1", "unit_price": 10}
+            ]"#,
+        );
+
+        top_sellers_aggregate_into_rolling(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM top_sellers_rolling", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "only the real menu item should be aggregated");
+    }
+
+    #[test]
+    fn top_sellers_aggregate_upserts_increment_existing_rows() {
+        let conn = setup_top_sellers_test_db();
+
+        // Pre-existing row from an earlier rollover.
+        conn.execute(
+            "INSERT INTO top_sellers_rolling
+                (branch_id, menu_item_id, name, total_quantity, total_revenue, updated_at)
+             VALUES ('branch-A', 'm1', 'Burger', 10, 50, datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        // New rollover adds 2 more.
+        insert_order(
+            &conn,
+            "ord-1",
+            "branch-A",
+            "completed",
+            r#"[{"menu_item_id": "m1", "name": "Burger", "quantity": 2, "unit_price": 5}]"#,
+        );
+
+        top_sellers_aggregate_into_rolling(&conn).unwrap();
+
+        let (qty, rev): (f64, f64) = conn
+            .query_row(
+                "SELECT total_quantity, total_revenue FROM top_sellers_rolling WHERE menu_item_id = 'm1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(qty, 12.0, "10 (existing) + 2 (new)");
+        assert_eq!(rev, 60.0, "50 (existing) + 10 (new)");
+    }
+
+    #[test]
+    fn merge_aggregated_top_items_sums_per_menu_item() {
+        let live = vec![
+            AggregatedTopItem {
+                menu_item_id: "m1".into(),
+                name: "Burger".into(),
+                quantity: 2.0,
+                revenue: 10.0,
+                category_id: Some("food".into()),
+            },
+            AggregatedTopItem {
+                menu_item_id: "m2".into(),
+                name: "Fries".into(),
+                quantity: 1.0,
+                revenue: 3.5,
+                category_id: Some("food".into()),
+            },
+        ];
+        let rolling = vec![
+            AggregatedTopItem {
+                menu_item_id: "m1".into(),
+                name: "Burger".into(),
+                quantity: 8.0,
+                revenue: 40.0,
+                category_id: Some("food".into()),
+            },
+            AggregatedTopItem {
+                menu_item_id: "m3".into(),
+                name: "Pizza".into(),
+                quantity: 5.0,
+                revenue: 50.0,
+                category_id: Some("food".into()),
+            },
+        ];
+
+        let merged = merge_aggregated_top_items(live, rolling);
+        assert_eq!(merged.len(), 3, "three distinct menu items");
+
+        // Sorted by quantity desc — burger sums to 10, beats Pizza (5) and Fries (1)
+        assert_eq!(merged[0].menu_item_id, "m1");
+        assert_eq!(merged[0].quantity, 10.0);
+        assert_eq!(merged[0].revenue, 50.0);
     }
 }

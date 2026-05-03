@@ -1236,6 +1236,52 @@ pub async fn customer_invalidate_cache(
     Ok(serde_json::json!({ "success": true, "removed": removed }))
 }
 
+/// Cache-only sibling of `customer_lookup_by_phone` — sync, takes an
+/// already-locked `&Connection` so it can be called from inside
+/// `sync::create_order` without re-acquiring the `db.conn` mutex
+/// (which the caller already holds — re-acquiring would deadlock).
+///
+/// Returns the canonical UUID `customer_id` when the digit-normalized
+/// phone matches a cache entry. Returns `None` when:
+///   - phone is empty after normalization
+///   - cache is empty / unparseable
+///   - no entry's phone matches the normalized phone
+///   - the matched entry has no `id` / `customerId`
+///   - the matched id is not a valid UUID (e.g. the `cust-<uuid>`
+///     synthetic ids that `customer_lookup_by_phone`'s orders-fallback
+///     branch emits — those would later be rejected by
+///     `resolvePersistedCustomerId` in the renderer, so we filter
+///     them out at this gate).
+///
+/// Used by `sync::create_order` (Layer 3 of the customer ↔ order ↔
+/// loyalty linkage repair) to derive `customer_id` from
+/// `customer_phone` when the renderer didn't capture it. Strict
+/// equality on the normalized phone — never partial / LIKE — to
+/// guarantee we never silently link an order to the wrong customer.
+pub fn resolve_customer_id_from_cache_conn(
+    conn: &rusqlite::Connection,
+    phone: &str,
+) -> Option<String> {
+    let normalized = normalize_phone(phone);
+    if normalized.is_empty() {
+        return None;
+    }
+    let raw = db::get_setting(conn, "local", "customer_cache_v1")?;
+    let cache: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
+    for entry in cache {
+        let entry_phone_norm = value_str(&entry, &["phone", "customerPhone", "mobile", "telephone"])
+            .map(|s| normalize_phone(&s))
+            .unwrap_or_default();
+        if !entry_phone_norm.is_empty() && entry_phone_norm == normalized {
+            let id = value_str(&entry, &["id", "customerId"])?;
+            if uuid::Uuid::parse_str(&id).is_ok() {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn customer_lookup_by_phone(
     arg0: Option<serde_json::Value>,
@@ -2054,5 +2100,129 @@ mod dto_tests {
             Some("Bashi")
         );
         assert_eq!(body.get("is_default").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    // ---------------------------------------------------------------
+    // Layer 3 of the customer ↔ order ↔ loyalty linkage repair —
+    // resolve_customer_id_from_cache_conn coverage
+    // ---------------------------------------------------------------
+
+    fn setup_local_settings_table(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS local_settings (
+                id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                setting_category TEXT NOT NULL,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT NOT NULL,
+                last_sync TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(setting_category, setting_key)
+            );",
+        )
+        .expect("create local_settings table");
+    }
+
+    fn write_cache(conn: &rusqlite::Connection, value: serde_json::Value) {
+        crate::db::set_setting(conn, "local", "customer_cache_v1", &value.to_string())
+            .expect("seed customer cache");
+    }
+
+    #[test]
+    fn resolve_customer_id_from_cache_returns_id_on_phone_match() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        setup_local_settings_table(&conn);
+        let cust_id = "11111111-2222-3333-4444-555555555555";
+        write_cache(
+            &conn,
+            serde_json::json!([{
+                "id": cust_id,
+                "name": "Ada Lovelace",
+                "phone": "6971729133"
+            }]),
+        );
+
+        let resolved = resolve_customer_id_from_cache_conn(&conn, "6971729133");
+        assert_eq!(resolved.as_deref(), Some(cust_id));
+    }
+
+    #[test]
+    fn resolve_customer_id_from_cache_normalizes_phone_before_matching() {
+        // normalize_phone (data_helpers.rs:36) strips ALL non-digit
+        // characters — spaces, dashes, parens, plus signs. This test
+        // verifies that input with formatting characters matches a
+        // cache entry stored as bare digits. Country-prefix semantics
+        // (e.g. matching "6971729133" to "+30 6971729133") is NOT in
+        // scope — the resulting normalized strings differ ("6971729133"
+        // vs "306971729133") and that's correct: matching across
+        // country prefixes risks linking different customers and is
+        // intentionally rejected.
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        setup_local_settings_table(&conn);
+        let cust_id = "11111111-2222-3333-4444-555555555555";
+        write_cache(
+            &conn,
+            serde_json::json!([{ "id": cust_id, "phone": "6971729133" }]),
+        );
+
+        // Input with spaces, dashes, parens — all stripped by normalize.
+        let resolved = resolve_customer_id_from_cache_conn(&conn, "(697) 172-9133");
+        assert_eq!(resolved.as_deref(), Some(cust_id));
+    }
+
+    #[test]
+    fn resolve_customer_id_from_cache_returns_none_on_miss() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        setup_local_settings_table(&conn);
+        write_cache(
+            &conn,
+            serde_json::json!([{
+                "id": "11111111-2222-3333-4444-555555555555",
+                "phone": "6971111111"
+            }]),
+        );
+
+        let resolved = resolve_customer_id_from_cache_conn(&conn, "6979999999");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_customer_id_from_cache_rejects_non_uuid_synthetic_ids() {
+        // The customer_lookup_by_phone fallback path emits
+        // synthetic ids of the form `cust-<uuid>` for orders-history
+        // matches. Those would later be rejected by the renderer's
+        // resolvePersistedCustomerId, so we filter them out at this
+        // gate too — return None instead of bubbling them up to the
+        // sync::create_order INSERT.
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        setup_local_settings_table(&conn);
+        write_cache(
+            &conn,
+            serde_json::json!([{
+                "id": "cust-11111111-2222-3333-4444-555555555555",
+                "phone": "6971729133"
+            }]),
+        );
+
+        let resolved = resolve_customer_id_from_cache_conn(&conn, "6971729133");
+        assert!(resolved.is_none(), "non-UUID synthetic id must be rejected");
+    }
+
+    #[test]
+    fn resolve_customer_id_from_cache_returns_none_on_empty_phone() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        setup_local_settings_table(&conn);
+        let resolved = resolve_customer_id_from_cache_conn(&conn, "");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_customer_id_from_cache_handles_missing_cache_row() {
+        // No customer_cache_v1 row at all — function should return
+        // None gracefully (offline / first-launch case).
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        setup_local_settings_table(&conn);
+        let resolved = resolve_customer_id_from_cache_conn(&conn, "6971729133");
+        assert!(resolved.is_none());
     }
 }

@@ -4517,6 +4517,27 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     cleared.insert("staff_shifts".into(), serde_json::json!(c));
 
     // 10. orders in the closed business window. Payments/adjustments were already removed above.
+    //
+    // BEFORE deleting the orders, fold their items into the persistent
+    // `top_sellers_rolling` table so the Featured tab in the menu picker
+    // doesn't go blank after the rollover. Without this step, every
+    // Z-report wipes the leaderboard's source data and the Featured tab
+    // shows "no products" until a new day's worth of orders accumulates.
+    // The aggregator reads from `temp_z_report_order_ids` (already
+    // populated upstream in this function), parses each order's items
+    // JSON, and UPSERTs per-(branch, menu_item) totals.
+    match crate::commands::analytics::top_sellers_aggregate_into_rolling(conn) {
+        Ok(upserts) => {
+            info!(upserts, "Z-report: rolled order items into top_sellers_rolling");
+        }
+        Err(e) => {
+            // Don't block the Z-report on a leaderboard hiccup — log
+            // and proceed. The Featured tab will simply fall back to
+            // whatever's already in the rolling table from prior runs.
+            warn!(error = %e, "Z-report: failed to update top_sellers_rolling (continuing)");
+        }
+    }
+
     let c = safe_delete(
         conn,
         "orders",

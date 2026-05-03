@@ -1145,6 +1145,32 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         validate_string_length("customer_email", v, 254)?;
     }
 
+    // Layer 3 of the customer ↔ order ↔ loyalty linkage repair: when an
+    // order arrives with `customer_phone` populated but `customer_id`
+    // missing, resolve the id from the local customer cache so the order
+    // row links to the canonical customer record. Without this, ~81% of
+    // orders historically shipped with id=NULL and broke downstream
+    // order-history + loyalty for any customer captured by phone alone.
+    //
+    // Rules (matching the planning doc):
+    //   - DO NOT clobber an explicit non-null customer_id (the renderer
+    //     may have already resolved it via a different code path).
+    //   - Cache-only lookup, no remote fetch — keeps this path sync,
+    //     keeps the held db.conn mutex unchanged, keeps offline
+    //     checkouts non-blocking. Cache misses fall through to NULL,
+    //     and the SQL backfill migration covers the residual gap on
+    //     next admin sweep.
+    //   - Strict equality on the digit-normalized phone — never LIKE.
+    //     Wrong-customer linking would silently corrupt loyalty +
+    //     history attribution; we'd rather link nothing than wrong.
+    let customer_id = if customer_id.is_some() {
+        customer_id // do-not-clobber rule
+    } else if let Some(phone) = customer_phone.as_ref() {
+        crate::commands::customers::resolve_customer_id_from_cache_conn(&conn, phone)
+    } else {
+        None
+    };
+
     let items = payload
         .get("items")
         .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))

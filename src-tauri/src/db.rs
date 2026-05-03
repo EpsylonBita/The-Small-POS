@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 59;
+const CURRENT_SCHEMA_VERSION: i32 = 60;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -421,6 +421,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 59 {
         run_migration_tx(conn, 59, migrate_v59)?;
+    }
+    if current < 60 {
+        run_migration_tx(conn, 60, migrate_v60)?;
     }
 
     Ok(())
@@ -3991,6 +3994,51 @@ fn migrate_v59(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("v59 record schema_version: {e}"))?;
 
     info!("Applied migration v59 (order delivery destination snapshots)");
+    Ok(())
+}
+
+/// Migration v60: persistent rolling top-sellers leaderboard.
+///
+/// The "Επιλεγμένα" (Featured) tab in the menu picker reads from
+/// `report_get_top_items` / `report_get_weekly_top_items`, which both
+/// query the local `orders` table. After every Z-report rollover,
+/// `apply_local_day_rollover` deletes the closed-out orders — and the
+/// Featured tab goes blank until the next day's orders accumulate.
+///
+/// This table preserves a per-(branch, menu_item) running aggregate
+/// across Z-report rollovers. Z-report calls `top_sellers_aggregate_into_rolling`
+/// just before deletion to fold the about-to-be-deleted orders into
+/// this table. The reports queries then merge live orders + this
+/// rolling table so the leaderboard is always populated and reflects
+/// historical sales weighted alongside today's activity.
+fn migrate_v60(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS top_sellers_rolling (
+            branch_id TEXT NOT NULL,
+            menu_item_id TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT 'Item',
+            category_id TEXT,
+            total_quantity REAL NOT NULL DEFAULT 0,
+            total_revenue REAL NOT NULL DEFAULT 0,
+            last_sold_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (branch_id, menu_item_id)
+        );
+
+        -- Lookups by branch + ranking are the hot path for the Featured
+        -- tab population. Quantity-desc index keeps the limit-N read
+        -- to an index scan rather than a full table sort.
+        CREATE INDEX IF NOT EXISTS idx_top_sellers_rolling_branch_qty
+          ON top_sellers_rolling (branch_id, total_quantity DESC);
+        ",
+    )
+    .map_err(|e| format!("v60 create top_sellers_rolling: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (60)", [])
+        .map_err(|e| format!("v60 record schema_version: {e}"))?;
+
+    info!("Applied migration v60 (persistent rolling top-sellers leaderboard)");
     Ok(())
 }
 
