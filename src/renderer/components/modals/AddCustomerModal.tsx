@@ -1554,9 +1554,15 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               value={formData.floorNumber}
               onChange={(e) => handleInputChange('floorNumber', e.target.value)}
               placeholder={t('modals.addCustomer.floorPlaceholder')}
+              maxLength={100}
               className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
             />
           </div>
+          {(formData.floorNumber?.length ?? 0) >= 100 && (
+            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+              {t('common.validation.maxLength', { count: 100 })}
+            </p>
+          )}
           {errors.floorNumber && (
             <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.floorNumber}</p>
           )}
