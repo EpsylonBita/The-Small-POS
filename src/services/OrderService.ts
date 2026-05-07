@@ -456,15 +456,33 @@ export class OrderService {
   }
 
   // Update order status - local-first via IPC, fallback to Admin API
-  async updateOrderStatus(orderId: string, status: OrderStatus): Promise<void> {
-    console.log('[RENDERER OrderService] 🔄 updateOrderStatus called', { orderId, status, timestamp: new Date().toISOString() });
+  async updateOrderStatus(
+    orderId: string,
+    status: OrderStatus,
+    options?: { cancellationReason?: string; cancelledAt?: string },
+  ): Promise<void> {
+    // Only meaningful when status === 'cancelled'. The store layer already
+    // gates this — but we re-check here so a stray reason on a non-cancel
+    // transition is silently dropped.
+    const cancellationReason =
+      status === 'cancelled' && options?.cancellationReason
+        ? options.cancellationReason.trim() || undefined
+        : undefined;
+    const cancelledAt =
+      status === 'cancelled'
+        ? options?.cancelledAt || new Date().toISOString()
+        : undefined;
+    console.log('[RENDERER OrderService] 🔄 updateOrderStatus called', { orderId, status, hasReason: Boolean(cancellationReason), timestamp: new Date().toISOString() });
     try {
       // 1) Try local-first via IPC
       const bridge = this.getBridge();
       if (bridge) {
         try {
-          console.log('[RENDERER OrderService] 📤 Invoking bridge orders.updateStatus', { orderId, status });
-          const resp: any = await bridge.orders.updateStatus(orderId, status);
+          console.log('[RENDERER OrderService] 📤 Invoking bridge orders.updateStatus', { orderId, status, hasReason: Boolean(cancellationReason) });
+          const resp: any = await bridge.orders.updateStatus(orderId, status, {
+            cancellationReason,
+            cancelledAt,
+          });
           console.log('[RENDERER OrderService] 📥 Bridge response received', { resp, orderId, status });
           if (resp && resp.success) {
             debugLogger.info(`Order status updated locally via bridge`, { orderId, status }, 'OrderService');
@@ -548,6 +566,12 @@ export class OrderService {
       const requestBody: any = { id: idToSend, status: supaStatus };
       if (organizationId) {
         requestBody.organization_id = organizationId;
+      }
+      if (cancellationReason) {
+        requestBody.cancellation_reason = cancellationReason;
+      }
+      if (cancelledAt) {
+        requestBody.cancelled_at = cancelledAt;
       }
 
       const abortController = new AbortController();

@@ -22,6 +22,11 @@ struct OrderUpdateStatusPayload {
     status: String,
     #[serde(default, alias = "estimated_time")]
     estimated_time: Option<i64>,
+    /// Optional cancellation reason (only meaningful when transitioning to
+    /// status = 'cancelled'). Persisted to local SQLite and forwarded in
+    /// the sync payload so the admin dashboard can surface it.
+    #[serde(default, alias = "cancellation_reason")]
+    cancellation_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1638,6 +1643,19 @@ pub async fn order_update_status(
     let order_id_raw = payload.order_id;
     let status = normalize_status_for_storage(&payload.status);
     let estimated_time = payload.estimated_time;
+    // Only attach a cancellation reason when actually cancelling — keeps
+    // the column tidy on other transitions and avoids accidentally
+    // clearing the reason on a re-update.
+    let cancellation_reason = if status == "cancelled" {
+        payload
+            .cancellation_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
     let now = Utc::now().to_rfc3339();
 
     let actual_order_id = {
@@ -1682,25 +1700,52 @@ pub async fn order_update_status(
             rusqlite::params![status, now, actual_order_id],
         )
         .map_err(|e| format!("update order status: {e}"))?;
+        if let Some(reason) = cancellation_reason.as_ref() {
+            conn.execute(
+                "UPDATE orders SET cancellation_reason = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![reason, now, actual_order_id],
+            )
+            .map_err(|e| format!("update cancellation_reason: {e}"))?;
+        }
         if let Some(eta) = estimated_time {
             let _ = conn.execute(
                 "UPDATE orders SET estimated_time = ?1, updated_at = ?2 WHERE id = ?3",
                 rusqlite::params![eta, now, actual_order_id],
             );
         }
-        let sync_payload = serde_json::json!({
+        let mut sync_payload = serde_json::json!({
             "orderId": actual_order_id,
             "status": status,
             "estimatedTime": estimated_time
         });
+        if let Some(reason) = cancellation_reason.as_ref() {
+            if let Some(obj) = sync_payload.as_object_mut() {
+                obj.insert(
+                    "cancellationReason".to_string(),
+                    serde_json::Value::String(reason.clone()),
+                );
+                obj.insert(
+                    "cancelled_at".to_string(),
+                    serde_json::Value::String(now.clone()),
+                );
+            }
+        }
         let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
     }
 
-    let event_payload = serde_json::json!({
+    let mut event_payload = serde_json::json!({
         "orderId": actual_order_id,
         "status": status,
         "estimatedTime": estimated_time
     });
+    if let Some(reason) = cancellation_reason.as_ref() {
+        if let Some(obj) = event_payload.as_object_mut() {
+            obj.insert(
+                "cancellationReason".to_string(),
+                serde_json::Value::String(reason.clone()),
+            );
+        }
+    }
     let _ = app.emit("order_status_updated", event_payload.clone());
     let _ = app.emit("order_realtime_update", event_payload);
 

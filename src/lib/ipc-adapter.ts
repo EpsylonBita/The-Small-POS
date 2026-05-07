@@ -1230,7 +1230,11 @@ export interface PlatformBridge {
     createWithInitialPayment(
       payload: CreateOrderPayload,
     ): Promise<IpcResult<Order>>;
-    updateStatus(orderId: string, status: string): Promise<IpcResult>;
+    updateStatus(
+      orderId: string,
+      status: string,
+      extra?: { cancellationReason?: string; cancelledAt?: string },
+    ): Promise<IpcResult>;
     updateItems(orderId: string, items: OrderItem[]): Promise<IpcResult>;
     previewEditSettlement(payload: {
       orderId: string;
@@ -2610,8 +2614,25 @@ export class TauriBridge implements PlatformBridge {
     create: (p: CreateOrderPayload) => this.inv("order:create", p),
     createWithInitialPayment: (p: CreateOrderPayload) =>
       this.inv("order:create-with-initial-payment", p),
-    updateStatus: (id: string, s: string) =>
-      this.inv("order:update-status", id, s),
+    updateStatus: (
+      id: string,
+      s: string,
+      extra?: { cancellationReason?: string; cancelledAt?: string },
+    ) =>
+      // The Rust `order_update_status` command accepts either a 2-arg
+      // (orderId, status) form or a single-object form. When we have a
+      // cancellation reason / timestamp, send the object form so the
+      // extra fields make it through.
+      extra && (extra.cancellationReason || extra.cancelledAt)
+        ? this.inv("order:update-status", {
+            orderId: id,
+            status: s,
+            ...(extra.cancellationReason
+              ? { cancellationReason: extra.cancellationReason }
+              : {}),
+            ...(extra.cancelledAt ? { cancelledAt: extra.cancelledAt } : {}),
+          })
+        : this.inv("order:update-status", id, s),
     updateItems: (id: string, items: OrderItem[]) =>
       this.inv("order:update-items", id, items),
     previewEditSettlement: (payload: {

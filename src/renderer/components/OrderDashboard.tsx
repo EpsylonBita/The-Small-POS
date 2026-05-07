@@ -3752,10 +3752,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Handle order cancellation
     const handleOrderCancellation = async (reason: string) => {
+      // Forward the typed reason so it's persisted locally AND included
+      // in the outbound sync payload — without this, the admin dashboard's
+      // cancellation panel falls back to "Reason not recorded".
+      const trimmedReason = reason.trim();
+      const cancellationOptions = trimmedReason
+        ? { cancellationReason: trimmedReason }
+        : undefined;
       try {
         // Cancel all pending orders
         for (const orderId of pendingCancelOrders) {
-          const success = await updateOrderStatus(orderId, "cancelled");
+          const success = await updateOrderStatus(
+            orderId,
+            "cancelled",
+            cancellationOptions,
+          );
           if (!success) {
             const order = orders.find((o) => o.id === orderId);
             toast.error(

@@ -68,6 +68,8 @@ interface Order {
   sync_status?: string;
   supabase_id?: string;
   client_order_id?: string;
+  cancellation_reason?: string;
+  cancelled_at?: string;
   source?: 'local' | 'remote';
 }
 
@@ -145,6 +147,8 @@ const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
     sync_status: asString(raw.sync_status) || asString(raw.syncStatus),
     supabase_id: asString(raw.supabase_id) || asString(raw.supabaseId),
     client_order_id: asString(raw.client_order_id),
+    cancellation_reason: asString(raw.cancellation_reason) || asString(raw.cancellationReason),
+    cancelled_at: asString(raw.cancelled_at) || asString(raw.cancelledAt),
     source,
   };
 };

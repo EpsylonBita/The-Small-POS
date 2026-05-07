@@ -309,6 +309,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const status = displayOrder.status || 'pending';
   const paymentMethod = displayOrder.payment_method || displayOrder.paymentMethod || '';
   const paymentStatus = String(displayOrder.payment_status || displayOrder.paymentStatus || 'pending').toLowerCase();
+  const cancellationReason = String(
+    displayOrder.cancellation_reason || displayOrder.cancellationReason || '',
+  ).trim();
+  const cancelledAt =
+    displayOrder.cancelled_at || displayOrder.cancelledAt || displayOrder.updated_at || displayOrder.updatedAt || '';
   const completedPayments = useMemo(
     () => orderPayments.filter(isCompletedPaymentRecord),
     [orderPayments],
@@ -1299,6 +1304,35 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
             </div>
           </div>
         )}
+
+        {/* Cancellation reason — visible whenever the order is cancelled. */}
+        {String(status).toLowerCase() === 'cancelled' ? (
+          <div className="mt-4 rounded-2xl border border-rose-300/70 bg-rose-50/80 p-4 dark:border-rose-700/70 dark:bg-rose-950/30">
+            <div className="text-xs font-semibold uppercase tracking-wider text-rose-700 dark:text-rose-300">
+              {t('modals.orderDetails.cancellation.title', { defaultValue: 'Cancellation' })}
+            </div>
+            <div className="mt-1 text-sm text-rose-900 dark:text-rose-100">
+              <span className="font-medium">
+                {t('modals.orderDetails.cancellation.reasonLabel', { defaultValue: 'Reason' })}:
+              </span>{' '}
+              {cancellationReason ||
+                t('modals.orderDetails.cancellation.reasonMissing', {
+                  defaultValue: 'Reason not recorded',
+                })}
+            </div>
+            {cancelledAt ? (
+              <div className="mt-1 text-xs text-rose-700/80 dark:text-rose-300/80">
+                <span className="font-medium">
+                  {t('modals.orderDetails.cancellation.cancelledAtLabel', {
+                    defaultValue: 'Cancelled at',
+                  })}
+                  :
+                </span>{' '}
+                {formatDate(cancelledAt)}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
     </LiquidGlassModal>
