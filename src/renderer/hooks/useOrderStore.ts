@@ -41,22 +41,15 @@ interface SyncRetryInfo {
   lastError?: string;
 }
 
-/**
- * Optional fields to attach to a status update. When `cancellationReason`
- * is provided alongside `status: 'cancelled'`, it's persisted on the order
- * (locally + sync'd to admin) so the cancellation panel in both UIs can
- * show *why* the order was cancelled instead of falling back to "Reason
- * not recorded".
- */
-export interface UpdateOrderStatusOptions {
-  cancellationReason?: string;
-  cancelledAt?: string;
-}
-
 interface UpdateOrderStatusDetailedResult {
   success: boolean;
   errorMessage?: string;
   paymentIntegrityPayload?: PaymentIntegrityErrorPayload | null;
+}
+
+interface UpdateOrderStatusOptions {
+  cancellationReason?: string;
+  cancelledAt?: string;
 }
 
 // IPC response interfaces for bridge calls
@@ -110,11 +103,7 @@ interface OrderStore {
   initializeOrders: () => Promise<void>;
   loadOrders: () => Promise<void>;
   getOrderById: (orderId: string) => Promise<Order | null>;
-  updateOrderStatus: (
-    orderId: string,
-    status: Order['status'],
-    options?: UpdateOrderStatusOptions,
-  ) => Promise<boolean>;
+  updateOrderStatus: (orderId: string, status: Order['status'], options?: UpdateOrderStatusOptions) => Promise<boolean>;
   updateOrderStatusDetailed: (
     orderId: string,
     status: Order['status'],
@@ -833,23 +822,10 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       }
     },
 
-    updateOrderStatusDetailed: async (
-      orderId: string,
-      status: Order['status'],
-      options?: UpdateOrderStatusOptions,
-    ) => {
+    updateOrderStatusDetailed: async (orderId: string, status: Order['status'], options?: UpdateOrderStatusOptions) => {
       const operation = `updateOrderStatus_${orderId}`;
       get()._setLoading(operation, true);
       get().clearError();
-
-      // Only attach cancellation_reason on a cancelling status — the column
-      // is meaningless on other transitions and we want the admin to see a
-      // clean transition history.
-      const cancellationReason =
-        status === 'cancelled' && options?.cancellationReason
-          ? options.cancellationReason.trim() || undefined
-          : undefined;
-      const cancelledAt = status === 'cancelled' ? options?.cancelledAt || new Date().toISOString() : undefined;
 
       try {
         // Validate inputs
@@ -860,31 +836,46 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         const orderService = OrderService.getInstance();
 
         // Wrap with timeout
+        const trimmedCancellationReason =
+          status === 'cancelled' && typeof options?.cancellationReason === 'string'
+            ? options.cancellationReason.trim()
+            : '';
+        const cancelledAt = status === 'cancelled' ? options?.cancelledAt : undefined;
         await withTimeout(
-          orderService.updateOrderStatus(orderId, status, { cancellationReason, cancelledAt }),
+          orderService.updateOrderStatus(orderId, status, {
+            ...(trimmedCancellationReason ? { cancellationReason: trimmedCancellationReason } : {}),
+            ...(cancelledAt ? { cancelledAt } : {}),
+          }),
           TIMING.DATABASE_QUERY_TIMEOUT,
           'Update order status'
         );
 
         // Update local state after successful API call
         const mappedLocalStatus = mapStatusForPOS(status) as Order['status'];
-      set((state) => {
-        const combined = [...state.orders, ...state.pendingExternalOrders];
-        const updatedOrders = combined.map(order =>
-          order.id === orderId
+        const cancellationReasonPatch =
+          mappedLocalStatus === 'cancelled' && trimmedCancellationReason.length > 0
             ? {
-                ...order,
-                status: mappedLocalStatus,
-                ...(cancellationReason ? { cancellation_reason: cancellationReason, cancellationReason } : {}),
+                cancellation_reason: trimmedCancellationReason,
+                cancellationReason: trimmedCancellationReason,
                 ...(cancelledAt ? { cancelled_at: cancelledAt, cancelledAt } : {}),
-                updatedAt: new Date().toISOString(),
-                sync_status: 'pending' as const,
-                syncStatus: 'pending' as const
               }
-            : order
-        );
-        return splitOrdersForState(updatedOrders);
-      });
+            : {};
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const updatedOrders = combined.map(order =>
+            order.id === orderId
+              ? {
+                  ...order,
+                  status: mappedLocalStatus,
+                  ...cancellationReasonPatch,
+                  updatedAt: new Date().toISOString(),
+                  sync_status: 'pending' as const,
+                  syncStatus: 'pending' as const
+                }
+              : order
+          );
+          return splitOrdersForState(updatedOrders);
+        });
 
 
         get()._invalidateCache();
@@ -922,11 +913,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       }
     },
 
-    updateOrderStatus: async (
-      orderId: string,
-      status: Order['status'],
-      options?: UpdateOrderStatusOptions,
-    ) => {
+    updateOrderStatus: async (orderId: string, status: Order['status'], options?: UpdateOrderStatusOptions) => {
       const result = await get().updateOrderStatusDetailed(orderId, status, options);
       if (result.success) {
         toast.success('Order status updated');

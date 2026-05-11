@@ -5,6 +5,7 @@ import {
   resolveAddressSuggestion,
   searchAddressSuggestions,
 } from '../services/address-workflow';
+import { parseSpecialAddressInput } from './specialAddress';
 
 export interface SavedAddressLike {
   street_address?: string;
@@ -44,6 +45,9 @@ export function extractSavedAddressCoordinates(
   address?: SavedAddressLike | null
 ): { lat: number; lng: number } | null {
   if (!address) {
+    return null;
+  }
+  if (parseSpecialAddressInput(address.street_address || address.street || '').shouldSkipZoneValidation) {
     return null;
   }
 
@@ -170,7 +174,7 @@ export async function resolveSavedAddressCoordinates(
   }
 
   const query = buildSavedAddressQuery(address);
-  if (!query) {
+  if (!query || parseSpecialAddressInput(query).shouldSkipZoneValidation) {
     return null;
   }
 

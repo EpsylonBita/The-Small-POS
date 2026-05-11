@@ -31,6 +31,7 @@ import {
 } from '../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
+import { parseSpecialAddressInput } from '../utils/specialAddress';
 import {
   hasValidSyncedPosMenuItemId,
   normalizePosOrderItems,
@@ -426,11 +427,15 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       let zoneName = null;
       let estimatedDeliveryTime = null;
       const effectiveDeliveryZoneInfo = orderData.deliveryZoneInfo ?? null;
-      const currentAddressCoordinates = toLatLngCoordinates(
-        currentAddress?.coordinates,
-        currentAddress?.latitude,
-        currentAddress?.longitude,
-      );
+      const currentAddressLabel =
+        currentAddress?.street_address || currentAddress?.street || currentAddress?.address || '';
+      const currentAddressCoordinates = parseSpecialAddressInput(currentAddressLabel).shouldSkipZoneValidation
+        ? undefined
+        : toLatLngCoordinates(
+            currentAddress?.coordinates,
+            currentAddress?.latitude,
+            currentAddress?.longitude,
+          );
 
       if (currentOrderType === 'delivery' && currentAddress) {
         const streetAddress = currentAddress.street_address || currentAddress.street || '';

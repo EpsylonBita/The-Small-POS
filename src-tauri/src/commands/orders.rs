@@ -3667,6 +3667,31 @@ mod dto_tests {
     }
 
     #[test]
+    fn parse_status_payload_supports_cancellation_reason_aliases() {
+        let parsed = parse_order_update_status_payload(
+            Some(serde_json::json!({
+                "orderId": "order-2",
+                "status": "cancelled",
+                "cancellationReason": "Customer request"
+            })),
+            None,
+        )
+        .expect("camelCase cancellation reason payload should parse");
+        assert_eq!(parsed.cancellation_reason.as_deref(), Some("Customer request"));
+
+        let parsed = parse_order_update_status_payload(
+            Some(serde_json::json!({
+                "order_id": "order-3",
+                "status": "cancelled",
+                "cancellation_reason": "Out of stock"
+            })),
+            None,
+        )
+        .expect("snake_case cancellation reason payload should parse");
+        assert_eq!(parsed.cancellation_reason.as_deref(), Some("Out of stock"));
+    }
+
+    #[test]
     fn parse_items_payload_supports_legacy_tuple_shape() {
         let parsed = parse_order_update_items_payload(
             Some(serde_json::json!("order-3")),

@@ -1,6 +1,7 @@
 import { getBridge, onEvent } from '../../lib';
 import { posApiPost } from '../utils/api-helpers';
 import { resolveAddressLanguage } from '../utils/address-language';
+import { parseSpecialAddressInput } from '../utils/specialAddress';
 import {
   extractStreetNumber,
   selectResolvedStreetNumber,
@@ -438,6 +439,10 @@ export async function searchAddressSuggestions(
   query: string,
   options: SearchOptions = {}
 ): Promise<AddressSuggestion[]> {
+  if (parseSpecialAddressInput(query).shouldSkipZoneValidation) {
+    return [];
+  }
+
   if (query.trim().length < 3) {
     return [];
   }
@@ -601,6 +606,23 @@ export async function validateAddressForDelivery(
   address: string,
   options: ValidateOptions = {}
 ): Promise<DeliveryValidationResult> {
+  const parsedAddress = parseSpecialAddressInput(address);
+  if (parsedAddress.shouldSkipZoneValidation) {
+    return {
+      success: true,
+      isValid: true,
+      deliveryAvailable: true,
+      validation_status: 'module_disabled',
+      requires_override: false,
+      house_number_match: true,
+      reason: 'Custom delivery address bypasses zone validation',
+      message: 'Custom delivery address bypasses zone validation',
+      suggestedAction: 'proceed',
+      address_fingerprint: options.addressFingerprint || buildAddressFingerprint(parsedAddress.trimmedInput),
+      validation_source: options.validationSource || 'online',
+    };
+  }
+
   const creds = await getResolvedTerminalCredentials();
   const payload = {
     address,

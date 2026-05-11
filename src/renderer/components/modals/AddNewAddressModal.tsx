@@ -19,6 +19,7 @@ import {
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 import { getBridge } from '../../../lib';
+import { parseSpecialAddressInput } from '../../utils/specialAddress';
 
 interface Customer {
   id: string;
@@ -134,6 +135,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   }, [isOpen]);
 
   const clearValidation = (addressValue: string) => {
+    const parsedAddress = parseSpecialAddressInput(addressValue);
     setSelectedAddressDetails(null);
     setAddressCoordinates(null);
     setValidationResult(null);
@@ -146,7 +148,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       return;
     }
 
-    if (!hasDeliveryPro) {
+    if (!hasDeliveryPro || parsedAddress.shouldSkipZoneValidation) {
       setValidationStatus('idle');
       return;
     }
@@ -170,6 +172,24 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     const trimmedAddress = address.trim();
     if (!trimmedAddress) {
       return null;
+    }
+
+    if (parseSpecialAddressInput(trimmedAddress).shouldSkipZoneValidation) {
+      const result: DeliveryValidationResult = {
+        success: true,
+        isValid: true,
+        deliveryAvailable: true,
+        validation_status: 'module_disabled',
+        requires_override: false,
+        house_number_match: true,
+        message: t('modals.addCustomer.specialAddressModeTitle', 'Special address label detected'),
+        address_fingerprint: buildAddressFingerprint(trimmedAddress),
+      };
+      setValidationResult(result);
+      setValidationStatus('idle');
+      setAddressCoordinates(null);
+      setValidationSnapshot(result.address_fingerprint || buildAddressFingerprint(trimmedAddress));
+      return result;
     }
 
     if (!hasDeliveryPro) {
@@ -435,8 +455,10 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
 
     setIsSubmitting(true);
     try {
+      const isSpecialAddress = parseSpecialAddressInput(formData.address).shouldSkipZoneValidation;
       // Keep exact selected suggestion coordinates when persisting.
       const coords = hasDeliveryPro
+        && !isSpecialAddress
         ? selectedAddressDetails?.coordinates || addressCoordinates || validation?.coordinates || null
         : null;
       const metadata = hasDeliveryPro

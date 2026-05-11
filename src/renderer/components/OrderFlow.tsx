@@ -37,6 +37,7 @@ import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
+import { parseSpecialAddressInput } from '../utils/specialAddress';
 import {
   hasValidSyncedPosMenuItemId,
   normalizePosOrderItems,
@@ -640,11 +641,15 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       let zoneName = null;
       let estimatedDeliveryTime = null;
       const effectiveDeliveryZoneInfo = orderData.deliveryZoneInfo ?? deliveryZoneInfo;
-      const selectedAddressCoordinates = toLatLngCoordinates(
-        selectedAddress?.coordinates,
-        selectedAddress?.latitude,
-        selectedAddress?.longitude,
-      );
+      const selectedAddressLabel =
+        selectedAddress?.street_address || selectedAddress?.street || selectedAddress?.address || '';
+      const selectedAddressCoordinates = parseSpecialAddressInput(selectedAddressLabel).shouldSkipZoneValidation
+        ? null
+        : toLatLngCoordinates(
+            selectedAddress?.coordinates,
+            selectedAddress?.latitude,
+            selectedAddress?.longitude,
+          );
 
       if (selectedOrderType === 'delivery' && selectedAddress) {
         deliveryAddress = `${selectedAddress.street_address}, ${selectedAddress.city}`;

@@ -585,11 +585,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     () => parseSpecialAddressInput(formData.address),
     [formData.address],
   );
-  const isSpecialAddressMode =
-    !hasDeliveryPro && parsedAddressInput.shouldSkipZoneValidation;
-  const normalizedStreetAddress = hasDeliveryPro
-    ? formData.address.trim()
-    : parsedAddressInput.normalizedAddress;
+  const isSpecialAddressMode = parsedAddressInput.shouldSkipZoneValidation;
+  const normalizedStreetAddress = parsedAddressInput.shouldSkipZoneValidation
+    ? parsedAddressInput.normalizedAddress
+    : formData.address.trim();
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -617,7 +616,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       return;
     }
 
-    if (!hasDeliveryPro) {
+    if (!hasDeliveryPro || parsedAddress.shouldSkipZoneValidation) {
       setShowDeliveryValidation(false);
       setDeliveryValidationStatus('idle');
       return;
@@ -829,11 +828,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.overrideReason = t('modals.addCustomer.overrideReasonRequired', 'Override reason must be at least 6 characters.');
     }
 
-    if (!formData.nameOnRinger.trim()) {
+    if (!isSpecialAddressMode && !formData.nameOnRinger.trim()) {
       newErrors.nameOnRinger = t('modals.addCustomer.nameOnRingerRequired', 'Name on ringer is required');
     }
 
-    if (!formData.floorNumber.trim()) {
+    if (!isSpecialAddressMode && !formData.floorNumber.trim()) {
       newErrors.floorNumber = t('modals.addCustomer.floorRequired', 'Floor number is required');
     }
 
@@ -884,6 +883,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         : null;
       // Persist the exact selected suggestion point first (Google/OSM details), then fallback.
       const persistedCoords = hasDeliveryPro
+        && !parsedAddressInput.shouldSkipZoneValidation
         ? (selectedAddressDetails?.coordinates || addressCoordinates || activeValidation?.coordinates || null)
         : null;
       const validatedAt = hasDeliveryPro && activeValidation ? new Date().toISOString() : null;
@@ -915,7 +915,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           // Use IPC service to avoid CORS
           const addressData = {
             street_address: normalizedStreetAddress, // Map to DB column name
-            city: formData.city ? formData.city.trim() : 'Athens',
+            city: formData.city ? formData.city.trim() : '',
             postal_code: formData.postalCode ? formData.postalCode.trim() : null,
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
             notes: formData.notes ? formData.notes.trim() : null,

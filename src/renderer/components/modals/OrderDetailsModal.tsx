@@ -2,12 +2,12 @@ import React, { useState, useEffect, useMemo } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, Building, FileText, History, Banknote, Smartphone, Bell, Layers, Car, CheckCircle, RotateCcw, Split } from 'lucide-react';
+import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, FileText, History, Banknote, Smartphone, RotateCcw, Split } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
 import { getVisibleOrderNumber } from '../../utils/orderNumberUtils';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
-import { normalizeOrderTypeForDisplay, resolveOrderDisplayTitle } from '../../utils/orderDisplay';
+import { normalizeOrderTypeForDisplay } from '../../utils/orderDisplay';
 import RefundVoidModal from './RefundVoidModal';
 import { SplitPaymentModal } from './SplitPaymentModal';
 import type { SplitPaymentResult } from './SplitPaymentModal';
@@ -207,6 +207,30 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     }
   };
 
+  const getOrderStatusLabel = (value: string) => {
+    switch (value?.toLowerCase()) {
+      case 'cancelled':
+      case 'canceled':
+        return t('modals.orderDetails.cancelled', { defaultValue: 'Cancelled' });
+      case 'completed':
+        return t('modals.orderDetails.completed', { defaultValue: 'Completed' });
+      case 'delivered':
+        return t('modals.orderDetails.delivered', { defaultValue: 'Delivered' });
+      case 'ready':
+        return t('modals.orderDetails.ready', { defaultValue: 'Ready' });
+      case 'out_for_delivery':
+        return t('modals.orderDetails.outForDelivery', { defaultValue: 'Out for delivery' });
+      case 'preparing':
+      case 'processing':
+        return t('modals.orderDetails.processing', { defaultValue: 'Processing' });
+      case 'confirmed':
+        return t('modals.orderDetails.confirmed', { defaultValue: 'Confirmed' });
+      case 'pending':
+      default:
+        return t('modals.orderDetails.pending', { defaultValue: 'Pending' });
+    }
+  };
+
   // Use real data or fallback to default values
   const displayOrder = orderData || order || {};
   const items = displayOrder.items || displayOrder.order_items || [];
@@ -216,17 +240,20 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   );
 
   // Get customer info from various sources (snake_case from prop, camelCase from Rust backend)
-  const customerName = resolveOrderDisplayTitle({
-    orderType,
-    customerName: customer.name || displayOrder.customer_name || displayOrder.customerName || '',
-    pickupLabel: t('orders.type.pickup', { defaultValue: 'Pickup' }),
-    fallbackLabel: t('modals.orderDetails.guestCustomer', { defaultValue: 'Guest' }),
-  });
+  const rawCustomerName = customer.name || displayOrder.customer_name || displayOrder.customerName || '';
   const customerPhone = customer.phone || displayOrder.customer_phone || displayOrder.customerPhone || '';
   const customerEmail = customer.email || displayOrder.customer_email || displayOrder.customerEmail || '';
   const normalizedCustomerPhone = String(customerPhone || '').replace(/\D+/g, '');
 
   const normalizeText = (value: any): string => typeof value === 'string' ? value.trim() : '';
+  const hasRealCustomerIdentity = Boolean(
+    normalizeText(rawCustomerName) ||
+    normalizeText(customerPhone) ||
+    normalizeText(customerEmail),
+  );
+  const customerIdentityName =
+    normalizeText(rawCustomerName) ||
+    t('modals.orderDetails.guestCustomer', { defaultValue: 'Guest' });
   const rawAddress = displayOrder.delivery_address || displayOrder.deliveryAddress;
   const rawAddressText = normalizeText(
     typeof rawAddress === 'string'
@@ -306,7 +333,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const total = displayOrder.total || displayOrder.total_amount || displayOrder.totalAmount || 0;
   // Calculate original subtotal before discount (for display purposes)
   const originalSubtotal = discountAmount > 0 ? subtotal + discountAmount : subtotal;
-  const status = displayOrder.status || 'pending';
+  const normalizedOrderStatus = String(displayOrder.status || 'pending').toLowerCase();
+  const isCancelledOrder = normalizedOrderStatus === 'cancelled' || normalizedOrderStatus === 'canceled';
+  const displayStatus = isCancelledOrder ? 'cancelled' : normalizedOrderStatus;
+  const displayStatusLabel = getOrderStatusLabel(displayStatus);
+  const status = displayStatus;
   // Reason text supplied at cancel time. Stored on either snake_case or
   // camelCase depending on which sync layer wrote the row, so check both.
   const cancellationReason = String(
@@ -314,7 +345,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     || displayOrder.cancellationReason
     || '',
   ).trim();
-  const isCancelledOrder = String(status).toLowerCase() === 'cancelled' || String(status).toLowerCase() === 'canceled';
+  const cancellationReasonDisplay =
+    cancellationReason ||
+    t('modals.orderDetails.reasonNotRecorded', { defaultValue: 'Reason not recorded' });
   const paymentMethod = displayOrder.payment_method || displayOrder.paymentMethod || '';
   const paymentStatus = String(displayOrder.payment_status || displayOrder.paymentStatus || 'pending').toLowerCase();
   const cancelledAt =
@@ -600,71 +633,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     return deduped.join(' | ');
   };
 
-  const modalHeader = (
-    <div className="flex-shrink-0 border-b liquid-glass-modal-border bg-gradient-to-br from-emerald-500/[0.08] via-cyan-500/[0.05] to-transparent px-6 py-5 dark:from-emerald-500/[0.12] dark:via-cyan-500/[0.09]">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.26em] ${
-              isDarkTheme
-                ? 'border-white/10 bg-white/[0.06] text-white/70'
-                : 'border-zinc-200 bg-white/80 text-zinc-500'
-            }`}>
-              <Package className="h-3.5 w-3.5" />
-              {t('modals.orderDetails.title', { defaultValue: 'Order Details' })}
-            </div>
-            <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${getStatusColor(status)}`}>
-              {status?.toUpperCase() || 'PENDING'}
-            </span>
-          </div>
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <h2 className="text-3xl font-bold tracking-tight liquid-glass-modal-text">
-              #{displayOrderNumber}
-            </h2>
-            <div className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm ${
-              isDarkTheme
-                ? 'bg-white/[0.06] text-white/70'
-                : 'bg-zinc-100 text-zinc-600'
-            }`}>
-              <Clock className="h-4 w-4" />
-              {createdDateTimeLabel}
-            </div>
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-sm liquid-glass-modal-text-muted">
-            <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 dark:border-white/10 dark:bg-white/[0.04]">
-              {isDeliveryOrder ? <Truck className="h-4 w-4 text-orange-400" /> : <Clock className="h-4 w-4 text-blue-400" />}
-              {getOrderTypeLabel(orderType)}
-            </span>
-            <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 dark:border-white/10 dark:bg-white/[0.04]">
-              {getPaymentMethodIcon(paymentMethodPresentation)}
-              {getPaymentMethodLabel(paymentMethodPresentation)}
-            </span>
-            {isDeliveryOrder && hasDriverAssignment ? (
-              <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 dark:border-white/10 dark:bg-white/[0.04]">
-                <Car className="h-4 w-4 text-cyan-400" />
-                {driverName || t('modals.orderDetails.unknownDriver', { defaultValue: 'Unknown Driver' })}
-              </span>
-            ) : null}
-          </div>
-          {isDeliveryOrder && hasDeliveryAddress ? (
-            <p className="mt-4 max-w-4xl whitespace-pre-line text-sm leading-6 liquid-glass-modal-text-muted">
-              {primaryAddressLine}
-            </p>
-          ) : null}
-        </div>
-        <button
-          onClick={onClose}
-          className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-zinc-200/70 bg-white/80 text-zinc-700 shadow-sm transition-colors hover:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-200 dark:hover:bg-white/[0.08]"
-          aria-label={t('common.actions.close')}
-        >
-          <X className="h-6 w-6" />
-        </button>
-      </div>
-    </div>
-  );
-
   const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed';
-  const canSplitPayment = paymentStatus === 'pending' || paymentStatus === 'partially_paid';
+  const canSplitPayment = !isCancelledOrder && (paymentStatus === 'pending' || paymentStatus === 'partially_paid');
 
   // Compute footer grid columns based on visible buttons
   const footerButtonCount =
@@ -738,10 +708,16 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       className="!w-[92vw] !max-w-6xl"
       contentClassName="p-0 overflow-hidden"
       ariaLabel={t('modals.orderDetails.title', { defaultValue: 'Order Details' })}
-      header={modalHeader}
       footer={modalFooter}
     >
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-6 scrollbar-hide">
+      <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 pb-6 pt-16 scrollbar-hide">
+        <button
+          onClick={onClose}
+          className="absolute right-4 top-3 z-20 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-zinc-200/70 bg-white/80 text-zinc-700 shadow-sm transition-colors hover:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-200 dark:hover:bg-white/[0.08]"
+          aria-label={t('common.actions.close')}
+        >
+          <X className="h-6 w-6" />
+        </button>
         {loading ? (
           <div className="flex items-center justify-center py-12">
             <div className={`h-12 w-12 animate-spin rounded-full border-2 ${
@@ -754,364 +730,176 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
           <div className="space-y-6">
 
             <section className={`${shellPanelClass} overflow-hidden p-6`}>
-              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-                <div className="space-y-4">
-                  <div className={mutedEyebrowClass}>{t('modals.orderDetails.title', { defaultValue: 'Order Details' })}</div>
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    <div className={`${insetPanelClass} px-4 py-4`}>
-                      <div className="flex items-center gap-3">
-                        <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
-                          isDeliveryOrder
-                            ? 'bg-orange-500/15 text-orange-500 dark:bg-orange-500/20 dark:text-orange-300'
-                            : 'bg-blue-500/15 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300'
-                        }`}>
-                          {isDeliveryOrder ? <Truck className="h-5 w-5" /> : <Clock className="h-5 w-5" />}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-lg font-semibold liquid-glass-modal-text">{getOrderTypeLabel(orderType)}</div>
-                          <div className="text-sm liquid-glass-modal-text-muted">{createdDateTimeLabel}</div>
-                        </div>
-                      </div>
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className={mutedEyebrowClass}>
+                    {t('modals.orderDetails.orderInformation', { defaultValue: 'Order Information' })}
+                  </div>
+                  <h3 className="mt-2 text-2xl font-bold tracking-tight liquid-glass-modal-text">
+                    {displayOrderNumber}
+                  </h3>
+                </div>
+                <span className={`inline-flex items-center rounded-full border px-4 py-2 text-sm font-semibold ${getStatusColor(displayStatus)}`}>
+                  {displayStatusLabel}
+                </span>
+              </div>
+
+              {isCancelledOrder ? (
+                <div className="mb-5 rounded-2xl border border-red-500/70 bg-black px-6 py-7 text-center shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+                  <div className="flex items-center justify-center gap-2 text-sm font-bold uppercase tracking-[0.24em] text-red-400">
+                    <RotateCcw className="h-4 w-4" />
+                    {t('modals.orderDetails.cancellationReason', { defaultValue: 'Cancellation Reason' })}
+                  </div>
+                  <p className="mt-4 whitespace-pre-line text-2xl font-bold leading-9 text-white">
+                    {cancellationReasonDisplay}
+                  </p>
+                </div>
+              ) : null}
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className={`${insetPanelClass} px-4 py-4`}>
+                  <div className="flex items-center gap-3">
+                    <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+                      isDeliveryOrder
+                        ? 'bg-orange-500/15 text-orange-500 dark:bg-orange-500/20 dark:text-orange-300'
+                        : 'bg-blue-500/15 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300'
+                    }`}>
+                      {isDeliveryOrder ? <Truck className="h-5 w-5" /> : <Clock className="h-5 w-5" />}
                     </div>
-                    <div className={`${insetPanelClass} px-4 py-4`}>
-                      <div className="flex items-center gap-3">
-                        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300">
-                          {getPaymentMethodIcon(paymentMethodPresentation)}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-lg font-semibold liquid-glass-modal-text">{getPaymentMethodLabel(paymentMethodPresentation)}</div>
-                          <div className="text-sm capitalize liquid-glass-modal-text-muted">{paymentStatus}</div>
-                        </div>
-                      </div>
+                    <div className="min-w-0">
+                      <div className={mutedEyebrowClass}>{t('modals.orderDetails.orderType', { defaultValue: 'Order Type' })}</div>
+                      <div className="mt-1 text-lg font-semibold liquid-glass-modal-text">{getOrderTypeLabel(orderType)}</div>
                     </div>
-                    <div className={`${insetPanelClass} px-4 py-4 md:col-span-2 xl:col-span-1`}>
-                      <div className="flex items-center gap-3">
-                        <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
-                          isDeliveryOrder
-                            ? 'bg-cyan-500/15 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-300'
-                            : 'bg-violet-500/15 text-violet-600 dark:bg-violet-500/20 dark:text-violet-300'
-                        }`}>
-                          {isDeliveryOrder ? <Car className="h-5 w-5" /> : <User className="h-5 w-5" />}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-lg font-semibold liquid-glass-modal-text">
-                            {isDeliveryOrder
-                              ? (driverName || t('modals.orderDetails.unknownDriver', { defaultValue: 'Unknown Driver' }))
-                              : (customerName || t('modals.orderDetails.guestCustomer', { defaultValue: 'Guest' }))}
-                          </div>
-                          <div className="text-sm liquid-glass-modal-text-muted">
-                            {isDeliveryOrder
-                              ? hasDriverAssignment
-                                ? (isDelivered
-                                  ? t('modals.orderDetails.deliveredBy', { defaultValue: 'Delivered By' })
-                                  : t('modals.orderDetails.assignedDriver', { defaultValue: 'Assigned Driver' }))
-                                : t('modals.orderDetails.processing', { defaultValue: 'Processing' })
-                              : (customerPhone || customerEmail || t('modals.orderDetails.processing', { defaultValue: 'Processing' }))}
-                          </div>
-                        </div>
+                  </div>
+                </div>
+
+                <div className={`${insetPanelClass} px-4 py-4`}>
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-sky-500/15 text-sky-600 dark:bg-sky-500/20 dark:text-sky-300">
+                      <Clock className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className={mutedEyebrowClass}>{t('modals.orderDetails.createdAt', { defaultValue: 'Created' })}</div>
+                      <div className="mt-1 text-base font-semibold liquid-glass-modal-text">{createdDateTimeLabel}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className={`${insetPanelClass} px-4 py-4`}>
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300">
+                      {getPaymentMethodIcon(paymentMethodPresentation)}
+                    </div>
+                    <div className="min-w-0">
+                      <div className={mutedEyebrowClass}>{t('modals.orderDetails.paymentMethod', { defaultValue: 'Payment Method' })}</div>
+                      <div className="mt-1 text-lg font-semibold liquid-glass-modal-text">{getPaymentMethodLabel(paymentMethodPresentation)}</div>
+                      <div className="text-sm capitalize liquid-glass-modal-text-muted">
+                        {t('modals.orderDetails.paymentStatus', { defaultValue: 'Payment status' })}: {paymentStatus.replace(/_/g, ' ')}
                       </div>
                     </div>
                   </div>
+                </div>
+
+                <div className={`${insetPanelClass} px-4 py-4`}>
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-violet-500/15 text-violet-600 dark:bg-violet-500/20 dark:text-violet-300">
+                      <Package className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className={mutedEyebrowClass}>{t('modals.orderDetails.total', { defaultValue: 'Total' })}</div>
+                      <div className="mt-1 text-2xl font-bold tracking-tight liquid-glass-modal-text">{formatCurrency(total)}</div>
+                      <div className="text-sm liquid-glass-modal-text-muted">
+                        {totalItemCount} {t('modals.orderDetails.orderItems', { defaultValue: 'Items' })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {hasRealCustomerIdentity || (isDeliveryOrder && hasDeliveryAddress) || serviceNotes.length > 0 || (isDeliveryOrder && hasDriverAssignment) ? (
+                <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                  {hasRealCustomerIdentity ? (
+                    <div className={`${insetPanelClass} px-4 py-4`}>
+                      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                        <User className="h-4 w-4" />
+                        {t('modals.orderDetails.customerInformation', { defaultValue: 'Customer' })}
+                      </div>
+                      <div className="text-lg font-semibold liquid-glass-modal-text">{customerIdentityName}</div>
+                      {customerPhone ? (
+                        <div className="mt-2 flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
+                          <Phone className="h-3.5 w-3.5" />
+                          {customerPhone}
+                        </div>
+                      ) : null}
+                      {customerEmail ? (
+                        <div className="mt-1 text-sm liquid-glass-modal-text-muted">{customerEmail}</div>
+                      ) : null}
+                    </div>
+                  ) : null}
+
                   {isDeliveryOrder && hasDeliveryAddress ? (
                     <div className={`${insetPanelClass} px-4 py-4`}>
-                      <div className={mutedEyebrowClass}>{t('modals.orderDetails.savedAddress', { defaultValue: 'Saved Address' })}</div>
-                      <p className="mt-3 whitespace-pre-line text-base leading-7 liquid-glass-modal-text">
+                      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                        <MapPin className="h-4 w-4" />
+                        {t('modals.orderDetails.deliveryAddress', { defaultValue: 'Delivery Address' })}
+                      </div>
+                      <p className="whitespace-pre-line text-base font-semibold leading-7 liquid-glass-modal-text">
                         {primaryAddressLine}
                       </p>
-                    </div>
-                  ) : null}
-                  {isCancelledOrder && cancellationReason ? (
-                    <div className={`${insetPanelClass} px-4 py-4 border-rose-300/60 bg-rose-50/60 dark:border-rose-500/30 dark:bg-rose-500/10`}>
-                      <div className={`${mutedEyebrowClass} text-rose-700 dark:text-rose-300`}>
-                        {t('modals.orderDetails.cancellationReason', { defaultValue: 'Cancellation Reason' })}
-                      </div>
-                      <p className="mt-3 whitespace-pre-line text-base leading-7 liquid-glass-modal-text">
-                        {cancellationReason}
-                      </p>
-                    </div>
-                  ) : null}
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-                  <div className={`${insetPanelClass} px-5 py-5`}>
-                    <div className={mutedEyebrowClass}>{t('modals.orderDetails.total', { defaultValue: 'Total' })}</div>
-                    <div className="mt-3 text-3xl font-bold tracking-tight liquid-glass-modal-text">
-                      {formatCurrency(total)}
-                    </div>
-                    <div className="mt-2 text-sm liquid-glass-modal-text-muted">
-                      {remainingAmount > 0
-                        ? `${t('splitPayment.remaining', { defaultValue: 'Remaining' })}: ${formatCurrency(remainingAmount)}`
-                        : `${t('modals.orderDetails.paid', { defaultValue: 'Paid' })}: ${formatCurrency(paidAmount || total)}`}
-                    </div>
-                  </div>
-                  <div className={`${insetPanelClass} px-5 py-5`}>
-                    <div className={mutedEyebrowClass}>{t('modals.orderDetails.orderItems', { defaultValue: 'Items' })}</div>
-                    <div className="mt-3 flex items-end justify-between gap-3">
-                      <div className="text-3xl font-bold tracking-tight liquid-glass-modal-text">
-                        {totalItemCount}
-                      </div>
-                      {normalizedCustomerPhone ? (
-                        <div className="rounded-full border border-emerald-300/70 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-200">
-                          {t('modals.orderDetails.customerOrderIndex', {
-                            count: repeatOrderCount || 1,
-                            defaultValue: 'Order #{{count}}',
-                          })}
+                      {[deliveryAddress.city, deliveryAddress.postal_code, deliveryAddress.floor, deliveryAddress.name_on_ringer]
+                        .filter(Boolean)
+                        .join(' | ') ? (
+                        <div className="mt-2 text-sm liquid-glass-modal-text-muted">
+                          {[deliveryAddress.city, deliveryAddress.postal_code, deliveryAddress.floor, deliveryAddress.name_on_ringer]
+                            .filter(Boolean)
+                            .join(' | ')}
+                        </div>
+                      ) : null}
+                      {deliveryAddress.notes ? (
+                        <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-sm text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100">
+                          {deliveryAddress.notes}
                         </div>
                       ) : null}
                     </div>
-                    <div className="mt-2 text-sm liquid-glass-modal-text-muted">
-                      {normalizedCustomerPhone
-                        ? repeatOrderCount > 1
-                          ? t('modals.orderDetails.previousOrdersCount', {
-                            count: repeatOrderCount - 1,
-                            defaultValue: '{{count}} previous orders on this phone',
-                          })
-                          : t('modals.orderDetails.firstOrder', { defaultValue: 'First recorded order' })
-                        : t('modals.orderDetails.processing', { defaultValue: 'Processing' })}
-                    </div>
-                    {completedPayments.length > 0 ? (
-                      <div className="mt-4 rounded-2xl border border-zinc-200/70 bg-white/70 px-4 py-3 text-sm liquid-glass-modal-text-muted dark:border-white/10 dark:bg-white/[0.04]">
-                        <div>{t('modals.orderDetails.paid', { defaultValue: 'Paid' })}: {formatCurrency(paidAmount)}</div>
-                        <div>{t('splitPayment.remaining', { defaultValue: 'Remaining' })}: {formatCurrency(remainingAmount)}</div>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            </section>
+                  ) : null}
 
-            <div className="grid grid-cols-1 gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
-              {/* Left Column: Customer, Delivery & Driver Info */}
-              <div className="space-y-6">
+                  {isDeliveryOrder && hasDriverAssignment ? (
+                    <div className={`${insetPanelClass} px-4 py-4`}>
+                      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                        <Truck className="h-4 w-4" />
+                        {t('modals.orderDetails.deliveryFulfillment', { defaultValue: 'Delivery Fulfillment' })}
+                      </div>
+                      <div className="text-lg font-semibold liquid-glass-modal-text">
+                        {driverName || t('modals.orderDetails.unknownDriver', { defaultValue: 'Unknown Driver' })}
+                      </div>
+                      <div className="mt-1 text-sm liquid-glass-modal-text-muted">
+                        {isDelivered
+                          ? t('modals.orderDetails.deliveredBy', { defaultValue: 'Delivered By' })
+                          : t('modals.orderDetails.assignedDriver', { defaultValue: 'Assigned Driver' })}
+                      </div>
+                    </div>
+                  ) : null}
 
-                {/* Customer Card */}
-                <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
-                  <div className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
-                    <User className="w-4 h-4" />
-                    {t('modals.orderDetails.customerInformation') || 'Customer'}
-                  </div>
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-3">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-purple-200 bg-purple-50 text-lg font-bold text-purple-700 shadow-sm dark:border-purple-500/25 dark:bg-purple-500/15 dark:text-purple-200">
-                        {customerName ? customerName.charAt(0).toUpperCase() : '?'}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="truncate text-base font-semibold liquid-glass-modal-text">
-                          {customerName || t('modals.orderDetails.guestCustomer') || 'Guest'}
-                        </div>
-                        {customerPhone ? (
-                          <div className="mt-1 flex items-center gap-1 text-sm liquid-glass-modal-text-muted">
-                            <Phone className="w-3 h-3" />
-                            {customerPhone}
-                          </div>
-                        ) : null}
-                        {customerEmail ? (
-                          <div className="mt-1 text-xs liquid-glass-modal-text-muted">
-                            {customerEmail}
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {normalizedCustomerPhone ? (
-                  <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
-                    <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
-                      <History className="w-4 h-4" />
-                      {t('modals.orderDetails.repeatCustomer', { defaultValue: 'Repeat Customer' })}
-                    </div>
-                    <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50/90 px-4 py-3 dark:border-emerald-500/20 dark:bg-emerald-500/10">
-                      <div className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-700 dark:text-emerald-200">
-                        {t('modals.orderDetails.customerOrderIndex', {
-                          count: repeatOrderCount || 1,
-                          defaultValue: 'Order #{{count}}',
-                        })}
-                      </div>
-                      <div className="mt-2 text-sm text-emerald-800 dark:text-emerald-100">
-                        {repeatOrderCount > 1
-                          ? t('modals.orderDetails.previousOrdersCount', {
-                            count: repeatOrderCount - 1,
-                            defaultValue: '{{count}} previous orders on this phone',
-                          })
-                          : t('modals.orderDetails.firstOrder', { defaultValue: 'First recorded order' })}
-                      </div>
-                    </div>
-                    <div className="mt-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <div className="text-sm font-semibold liquid-glass-modal-text">
-                          {t('modals.orderDetails.recentOrders', { defaultValue: 'Recent Orders' })}
-                        </div>
-                        {historyLoading && (
-                          <div className="h-4 w-4 animate-spin rounded-full border border-zinc-300 border-t-zinc-700 dark:border-zinc-700 dark:border-t-zinc-200" />
-                        )}
+                  {serviceNotes.length > 0 ? (
+                    <div className={`${insetPanelClass} px-4 py-4`}>
+                      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                        <FileText className="h-4 w-4" />
+                        {t('modals.orderDetails.serviceNotes', { defaultValue: 'Service Notes' })}
                       </div>
                       <div className="space-y-2">
-                        {recentOrders.length > 0 ? (
-                          recentOrders.map((historyOrder) => (
-                            <div
-                              key={`${historyOrder.id || historyOrder.order_number || historyOrder.orderNumber}-${historyOrder.created_at || historyOrder.createdAt || ''}`}
-                              className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-3 py-3 dark:border-white/10 dark:bg-white/5"
-                            >
-                              <div className="min-w-0">
-                                <div className="truncate text-sm font-semibold liquid-glass-modal-text">
-                                  #{historyOrder.order_number || historyOrder.orderNumber || historyOrder.id}
-                                </div>
-                                <div className="text-xs liquid-glass-modal-text-muted">
-                                  {`${formatDate(new Date(historyOrder.created_at || historyOrder.createdAt || Date.now()))} ${formatTime(new Date(historyOrder.created_at || historyOrder.createdAt || Date.now()), { hour: '2-digit', minute: '2-digit' })}`}
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold ${getStatusColor(historyOrder.status || 'pending')}`}>
-                                  {historyOrder.status || 'pending'}
-                                </span>
-                                <span className="text-sm font-semibold liquid-glass-modal-text">
-                                  {formatCurrency(Number(historyOrder.total_amount || historyOrder.totalAmount || 0))}
-                                </span>
-                                <ChevronRight className="w-4 h-4 liquid-glass-modal-text-muted" />
-                              </div>
-                            </div>
-                          ))
-                        ) : (
-                          <div className="rounded-2xl border border-dashed border-zinc-200 px-4 py-4 text-sm liquid-glass-modal-text-muted dark:border-white/10">
-                            {t('modals.orderDetails.noRecentOrders', { defaultValue: 'No previous orders found' })}
+                        {serviceNotes.map((note) => (
+                          <div key={note} className="rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm liquid-glass-modal-text dark:border-white/10 dark:bg-white/5">
+                            {note}
                           </div>
-                        )}
+                        ))}
                       </div>
                     </div>
-                  </div>
-                ) : null}
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
 
-                {/* Delivery Address Card - Show only for delivery orders */}
-                {isDeliveryOrder && hasDeliveryAddress && (
-                  <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
-                    <h4 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
-                      <MapPin className="w-4 h-4" />
-                      {t('modals.orderDetails.deliveryAddress') || 'Delivery Address'}
-                    </h4>
-                    <div className="rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 dark:border-white/10 dark:bg-white/5">
-                      <div className="text-xs font-semibold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
-                        {t('modals.orderDetails.savedAddress', { defaultValue: 'Saved Address' })}
-                      </div>
-                      <p className="mt-2 whitespace-pre-line font-medium liquid-glass-modal-text">
-                        {deliveryAddress.address || t('modals.orderDetails.noAddress') || 'No address'}
-                      </p>
-                    </div>
-
-                    <div className="mt-4 space-y-2">
-                      {deliveryAddress.city ? (
-                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm dark:border-white/10 dark:bg-white/5">
-                          <span className="flex items-center gap-2 liquid-glass-modal-text-muted">
-                            <MapPin className="w-3 h-3" />
-                            {t('modals.orderDetails.city', { defaultValue: 'City' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">{deliveryAddress.city}</span>
-                        </div>
-                      ) : null}
-                      {deliveryAddress.postal_code ? (
-                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm dark:border-white/10 dark:bg-white/5">
-                          <span className="flex items-center gap-2 liquid-glass-modal-text-muted">
-                            <Layers className="w-3 h-3" />
-                            {t('modals.orderDetails.postalCode', { defaultValue: 'Postal Code' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">{deliveryAddress.postal_code}</span>
-                        </div>
-                      ) : null}
-                      {deliveryAddress.floor ? (
-                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm dark:border-white/10 dark:bg-white/5">
-                          <span className="flex items-center gap-2 liquid-glass-modal-text-muted">
-                            <Layers className="w-3 h-3" />
-                            {t('modals.orderDetails.floor', { defaultValue: 'Floor' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">{deliveryAddress.floor}</span>
-                        </div>
-                      ) : null}
-                      {deliveryAddress.name_on_ringer ? (
-                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm dark:border-white/10 dark:bg-white/5">
-                          <span className="flex items-center gap-2 liquid-glass-modal-text-muted">
-                            <Bell className="w-3 h-3" />
-                            {t('modals.orderDetails.nameOnRinger', { defaultValue: 'Bell' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">{deliveryAddress.name_on_ringer}</span>
-                        </div>
-                      ) : null}
-                    </div>
-
-                    {deliveryAddress.notes ? (
-                      <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 dark:border-amber-500/20 dark:bg-amber-500/10">
-                        <div className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-700 dark:text-amber-200">
-                          {t('modals.orderDetails.deliveryNotes', { defaultValue: 'Delivery Notes' })}
-                        </div>
-                        <div className="mt-2 flex items-start gap-2 text-sm text-amber-900 dark:text-amber-100">
-                          <FileText className="mt-0.5 w-3 h-3 shrink-0" />
-                          <span>{deliveryAddress.notes}</span>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                )}
-
-                {/* Driver Info - Show for assigned and delivered delivery orders */}
-                {isDeliveryOrder && hasDriverAssignment && (
-                  <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
-                    <h4 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
-                      <Truck className="w-4 h-4" />
-                      {t('modals.orderDetails.deliveryFulfillment', { defaultValue: 'Delivery Fulfillment' })}
-                    </h4>
-                    <div className={`rounded-2xl border px-4 py-3 ${
-                      isDelivered
-                        ? 'border-green-500/20 bg-green-500/10'
-                        : 'border-cyan-500/20 bg-cyan-500/10'
-                    }`}>
-                      <div className="flex items-center gap-3">
-                        <div className={`flex h-10 w-10 items-center justify-center rounded-full text-white font-bold text-lg shadow-lg ${
-                          isDelivered
-                            ? 'bg-gradient-to-br from-green-500 to-teal-600'
-                            : 'bg-gradient-to-br from-cyan-500 to-blue-600'
-                        }`}>
-                          {driverName ? driverName.charAt(0).toUpperCase() : <Car className="w-5 h-5" />}
-                        </div>
-                        <div>
-                          <div className="font-semibold liquid-glass-modal-text">
-                            {driverName || t('modals.orderDetails.unknownDriver', { defaultValue: 'Unknown Driver' })}
-                          </div>
-                          <div className={`text-xs flex items-center gap-1 ${
-                            isDelivered ? 'text-green-400' : 'text-cyan-400'
-                          }`}>
-                            {isDelivered ? <CheckCircle className="w-3 h-3" aria-hidden="true" /> : <Truck className="w-3 h-3" aria-hidden="true" />}
-                            {isDelivered
-                              ? t('modals.orderDetails.deliveredBy', { defaultValue: 'Delivered By' })
-                              : t('modals.orderDetails.assignedDriver', { defaultValue: 'Assigned Driver' })}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {serviceNotes.length > 0 ? (
-                  <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
-                    <h4 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
-                      <FileText className="w-4 h-4" />
-                      {t('modals.orderDetails.serviceNotes', { defaultValue: 'Service Notes' })}
-                    </h4>
-                    <div className="space-y-2">
-                      {serviceNotes.map((note) => (
-                        <div
-                          key={note}
-                          className="rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm liquid-glass-modal-text dark:border-white/10 dark:bg-white/5"
-                        >
-                          {note}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-              </div>
-
-              {/* Right Column: Order Items */}
-              <div className="min-w-0">
-                <div className={`${shellPanelClass} flex h-full flex-col p-6`}>
+            <section className={`${shellPanelClass} flex flex-col p-6`}>
                   <div className="mb-5 flex items-center justify-between gap-3">
                     <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
                       <Package className="w-4 h-4" />
@@ -1314,9 +1102,86 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                     </div>
                   </div>
 
+            </section>
+
+            <section className={`${shellPanelClass} p-6`}>
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <History className="h-4 w-4 liquid-glass-modal-text-muted" />
+                  <div className={mutedEyebrowClass}>
+                    {t('modals.orderDetails.orderHistory', { defaultValue: 'Order History' })}
+                  </div>
                 </div>
+                {historyLoading ? (
+                  <div className="h-4 w-4 animate-spin rounded-full border border-zinc-300 border-t-zinc-700 dark:border-zinc-700 dark:border-t-zinc-200" />
+                ) : normalizedCustomerPhone ? (
+                  <span className="rounded-full border border-emerald-300/70 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-200">
+                    {t('modals.orderDetails.customerOrderIndex', {
+                      count: repeatOrderCount || 1,
+                      defaultValue: 'Order #{{count}}',
+                    })}
+                  </span>
+                ) : null}
               </div>
-            </div>
+
+              {normalizedCustomerPhone ? (
+                <div className="space-y-4">
+                  <div className={`${insetPanelClass} px-4 py-4`}>
+                    <div className="text-sm font-semibold liquid-glass-modal-text">
+                      {repeatOrderCount > 1
+                        ? t('modals.orderDetails.previousOrdersCount', {
+                          count: repeatOrderCount - 1,
+                          defaultValue: '{{count}} previous orders on this phone',
+                        })
+                        : t('modals.orderDetails.firstOrder', { defaultValue: 'First recorded order' })}
+                    </div>
+                    {customerPhone ? (
+                      <div className="mt-1 text-sm liquid-glass-modal-text-muted">{customerPhone}</div>
+                    ) : null}
+                  </div>
+
+                  <div className="space-y-2">
+                    {recentOrders.length > 0 ? (
+                      recentOrders.map((historyOrder) => {
+                        const historyStatus = String(historyOrder.status || 'pending').toLowerCase();
+                        return (
+                          <div
+                            key={`${historyOrder.id || historyOrder.order_number || historyOrder.orderNumber}-${historyOrder.created_at || historyOrder.createdAt || ''}`}
+                            className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 dark:border-white/10 dark:bg-white/5"
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-semibold liquid-glass-modal-text">
+                                #{historyOrder.order_number || historyOrder.orderNumber || historyOrder.id}
+                              </div>
+                              <div className="text-xs liquid-glass-modal-text-muted">
+                                {`${formatDate(new Date(historyOrder.created_at || historyOrder.createdAt || Date.now()))} ${formatTime(new Date(historyOrder.created_at || historyOrder.createdAt || Date.now()), { hour: '2-digit', minute: '2-digit' })}`}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold ${getStatusColor(historyStatus)}`}>
+                                {getOrderStatusLabel(historyStatus)}
+                              </span>
+                              <span className="text-sm font-semibold liquid-glass-modal-text">
+                                {formatCurrency(Number(historyOrder.total_amount || historyOrder.totalAmount || 0))}
+                              </span>
+                              <ChevronRight className="h-4 w-4 liquid-glass-modal-text-muted" />
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-2xl border border-dashed border-zinc-200 px-4 py-5 text-sm liquid-glass-modal-text-muted dark:border-white/10">
+                        {t('modals.orderDetails.noRecentOrders', { defaultValue: 'No previous orders found' })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-zinc-200 px-4 py-5 text-sm liquid-glass-modal-text-muted dark:border-white/10">
+                  {t('modals.orderDetails.noCustomerHistory', { defaultValue: 'No customer history available' })}
+                </div>
+              )}
+            </section>
           </div>
         )}
 

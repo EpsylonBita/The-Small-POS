@@ -15,6 +15,10 @@ type SupabaseCustomer = any
 type SupabaseCustomerAddress = any
 type SupabaseConflict = any
 
+function isCustomDeliveryAddress(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().startsWith('#')
+}
+
 /**
  * CustomerSyncService
  *
@@ -280,6 +284,11 @@ export class CustomerSyncService {
               addressPayload.longitude = coords.lng
             }
           }
+          if (isCustomDeliveryAddress(addressPayload.street_address)) {
+            addressPayload.coordinates = null
+            addressPayload.latitude = null
+            addressPayload.longitude = null
+          }
 
           const { data: createdAddress, error: addressError } = await this.supabase
             .from('customer_addresses')
@@ -494,6 +503,11 @@ export class CustomerSyncService {
           if (addressData.longitude === undefined) addressData.longitude = coordinates.lng
         }
       }
+      if (isCustomDeliveryAddress(addressData.street_address)) {
+        addressData.coordinates = null
+        addressData.latitude = null
+        addressData.longitude = null
+      }
 
       const { data: created, error } = await this.supabase
         .from('customer_addresses')
@@ -559,6 +573,11 @@ export class CustomerSyncService {
           if (updateData.latitude === undefined) updateData.latitude = coordinates.lat
           if (updateData.longitude === undefined) updateData.longitude = coordinates.lng
         }
+      }
+      if (isCustomDeliveryAddress(updateData.street_address)) {
+        updateData.coordinates = null
+        updateData.latitude = null
+        updateData.longitude = null
       }
 
       // Remove undefined values
@@ -959,4 +978,3 @@ export class CustomerSyncService {
     }
   }
 }
-

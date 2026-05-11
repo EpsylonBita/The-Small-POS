@@ -11646,6 +11646,8 @@ fn build_normalized_order_operation(
             &["specialInstructions", "special_instructions", "notes"],
         )
     });
+    let cancellation_reason = str_any(source, &["cancellationReason", "cancellation_reason"])
+        .or_else(|| str_any(&payload_data, &["cancellationReason", "cancellation_reason"]));
     let is_ghost = bool_any(source, &["is_ghost", "isGhost"])
         .or_else(|| bool_any(&payload_data, &["is_ghost", "isGhost"]))
         .unwrap_or(false);
@@ -11695,6 +11697,7 @@ fn build_normalized_order_operation(
         "delivery_fee": delivery_fee,
         "notes": notes,
         "special_instructions": special_instructions,
+        "cancellation_reason": cancellation_reason,
         "delivery_address": str_any(source, &["deliveryAddress", "delivery_address"]).or_else(|| str_any(&payload_data, &["deliveryAddress", "delivery_address"])),
         "delivery_city": str_any(source, &["deliveryCity", "delivery_city"]).or_else(|| str_any(&payload_data, &["deliveryCity", "delivery_city"])),
         "delivery_postal_code": str_any(source, &["deliveryPostalCode", "delivery_postal_code"]).or_else(|| str_any(&payload_data, &["deliveryPostalCode", "delivery_postal_code"])),
@@ -11717,6 +11720,37 @@ fn build_normalized_order_operation(
         "data": data,
         "items": items,
     }))
+}
+
+fn copy_order_update_payload_fields(payload_value: &Value, body: &mut Value) {
+    for &(camel, snake) in &[
+        ("orderType", "order_type"),
+        ("customerId", "customer_id"),
+        ("customerName", "customer_name"),
+        ("customerEmail", "customer_email"),
+        ("customerPhone", "customer_phone"),
+        ("deliveryAddress", "delivery_address"),
+        ("deliveryAddressId", "delivery_address_id"),
+        ("deliveryCity", "delivery_city"),
+        ("deliveryPostalCode", "delivery_postal_code"),
+        ("deliveryFloor", "delivery_floor"),
+        ("deliveryNotes", "delivery_notes"),
+        ("nameOnRinger", "name_on_ringer"),
+        ("deliveryLatitude", "delivery_latitude"),
+        ("deliveryLongitude", "delivery_longitude"),
+        ("deliveryAddressFingerprint", "delivery_address_fingerprint"),
+        ("deliveryZoneId", "delivery_zone_id"),
+        ("cancellationReason", "cancellation_reason"),
+    ] {
+        let value = payload_value.get(camel).or_else(|| payload_value.get(snake));
+        if let Some(value) = value {
+            if !value.is_null() {
+                body.as_object_mut()
+                    .unwrap()
+                    .insert(snake.to_string(), value.clone());
+            }
+        }
+    }
 }
 
 fn mark_order_synced_via_direct_fallback(
@@ -12006,6 +12040,7 @@ async fn sync_order_batch_via_direct_api(
             "delivery_longitude": num_any(&data, &["delivery_longitude", "deliveryLongitude"]),
             "delivery_address_fingerprint": str_any(&data, &["delivery_address_fingerprint", "deliveryAddressFingerprint"]),
             "delivery_zone_id": str_any(&data, &["delivery_zone_id", "deliveryZoneId"]),
+            "cancellation_reason": str_any(&data, &["cancellation_reason", "cancellationReason"]),
             "is_ghost": bool_any(&data, &["is_ghost"]).unwrap_or(false),
             "ghost_source": str_any(&data, &["ghost_source"]),
             "ghost_metadata": data.get("ghost_metadata").or_else(|| data.pointer("/data/ghost_metadata")),
@@ -12187,35 +12222,7 @@ async fn sync_order_batch_via_direct_api(
             }
         }
 
-        for &(camel, snake) in &[
-            ("orderType", "order_type"),
-            ("customerId", "customer_id"),
-            ("customerName", "customer_name"),
-            ("customerEmail", "customer_email"),
-            ("customerPhone", "customer_phone"),
-            ("deliveryAddress", "delivery_address"),
-            ("deliveryAddressId", "delivery_address_id"),
-            ("deliveryCity", "delivery_city"),
-            ("deliveryPostalCode", "delivery_postal_code"),
-            ("deliveryFloor", "delivery_floor"),
-            ("deliveryNotes", "delivery_notes"),
-            ("nameOnRinger", "name_on_ringer"),
-            ("deliveryLatitude", "delivery_latitude"),
-            ("deliveryLongitude", "delivery_longitude"),
-            ("deliveryAddressFingerprint", "delivery_address_fingerprint"),
-            ("deliveryZoneId", "delivery_zone_id"),
-        ] {
-            let value = payload_value
-                .get(camel)
-                .or_else(|| payload_value.get(snake));
-            if let Some(value) = value {
-                if !value.is_null() {
-                    body.as_object_mut()
-                        .unwrap()
-                        .insert(snake.to_string(), value.clone());
-                }
-            }
-        }
+        copy_order_update_payload_fields(&payload_value, &mut body);
 
         // Forward financial fields when present (from order_update_financials)
         for &(camel, snake) in &[
@@ -20392,6 +20399,74 @@ mod tests {
         assert_eq!(order_queue_status, "synced");
         assert_eq!(payment_sync_state, "pending");
         assert_eq!(payment_queue_status, "pending");
+    }
+
+    #[test]
+    fn test_build_normalized_order_operation_includes_cancellation_reason() {
+        let db = test_db();
+        let fallback_branch_id = Uuid::new_v4().to_string();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                 status, payment_status, order_type, cancellation_reason, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'ord-cancel-before-remote',
+                 ?1,
+                 4.2, 420, 4.2, 420,
+                 'cancelled',
+                 'paid',
+                 'pickup',
+                 'deleted',
+                 'pending',
+                 datetime('now'),
+                 datetime('now')
+             )",
+            params![r#"[{"name":"Hawaiian","quantity":1,"price":4.2}]"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        let normalized = build_normalized_order_operation(
+            &db,
+            "ord-cancel-before-remote",
+            "insert",
+            &serde_json::json!({}),
+            &fallback_branch_id,
+        )
+        .unwrap();
+        assert_eq!(
+            normalized.pointer("/data/status").and_then(Value::as_str),
+            Some("cancelled")
+        );
+        assert_eq!(
+            normalized
+                .pointer("/data/cancellation_reason")
+                .and_then(Value::as_str),
+            Some("deleted")
+        );
+    }
+
+    #[test]
+    fn test_copy_order_update_payload_fields_forwards_cancellation_reason() {
+        let payload = serde_json::json!({
+            "orderId": "ord-cancel-reason",
+            "status": "cancelled",
+            "cancellationReason": "Customer request"
+        });
+        let mut body = serde_json::json!({
+            "id": "remote-cancel-reason",
+            "status": "cancelled"
+        });
+
+        copy_order_update_payload_fields(&payload, &mut body);
+
+        assert_eq!(
+            body.get("cancellation_reason").and_then(Value::as_str),
+            Some("Customer request")
+        );
     }
 
     #[test]

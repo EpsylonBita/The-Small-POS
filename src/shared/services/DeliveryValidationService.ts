@@ -65,6 +65,26 @@ export class DeliveryValidationService {
   ): Promise<DeliveryBoundaryValidationResponse> {
     try {
       const preparedRequest = this.prepareRequest(request);
+      if (this.isCustomDeliveryAddress(preparedRequest.address)) {
+        return {
+          success: true,
+          isValid: true,
+          deliveryAvailable: true,
+          coordinates: undefined,
+          reason: 'CUSTOM_DELIVERY_ADDRESS',
+          message: 'Custom delivery address bypasses zone validation.',
+          validation_status: 'module_disabled' as any,
+          requires_override: false,
+          house_number_match: true,
+          uiState: {
+            indicator: 'success',
+            showOverrideOption: false,
+            requiresManagerApproval: false,
+            canProceed: true,
+          },
+        };
+      }
+
       const cacheKey = this.getCacheKey(preparedRequest);
 
       if (cacheKey) {
@@ -479,5 +499,9 @@ export class DeliveryValidationService {
 
     const record = value as Record<string, unknown>;
     return Number.isFinite(Number(record.lat)) && Number.isFinite(Number(record.lng));
+  }
+
+  private isCustomDeliveryAddress(value: unknown): boolean {
+    return typeof value === 'string' && value.trim().startsWith('#');
   }
 }

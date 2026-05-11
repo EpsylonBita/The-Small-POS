@@ -582,6 +582,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   enterKeyEnabled = true
 }) => {
   const { t } = useI18n()
+  const isServerRender = typeof document === 'undefined'
   const containerRef = React.useRef<HTMLDivElement>(null)
   const backdropRef = React.useRef<HTMLDivElement>(null)
   const previousActiveElementRef = React.useRef<HTMLElement | null>(null)
@@ -601,7 +602,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
   // Internal state for closing animation
   const [isClosing, setIsClosing] = React.useState(false)
-  const [mounted, setMounted] = React.useState(false)
+  const [mounted, setMounted] = React.useState(isServerRender ? isOpen : false)
   const blockerId = React.useId()
   const blockerMetadata = React.useMemo(
     () => ({
@@ -822,7 +823,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   }, [mounted, isClosing, closeOnEscape, handleClose, initialFocusRef, isTopMostDialog])
 
   // Early return if not mounted
-  if (!mounted || typeof document === 'undefined') return null
+  if (!mounted) return null
 
   // Size classes mapping - Larger modals for better UX
   const sizeClasses = {
@@ -894,6 +895,10 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
       </div>
     </div>
   )
+
+  if (isServerRender) {
+    return modalContent
+  }
 
   return ReactDOM.createPortal(modalContent, document.body)
 }

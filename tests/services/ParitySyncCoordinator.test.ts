@@ -48,6 +48,7 @@ function createMockBridge(overrides?: {
     getOrganizationId: 0,
     getSettings: 0,
     getPosApiKey: 0,
+    getCredentialStatus: 0,
     settingsUpdateLocal: [] as Array<{ request: unknown; value?: unknown }>,
   };
 
@@ -112,6 +113,14 @@ function createMockBridge(overrides?: {
         calls.getPosApiKey += 1;
         return overrides?.posApiKey ?? 'pos-key';
       },
+      getCredentialStatus: async () => {
+        calls.getCredentialStatus += 1;
+        return {
+          hasAdminUrl: true,
+          hasApiKey: true,
+          hasTerminalId: true,
+        };
+      },
       updateLocal: async (request: unknown, value?: unknown) => {
         calls.settingsUpdateLocal.push({ request, value });
         return { success: true };
@@ -172,11 +181,11 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
     conflicts: 0,
     errors: [],
   };
-  const queueCalls: Array<{ adminUrl: string; apiKey: string }> = [];
+  let queueProcessCount = 0;
   const mockQueue = {
     getStatus: async () => queueStatus,
-    processQueue: async (adminUrl: string, apiKey: string) => {
-      queueCalls.push({ adminUrl, apiKey });
+    processQueue: async () => {
+      queueProcessCount += 1;
       return parityResult;
     },
   } as any;
@@ -275,12 +284,7 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
     assert.equal(calls.staffSchedule.length, 1);
     assert.equal(calls.loyaltySyncSettings, 1);
     assert.equal(calls.loyaltySyncCustomers, 1);
-    assert.deepEqual(queueCalls, [
-      {
-        adminUrl: 'https://admin.example',
-        apiKey: 'pos-key',
-      },
-    ]);
+    assert.equal(queueProcessCount, 1);
     assert.deepEqual(queueEvents, [queueStatus]);
     // `terminal-config-updated` was previously emitted by the coordinator
     // after `terminalConfig.syncFromAdmin`. It is now emitted by the Rust

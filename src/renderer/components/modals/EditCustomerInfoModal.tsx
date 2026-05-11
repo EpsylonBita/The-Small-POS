@@ -19,6 +19,7 @@ import {
 } from '../../services/address-workflow';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
+import { parseSpecialAddressInput } from '../../utils/specialAddress';
 
 export interface EditCustomerInfoFormData {
   name: string;
@@ -111,6 +112,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   }, [isOpen, initialCustomerInfo]);
 
   const clearValidation = (addressValue: string) => {
+    const parsedAddress = parseSpecialAddressInput(addressValue);
     setSelectedAddressDetails(null);
     setAddressCoordinates(null);
     setValidationResult(null);
@@ -123,7 +125,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       return;
     }
 
-    if (!hasDeliveryPro) {
+    if (!hasDeliveryPro || parsedAddress.shouldSkipZoneValidation) {
       setValidationStatus('idle');
       return;
     }
@@ -147,6 +149,24 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     const trimmedAddress = address.trim();
     if (!trimmedAddress) {
       return null;
+    }
+
+    if (parseSpecialAddressInput(trimmedAddress).shouldSkipZoneValidation) {
+      const result: DeliveryValidationResult = {
+        success: true,
+        isValid: true,
+        deliveryAvailable: true,
+        validation_status: 'module_disabled',
+        requires_override: false,
+        house_number_match: true,
+        message: t('modals.addCustomer.specialAddressModeTitle', 'Special address label detected'),
+        address_fingerprint: buildAddressFingerprint(trimmedAddress),
+      };
+      setValidationResult(result);
+      setValidationStatus('idle');
+      setAddressCoordinates(null);
+      setValidationSnapshot(result.address_fingerprint || buildAddressFingerprint(trimmedAddress));
+      return result;
     }
 
     if (!hasDeliveryPro) {
@@ -402,17 +422,19 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
 
     setIsSaving(true);
     try {
+      const isSpecialAddress = parseSpecialAddressInput(customerInfo.address).shouldSkipZoneValidation;
+      const savedCoordinates = isSpecialAddress
+        ? null
+        : addressCoordinates || selectedAddressDetails?.coordinates || null;
       await onSave({
         name: customerInfo.name.trim(),
         phone: customerInfo.phone.trim(),
         address: customerInfo.address.trim(),
         postal_code: customerInfo.postal_code?.trim() || undefined,
         notes: customerInfo.notes?.trim() || undefined,
-        coordinates: addressCoordinates || selectedAddressDetails?.coordinates || null,
-        latitude:
-          addressCoordinates?.lat ?? selectedAddressDetails?.coordinates?.lat ?? null,
-        longitude:
-          addressCoordinates?.lng ?? selectedAddressDetails?.coordinates?.lng ?? null,
+        coordinates: savedCoordinates,
+        latitude: savedCoordinates?.lat ?? null,
+        longitude: savedCoordinates?.lng ?? null,
         addressFingerprint:
           selectedAddressDetails?.addressFingerprint || validationSnapshot || null,
       });
