@@ -165,6 +165,54 @@ function ensureCoreModulesPresent(modules: EnabledModule[]): EnabledModule[] {
 
 const ModuleContext = createContext<ModuleContextType | undefined>(undefined);
 
+/**
+ * Stable-identity comparison for enabled-module lists. Returns true when
+ * `prev` and `next` describe the same set of modules in the same enabled
+ * state, regardless of array reference. Used to short-circuit `setState`
+ * calls in `syncModulesFromAdmin` so that periodic syncs returning identical
+ * data don't trigger spurious re-renders that flicker the navigation
+ * sidebar.
+ */
+function areEnabledModuleListsEquivalent(
+  prev: EnabledModule[],
+  next: EnabledModule[],
+): boolean {
+  if (prev === next) return true;
+  if (prev.length !== next.length) return false;
+  // Compare via a deterministic key per item. The fields that actually drive
+  // navigation rendering are the module id and its enabled flag — anything
+  // else is metadata reconstructed from the same `module_id` lookup, so
+  // matching on (id, enabled) is sufficient.
+  const prevKeys = prev
+    .map((m) => `${m.module.id}:${m.isEnabled === false ? '0' : '1'}`)
+    .sort();
+  const nextKeys = next
+    .map((m) => `${m.module.id}:${m.isEnabled === false ? '0' : '1'}`)
+    .sort();
+  for (let i = 0; i < prevKeys.length; i += 1) {
+    if (prevKeys[i] !== nextKeys[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Stable-identity comparison for raw API module payloads. Skips re-render
+ * when the upstream `module_id` set hasn't shifted.
+ */
+function areApiModuleListsEquivalent(
+  prev: POSModuleInfo[],
+  next: POSModuleInfo[],
+): boolean {
+  if (prev === next) return true;
+  if (prev.length !== next.length) return false;
+  const prevIds = prev.map((m) => m.module_id).sort();
+  const nextIds = next.map((m) => m.module_id).sort();
+  for (let i = 0; i < prevIds.length; i += 1) {
+    if (prevIds[i] !== nextIds[i]) return false;
+  }
+  return true;
+}
+
 // =============================================
 // PROVIDER COMPONENT
 // =============================================
@@ -182,8 +230,29 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   
   // Ref to track sync in progress (doesn't cause re-renders)
   const isSyncingRef = useRef(false);
-  // Ref to store previous apiModules for comparison without causing re-renders
+  // Ref to store previous apiModules for comparison without causing re-renders.
+  // (Used by the "removed modules" detector — compares previous API response
+  // ids against the new ones — and is updated each cycle in
+  // `syncModulesFromAdmin`.)
   const prevApiModulesRef = useRef<POSModuleInfo[]>([]);
+
+  // Refs that mirror the current state variables for `syncModulesFromAdmin`'s
+  // diff-before-setState short-circuit. The sync callback's deps deliberately
+  // omit these arrays (to avoid re-creating the function on every render),
+  // which means a direct closure read would be stale. Mirroring to refs via a
+  // dedicated useEffect keeps the diffs always pointing at the latest value.
+  const enabledModulesStateRef = useRef<EnabledModule[]>(enabledModules);
+  const lockedModulesStateRef = useRef<EnabledModule[]>(lockedModules);
+  const apiModulesStateRef = useRef<POSModuleInfo[]>(apiModules);
+  useEffect(() => {
+    enabledModulesStateRef.current = enabledModules;
+  }, [enabledModules]);
+  useEffect(() => {
+    lockedModulesStateRef.current = lockedModules;
+  }, [lockedModules]);
+  useEffect(() => {
+    apiModulesStateRef.current = apiModules;
+  }, [apiModules]);
 
   const getModuleCacheIdentity = useCallback(() => {
     const creds = getCachedTerminalCredentials();
@@ -383,19 +452,35 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         
         // Update ref for next comparison
         prevApiModulesRef.current = response.modules;
-        
-        // Store raw API modules
-        setApiModules(response.modules);
+
+        // Store raw API modules — but only if the id-set actually changed.
+        // Skipping the setter on identical payloads avoids cascading
+        // re-renders / re-mounts in components that key off this array.
+        // We diff against `apiModulesStateRef.current` (mirrored from
+        // state) rather than `apiModules` directly, since the closure of
+        // this useCallback would otherwise hold a stale value.
+        if (!areApiModuleListsEquivalent(apiModulesStateRef.current, response.modules)) {
+          setApiModules(response.modules);
+        }
 
         // Transform to EnabledModule format with POS filtering
         const transformed = transformApiModules(response.modules);
-        
-        // Update enabled modules with API data
-        // This automatically removes modules not in the latest API response (Requirement 3.4)
-        setEnabledModules(transformed);
-        
-        // Clear locked modules when using API data (API already filters)
-        setLockedModules([]);
+
+        // Update enabled modules with API data only when the (id, enabled)
+        // signature changed. This automatically removes modules not in the
+        // latest API response (Requirement 3.4) without flickering on
+        // no-op refreshes.
+        if (!areEnabledModuleListsEquivalent(enabledModulesStateRef.current, transformed)) {
+          setEnabledModules(transformed);
+        }
+
+        // Clear locked modules when using API data (API already filters).
+        // Only call the setter if the list is actually non-empty — avoids
+        // triggering a re-render with a fresh empty-array reference every
+        // sync cycle.
+        if (lockedModulesStateRef.current.length > 0) {
+          setLockedModules([]);
+        }
 
         // Save to cache for future cache-first loading (Requirement 5.2)
         if (businessType && organizationId) {

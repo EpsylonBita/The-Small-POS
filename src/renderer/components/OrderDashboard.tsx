@@ -3760,7 +3760,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         ? { cancellationReason: trimmedReason }
         : undefined;
       try {
-        // Cancel all pending orders
+        // Cancel all pending orders. The trimmed reason is threaded through
+        // updateOrderStatus -> Rust IPC -> sync payload so it lands on the
+        // server's `cancellation_reason` column and shows up in both the
+        // pos-tauri order detail view and the admin dashboard.
         for (const orderId of pendingCancelOrders) {
           const success = await updateOrderStatus(
             orderId,

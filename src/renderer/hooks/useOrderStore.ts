@@ -50,6 +50,7 @@ interface SyncRetryInfo {
  */
 export interface UpdateOrderStatusOptions {
   cancellationReason?: string;
+  cancelledAt?: string;
 }
 
 interface UpdateOrderStatusDetailedResult {
@@ -848,7 +849,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         status === 'cancelled' && options?.cancellationReason
           ? options.cancellationReason.trim() || undefined
           : undefined;
-      const cancelledAt = status === 'cancelled' ? new Date().toISOString() : undefined;
+      const cancelledAt = status === 'cancelled' ? options?.cancelledAt || new Date().toISOString() : undefined;
 
       try {
         // Validate inputs

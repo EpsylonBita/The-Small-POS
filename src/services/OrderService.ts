@@ -569,6 +569,7 @@ export class OrderService {
       }
       if (cancellationReason) {
         requestBody.cancellation_reason = cancellationReason;
+        requestBody.cancellationReason = cancellationReason;
       }
       if (cancelledAt) {
         requestBody.cancelled_at = cancelledAt;

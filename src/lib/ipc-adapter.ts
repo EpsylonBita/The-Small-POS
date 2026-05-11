@@ -1233,7 +1233,7 @@ export interface PlatformBridge {
     updateStatus(
       orderId: string,
       status: string,
-      extra?: { cancellationReason?: string; cancelledAt?: string },
+      extra?: { cancellationReason?: string; cancelledAt?: string } | string,
     ): Promise<IpcResult>;
     updateItems(orderId: string, items: OrderItem[]): Promise<IpcResult>;
     previewEditSettlement(payload: {
@@ -2617,22 +2617,25 @@ export class TauriBridge implements PlatformBridge {
     updateStatus: (
       id: string,
       s: string,
-      extra?: { cancellationReason?: string; cancelledAt?: string },
-    ) =>
+      extra?: { cancellationReason?: string; cancelledAt?: string } | string,
+    ) => {
+      const payload =
+        typeof extra === 'string' ? { cancellationReason: extra } : extra;
       // The Rust `order_update_status` command accepts either a 2-arg
       // (orderId, status) form or a single-object form. When we have a
       // cancellation reason / timestamp, send the object form so the
       // extra fields make it through.
-      extra && (extra.cancellationReason || extra.cancelledAt)
+      return payload && (payload.cancellationReason || payload.cancelledAt)
         ? this.inv("order:update-status", {
             orderId: id,
             status: s,
-            ...(extra.cancellationReason
-              ? { cancellationReason: extra.cancellationReason }
+            ...(payload.cancellationReason
+              ? { cancellationReason: payload.cancellationReason }
               : {}),
-            ...(extra.cancelledAt ? { cancelledAt: extra.cancelledAt } : {}),
+            ...(payload.cancelledAt ? { cancelledAt: payload.cancelledAt } : {}),
           })
-        : this.inv("order:update-status", id, s),
+        : this.inv("order:update-status", id, s);
+    },
     updateItems: (id: string, items: OrderItem[]) =>
       this.inv("order:update-items", id, items),
     previewEditSettlement: (payload: {

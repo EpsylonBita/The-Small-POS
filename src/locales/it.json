@@ -1359,7 +1359,9 @@
       "refunds": "Rimborsi",
       "discounts": "Sconti",
       "tips": "Mance",
-      "paymentMethods": "Metodi di pagamento"
+      "paymentMethods": "Metodi di pagamento",
+      "transactions": "[NEEDS IT TRANSLATION] συναλλαγές",
+      "orders": "[NEEDS IT TRANSLATION] παραγγελίες"
     },
     "staff": {
       "title": "Prestazioni personale",
@@ -1434,7 +1436,8 @@
     },
     "errors": {
       "loadFailed": "Impossibile caricare i dati del report"
-    }
+    },
+    "deliveryOrders": "[NEEDS IT TRANSLATION] Παραγγελίες Διανομής"
   },
   "expense": {
     "title": "Spese",
@@ -2243,7 +2246,10 @@
       "queueDetailsUnavailable": "Financial sync still has actionable items.",
       "queueDetailsUnavailableHint": "The local summary still reports pending or failed financial sync rows, but their queue details were not returned.",
       "actionableItemsTitle": "Actionable financial queue items",
-      "actionableItemsSubtitle": "Grouped by sync status so pending and blocked rows are visible before they fail."
+      "actionableItemsSubtitle": "Grouped by sync status so pending and blocked rows are visible before they fail.",
+      "operation": "[NEEDS IT TRANSLATION] Λειτουργία",
+      "errorMessage": "[NEEDS IT TRANSLATION] Μήνυμα Σφάλματος",
+      "createdAt": "[NEEDS IT TRANSLATION] Δημιουργήθηκε"
     },
     "health": {
       "label": "Sync health",
@@ -2555,7 +2561,12 @@
       "cardFailed": "Pagamento con carta non riuscito. Riprovare.",
       "loadingMethods": "Caricamento metodi di pagamento",
       "loadingMethodsHint": "Verifica configurazione pagamento del terminale...",
-      "splitSimple": "SPLIT"
+      "splitSimple": "SPLIT",
+      "enterCashReceived": "[NEEDS IT TRANSLATION] Μετρητά που Παραλήφθηκαν",
+      "insufficient": "[NEEDS IT TRANSLATION] Ανεπαρκή",
+      "completeCash": "[NEEDS IT TRANSLATION] Ολοκλήρωση",
+      "cashSimple": "[NEEDS IT TRANSLATION] ΜΕΤΡΗΤΑ",
+      "cardSimple": "[NEEDS IT TRANSLATION] ΚΑΡΤΑ"
     },
     "customerSearch": {
       "title": "Cerca cliente",
@@ -2607,6 +2618,7 @@
       "noRecentOrders": "Nessun ordine precedente trovato",
       "deliveryAddress": "Indirizzo di consegna",
       "savedAddress": "Indirizzo salvato",
+      "cancellationReason": "Motivo dell'annullamento",
       "city": "Città",
       "postalCode": "CAP",
       "deliveryNotes": "Note di consegna",
@@ -2643,7 +2655,10 @@
       "shift": "Turno",
       "transaction": "Transazione",
       "coveredItems": "Articoli coperti",
-      "item": "Articolo"
+      "item": "Articolo",
+      "address": "[NEEDS IT TRANSLATION] Διεύθυνση",
+      "noPhone": "[NEEDS IT TRANSLATION] Χωρίς τηλέφωνο",
+      "paymentMethod": "[NEEDS IT TRANSLATION] Τρόπος Πληρωμής"
     },
     "simplePricing": {
       "title": "Imposta prezzi"
@@ -2908,7 +2923,12 @@
       "pinNotConfigured": "No POS PIN is configured for this staff member. Please set it in Admin first.",
       "posLoginDisabled": "This staff member is not allowed to log in on POS.",
       "staffAuthServerUpgradeRequired": "This POS is connected to an older Admin deployment that does not send staff PIN auth data yet. Deploy the latest Admin and reopen POS.",
-      "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first."
+      "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first.",
+      "cashierCashHelper": "[NEEDS IT TRANSLATION] Εισάγετε το ποσό στο ταμείο",
+      "driverCashHelper": "[NEEDS IT TRANSLATION] Προαιρετικό: Ποσό από το ταμείο. Εισάγετε 0 για παράλειψη.",
+      "startingCashOptional": "[NEEDS IT TRANSLATION] Αρχικά Μετρητά (Προαιρετικό)",
+      "confirmZeroTitle": "[NEEDS IT TRANSLATION] Επιβεβαίωση Μηδενικών Τελικών Μετρητών",
+      "confirmZeroMessage": "[NEEDS IT TRANSLATION] Είστε σίγουροι ότι θέλετε να κλείσετε τη βάρδια με 0,00€ τελικά μετρητά;"
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
@@ -4504,7 +4524,23 @@
     "offlineNote": "Dati in cache visualizzati",
     "noMembers": "Nessun membro fedeltà",
     "noMembersDesc": "I clienti appariranno qui quando si iscriveranno al programma fedeltà.",
-    "unknownCustomer": "Cliente sconosciuto"
+    "unknownCustomer": "Cliente sconosciuto",
+    "title": "[NEEDS IT TRANSLATION] Πρόγραμμα Πιστότητας",
+    "programInactive": "[NEEDS IT TRANSLATION] Πρόγραμμα Πιστότητας Ανενεργό",
+    "programInactiveDesc": "[NEEDS IT TRANSLATION] Το πρόγραμμα πιστότητας είναι απενεργοποιημένο. Ενεργοποιήστε το από τον πίνακα διαχείρισης.",
+    "pointsPerEuro": "[NEEDS IT TRANSLATION] πόντος ανά €1",
+    "perPoint": "[NEEDS IT TRANSLATION] ανά πόντο",
+    "members": "[NEEDS IT TRANSLATION] Μέλη",
+    "totalPoints": "[NEEDS IT TRANSLATION] Συνολικοί Πόντοι",
+    "avgPoints": "[NEEDS IT TRANSLATION] Μέσος Όρος Πόντων",
+    "searchCustomers": "[NEEDS IT TRANSLATION] Αναζήτηση πελατών...",
+    "balance": "[NEEDS IT TRANSLATION] Υπόλοιπο",
+    "earned": "[NEEDS IT TRANSLATION] Κερδισμένοι",
+    "redeemed": "[NEEDS IT TRANSLATION] Εξαργυρωμένοι",
+    "canRedeem": "[NEEDS IT TRANSLATION] Μπορεί να εξαργυρώσει",
+    "errors": {
+      "loadFailed": "[NEEDS IT TRANSLATION] Αποτυχία φόρτωσης δεδομένων πιστότητας"
+    }
   },
   "updates": {
     "title": {
@@ -4981,15 +5017,25 @@
       "actionFailed": "Azione non riuscita. Controlla i dettagli del problema e riprova."
     },
     "actions": {
-      "refresh": { "label": "Aggiorna problemi" },
-      "openConnectionSettings": { "label": "Apri impostazioni di connessione" },
-      "runParitySyncNow": { "label": "Esegui sincronizzazione ora" },
-      "retryParityItem": { "label": "Riprova elemento parity" },
+      "refresh": {
+        "label": "Aggiorna problemi"
+      },
+      "openConnectionSettings": {
+        "label": "Apri impostazioni di connessione"
+      },
+      "runParitySyncNow": {
+        "label": "Esegui sincronizzazione ora"
+      },
+      "retryParityItem": {
+        "label": "Riprova elemento parity"
+      },
       "retryCatalogAvailabilitySync": {
         "label": "Riprova disponibilita catalogo",
         "description": "Riprova il flag di disponibilita bloccato dopo la correzione di compatibilita admin."
       },
-      "retryParityModule": { "label": "Riprova modulo parity" },
+      "retryParityModule": {
+        "label": "Riprova modulo parity"
+      },
       "repairPaymentTotalConflict": {
         "label": "Correggi differenza pagamento/ordine",
         "description": "Aggiorna l'ordine, invia la prova di saldo, collega il pagamento e riprova il rimborso in attesa."
@@ -5004,28 +5050,50 @@
         "confirmTitle": "Correggere i blocchi replay ordine?",
         "confirmMessage": "Questa azione può archiviare vecchi comandi di sincronizzazione per {{orderId}} quando l'ordine padre locale non esiste più. Non elimina ordini, pagamenti o Z-report."
       },
-      "retrySync": { "label": "Riprova riga di sincronizzazione" },
-      "validatePendingOrders": { "label": "Valida ordini in attesa" },
+      "retrySync": {
+        "label": "Riprova riga di sincronizzazione"
+      },
+      "validatePendingOrders": {
+        "label": "Valida ordini in attesa"
+      },
       "removeInvalidOrders": {
         "label": "Rimuovi ordini non validi",
         "confirmTitle": "Rimuovere gli ordini locali non validi?",
         "confirmMessage": "Questa azione rimuove le righe di ordine locali non valide che non possono essere sincronizzate."
       },
-      "retryFinancialItem": { "label": "Riprova elemento finanziario" },
-        "retryAllFailedFinancial": { "label": "Riprova tutti gli elementi finanziari non riusciti" },
-        "repairOrphanedFinancial": { "label": "Ripara righe finanziarie orfane" },
-        "repairWaitingParentPayments": { "label": "Promuovi pagamenti in attesa" },
-        "repairWaitingParentAdjustments": { "label": "Promuovi rettifiche in attesa" },
-        "clearLegacyFinancialOrphan": {
-          "label": "Rimuovi riga finanziaria legacy obsoleta",
-          "confirmTitle": "Rimuovere la riga finanziaria legacy obsoleta?",
-          "confirmMessage": "Questa azione rimuove dal solo terminale corrente la riga di sincronizzazione finanziaria legacy obsoleta per {{entityId}}. Non ricrea il record di pagamento o rettifica mancante.",
-          "confirmCheckbox": "Ho capito che questa azione rimuove solo la riga di sincronizzazione legacy obsoleta da questo terminale."
-        },
-        "requeueFailedFinancialShiftRows": { "label": "Rimetti in coda le righe finanziarie legate al turno" },
-        "requeueFailedAdjustmentMissingEndpointRows": { "label": "Rimetti in coda le rettifiche bloccate dall'endpoint" },
-        "requeueFailedAdjustmentLegacyValidationRows": { "label": "Rimetti in coda le rettifiche di validazione legacy" },
-        "contactOperator": { "label": "Contatta operatore" },
+      "retryFinancialItem": {
+        "label": "Riprova elemento finanziario"
+      },
+      "retryAllFailedFinancial": {
+        "label": "Riprova tutti gli elementi finanziari non riusciti"
+      },
+      "repairOrphanedFinancial": {
+        "label": "Ripara righe finanziarie orfane"
+      },
+      "repairWaitingParentPayments": {
+        "label": "Promuovi pagamenti in attesa"
+      },
+      "repairWaitingParentAdjustments": {
+        "label": "Promuovi rettifiche in attesa"
+      },
+      "clearLegacyFinancialOrphan": {
+        "label": "Rimuovi riga finanziaria legacy obsoleta",
+        "confirmTitle": "Rimuovere la riga finanziaria legacy obsoleta?",
+        "confirmMessage": "Questa azione rimuove dal solo terminale corrente la riga di sincronizzazione finanziaria legacy obsoleta per {{entityId}}. Non ricrea il record di pagamento o rettifica mancante.",
+        "confirmCheckbox": "Ho capito che questa azione rimuove solo la riga di sincronizzazione legacy obsoleta da questo terminale."
+      },
+      "requeueFailedFinancialShiftRows": {
+        "label": "Rimetti in coda le righe finanziarie legate al turno"
+      },
+      "requeueFailedAdjustmentMissingEndpointRows": {
+        "label": "Rimetti in coda le rettifiche bloccate dall'endpoint"
+      },
+      "requeueFailedAdjustmentLegacyValidationRows": {
+        "label": "Rimetti in coda le rettifiche di validazione legacy"
+      },
+      "contactOperator": {
+        "label": "Contatta operatore"
+      },
       "confirmTitle": "Conferma azione di recupero",
       "confirmMessage": "Questa azione modifica i dati locali di recupero per il problema selezionato."
     },
@@ -5127,20 +5195,20 @@
         "summary": "Il pagamento padre è applied, ma manca ancora il suo canonical remote payment id.",
         "guidance": "Esegui la riparazione delle righe finanziarie orfane. Se la rettifica continua a non poter essere collegata al pagamento backend, contatta l'operatore."
       },
-        "financialIntegrity": {
-          "title": "Problema di integrità finanziaria",
-          "summary": "Un record di pagamento o di rettifica richiede una riparazione prima che la sincronizzazione possa completarsi.",
-          "guidance": "Usa l'azione di recupero suggerita se disponibile. Se il problema resta invariato, contatta l'operatore con il reason code esatto."
-        },
-        "legacyFinancialParityOrphan": {
-          "title": "Riga legacy di sincronizzazione finanziaria obsoleta",
-          "summary": "Esiste ancora una riga legacy di sincronizzazione del pagamento, ma manca il record locale corrispondente del pagamento o della rettifica.",
-          "guidance": "Se hai già verificato che questo storico pagamenti è completo, rimuovi la riga legacy obsoleta da questo terminale. Questo elimina solo il blocco; non ricrea il record mancante."
-        },
-        "financialQueueFailed": {
-          "title": "Riga di sincronizzazione finanziaria fallita",
-          "summary": "Una riga di sincronizzazione finanziaria è fallita con {{lastError}}.",
-          "guidance": "Usa l'azione di recupero mappata quando disponibile. Se lo stesso errore ritorna dopo il nuovo tentativo, contatta l'operatore."
+      "financialIntegrity": {
+        "title": "Problema di integrità finanziaria",
+        "summary": "Un record di pagamento o di rettifica richiede una riparazione prima che la sincronizzazione possa completarsi.",
+        "guidance": "Usa l'azione di recupero suggerita se disponibile. Se il problema resta invariato, contatta l'operatore con il reason code esatto."
+      },
+      "legacyFinancialParityOrphan": {
+        "title": "Riga legacy di sincronizzazione finanziaria obsoleta",
+        "summary": "Esiste ancora una riga legacy di sincronizzazione del pagamento, ma manca il record locale corrispondente del pagamento o della rettifica.",
+        "guidance": "Se hai già verificato che questo storico pagamenti è completo, rimuovi la riga legacy obsoleta da questo terminale. Questo elimina solo il blocco; non ricrea il record mancante."
+      },
+      "financialQueueFailed": {
+        "title": "Riga di sincronizzazione finanziaria fallita",
+        "summary": "Una riga di sincronizzazione finanziaria è fallita con {{lastError}}.",
+        "guidance": "Usa l'azione di recupero mappata quando disponibile. Se lo stesso errore ritorna dopo il nuovo tentativo, contatta l'operatore."
       },
       "checkoutPaymentBlocker": {
         "title": "L'ordine blocca la chiusura turno",
@@ -5153,5 +5221,84 @@
         "guidance": "Contatta l'operatore e includi il bundle diagnostico così la prossima occorrenza potrà essere associata a una soluzione guidata."
       }
     }
+  },
+  "features": {
+    "cashDrawer": "[NEEDS IT TRANSLATION] Συρτάρι Ταμείου",
+    "zReportExecution": "[NEEDS IT TRANSLATION] Έκδοση Ζ",
+    "cashPayments": "[NEEDS IT TRANSLATION] Πληρωμές Μετρητών",
+    "cardPayments": "[NEEDS IT TRANSLATION] Πληρωμές Κάρτας",
+    "orderCreation": "[NEEDS IT TRANSLATION] Δημιουργία Παραγγελίας",
+    "orderModification": "[NEEDS IT TRANSLATION] Τροποποίηση Παραγγελίας",
+    "discounts": "[NEEDS IT TRANSLATION] Εκπτώσεις",
+    "refunds": "[NEEDS IT TRANSLATION] Επιστροφές",
+    "expenses": "[NEEDS IT TRANSLATION] Έξοδα",
+    "staffPayments": "[NEEDS IT TRANSLATION] Πληρωμές Προσωπικού",
+    "reports": "[NEEDS IT TRANSLATION] Αναφορές",
+    "settings": "[NEEDS IT TRANSLATION] Ρυθμίσεις"
+  },
+  "terminal": {
+    "type": {
+      "mobile_waiter": "[NEEDS IT TRANSLATION] Mobile POS",
+      "main": "[NEEDS IT TRANSLATION] Κεντρικό Τερματικό"
+    },
+    "labels": {
+      "terminalConfig": "[NEEDS IT TRANSLATION] Ρύθμιση Τερματικού",
+      "terminalType": "[NEEDS IT TRANSLATION] Τύπος Τερματικού",
+      "parentTerminal": "[NEEDS IT TRANSLATION] Γονικό Τερματικό",
+      "enabledFeatures": "[NEEDS IT TRANSLATION] Ενεργές Λειτουργίες",
+      "mobileWaiterMode": "[NEEDS IT TRANSLATION] Λειτουργία Mobile Waiter"
+    },
+    "messages": {
+      "mobileWaiterInfo": "[NEEDS IT TRANSLATION] Ορισμένες λειτουργίες διαχειρίζονται από το κεντρικό τερματικό. Επικοινωνήστε με τον διευθυντή για αλλαγές."
+    }
+  },
+  "deliveryZones": {
+    "title": "[NEEDS IT TRANSLATION] Ζώνες Διανομής",
+    "subtitle": "[NEEDS IT TRANSLATION] Προβολή περιοχών και χρεώσεων διανομής",
+    "activeZones": "[NEEDS IT TRANSLATION] Ενεργές Ζώνες",
+    "avgFee": "[NEEDS IT TRANSLATION] Μέση Χρέωση Διανομής",
+    "avgTime": "[NEEDS IT TRANSLATION] Μέσος Χρόνος Διανομής",
+    "noZones": "[NEEDS IT TRANSLATION] Δεν Υπάρχουν Ζώνες Διανομής",
+    "noZonesDesc": "[NEEDS IT TRANSLATION] Οι ζώνες διανομής ρυθμίζονται από τον πίνακα διαχείρισης.",
+    "minOrder": "[NEEDS IT TRANSLATION] Ελάχ. Παραγγελία",
+    "fee": "[NEEDS IT TRANSLATION] Χρέωση Διανομής",
+    "estimatedTime": "[NEEDS IT TRANSLATION] Εκτ. Χρόνος",
+    "infoTitle": "[NEEDS IT TRANSLATION] Πληροφορίες Ζώνης Διανομής",
+    "infoDesc": "[NEEDS IT TRANSLATION] Οι ζώνες διανομής διαχειρίζονται από τον πίνακα διαχείρισης. Χρησιμοποιήστε αυτή την προβολή για να ελέγξετε τις λεπτομέρειες ζώνης κατά την επεξεργασία παραγγελιών διανομής.",
+    "errors": {
+      "loadFailed": "[NEEDS IT TRANSLATION] Αποτυχία φόρτωσης ζωνών διανομής"
+    }
+  },
+  "analytics": {
+    "title": "[NEEDS IT TRANSLATION] Αναλυτικά",
+    "subtitle": "[NEEDS IT TRANSLATION] Στατιστικά επιχειρηματικής απόδοσης",
+    "totalRevenue": "[NEEDS IT TRANSLATION] Συνολικά Έσοδα",
+    "totalOrders": "[NEEDS IT TRANSLATION] Συνολικές Παραγγελίες",
+    "avgOrder": "[NEEDS IT TRANSLATION] Μέση Αξία Παραγγελίας",
+    "customers": "[NEEDS IT TRANSLATION] Πελάτες",
+    "categoryBreakdown": "[NEEDS IT TRANSLATION] Πωλήσεις ανά Κατηγορία",
+    "hourlyOrders": "[NEEDS IT TRANSLATION] Παραγγελίες ανά Ώρα",
+    "peakHour": "[NEEDS IT TRANSLATION] Ώρα Αιχμής",
+    "topCategory": "[NEEDS IT TRANSLATION] Κορυφαία Κατηγορία",
+    "period": {
+      "today": "[NEEDS IT TRANSLATION] Σήμερα",
+      "week": "[NEEDS IT TRANSLATION] Εβδομάδα",
+      "month": "[NEEDS IT TRANSLATION] Μήνας"
+    },
+    "errors": {
+      "loadFailed": "[NEEDS IT TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
+    }
+  },
+  "guestBilling": {
+    "empty": {
+      "title": "[NEEDS IT TRANSLATION] Δεν υπάρχουν λογαριασμοί επισκεπτών",
+      "description": "[NEEDS IT TRANSLATION] Οι λογαριασμοί επισκεπτών θα εμφανιστούν εδώ όταν δημιουργηθούν."
+    },
+    "stats": {
+      "openFolios": "[NEEDS IT TRANSLATION] Ανοιχτοί Λογαριασμοί"
+    }
+  },
+  "filters": {
+    "all": "[NEEDS IT TRANSLATION] Όλα"
   }
 }

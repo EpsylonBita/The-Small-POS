@@ -22,10 +22,17 @@ struct OrderUpdateStatusPayload {
     status: String,
     #[serde(default, alias = "estimated_time")]
     estimated_time: Option<i64>,
-    /// Optional cancellation reason (only meaningful when transitioning to
-    /// status = 'cancelled'). Persisted to local SQLite and forwarded in
-    /// the sync payload so the admin dashboard can surface it.
-    #[serde(default, alias = "cancellation_reason")]
+    /// Reason text supplied when the operator cancels the order. Persisted on
+    /// the local row and included in the outbound sync payload so the admin
+    /// dashboard can store and display it. Ignored for non-cancellation status
+    /// transitions.
+    #[serde(
+        default,
+        alias = "cancellation_reason",
+        alias = "cancelReason",
+        alias = "cancel_reason",
+        alias = "reason"
+    )]
     cancellation_reason: Option<String>,
 }
 
@@ -1643,10 +1650,10 @@ pub async fn order_update_status(
     let order_id_raw = payload.order_id;
     let status = normalize_status_for_storage(&payload.status);
     let estimated_time = payload.estimated_time;
-    // Only attach a cancellation reason when actually cancelling — keeps
-    // the column tidy on other transitions and avoids accidentally
-    // clearing the reason on a re-update.
-    let cancellation_reason = if status == "cancelled" {
+    // Only honor cancellation_reason when the transition is actually to
+    // cancelled. For other transitions (e.g. complete -> delivered) we never
+    // overwrite the existing reason column.
+    let cancellation_reason: Option<String> = if status == "cancelled" {
         payload
             .cancellation_reason
             .as_deref()
@@ -1693,19 +1700,25 @@ pub async fn order_update_status(
             order_ownership::reverse_order_drawer_attribution(&conn, &actual_order_id, &now)?;
         }
 
-        conn.execute(
-            "UPDATE orders
-             SET status = ?1, sync_status = 'pending', updated_at = ?2
-             WHERE id = ?3",
-            rusqlite::params![status, now, actual_order_id],
-        )
-        .map_err(|e| format!("update order status: {e}"))?;
-        if let Some(reason) = cancellation_reason.as_ref() {
+        if let Some(reason) = cancellation_reason.as_deref() {
             conn.execute(
-                "UPDATE orders SET cancellation_reason = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![reason, now, actual_order_id],
+                "UPDATE orders
+                 SET status = ?1,
+                     cancellation_reason = ?2,
+                     sync_status = 'pending',
+                     updated_at = ?3
+                 WHERE id = ?4",
+                rusqlite::params![status, reason, now, actual_order_id],
             )
-            .map_err(|e| format!("update cancellation_reason: {e}"))?;
+            .map_err(|e| format!("update order status: {e}"))?;
+        } else {
+            conn.execute(
+                "UPDATE orders
+                 SET status = ?1, sync_status = 'pending', updated_at = ?2
+                 WHERE id = ?3",
+                rusqlite::params![status, now, actual_order_id],
+            )
+            .map_err(|e| format!("update order status: {e}"))?;
         }
         if let Some(eta) = estimated_time {
             let _ = conn.execute(
@@ -1718,11 +1731,17 @@ pub async fn order_update_status(
             "status": status,
             "estimatedTime": estimated_time
         });
-        if let Some(reason) = cancellation_reason.as_ref() {
+        if let Some(reason) = cancellation_reason.as_deref() {
+            // Send under both keys so whichever convention the server reads is
+            // satisfied (admin-dashboard inspects both shapes).
             if let Some(obj) = sync_payload.as_object_mut() {
                 obj.insert(
+                    "cancellation_reason".to_string(),
+                    serde_json::Value::String(reason.to_string()),
+                );
+                obj.insert(
                     "cancellationReason".to_string(),
-                    serde_json::Value::String(reason.clone()),
+                    serde_json::Value::String(reason.to_string()),
                 );
                 obj.insert(
                     "cancelled_at".to_string(),

@@ -2613,6 +2613,7 @@
       "address": "Διεύθυνση",
       "deliveryAddress": "Διεύθυνση Παράδοσης",
       "savedAddress": "Αποθηκευμένη Διεύθυνση",
+      "cancellationReason": "Αιτία Ακύρωσης",
       "city": "Πόλη",
       "postalCode": "Τ.Κ.",
       "deliveryNotes": "Σημειώσεις Παράδοσης",

@@ -2322,8 +2322,13 @@ pub async fn check_network_status() -> Value {
     let base = api::normalize_admin_url(&admin_url);
     let health_url = format!("{base}/api/health");
 
+    // Switched HEAD -> GET so this probe matches the path used by
+    // `api::test_connectivity`. Some upstream proxies and Next.js auto-HEAD
+    // shims occasionally hiccup on HEAD even when GET is healthy, which
+    // showed up as a flickering "Disconnected" badge. Timeout bumped from
+    // 5s -> 10s to absorb cold-start / GC pauses without flipping state.
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
         .build()
     {
         Ok(c) => c,
@@ -2331,7 +2336,7 @@ pub async fn check_network_status() -> Value {
     };
 
     match client
-        .head(&health_url)
+        .get(&health_url)
         .header("X-POS-API-Key", api_key.as_str())
         .send()
         .await
@@ -2993,6 +2998,11 @@ pub fn start_sync_loop(
     tauri::async_runtime::spawn(async move {
         info!("Sync loop started (interval: {interval_secs}s)");
         let mut previous_network_online: Option<bool> = None;
+        // Hysteresis: a single failed probe shouldn't flip the UI badge to
+        // offline. Only flip after `OFFLINE_FLIP_THRESHOLD` consecutive
+        // probe failures. Reset on the first successful probe.
+        const OFFLINE_FLIP_THRESHOLD: u32 = 2;
+        let mut consecutive_offline_probes: u32 = 0;
 
         loop {
             if cancel.is_cancelled() || !is_running.load(Ordering::SeqCst) {
@@ -3015,11 +3025,31 @@ pub fn start_sync_loop(
             // Emit network status every cycle so renderer indicators can
             // stay event-driven without command polling.
             let network_status = check_network_status().await;
-            let network_is_online = network_status
+            let raw_probe_online = network_status
                 .get("isOnline")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let _ = app.emit("network_status", &network_status);
+
+            // Apply hysteresis before deciding what to broadcast: a single
+            // failed probe is treated as transient and the UI keeps its last
+            // known online state. Only after OFFLINE_FLIP_THRESHOLD
+            // consecutive offline probes do we declare the network down.
+            if raw_probe_online {
+                consecutive_offline_probes = 0;
+            } else {
+                consecutive_offline_probes = consecutive_offline_probes.saturating_add(1);
+            }
+            let network_is_online = if raw_probe_online {
+                true
+            } else {
+                consecutive_offline_probes < OFFLINE_FLIP_THRESHOLD
+            };
+            let network_status_for_ui = if raw_probe_online == network_is_online {
+                network_status
+            } else {
+                serde_json::json!({ "isOnline": network_is_online })
+            };
+            let _ = app.emit("network_status", &network_status_for_ui);
 
             // If terminal is not configured yet, still emit sync status so
             // UI state remains consistent.

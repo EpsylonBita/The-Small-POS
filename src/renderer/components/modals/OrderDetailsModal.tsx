@@ -307,11 +307,16 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   // Calculate original subtotal before discount (for display purposes)
   const originalSubtotal = discountAmount > 0 ? subtotal + discountAmount : subtotal;
   const status = displayOrder.status || 'pending';
+  // Reason text supplied at cancel time. Stored on either snake_case or
+  // camelCase depending on which sync layer wrote the row, so check both.
+  const cancellationReason = String(
+    displayOrder.cancellation_reason
+    || displayOrder.cancellationReason
+    || '',
+  ).trim();
+  const isCancelledOrder = String(status).toLowerCase() === 'cancelled' || String(status).toLowerCase() === 'canceled';
   const paymentMethod = displayOrder.payment_method || displayOrder.paymentMethod || '';
   const paymentStatus = String(displayOrder.payment_status || displayOrder.paymentStatus || 'pending').toLowerCase();
-  const cancellationReason = String(
-    displayOrder.cancellation_reason || displayOrder.cancellationReason || '',
-  ).trim();
   const cancelledAt =
     displayOrder.cancelled_at || displayOrder.cancelledAt || displayOrder.updated_at || displayOrder.updatedAt || '';
   const completedPayments = useMemo(
@@ -812,6 +817,16 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       <div className={mutedEyebrowClass}>{t('modals.orderDetails.savedAddress', { defaultValue: 'Saved Address' })}</div>
                       <p className="mt-3 whitespace-pre-line text-base leading-7 liquid-glass-modal-text">
                         {primaryAddressLine}
+                      </p>
+                    </div>
+                  ) : null}
+                  {isCancelledOrder && cancellationReason ? (
+                    <div className={`${insetPanelClass} px-4 py-4 border-rose-300/60 bg-rose-50/60 dark:border-rose-500/30 dark:bg-rose-500/10`}>
+                      <div className={`${mutedEyebrowClass} text-rose-700 dark:text-rose-300`}>
+                        {t('modals.orderDetails.cancellationReason', { defaultValue: 'Cancellation Reason' })}
+                      </div>
+                      <p className="mt-3 whitespace-pre-line text-base leading-7 liquid-glass-modal-text">
+                        {cancellationReason}
                       </p>
                     </div>
                   ) : null}

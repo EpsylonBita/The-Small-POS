@@ -707,11 +707,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const canRecordInlineExpenses =
     effectiveShift?.role_type === 'cashier' || effectiveShift?.role_type === 'manager';
   const isDriverRole = effectiveShift?.role_type === 'driver';
-  const isCheckoutAmountMissing = effectiveMode === 'checkout' && (
-    (isCashierCheckoutRole && !hasManualCashInput(closingCash)) ||
-    (effectiveShift?.role_type === 'driver' && !hasManualCashInput(driverActualCash)) ||
-    (effectiveShift?.role_type === 'server' && !hasManualCashInput(closingCash))
-  );
+  // (`isCheckoutAmountMissing` and the zero-expected-return short-circuit live
+  // further below, after `shiftSummary` is initialized — see the matching block
+  // declared right after the `shiftSummary` useState.)
   const prefersReducedMotion = useReducedMotion();
   const [contentDirection, setContentDirection] = useState<MotionDirection>(1);
   const [supportsHoverMotion, setSupportsHoverMotion] = useState(false);
@@ -901,6 +899,50 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   }, [checkInStep, selectedStaff]);
   const [shiftSummary, setShiftSummary] = useState<any | null>(null);
+
+  // Expected cash to return for the active role at checkout. When this is
+  // effectively zero (slow/empty shift), the operator shouldn't have to type
+  // "0,00" to confirm — the Complete button stays enabled and `handleCheckOut`
+  // auto-confirms 0 in the validation block.
+  const expectedReturnAtCheckout = ((): number => {
+    if (effectiveMode !== 'checkout' || !effectiveShift || !shiftSummary) {
+      return 0;
+    }
+    const role = effectiveShift.role_type;
+    const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
+    const expensesTotal = shiftSummary?.totalExpenses || 0;
+    const calculationVersion = effectiveShift.calculation_version || 1;
+
+    if (role === 'driver') {
+      const deliveries = Array.isArray(shiftSummary?.driverDeliveries) ? shiftSummary.driverDeliveries : [];
+      const completed = deliveries.filter((d: any) => {
+        const status = (d?.status || d?.order_status || '').toLowerCase();
+        return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
+      });
+      const collected = completed.reduce((sum: number, d: any) => sum + Number(d?.cash_collected || 0), 0);
+      const driverPayment = parseMoneyInputValue(staffPayment) || 0;
+      return calculationVersion >= 2
+        ? opening + collected - expensesTotal
+        : opening + collected - expensesTotal - driverPayment;
+    }
+    if (role === 'server') {
+      const tables = Array.isArray(shiftSummary?.waiterTables) ? shiftSummary.waiterTables : [];
+      const collected = tables.reduce((sum: number, t: any) => sum + Number(t?.cash_amount || 0), 0);
+      return opening + collected - expensesTotal;
+    }
+    if (role === 'cashier' || role === 'manager') {
+      return getCashierExpectedBreakdown(shiftSummary, effectiveShift, opening, expensesTotal).expected;
+    }
+    return 0;
+  })();
+  const expectedReturnIsZero = Math.abs(expectedReturnAtCheckout) < 0.005;
+
+  const isCheckoutAmountMissing = effectiveMode === 'checkout' && !expectedReturnIsZero && (
+    (isCashierCheckoutRole && !hasManualCashInput(closingCash)) ||
+    (effectiveShift?.role_type === 'driver' && !hasManualCashInput(driverActualCash)) ||
+    (effectiveShift?.role_type === 'server' && !hasManualCashInput(closingCash))
+  );
+
   const canPrintCheckoutSnapshot = React.useMemo(
     () =>
       effectiveMode === 'checkout' &&
@@ -1101,8 +1143,47 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       console.log('[loadStaff] Using branchId:', branchId);
 
+      // Offline-first: optimistic cache read renders the staff list
+      // immediately from local SQLite (sub-100ms), then the network fetch
+      // below refreshes with fresh data. This is the warm-path that makes
+      // the modal feel instant — the network call still runs but doesn't
+      // block the initial render. Cache is populated by
+      // `persistStaffAuthCache` after every successful network fetch, so
+      // any returning user has a hot cache.
+      try {
+        const cachedStaff = await loadCachedStaffAuth(branchId);
+        if (cachedStaff.length > 0) {
+          console.log('[loadStaff] Optimistic render from cache:', cachedStaff.length, 'staff');
+          setAvailableStaff([...cachedStaff]);
+          // Show the modal as ready while the network refresh runs.
+          setLoading(false);
+          // Best-effort: hydrate active shifts from local DB so role badges
+          // are correct on the optimistic render. Failures are non-fatal —
+          // the network refresh below will reconcile.
+          void loadActiveShiftsForStaff(cachedStaff).catch((e) => {
+            console.warn('[StaffShiftModal] Cached active-shift load failed (non-fatal):', e);
+          });
+        }
+      } catch (cacheError) {
+        console.warn('[StaffShiftModal] Cached staff auth load failed (non-fatal):', cacheError);
+      }
+
       const today = new Date();
       const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+      // Kick off the cross-terminal directory refresh in parallel with the
+      // staff schedule fetch. The two calls are independent — directory
+      // returns cross-terminal "busy" state, while schedule returns who is
+      // assigned to today. Awaiting them sequentially used to add ~1s of
+      // unnecessary latency to the modal cold-open. We attach the catch
+      // here so an early-firing rejection doesn't surface as an unhandled
+      // promise rejection while the await chain is still building.
+      const refreshDirectoryPromise: Promise<any> = bridge.staffAuth
+        .refreshDirectory()
+        .catch((directoryErr) => {
+          console.warn('[StaffShiftModal] refreshDirectory failed (non-fatal):', directoryErr);
+          return null;
+        });
 
       const result = await bridge.staffSchedule.list({
         start_date: dateStr,
@@ -1172,42 +1253,45 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       // Create a new array reference to trigger React re-render
       setAvailableStaff([...normalizedStaffList]);
-      try {
-        await loadActiveShiftsForStaff(normalizedStaffList);
-      } catch (e) {
-        console.warn('Active shifts load failed', e);
-      }
 
-      // Fetch cross-terminal busy state so the "Ready to check in" list
-      // can gray out staff who are already on a shift on another terminal.
-      // Non-fatal — if the endpoint is unreachable (offline, old admin
-      // build without the staff-directory route) we just show the list
-      // without busy markers and rely on the server-side unique index to
-      // reject duplicate check-ins.
-      try {
-        const directoryResult = await bridge.staffAuth.refreshDirectory();
-        if (directoryResult?.success && Array.isArray(directoryResult.staff)) {
-          const myTerminalId = (directoryResult.currentTerminalId ?? '').trim();
-          const busy = new Map<string, { terminalName: string; role: string }>();
-          for (const entry of directoryResult.staff) {
-            const cs = entry?.currentShift;
-            if (!cs) continue;
-            const shiftTerminal = (cs.terminalId ?? '').trim();
-            if (!shiftTerminal) continue;
-            // If we don't know our own terminal id, be conservative and
-            // treat every open shift as "elsewhere" — mirrors the Rust
-            // verify path's same-sided safe default.
-            if (myTerminalId && shiftTerminal === myTerminalId) continue;
-            busy.set(entry.id, {
-              terminalName: (cs.terminalName ?? '').trim(),
-              role: (cs.role ?? '').trim(),
-            });
+      // Run loadActiveShiftsForStaff and the (already-in-flight) directory
+      // refresh in parallel. Both are non-blocking for staff-list rendering;
+      // doing them concurrently shaves another ~1s off the cold-open path.
+      // We use Promise.all so a failure in one path doesn't cancel the other
+      // (each has its own try/catch wrapper).
+      await Promise.all([
+        loadActiveShiftsForStaff(normalizedStaffList).catch((e) => {
+          console.warn('Active shifts load failed', e);
+        }),
+        // Fetch cross-terminal busy state so the "Ready to check in" list
+        // can gray out staff who are already on a shift on another terminal.
+        // Non-fatal — if the endpoint is unreachable (offline, old admin
+        // build without the staff-directory route) we just show the list
+        // without busy markers and rely on the server-side unique index to
+        // reject duplicate check-ins. The promise was started above in
+        // parallel with the staff-schedule fetch.
+        refreshDirectoryPromise.then((directoryResult: any) => {
+          if (directoryResult?.success && Array.isArray(directoryResult.staff)) {
+            const myTerminalId = (directoryResult.currentTerminalId ?? '').trim();
+            const busy = new Map<string, { terminalName: string; role: string }>();
+            for (const entry of directoryResult.staff) {
+              const cs = entry?.currentShift;
+              if (!cs) continue;
+              const shiftTerminal = (cs.terminalId ?? '').trim();
+              if (!shiftTerminal) continue;
+              // If we don't know our own terminal id, be conservative and
+              // treat every open shift as "elsewhere" — mirrors the Rust
+              // verify path's same-sided safe default.
+              if (myTerminalId && shiftTerminal === myTerminalId) continue;
+              busy.set(entry.id, {
+                terminalName: (cs.terminalName ?? '').trim(),
+                role: (cs.role ?? '').trim(),
+              });
+            }
+            setBusyElsewhereByStaffId(busy);
           }
-          setBusyElsewhereByStaffId(busy);
-        }
-      } catch (directoryErr) {
-        console.warn('[StaffShiftModal] refreshDirectory failed (non-fatal):', directoryErr);
-      }
+        }),
+      ]);
     } catch (err) {
       console.error('Failed to load staff:', err);
       if (branchId) {
@@ -2157,14 +2241,23 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const totalExpenses = freshSummary?.totalExpenses || 0;
       const expectedReturn = openingCash + totalCashCollected - totalExpenses - driverPayment;
 
+      // When the expected return is zero (slow shift, nothing collected, etc.),
+      // auto-confirm 0 instead of requiring the operator to type "0,00" — the
+      // input is redundant in that case and forces an extra step before close.
+      let actual: number;
       if (!hasManualCashInput(driverActualCash)) {
-        setError(t('modals.staffShift.actualCashReturnedRequired', {
-          defaultValue: 'Enter the actual cash returned before checkout.',
-        }));
-        return;
+        if (Math.abs(expectedReturn) < 0.005) {
+          actual = 0;
+        } else {
+          setError(t('modals.staffShift.actualCashReturnedRequired', {
+            defaultValue: 'Enter the actual cash returned before checkout.',
+          }));
+          return;
+        }
+      } else {
+        actual = parseMoneyInputValue(driverActualCash);
       }
 
-      const actual = parseMoneyInputValue(driverActualCash);
       if (actual < 0) {
         setError(t('modals.staffShift.invalidClosingCash'));
         return;
@@ -2196,14 +2289,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         shiftSummary?.totalExpenses || 0
       ).expected;
 
+      // Skip the manual-entry requirement when the expected till total is zero —
+      // operator doesn't need to type "0,00" to confirm an empty till.
+      let actualAmount: number;
       if (!hasManualCashInput(closingCash)) {
-        setError(t('modals.staffShift.countedCashRequired', {
-          defaultValue: 'Enter the counted cash before checkout.',
-        }));
-        return;
+        if (Math.abs(expectedAmount) < 0.005) {
+          actualAmount = 0;
+        } else {
+          setError(t('modals.staffShift.countedCashRequired', {
+            defaultValue: 'Enter the counted cash before checkout.',
+          }));
+          return;
+        }
+      } else {
+        actualAmount = parseMoneyInputValue(closingCash);
       }
-
-      const actualAmount = parseMoneyInputValue(closingCash);
 
       if (actualAmount < 0) {
         setError(t('modals.staffShift.invalidClosingCash'));
@@ -2239,14 +2339,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Formula: Cash to Return = Starting Amount + Cash Collected - Expenses - Payments
       const expectedReturn = openingCash + cashCollected - totalExpenses - waiterPayment;
 
+      // Auto-confirm 0 when there's nothing to return — operator doesn't need
+      // to type "0,00" to close out an empty/inactive shift.
+      let actual: number;
       if (!hasManualCashInput(closingCash)) {
-        setError(t('modals.staffShift.actualCashReturnedRequired', {
-          defaultValue: 'Enter the actual cash returned before checkout.',
-        }));
-        return;
+        if (Math.abs(expectedReturn) < 0.005) {
+          actual = 0;
+        } else {
+          setError(t('modals.staffShift.actualCashReturnedRequired', {
+            defaultValue: 'Enter the actual cash returned before checkout.',
+          }));
+          return;
+        }
+      } else {
+        actual = parseMoneyInputValue(closingCash);
       }
 
-      const actual = parseMoneyInputValue(closingCash);
       if (actual < 0) {
         setError(t('modals.staffShift.invalidClosingCash'));
         return;
