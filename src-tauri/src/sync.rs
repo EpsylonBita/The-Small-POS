@@ -11647,7 +11647,12 @@ fn build_normalized_order_operation(
         )
     });
     let cancellation_reason = str_any(source, &["cancellationReason", "cancellation_reason"])
-        .or_else(|| str_any(&payload_data, &["cancellationReason", "cancellation_reason"]));
+        .or_else(|| {
+            str_any(
+                &payload_data,
+                &["cancellationReason", "cancellation_reason"],
+            )
+        });
     let is_ghost = bool_any(source, &["is_ghost", "isGhost"])
         .or_else(|| bool_any(&payload_data, &["is_ghost", "isGhost"]))
         .unwrap_or(false);
@@ -11742,7 +11747,9 @@ fn copy_order_update_payload_fields(payload_value: &Value, body: &mut Value) {
         ("deliveryZoneId", "delivery_zone_id"),
         ("cancellationReason", "cancellation_reason"),
     ] {
-        let value = payload_value.get(camel).or_else(|| payload_value.get(snake));
+        let value = payload_value
+            .get(camel)
+            .or_else(|| payload_value.get(snake));
         if let Some(value) = value {
             if !value.is_null() {
                 body.as_object_mut()

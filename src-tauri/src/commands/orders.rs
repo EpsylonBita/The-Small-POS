@@ -3677,7 +3677,10 @@ mod dto_tests {
             None,
         )
         .expect("camelCase cancellation reason payload should parse");
-        assert_eq!(parsed.cancellation_reason.as_deref(), Some("Customer request"));
+        assert_eq!(
+            parsed.cancellation_reason.as_deref(),
+            Some("Customer request")
+        );
 
         let parsed = parse_order_update_status_payload(
             Some(serde_json::json!({

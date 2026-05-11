@@ -10,7 +10,9 @@ export const parseSpecialAddressInput = (input: string): ParsedSpecialAddressInp
   const rawInput = typeof input === 'string' ? input : '';
   const trimmedInput = rawInput.trim();
   const isSpecialLabelInput = trimmedInput.startsWith('#');
-  const normalizedAddress = trimmedInput;
+  const normalizedAddress = isSpecialLabelInput
+    ? trimmedInput.slice(1).trim()
+    : trimmedInput;
 
   return {
     rawInput,
