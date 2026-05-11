@@ -22,6 +22,11 @@ import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 // in case order_save_from_remote echoes back our own order.
 const _recentlyCreatedOrderIds = new Set<string>();
 
+const isCancelledOrderStatus = (status: unknown): boolean => {
+  const normalized = String(status || '').toLowerCase();
+  return normalized === 'cancelled' || normalized === 'canceled';
+};
+
 // Conflict and retry interfaces
 interface OrderConflict {
   id: string;
@@ -750,7 +755,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
       // Apply status filter
       if (state.filter.status !== 'all') {
-        filtered = filtered.filter(order => order.status === state.filter.status);
+        filtered = filtered.filter(order => {
+          if (state.filter.status === 'cancelled' || state.filter.status === 'canceled') {
+            return isCancelledOrderStatus(order.status);
+          }
+
+          return order.status === state.filter.status;
+        });
       }
 
       // Apply order type filter
@@ -792,7 +803,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         preparing: counts.preparing || 0,
         ready: counts.ready || 0,
         completed: counts.completed || 0,
-        cancelled: counts.cancelled || 0,
+        cancelled: (counts.cancelled || 0) + (counts.canceled || 0),
       };
 
       // Cache the result

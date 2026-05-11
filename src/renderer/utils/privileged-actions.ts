@@ -59,6 +59,15 @@ const parseFromText = (
     return null
   }
 
+  if (/^fresh pin confirmation required$/i.test(trimmed)) {
+    return {
+      code: 'REAUTH_REQUIRED',
+      scope: fallbackScope,
+      reason: 'Fresh PIN confirmation required',
+      ttlSeconds: null,
+    }
+  }
+
   try {
     const parsed = JSON.parse(trimmed)
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {

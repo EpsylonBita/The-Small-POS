@@ -8,6 +8,11 @@ import SkeletonLoader from './ui/SkeletonLoader';
 import LoadingSpinner from './ui/LoadingSpinner';
 import type { StoreMapOrigin } from '../utils/delivery-routing';
 
+const isCancelledOrderStatus = (status: unknown): boolean => {
+  const normalized = String(status || '').toLowerCase();
+  return normalized === 'cancelled' || normalized === 'canceled';
+};
+
 interface OrderGridProps {
   orders?: Order[];
   selectedOrders: string[];
@@ -44,7 +49,11 @@ const OrderGrid = memo<OrderGridProps>(({
     // Apply global filters first (status, orderType, searchTerm)
     if (filter.status !== 'all') {
       const statusFilter = filter.status.toLowerCase();
-      filtered = filtered.filter(order => (order.status || '').toLowerCase() === statusFilter);
+      filtered = filtered.filter(order => (
+        statusFilter === 'cancelled' || statusFilter === 'canceled'
+          ? isCancelledOrderStatus(order.status)
+          : (order.status || '').toLowerCase() === statusFilter
+      ));
     }
 
     if (filter.orderType !== 'all') {
@@ -81,7 +90,7 @@ const OrderGrid = memo<OrderGridProps>(({
       });
     } else if (activeTab === 'canceled') {
       // Show cancelled orders
-      filtered = filtered.filter(order => (order.status || '').toLowerCase() === 'cancelled');
+      filtered = filtered.filter(order => isCancelledOrderStatus(order.status));
     }
 
     return filtered;

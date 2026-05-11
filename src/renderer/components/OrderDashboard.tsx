@@ -175,6 +175,11 @@ interface PickupToDeliveryContext {
 
 type StatusTransitionTarget = Extract<Order["status"], "completed" | "delivered">;
 
+const isCancelledOrderStatus = (status: unknown): boolean => {
+  const normalized = String(status || "").toLowerCase();
+  return normalized === "cancelled" || normalized === "canceled";
+};
+
 interface PendingStatusPaymentCollection {
   orderId: string;
   orderNumber?: string;
@@ -944,7 +949,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
       // Apply global filters first
       if (filter.status && filter.status !== "all") {
-        filtered = filtered.filter((order) => order.status === filter.status);
+        filtered = filtered.filter((order) => {
+          if (filter.status === "cancelled" || filter.status === "canceled") {
+            return isCancelledOrderStatus(order.status);
+          }
+
+          return order.status === filter.status;
+        });
       }
 
       if (filter.orderType && filter.orderType !== "all") {
@@ -981,7 +992,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           );
           break;
         case "canceled":
-          filtered = filtered.filter((order) => order.status === "cancelled");
+          filtered = filtered.filter((order) => isCancelledOrderStatus(order.status));
           break;
       }
 
@@ -996,22 +1007,23 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       };
 
       baseOrders.forEach((order) => {
-        switch (order.status) {
-          case "pending":
-          case "confirmed":
-          case "preparing":
-          case "ready":
-            counts.orders++;
-            break;
-          case "delivered":
-          case "completed":
-            counts.delivered++;
-            break;
-          default:
-            break;
-          case "cancelled":
-            counts.canceled++;
-            break;
+        if (
+          order.status === "pending" ||
+          order.status === "confirmed" ||
+          order.status === "preparing" ||
+          order.status === "ready"
+        ) {
+          counts.orders++;
+          return;
+        }
+
+        if (order.status === "delivered" || order.status === "completed") {
+          counts.delivered++;
+          return;
+        }
+
+        if (isCancelledOrderStatus(order.status)) {
+          counts.canceled++;
         }
       });
 
@@ -3581,7 +3593,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         } else if (action === "return") {
           // Reactivate cancelled orders back to active (pending)
           const cancelledOrders = selectedOrderObjects.filter(
-            (order) => order.status === "cancelled",
+            (order) => isCancelledOrderStatus(order.status),
           );
 
           if (cancelledOrders.length === 0) {

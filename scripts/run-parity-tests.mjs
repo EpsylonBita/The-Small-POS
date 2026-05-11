@@ -27,6 +27,7 @@ const entryPoints = [
   // Wave 8 H29 regression: corrupt keyring blob must be rejected by
   // validateSecureSessionUser AND the keyring entry must be cleared.
   path.join(testsRoot, 'renderer', 'secure-session-validation.test.ts'),
+  path.join(testsRoot, 'renderer', 'privileged-actions.test.ts'),
 ];
 
 await fs.mkdir(outDir, { recursive: true });
