@@ -1336,6 +1336,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         requested_staff_shift_id.as_deref(),
         requested_staff_id.as_deref(),
     )?;
+    let (owner_terminal_id, source_terminal_id) = current_order_terminal_scope_for_insert(&conn);
 
     // Wrap order + sync_queue inserts in a transaction to prevent
     // orphaned orders (order exists locally but never syncs).
@@ -1356,7 +1357,8 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             delivery_floor, delivery_notes, name_on_ringer, special_instructions,
             created_at, updated_at, estimated_time, sync_status, payment_status,
             staff_shift_id, staff_id, driver_id, driver_name, discount_percentage,
-            discount_amount, tip_amount, version, terminal_id, branch_id, plugin, tax_rate,
+            discount_amount, tip_amount, version, terminal_id, owner_terminal_id,
+            source_terminal_id, branch_id, plugin, tax_rate,
             delivery_fee, client_request_id, is_ghost, ghost_source, ghost_metadata,
             delivery_address_id, delivery_latitude, delivery_longitude,
             delivery_address_fingerprint, delivery_zone_id
@@ -1367,9 +1369,10 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             ?18, ?19, ?20, ?21,
             ?22, ?23, ?24, 'pending', ?25,
             ?26, ?27, ?28, ?29, ?30,
-            ?31, ?32, 1, ?33, ?34, ?35, ?36,
-            ?37, ?38, ?39, ?40, ?41,
-            ?42, ?43, ?44, ?45, ?46
+            ?31, ?32, 1, ?33, ?34,
+            ?35, ?36, ?37, ?38,
+            ?39, ?40, ?41, ?42, ?43,
+            ?44, ?45, ?46, ?47, ?48
         )",
         params![
             &order_id,
@@ -1405,6 +1408,8 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &discount_amount,
             &tip_amount,
             &terminal_id,
+            &owner_terminal_id,
+            &source_terminal_id,
             &branch_id,
             &plugin,
             &tax_rate,
@@ -1681,6 +1686,8 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             "createdAt": &now,
             "terminalId": &terminal_id,
             "branchId": &branch_id,
+            "ownerTerminalId": &owner_terminal_id,
+            "sourceTerminalId": &source_terminal_id,
         }
     }))
 }
@@ -1689,9 +1696,166 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 // Order queries
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Default)]
+struct OrderTerminalVisibilityScope {
+    is_isolated: bool,
+    terminal_id: Option<String>,
+    owner_terminal_id: Option<String>,
+    owner_terminal_db_id: Option<String>,
+    source_terminal_id: Option<String>,
+}
+
+impl OrderTerminalVisibilityScope {
+    fn has_terminal_identity(&self) -> bool {
+        self.terminal_id.is_some()
+            || self.owner_terminal_id.is_some()
+            || self.owner_terminal_db_id.is_some()
+            || self.source_terminal_id.is_some()
+    }
+}
+
+fn normalize_scope_value(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "default"
+                | "default-terminal"
+                | "default-branch"
+                | "default-organization"
+                | "default-org"
+                | "null"
+                | "undefined"
+        ) {
+            return None;
+        }
+        Some(trimmed)
+    })
+}
+
+fn normalize_scope_str(value: Option<&str>) -> Option<String> {
+    normalize_scope_value(value.map(ToString::to_string))
+}
+
+fn read_terminal_scope_value(conn: &Connection, key: &str) -> Option<String> {
+    normalize_scope_value(db::get_setting(conn, "terminal", key))
+        .or_else(|| normalize_scope_value(storage::get_credential(key)))
+}
+
+fn load_order_terminal_visibility_scope(conn: &Connection) -> OrderTerminalVisibilityScope {
+    let mode = read_terminal_scope_value(conn, "pos_operating_mode")
+        .unwrap_or_else(|| "legacy_branch_shared".to_string())
+        .to_ascii_lowercase();
+
+    let terminal_id = read_terminal_scope_value(conn, "terminal_id");
+    let source_terminal_id =
+        read_terminal_scope_value(conn, "source_terminal_id").or_else(|| terminal_id.clone());
+    let owner_terminal_id = read_terminal_scope_value(conn, "owner_terminal_id")
+        .or_else(|| source_terminal_id.clone())
+        .or_else(|| terminal_id.clone());
+    let owner_terminal_db_id = read_terminal_scope_value(conn, "owner_terminal_db_id")
+        .or_else(|| read_terminal_scope_value(conn, "source_terminal_db_id"));
+
+    OrderTerminalVisibilityScope {
+        is_isolated: mode == "main_isolated",
+        terminal_id,
+        owner_terminal_id,
+        owner_terminal_db_id,
+        source_terminal_id,
+    }
+}
+
+fn scope_value_matches(value: &str, expected: Option<&String>) -> bool {
+    expected
+        .map(|candidate| value.eq_ignore_ascii_case(candidate.trim()))
+        .unwrap_or(false)
+}
+
+fn scope_owner_matches(scope: &OrderTerminalVisibilityScope, owner_terminal_id: &str) -> bool {
+    scope_value_matches(owner_terminal_id, scope.owner_terminal_db_id.as_ref())
+        || scope_value_matches(owner_terminal_id, scope.owner_terminal_id.as_ref())
+}
+
+fn scope_public_terminal_matches(
+    scope: &OrderTerminalVisibilityScope,
+    public_terminal_id: &str,
+) -> bool {
+    scope_value_matches(public_terminal_id, scope.source_terminal_id.as_ref())
+        || scope_value_matches(public_terminal_id, scope.terminal_id.as_ref())
+        || scope_value_matches(public_terminal_id, scope.owner_terminal_id.as_ref())
+}
+
+fn order_terminal_scope_visible(
+    scope: &OrderTerminalVisibilityScope,
+    owner_terminal_id: Option<String>,
+    source_terminal_id: Option<String>,
+    terminal_id: Option<String>,
+) -> bool {
+    if !scope.is_isolated || !scope.has_terminal_identity() {
+        return true;
+    }
+
+    if let Some(owner_terminal_id) = owner_terminal_id {
+        if scope_owner_matches(scope, &owner_terminal_id) {
+            return true;
+        }
+
+        if let Some(source_terminal_id) = source_terminal_id {
+            return scope_public_terminal_matches(scope, &source_terminal_id);
+        }
+
+        if let Some(terminal_id) = terminal_id {
+            return scope_public_terminal_matches(scope, &terminal_id);
+        }
+
+        return false;
+    }
+
+    if let Some(source_terminal_id) = source_terminal_id {
+        return scope_public_terminal_matches(scope, &source_terminal_id);
+    }
+
+    if let Some(terminal_id) = terminal_id {
+        return scope_public_terminal_matches(scope, &terminal_id);
+    }
+
+    false
+}
+
+fn current_order_terminal_scope_for_insert(conn: &Connection) -> (Option<String>, Option<String>) {
+    let scope = load_order_terminal_visibility_scope(conn);
+    let owner_terminal_id = scope
+        .owner_terminal_db_id
+        .clone()
+        .or_else(|| scope.owner_terminal_id.clone());
+    let source_terminal_id = scope
+        .source_terminal_id
+        .clone()
+        .or_else(|| scope.terminal_id.clone());
+    (owner_terminal_id, source_terminal_id)
+}
+
+pub(crate) fn remote_order_visible_to_current_terminal(
+    conn: &Connection,
+    remote_order: &Value,
+) -> Result<bool, String> {
+    let scope = load_order_terminal_visibility_scope(conn);
+    Ok(order_terminal_scope_visible(
+        &scope,
+        str_any(remote_order, &["owner_terminal_id", "ownerTerminalId"]),
+        str_any(remote_order, &["source_terminal_id", "sourceTerminalId"]),
+        str_any(remote_order, &["terminal_id", "terminalId"]),
+    ))
+}
+
 /// Get all orders, most recent first.
 pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let visibility_scope = load_order_terminal_visibility_scope(&conn);
     // W6: `orders.payment_method` was dropped in v55. The SELECT keeps
     // the same column ordering (`paymentMethod` stays at index 25)
     // by substituting a derive subquery that matches
@@ -1723,7 +1887,8 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
                     delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name,
                     delivery_address_id, delivery_latitude, delivery_longitude,
-                    delivery_address_fingerprint, delivery_zone_id
+                    delivery_address_fingerprint, delivery_zone_id,
+                    owner_terminal_id, source_terminal_id
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
              ORDER BY created_at ASC",
@@ -1822,6 +1987,10 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "delivery_address_fingerprint": row.get::<_, Option<String>>(53)?,
                 "deliveryZoneId": row.get::<_, Option<String>>(54)?,
                 "delivery_zone_id": row.get::<_, Option<String>>(54)?,
+                "ownerTerminalId": row.get::<_, Option<String>>(55)?,
+                "owner_terminal_id": row.get::<_, Option<String>>(55)?,
+                "sourceTerminalId": row.get::<_, Option<String>>(56)?,
+                "source_terminal_id": row.get::<_, Option<String>>(56)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -1829,7 +1998,29 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
     let mut orders = Vec::new();
     for row in rows {
         match row {
-            Ok(order) => orders.push(order),
+            Ok(order) => {
+                let visible = order_terminal_scope_visible(
+                    &visibility_scope,
+                    normalize_scope_str(order.get("owner_terminal_id").and_then(Value::as_str)),
+                    normalize_scope_str(order.get("source_terminal_id").and_then(Value::as_str)),
+                    normalize_scope_str(order.get("terminalId").and_then(Value::as_str)),
+                );
+                if visible {
+                    orders.push(order);
+                } else {
+                    debug!(
+                        order_id = order
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or(""),
+                        terminal_id = order
+                            .get("terminalId")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or(""),
+                        "Hiding local order outside current isolated terminal scope"
+                    );
+                }
+            }
             Err(e) => warn!("skipping malformed order row: {e}"),
         }
     }
@@ -5839,6 +6030,14 @@ fn materialize_remote_order(
         _ => return Ok(None),
     };
 
+    if !remote_order_visible_to_current_terminal(conn, remote_order)? {
+        debug!(
+            remote_id = %remote_id,
+            "Skipping remote order outside current isolated terminal scope"
+        );
+        return Ok(None);
+    }
+
     if let Some(existing_local_id) = resolve_local_order_id(conn, remote_order) {
         return Ok(Some(existing_local_id));
     }
@@ -5938,6 +6137,8 @@ fn materialize_remote_order(
         .and_then(Value::as_i64)
         .unwrap_or(1);
     let terminal_id = str_any(remote_order, &["terminal_id", "terminalId"]);
+    let owner_terminal_id = str_any(remote_order, &["owner_terminal_id", "ownerTerminalId"]);
+    let source_terminal_id = str_any(remote_order, &["source_terminal_id", "sourceTerminalId"]);
     let branch_id = str_any(remote_order, &["branch_id", "branchId"]);
     let plugin = str_any(remote_order, &["plugin", "platform"]);
     let external_plugin_order_id = str_any(
@@ -5978,7 +6179,8 @@ fn materialize_remote_order(
             created_at, updated_at, estimated_time, supabase_id, sync_status,
             payment_status, payment_transaction_id, staff_shift_id,
             staff_id, driver_id, driver_name, discount_percentage, discount_amount,
-            tip_amount, version, terminal_id, branch_id, plugin, external_plugin_order_id,
+            tip_amount, version, terminal_id, owner_terminal_id, source_terminal_id,
+            branch_id, plugin, external_plugin_order_id,
             tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
             delivery_address_id, delivery_latitude, delivery_longitude,
             delivery_address_fingerprint, delivery_zone_id
@@ -5991,9 +6193,9 @@ fn materialize_remote_order(
             ?26, ?27, ?28,
             ?29, ?30, ?31, ?32, ?33,
             ?34, ?35, ?36, ?37, ?38,
-            ?39, ?40, ?41, ?42,
-            ?43, ?44, ?45, ?46, ?47,
-            ?48, ?49
+            ?39, ?40, ?41, ?42, ?43,
+            ?44, ?45, ?46, ?47,
+            ?48, ?49, ?50, ?51
         )",
         params![
             local_id,
@@ -6032,6 +6234,8 @@ fn materialize_remote_order(
             tip_amount,
             version,
             terminal_id,
+            owner_terminal_id,
+            source_terminal_id,
             branch_id,
             plugin,
             external_plugin_order_id,
@@ -9376,6 +9580,14 @@ fn sync_remote_order_snapshot_into_local(
     repaired_at: &str,
 ) -> Result<usize, String> {
     let remote_order_id = str_any(remote_order, &["id"]);
+    if !remote_order_visible_to_current_terminal(conn, remote_order)? {
+        debug!(
+            local_order_id = %local_order_id,
+            remote_order_id = remote_order_id.as_deref().unwrap_or(""),
+            "Skipping remote order snapshot outside current isolated terminal scope"
+        );
+        return Ok(0);
+    }
     let order_number = str_any(remote_order, &["order_number", "orderNumber"]);
     let items_json = remote_order.get("items").map(|items| match items {
         Value::String(raw) => raw.clone(),
@@ -9474,6 +9686,8 @@ fn sync_remote_order_snapshot_into_local(
         .and_then(Value::as_i64)
         .map(|value| value.max(1));
     let terminal_id = str_any(remote_order, &["terminal_id", "terminalId"]);
+    let owner_terminal_id = str_any(remote_order, &["owner_terminal_id", "ownerTerminalId"]);
+    let source_terminal_id = str_any(remote_order, &["source_terminal_id", "sourceTerminalId"]);
     let branch_id = str_any(remote_order, &["branch_id", "branchId"]);
     let plugin = str_any(remote_order, &["plugin", "platform"]);
     let external_plugin_order_id = str_any(
@@ -9545,24 +9759,26 @@ fn sync_remote_order_snapshot_into_local(
              tip_amount_cents = COALESCE(CAST(ROUND(?26 * 100) AS INTEGER), tip_amount_cents),
              version = COALESCE(?27, version),
              terminal_id = COALESCE(?28, terminal_id),
-             branch_id = COALESCE(?29, branch_id),
-             plugin = COALESCE(?30, plugin),
-             external_plugin_order_id = COALESCE(?31, external_plugin_order_id),
-             tax_rate = COALESCE(?32, tax_rate),
-             delivery_fee = COALESCE(?33, delivery_fee),
-             delivery_fee_cents = COALESCE(CAST(ROUND(?33 * 100) AS INTEGER), delivery_fee_cents),
-              is_ghost = COALESCE(?34, is_ghost),
-              ghost_source = COALESCE(?35, ghost_source),
-              ghost_metadata = COALESCE(?36, ghost_metadata),
-              delivery_address_id = COALESCE(?37, delivery_address_id),
-              delivery_latitude = COALESCE(?38, delivery_latitude),
-              delivery_longitude = COALESCE(?39, delivery_longitude),
-              delivery_address_fingerprint = COALESCE(?40, delivery_address_fingerprint),
-              delivery_zone_id = COALESCE(?41, delivery_zone_id),
+             owner_terminal_id = COALESCE(?29, owner_terminal_id),
+             source_terminal_id = COALESCE(?30, source_terminal_id),
+             branch_id = COALESCE(?31, branch_id),
+             plugin = COALESCE(?32, plugin),
+             external_plugin_order_id = COALESCE(?33, external_plugin_order_id),
+             tax_rate = COALESCE(?34, tax_rate),
+             delivery_fee = COALESCE(?35, delivery_fee),
+             delivery_fee_cents = COALESCE(CAST(ROUND(?35 * 100) AS INTEGER), delivery_fee_cents),
+              is_ghost = COALESCE(?36, is_ghost),
+              ghost_source = COALESCE(?37, ghost_source),
+              ghost_metadata = COALESCE(?38, ghost_metadata),
+              delivery_address_id = COALESCE(?39, delivery_address_id),
+              delivery_latitude = COALESCE(?40, delivery_latitude),
+              delivery_longitude = COALESCE(?41, delivery_longitude),
+              delivery_address_fingerprint = COALESCE(?42, delivery_address_fingerprint),
+              delivery_zone_id = COALESCE(?43, delivery_zone_id),
               sync_status = 'synced',
               last_synced_at = datetime('now'),
-              updated_at = COALESCE(?42, updated_at, ?43)
-          WHERE id = ?44",
+              updated_at = COALESCE(?44, updated_at, ?45)
+          WHERE id = ?46",
         params![
             remote_order_id,
             order_number,
@@ -9592,6 +9808,8 @@ fn sync_remote_order_snapshot_into_local(
             tip_amount,
             version,
             terminal_id,
+            owner_terminal_id,
+            source_terminal_id,
             branch_id,
             plugin,
             external_plugin_order_id,
@@ -17728,6 +17946,126 @@ mod tests {
             )
             .unwrap();
         assert_eq!(supabase_id, "remote-order-1");
+    }
+
+    #[test]
+    fn get_all_orders_filters_other_main_terminal_rows_when_isolated() {
+        let db = test_db();
+        set_terminal_setting(&db, "pos_operating_mode", "main_isolated");
+        set_terminal_setting(&db, "terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "owner_terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "owner_terminal_db_id", "owner-test-db");
+        set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents,
+                    status, sync_status, terminal_id, created_at, updated_at
+                 ) VALUES (
+                    'prod-old-local', '#PROD', '[]', 18.4, 1840,
+                    'completed', 'synced', 'terminal-d80762ac',
+                    '2026-05-11T10:00:00Z', '2026-05-11T10:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents,
+                    status, sync_status, terminal_id, created_at, updated_at
+                 ) VALUES (
+                    'test-local', '#TEST', '[]', 4.2, 420,
+                    'cancelled', 'synced', 'terminal-efe99d27',
+                    '2026-05-11T10:01:00Z', '2026-05-11T10:01:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents,
+                    status, sync_status, owner_terminal_id, source_terminal_id, terminal_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    'test-owned-remote', '#TEST-REMOTE', '[]', 6.9, 690,
+                    'completed', 'synced', 'owner-test-db', 'terminal-efe99d27', 'terminal-efe99d27',
+                    '2026-05-11T10:02:00Z', '2026-05-11T10:02:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let orders = get_all_orders(&db).expect("get all orders");
+        let ids: Vec<String> = orders
+            .iter()
+            .filter_map(|order| {
+                order
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect();
+
+        assert_eq!(ids, vec!["test-local", "test-owned-remote"]);
+    }
+
+    #[test]
+    fn materialize_remote_order_rejects_other_main_terminal_when_isolated() {
+        let db = test_db();
+        set_terminal_setting(&db, "pos_operating_mode", "main_isolated");
+        set_terminal_setting(&db, "terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "owner_terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "owner_terminal_db_id", "owner-test-db");
+        set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
+
+        let conn = db.conn.lock().unwrap();
+        let prod_remote_order = serde_json::json!({
+            "id": "remote-prod-order",
+            "order_number": "ORD-PROD",
+            "items": [],
+            "total_amount": 18.4,
+            "status": "completed",
+            "owner_terminal_id": "owner-prod-db",
+            "source_terminal_id": "terminal-d80762ac",
+            "terminal_id": "terminal-d80762ac"
+        });
+
+        let skipped = materialize_remote_order(&conn, &prod_remote_order)
+            .expect("materialize should not error");
+        assert!(skipped.is_none());
+
+        let test_remote_order = serde_json::json!({
+            "id": "remote-test-order",
+            "order_number": "ORD-TEST",
+            "items": [],
+            "total_amount": 4.2,
+            "status": "cancelled",
+            "owner_terminal_id": "owner-test-db",
+            "source_terminal_id": "terminal-efe99d27",
+            "terminal_id": "terminal-efe99d27"
+        });
+
+        let local_id = materialize_remote_order(&conn, &test_remote_order)
+            .expect("materialize test order")
+            .expect("local id");
+
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        let (owner_terminal_id, source_terminal_id): (String, String) = conn
+            .query_row(
+                "SELECT owner_terminal_id, source_terminal_id FROM orders WHERE id = ?1",
+                params![local_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(owner_terminal_id, "owner-test-db");
+        assert_eq!(source_terminal_id, "terminal-efe99d27");
     }
 
     #[test]

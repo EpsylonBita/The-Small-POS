@@ -2557,6 +2557,21 @@ pub async fn order_save_from_remote(
     let remote_id = value_str(&order_data, &["id", "supabase_id", "supabaseId"])
         .ok_or("Missing remote order id")?;
 
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if !sync::remote_order_visible_to_current_terminal(&conn, &order_data)? {
+            tracing::debug!(
+                remote_id = %remote_id,
+                "Ignoring remote order outside current isolated terminal scope"
+            );
+            return Ok(serde_json::json!({
+                "success": true,
+                "ignored": true,
+                "reason": "outside_terminal_scope"
+            }));
+        }
+    }
+
     let existing_local_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
@@ -2632,6 +2647,8 @@ pub async fn order_save_from_remote(
         .or_else(|| storage::get_credential("branch_id"));
     let terminal_id = value_str(&order_data, &["terminal_id", "terminalId"])
         .or_else(|| storage::get_credential("terminal_id"));
+    let owner_terminal_id = value_str(&order_data, &["owner_terminal_id", "ownerTerminalId"]);
+    let source_terminal_id = value_str(&order_data, &["source_terminal_id", "sourceTerminalId"]);
     let plugin = value_str(
         &order_data,
         &["plugin", "platform", "order_plugin", "orderPlatform"],
@@ -2711,7 +2728,8 @@ pub async fn order_save_from_remote(
                 staff_id, driver_id, driver_name, discount_percentage,
                 discount_amount, discount_amount_cents,
                 tip_amount, tip_amount_cents,
-                version, terminal_id, branch_id, plugin, external_plugin_order_id,
+                version, terminal_id, owner_terminal_id, source_terminal_id,
+                branch_id, plugin, external_plugin_order_id,
                 tax_rate,
                 delivery_fee, delivery_fee_cents,
                 is_ghost, ghost_source, ghost_metadata
@@ -2729,10 +2747,11 @@ pub async fn order_save_from_remote(
                 ?31, ?32, ?33, ?34,
                 ?35, ?36,
                 ?37, ?38,
-                ?39, ?40, ?41, ?42, ?43,
-                ?44,
-                ?45, ?46,
-                ?47, ?48, ?49
+                1, ?39, ?40, ?41,
+                ?42, ?43, ?44,
+                ?45,
+                ?46, ?47,
+                ?48, ?49, ?50
             )",
             rusqlite::params![
                 local_id,
@@ -2774,6 +2793,8 @@ pub async fn order_save_from_remote(
                 tip_amount,
                 tip_amount_cents,
                 terminal_id,
+                owner_terminal_id,
+                source_terminal_id,
                 branch_id,
                 plugin,
                 external_plugin_order_id,

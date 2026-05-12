@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 60;
+const CURRENT_SCHEMA_VERSION: i32 = 61;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -424,6 +424,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 60 {
         run_migration_tx(conn, 60, migrate_v60)?;
+    }
+    if current < 61 {
+        run_migration_tx(conn, 61, migrate_v61)?;
     }
 
     Ok(())
@@ -4042,6 +4045,42 @@ fn migrate_v60(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v61: local terminal ownership scope for orders.
+///
+/// Remote orders already carry both the owning main terminal DB id and the
+/// public source terminal id. Persisting those locally lets isolated main
+/// terminals hide stale branch-shared rows that were imported before the
+/// server-side terminal-unit filters were restored.
+fn migrate_v61(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "owner_terminal_id")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN owner_terminal_id TEXT", [])
+            .map_err(|e| format!("v61 add orders.owner_terminal_id: {e}"))?;
+    }
+
+    if !column_exists(conn, "orders", "source_terminal_id")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN source_terminal_id TEXT", [])
+            .map_err(|e| format!("v61 add orders.source_terminal_id: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_orders_owner_terminal_id
+          ON orders(owner_terminal_id)
+          WHERE owner_terminal_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_orders_source_terminal_id
+          ON orders(source_terminal_id)
+          WHERE source_terminal_id IS NOT NULL;
+        ",
+    )
+    .map_err(|e| format!("v61 order terminal ownership indexes: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (61)", [])
+        .map_err(|e| format!("v61 record schema_version: {e}"))?;
+
+    info!("Applied migration v61 (local order terminal ownership scope)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -4769,6 +4808,11 @@ mod tests {
         let _delivery_columns_check: Result<Option<String>, _> = conn.query_row(
             "SELECT delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name
              FROM orders LIMIT 0",
+            [],
+            |row| row.get(0),
+        );
+        let _terminal_scope_columns_check: Result<Option<String>, _> = conn.query_row(
+            "SELECT owner_terminal_id, source_terminal_id FROM orders LIMIT 0",
             [],
             |row| row.get(0),
         );
