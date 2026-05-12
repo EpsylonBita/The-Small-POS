@@ -1699,6 +1699,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 #[derive(Debug, Clone, Default)]
 struct OrderTerminalVisibilityScope {
     is_isolated: bool,
+    isolation_reason: &'static str,
     terminal_id: Option<String>,
     owner_terminal_id: Option<String>,
     owner_terminal_db_id: Option<String>,
@@ -1759,9 +1760,30 @@ fn load_order_terminal_visibility_scope(conn: &Connection) -> OrderTerminalVisib
         .or_else(|| terminal_id.clone());
     let owner_terminal_db_id = read_terminal_scope_value(conn, "owner_terminal_db_id")
         .or_else(|| read_terminal_scope_value(conn, "source_terminal_db_id"));
+    let terminal_type = read_terminal_scope_value(conn, "terminal_type")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let has_self_owned_main_scope = matches!(terminal_type.as_str(), "main" | "primary")
+        && terminal_id
+            .as_ref()
+            .zip(owner_terminal_id.as_ref())
+            .is_some_and(|(terminal, owner)| terminal.eq_ignore_ascii_case(owner))
+        && terminal_id
+            .as_ref()
+            .zip(source_terminal_id.as_ref())
+            .is_some_and(|(terminal, source)| terminal.eq_ignore_ascii_case(source))
+        && owner_terminal_db_id.is_some();
+    let (is_isolated, isolation_reason) = if mode == "main_isolated" {
+        (true, "branch_mode")
+    } else if has_self_owned_main_scope {
+        (true, "self_owned_main_terminal")
+    } else {
+        (false, "legacy_branch_shared")
+    };
 
     OrderTerminalVisibilityScope {
-        is_isolated: mode == "main_isolated",
+        is_isolated,
+        isolation_reason,
         terminal_id,
         owner_terminal_id,
         owner_terminal_db_id,
@@ -2017,6 +2039,7 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                             .get("terminalId")
                             .and_then(|value| value.as_str())
                             .unwrap_or(""),
+                        isolation_reason = visibility_scope.isolation_reason,
                         "Hiding local order outside current isolated terminal scope"
                     );
                 }
@@ -18010,6 +18033,60 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec!["test-local", "test-owned-remote"]);
+    }
+
+    #[test]
+    fn get_all_orders_defensively_isolates_self_owned_main_terminal_scope() {
+        let db = test_db();
+        set_terminal_setting(&db, "pos_operating_mode", "legacy_branch_shared");
+        set_terminal_setting(&db, "terminal_type", "main");
+        set_terminal_setting(&db, "terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "owner_terminal_id", "terminal-efe99d27");
+        set_terminal_setting(&db, "owner_terminal_db_id", "owner-test-db");
+        set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents,
+                    status, sync_status, owner_terminal_id, source_terminal_id, terminal_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    'prod-remote', '#PROD', '[]', 18.4, 1840,
+                    'pending', 'synced', 'owner-prod-db', 'terminal-d80762ac', 'terminal-d80762ac',
+                    '2026-05-11T10:00:00Z', '2026-05-11T10:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents,
+                    status, sync_status, owner_terminal_id, source_terminal_id, terminal_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    'test-remote', '#TEST', '[]', 4.2, 420,
+                    'pending', 'synced', 'owner-test-db', 'terminal-efe99d27', 'terminal-efe99d27',
+                    '2026-05-11T10:01:00Z', '2026-05-11T10:01:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let orders = get_all_orders(&db).expect("get all orders");
+        let ids: Vec<String> = orders
+            .iter()
+            .filter_map(|order| {
+                order
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect();
+
+        assert_eq!(ids, vec!["test-remote"]);
     }
 
     #[test]

@@ -165,15 +165,8 @@ mod tests {
 
     #[test]
     fn test_debounce_same_card() {
-        // Set last card to "ABC123" just now
-        {
-            let mut guard = LAST_CARD.lock().unwrap();
-            *guard = Some(("ABC123".to_string(), Instant::now()));
-        }
-
-        // process_card_scan requires AppHandle which we can't create in tests,
-        // so we test the debounce logic directly
-        let guard = LAST_CARD.lock().unwrap();
+        let mut guard = LAST_CARD.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(("ABC123".to_string(), Instant::now()));
         let (ref uid, ref time) = guard.as_ref().unwrap();
         assert_eq!(uid, "ABC123");
         assert!(time.elapsed() < CARD_DEBOUNCE);
@@ -181,30 +174,19 @@ mod tests {
 
     #[test]
     fn test_debounce_different_card() {
-        // Set last card to "ABC123"
-        {
-            let mut guard = LAST_CARD.lock().unwrap();
-            *guard = Some(("ABC123".to_string(), Instant::now()));
-        }
-
-        // A different card UID should not be debounced
-        let guard = LAST_CARD.lock().unwrap();
+        let mut guard = LAST_CARD.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(("ABC123".to_string(), Instant::now()));
         let (ref uid, _) = guard.as_ref().unwrap();
         assert_ne!(uid, "XYZ789"); // Different card — would pass debounce
     }
 
     #[test]
     fn test_debounce_expired() {
-        // Set last card to well in the past
-        {
-            let mut guard = LAST_CARD.lock().unwrap();
-            *guard = Some((
-                "ABC123".to_string(),
-                Instant::now() - Duration::from_secs(10),
-            ));
-        }
-
-        let guard = LAST_CARD.lock().unwrap();
+        let mut guard = LAST_CARD.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some((
+            "ABC123".to_string(),
+            Instant::now() - Duration::from_secs(10),
+        ));
         let (_, ref time) = guard.as_ref().unwrap();
         assert!(time.elapsed() > CARD_DEBOUNCE); // Would pass debounce
     }
