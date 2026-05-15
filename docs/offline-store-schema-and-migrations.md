@@ -7,7 +7,16 @@ Linear: THE-97
 ## Scope
 
 This document describes the current Tauri 2 desktop POS runtime only. It does
-not use the old Electron `pos-system` planning as a source of truth.
+not use the retired Electron-based POS planning as a source of truth.
+
+<!--
+  Phrasing note: this paragraph originally used the legacy Electron-POS
+  identifier in backticks. The repo's identifier policy script
+  (scripts/check-platform-identifier-policy.mjs) forbids that literal
+  token outside an allowlist of compatibility/migration code, so the doc
+  was rephrased on 2026-05-15. The intent ("don't trust the retired
+  Electron POS planning") is unchanged.
+-->
 
 Primary source files:
 
