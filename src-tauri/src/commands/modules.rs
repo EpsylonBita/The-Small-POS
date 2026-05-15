@@ -140,16 +140,64 @@ fn cache_fallback_allowed(fetch_err: &str, identity_match: bool) -> bool {
     true
 }
 
+fn is_terminal_configuration_error(error: &str) -> bool {
+    error
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("terminal not configured")
+}
+
+fn module_terminal_config_failure_payload(error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "success": false,
+        "error": error,
+        "errorCode": "terminal_not_configured",
+        "recoveryAction": "open_connection_settings",
+        "fromCache": false,
+        "modules": serde_json::Value::Null,
+    })
+}
+
+fn module_terminal_auth_failure_payload(error: &str) -> serde_json::Value {
+    let requires_reset = crate::sync::terminal_auth_failure_requires_reset(error);
+    serde_json::json!({
+        "success": false,
+        "error": error,
+        "errorCode": if requires_reset {
+            "invalid_terminal_credentials"
+        } else {
+            "terminal_auth_paused"
+        },
+        "recoveryAction": if requires_reset {
+            "open_connection_settings"
+        } else {
+            "refresh_terminal_settings"
+        },
+        "fromCache": false,
+        "modules": serde_json::Value::Null,
+    })
+}
+
+fn emit_modules_sync_error(app: &tauri::AppHandle, payload: &serde_json::Value) {
+    let _ = app.emit("modules_sync_error", payload.clone());
+}
+
 #[tauri::command]
 pub async fn modules_fetch_from_admin(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
+    sync_state: tauri::State<'_, std::sync::Arc<crate::sync::SyncState>>,
 ) -> Result<serde_json::Value, String> {
     crate::hydrate_terminal_credentials_from_local_settings(&db);
 
-    let terminal_id = storage::get_credential("terminal_id")
+    let Some(terminal_id) = storage::get_credential("terminal_id")
         .or_else(|| crate::read_local_setting(&db, "terminal", "terminal_id"))
-        .ok_or("Terminal not configured: missing terminal_id")?;
+    else {
+        let payload =
+            module_terminal_config_failure_payload("Terminal not configured: missing terminal_id");
+        emit_modules_sync_error(&app, &payload);
+        return Ok(payload);
+    };
     if storage::get_credential("terminal_id").is_none() && !terminal_id.trim().is_empty() {
         let _ = storage::set_credential("terminal_id", &terminal_id);
     }
@@ -231,6 +279,32 @@ pub async fn modules_fetch_from_admin(
                 "identityMatch": true
             }))
         }
+        Err(fetch_err) if is_terminal_configuration_error(&fetch_err) => {
+            let payload = module_terminal_config_failure_payload(&fetch_err);
+            emit_modules_sync_error(&app, &payload);
+            Ok(payload)
+        }
+        Err(fetch_err) if crate::is_terminal_auth_failure(&fetch_err) => {
+            let payload = module_terminal_auth_failure_payload(&fetch_err);
+            if crate::sync::terminal_auth_failure_requires_reset(&fetch_err) {
+                crate::handle_invalid_terminal_credentials(
+                    Some(&db),
+                    &app,
+                    "modules_fetch_from_admin",
+                    &fetch_err,
+                );
+            } else {
+                crate::sync::handle_soft_terminal_auth_failure(
+                    &db,
+                    sync_state.inner().as_ref(),
+                    &app,
+                    "modules_fetch_from_admin",
+                    &fetch_err,
+                );
+            }
+            emit_modules_sync_error(&app, &payload);
+            Ok(payload)
+        }
         Err(fetch_err) => match crate::read_module_cache(&db) {
             Ok(cache) => {
                 let (current_org, current_terminal, current_admin_url) =
@@ -242,20 +316,15 @@ pub async fn modules_fetch_from_admin(
                     &current_admin_url,
                 );
                 if !cache_fallback_allowed(&fetch_err, identity_match) {
-                    let _ = app.emit(
-                        "modules_sync_error",
-                        serde_json::json!({
-                            "error": fetch_err,
-                            "identityMatch": identity_match
-                        }),
-                    );
-                    return Ok(serde_json::json!({
+                    let payload = serde_json::json!({
                         "success": false,
                         "error": fetch_err,
                         "fromCache": false,
                         "identityMatch": identity_match,
                         "modules": serde_json::Value::Null
-                    }));
+                    });
+                    emit_modules_sync_error(&app, &payload);
+                    return Ok(payload);
                 }
 
                 let api_modules = cache
@@ -306,15 +375,13 @@ pub async fn modules_fetch_from_admin(
                 }))
             }
             Err(_) => {
-                let _ = app.emit(
-                    "modules_sync_error",
-                    serde_json::json!({ "error": fetch_err }),
-                );
-                Ok(serde_json::json!({
+                let payload = serde_json::json!({
                     "success": false,
                     "error": fetch_err,
                     "modules": serde_json::Value::Null
-                }))
+                });
+                emit_modules_sync_error(&app, &payload);
+                Ok(payload)
             }
         },
     }
@@ -497,5 +564,29 @@ mod dto_tests {
             parsed.api_timestamp.as_deref(),
             Some("2026-02-22T02:00:00Z")
         );
+    }
+
+    #[test]
+    fn module_terminal_config_failure_payload_points_to_connection_settings() {
+        let payload =
+            module_terminal_config_failure_payload("Terminal not configured: missing API key");
+
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["errorCode"], "terminal_not_configured");
+        assert_eq!(payload["recoveryAction"], "open_connection_settings");
+        assert_eq!(payload["modules"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn module_terminal_auth_failure_payload_points_to_auth_recovery() {
+        let payload = module_terminal_auth_failure_payload(
+            r#"Per-terminal authentication required (HTTP 403): {"success":false,"code":"per_terminal_auth_required","error":"Per-terminal authentication required","authSource":"bearer"}"#,
+        );
+
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["errorCode"], "terminal_auth_paused");
+        assert_eq!(payload["recoveryAction"], "refresh_terminal_settings");
+        assert_eq!(payload["fromCache"], false);
+        assert_eq!(payload["modules"], serde_json::Value::Null);
     }
 }

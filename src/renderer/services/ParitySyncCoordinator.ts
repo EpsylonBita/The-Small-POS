@@ -1,7 +1,11 @@
 import { environment } from '../../config/environment';
 import { emitCompatEvent, getBridge } from '../../lib';
 import { getSyncQueueBridge } from './SyncQueueBridge';
-import type { QueueStatus, SyncResult } from '../../../../shared/pos/sync-queue-types';
+import type {
+  QueueStatus,
+  SyncResult,
+  SyncTelemetrySnapshot,
+} from '../../../../shared/pos/sync-queue-types';
 
 export const PARITY_QUEUE_STATUS_EVENT = 'parity-queue:status';
 export const PARITY_SYNC_STATUS_EVENT = 'parity-sync:status';
@@ -42,6 +46,7 @@ export interface ParitySyncSnapshot {
   legacySyncTriggered: boolean;
   credentialState: ParitySyncCredentialState;
   queueStatus: QueueStatus | null;
+  telemetry: SyncTelemetrySnapshot | null;
 }
 
 export interface ParitySyncCycleResult {
@@ -71,6 +76,7 @@ let lastParitySyncSnapshot: ParitySyncSnapshot = {
     hasApiKey: false,
   },
   queueStatus: null,
+  telemetry: null,
 };
 
 function describeCaughtError(error: unknown, fallback: string): string {
@@ -310,6 +316,7 @@ export async function runParitySyncCycle(options?: {
         legacySyncTriggered: false,
         credentialState,
         queueStatus: lastParitySyncSnapshot.queueStatus,
+        telemetry: null,
       };
       await publishParitySyncSnapshot(initialSnapshot);
 
@@ -381,6 +388,7 @@ export async function runParitySyncCycle(options?: {
         legacySyncTriggered: shouldForceLegacySync,
         credentialState,
         queueStatus,
+        telemetry: paritySyncResult?.telemetry ?? null,
       };
       await publishParitySyncSnapshot(completedSnapshot);
 

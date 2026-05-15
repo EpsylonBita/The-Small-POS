@@ -12,6 +12,8 @@ This folder and top-level markdown files document the current native-only `pos-t
 - `../SUPPORT.md`: diagnostics workflow and incident playbooks.
 - `../PARITY_GATES.md`: active parity gate definitions and execution model.
 - `../PARITY_CHECKLIST.md`: active parity status tracker.
+- `offline-store-schema-and-migrations.md`: current Tauri SQLite schema, queue ownership, API mapping, conflict expectations, and installed-terminal migration risks.
+- `offline-sync-telemetry-qa.md`: manual QA checklist for offline replay telemetry, reconnect behavior, and secret-safe diagnostics evidence.
 - `receipt-printing-2026.md`: receipt template system, queue payload snapshots, width/charset behavior, and print fallbacks.
 
 ## Security/Native Migration Set

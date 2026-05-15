@@ -77,12 +77,14 @@ Rust Event Emitters
 
 - SQLite (`rusqlite`) with migration-managed schema.
 - WAL mode and foreign key enforcement.
-- `sync_queue` is authoritative for deferred remote operations.
+- `parity_sync_queue` is the canonical queue for current deferred remote operations.
+- Legacy `sync_queue` remains as compatibility/drain state for older financial/order guard paths.
+- Offline store schema, queue ownership, and installed-terminal migration risks are documented in `docs/offline-store-schema-and-migrations.md`.
 
 ## Offline-First Sync Semantics
 
 1. User mutation writes to SQLite first.
-2. Sync payload is enqueued into `sync_queue` with idempotency key.
+2. Sync payload is enqueued into `parity_sync_queue` with a stable record identity, module type, conflict strategy, and idempotency context.
 3. UI returns immediately from local state.
 4. Background sync checks network reachability.
 5. If offline, queue remains pending, remote writes are deferred, and status events continue with offline state.

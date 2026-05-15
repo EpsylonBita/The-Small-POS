@@ -22,6 +22,7 @@ use reqwest::Method;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -183,6 +184,10 @@ pub struct SyncResult {
     /// when no monetary items dead-lettered this cycle.
     #[serde(default)]
     pub monetary_dead_letters: Vec<MonetaryDeadLetter>,
+    /// Aggregate-only telemetry for the just-finished replay batch. This is
+    /// safe to persist in diagnostics because it never includes queued payload
+    /// JSON, response bodies, API keys, or customer data.
+    pub telemetry: SyncTelemetrySnapshot,
 }
 
 /// A monetary sync item that crossed the max-retry threshold and was
@@ -217,6 +222,136 @@ pub struct QueueStatus {
     pub failed: i64,
     pub conflicts: i64,
     pub oldest_item_age: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTelemetrySnapshot {
+    pub started_at: String,
+    pub finished_at: String,
+    pub queue_depth_before: i64,
+    pub queue_depth_after: i64,
+    pub replay_attempts: i64,
+    pub deferred: i64,
+    pub processed: i64,
+    pub failed: i64,
+    pub conflicts: i64,
+    pub terminal_auth_failures: i64,
+    pub scope: SyncTelemetryScope,
+    pub queue_status: QueueStatus,
+    pub outcomes: Vec<SyncTelemetryOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTelemetryScope {
+    pub organization_id: Option<String>,
+    pub terminal_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTelemetryOutcome {
+    pub module_type: String,
+    pub status: String,
+    pub error_class: String,
+    pub count: i64,
+}
+
+#[derive(Debug)]
+struct SyncTelemetryBuilder {
+    started_at: String,
+    queue_depth_before: i64,
+    replay_attempts: i64,
+    deferred: i64,
+    terminal_auth_failures: i64,
+    outcomes: BTreeMap<(String, String, String), i64>,
+}
+
+impl SyncTelemetryBuilder {
+    fn new(started_at: String, queue_depth_before: i64) -> Self {
+        Self {
+            started_at,
+            queue_depth_before,
+            replay_attempts: 0,
+            deferred: 0,
+            terminal_auth_failures: 0,
+            outcomes: BTreeMap::new(),
+        }
+    }
+
+    fn record_attempt(&mut self) {
+        self.replay_attempts += 1;
+    }
+
+    fn record_deferred(&mut self, item: &SyncQueueItem, reason: &str) {
+        self.deferred += 1;
+        self.record_outcome(item, "pending", classify_sync_error(Some(reason), None));
+    }
+
+    fn record_error(
+        &mut self,
+        item: &SyncQueueItem,
+        status: &str,
+        error: &str,
+        http_status: Option<u16>,
+    ) {
+        let error_class = classify_sync_error(Some(error), http_status);
+        if error_class == "terminal_auth" {
+            self.terminal_auth_failures += 1;
+        }
+        self.record_outcome(item, status, error_class);
+    }
+
+    fn record_success(&mut self, item: &SyncQueueItem) {
+        self.record_outcome(item, "processed", "none");
+    }
+
+    fn record_outcome(&mut self, item: &SyncQueueItem, status: &str, error_class: &str) {
+        let key = (
+            item.module_type.clone(),
+            status.to_string(),
+            error_class.to_string(),
+        );
+        *self.outcomes.entry(key).or_insert(0) += 1;
+    }
+
+    fn finish(
+        self,
+        conn: &Connection,
+        processed: i64,
+        failed: i64,
+        conflicts: i64,
+    ) -> Result<SyncTelemetrySnapshot, String> {
+        let queue_status = get_status(conn)?;
+        let queue_depth_after = queue_status.total;
+        Ok(SyncTelemetrySnapshot {
+            started_at: self.started_at,
+            finished_at: Utc::now().to_rfc3339(),
+            queue_depth_before: self.queue_depth_before,
+            queue_depth_after,
+            replay_attempts: self.replay_attempts,
+            deferred: self.deferred,
+            processed,
+            failed,
+            conflicts,
+            terminal_auth_failures: self.terminal_auth_failures,
+            scope: sync_telemetry_scope(conn),
+            queue_status,
+            outcomes: self
+                .outcomes
+                .into_iter()
+                .map(
+                    |((module_type, status, error_class), count)| SyncTelemetryOutcome {
+                        module_type,
+                        status,
+                        error_class,
+                        count,
+                    },
+                )
+                .collect(),
+        })
+    }
 }
 
 /// Query options for listing actionable parity queue items.
@@ -2496,6 +2631,64 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
     })
 }
 
+fn sync_telemetry_scope(conn: &Connection) -> SyncTelemetryScope {
+    SyncTelemetryScope {
+        organization_id: runtime_credential(conn, "organization_id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        terminal_id: runtime_credential(conn, "terminal_id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    }
+}
+
+fn classify_sync_error(error: Option<&str>, http_status: Option<u16>) -> &'static str {
+    let normalized = error.unwrap_or_default().to_ascii_lowercase();
+    if normalized.contains("missing terminal_id")
+        || normalized.contains("terminal_id context")
+        || normalized.contains("missing_terminal_id")
+        || normalized.contains("missing api key")
+        || normalized.contains("terminal not configured")
+        || normalized.contains("invalid terminal")
+        || normalized.contains("revoked terminal")
+        || normalized.contains("terminal auth")
+    {
+        return "terminal_auth";
+    }
+
+    if http_status == Some(429) || normalized.contains("rate limit") {
+        return "rate_limited";
+    }
+
+    if matches!(http_status, Some(409 | 412))
+        || normalized.contains("version conflict")
+        || normalized.contains("version mismatch")
+        || normalized.contains("stale version")
+        || normalized.contains("conflict detected")
+    {
+        return "conflict";
+    }
+
+    if normalized.contains("network error") {
+        return "network";
+    }
+
+    if normalized.contains("deferred") || normalized.contains("waiting for") {
+        return "deferred";
+    }
+
+    if let Some(status) = http_status {
+        if (400..500).contains(&status) {
+            return "client_error";
+        }
+        if status >= 500 {
+            return "server_error";
+        }
+    }
+
+    "unknown"
+}
+
 pub fn list_actionable_items(
     conn: &Connection,
     query: &QueueListQuery,
@@ -4399,17 +4592,65 @@ fn apply_success(
     Ok(())
 }
 
+fn is_replay_conflict_response(status: u16, response_body: &str, item: &SyncQueueItem) -> bool {
+    if status == 409 {
+        return true;
+    }
+    if status == 429 || !(400..500).contains(&status) {
+        return false;
+    }
+    if matches!(item.table_name.as_str(), "payments" | "payment_adjustments")
+        && is_payment_total_conflict_error(response_body)
+    {
+        return false;
+    }
+
+    let lower = response_body.to_ascii_lowercase();
+    let conflict_language = status == 412
+        || lower.contains("version conflict")
+        || lower.contains("version mismatch")
+        || lower.contains("stale version")
+        || lower.contains("expected_version")
+        || lower.contains("expected version")
+        || lower.contains("optimistic lock")
+        || lower.contains("updated by another terminal")
+        || lower.contains("already changed");
+    if !conflict_language {
+        return false;
+    }
+
+    matches!(
+        item.table_name.as_str(),
+        "orders"
+            | "menu_categories"
+            | "menu_subcategories"
+            | "menu_ingredients"
+            | "menu_combos"
+            | "products"
+            | "rooms"
+            | "branch_settings"
+            | "terminal_settings"
+            | "local_settings"
+    ) || matches!(
+        item.module_type.as_str(),
+        "orders" | "catalog" | "settings" | "operations"
+    )
+}
+
 /// Process all pending items in the queue by sending them to the admin API.
 ///
 /// Items are processed FIFO within priority bands. On success, items are
 /// removed. On transient failure (5xx / network), items are rescheduled
-/// with exponential backoff. On conflict (409), items are marked as
-/// `conflict`. On client error (4xx != 409), items are marked as `failed`.
+/// with exponential backoff. On replay conflicts (409, 412, or explicit
+/// version-conflict responses), items are marked as `conflict`. On other
+/// client errors, items are marked as `failed`.
 pub async fn process_queue(
     conn: &std::sync::Mutex<Connection>,
     api_base_url: &str,
     api_key: &str,
 ) -> Result<SyncResult, String> {
+    let started_at = Utc::now().to_rfc3339();
+    let queue_depth_before: i64;
     // Check for age warnings before processing
     {
         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -4439,6 +4680,8 @@ pub async fn process_queue(
 
         let _ =
             retry_failed_customer_address_not_found_items_limited(&db, remaining_requeue_budget)?;
+
+        queue_depth_before = get_length(&db)?;
     }
 
     let client = reqwest::Client::builder()
@@ -4452,6 +4695,7 @@ pub async fn process_queue(
     // Wave 4 H: collect monetary dead-letters so the caller can emit
     // `sync:dead-letter:monetary` events in the Tauri command layer.
     let mut monetary_dead_letters: Vec<MonetaryDeadLetter> = Vec::new();
+    let mut telemetry = SyncTelemetryBuilder::new(started_at, queue_depth_before);
 
     loop {
         // Dequeue next item under lock, then release lock before HTTP call
@@ -4464,6 +4708,7 @@ pub async fn process_queue(
             Some(i) => i,
             None => break,
         };
+        telemetry.record_attempt();
 
         let request_spec = {
             let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -4475,6 +4720,7 @@ pub async fn process_queue(
             RequestPreparation::Deferred { reason } => {
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                 mark_deferred(&db, &item.id, &reason, item.claim_generation)?;
+                telemetry.record_deferred(&item, &reason);
                 continue;
             }
             RequestPreparation::Failed { reason } => {
@@ -4490,6 +4736,7 @@ pub async fn process_queue(
                 )
                 .map_err(|e| format!("mark parity item permanently failed: {e}"))?;
                 failed += 1;
+                telemetry.record_error(&item, "failed", &reason, None);
                 errors.push(SyncError {
                     item_id: item.id.clone(),
                     table_name: item.table_name.clone(),
@@ -4548,6 +4795,7 @@ pub async fn process_queue(
                         apply_success(&db, &item, response_json.as_ref())?;
                         mark_success(&db, &item.id, item.claim_generation)?;
                         processed += 1;
+                        telemetry.record_success(&item);
                     } else {
                         debug!(
                             item_id = %item.id,
@@ -4555,7 +4803,7 @@ pub async fn process_queue(
                             "Skipping stale parity success ack before local apply"
                         );
                     }
-                } else if status == 409 {
+                } else if is_replay_conflict_response(status, &response_body, &item) {
                     let server_record = fetch_server_record(
                         &client,
                         api_base_url,
@@ -4593,19 +4841,22 @@ pub async fn process_queue(
                     if requires_operator_review {
                         mark_conflict(&db, &item.id, item.claim_generation)?;
                         conflicts += 1;
+                        let error_message = format!(
+                            "Conflict detected (HTTP {status}) requiring review: {}",
+                            resolution
+                        );
+                        telemetry.record_error(&item, "conflict", &error_message, Some(status));
                         errors.push(SyncError {
                             item_id: item.id.clone(),
                             table_name: item.table_name.clone(),
                             record_id: item.record_id.clone(),
-                            error: format!(
-                                "Conflict detected (HTTP 409) requiring review: {}",
-                                resolution
-                            ),
+                            error: error_message,
                             http_status: Some(status),
                         });
                     } else {
                         mark_success(&db, &item.id, item.claim_generation)?;
                         processed += 1;
+                        telemetry.record_outcome(&item, "processed", "conflict_auto_resolved");
                     }
                 } else if status == 429 {
                     let error_message = format!("HTTP {status}: {response_body}");
@@ -4618,6 +4869,7 @@ pub async fn process_queue(
                         item.claim_generation,
                     )?;
                     failed += 1;
+                    telemetry.record_error(&item, "pending", &error_message, Some(status));
                     errors.push(SyncError {
                         item_id: item.id.clone(),
                         table_name: item.table_name.clone(),
@@ -4649,6 +4901,7 @@ pub async fn process_queue(
                         )?
                     {
                         processed += 1;
+                        telemetry.record_outcome(&item, "processed", "payment_total_auto_repaired");
                         continue;
                     }
                     if let Some(dl) =
@@ -4665,6 +4918,7 @@ pub async fn process_queue(
                     )
                     .map_err(|e| format!("mark client error failed: {e}"))?;
                     failed += 1;
+                    telemetry.record_error(&item, "failed", &error_message, Some(status));
                     errors.push(SyncError {
                         item_id: item.id.clone(),
                         table_name: item.table_name.clone(),
@@ -4683,33 +4937,34 @@ pub async fn process_queue(
                     )? {
                         monetary_dead_letters.push(dl);
                     }
+                    let error_message = format!("HTTP {status}: {response_body}");
                     failed += 1;
+                    telemetry.record_error(&item, "failed", &error_message, Some(status));
                     errors.push(SyncError {
                         item_id: item.id.clone(),
                         table_name: item.table_name.clone(),
                         record_id: item.record_id.clone(),
-                        error: format!("HTTP {status}: {response_body}"),
+                        error: error_message,
                         http_status: Some(status),
                     });
                 }
             }
             Err(e) => {
                 // Network error (retriable)
+                let error_message = format!("Network error: {e}");
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                if let Some(dl) = mark_failure(
-                    &db,
-                    &item.id,
-                    &format!("Network error: {e}"),
-                    item.claim_generation,
-                )? {
+                if let Some(dl) =
+                    mark_failure(&db, &item.id, &error_message, item.claim_generation)?
+                {
                     monetary_dead_letters.push(dl);
                 }
                 failed += 1;
+                telemetry.record_error(&item, "failed", &error_message, None);
                 errors.push(SyncError {
                     item_id: item.id.clone(),
                     table_name: item.table_name.clone(),
                     record_id: item.record_id.clone(),
-                    error: format!("Network error: {e}"),
+                    error: error_message,
                     http_status: None,
                 });
             }
@@ -4717,6 +4972,10 @@ pub async fn process_queue(
     }
 
     let success = failed == 0 && conflicts == 0;
+    let telemetry = {
+        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+        telemetry.finish(&db, processed, failed, conflicts)?
+    };
 
     Ok(SyncResult {
         success,
@@ -4725,6 +4984,7 @@ pub async fn process_queue(
         conflicts,
         errors,
         monetary_dead_letters,
+        telemetry,
     })
 }
 
@@ -7327,6 +7587,100 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_reports_reconnect_telemetry_without_payload_or_api_key() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        crate::db::set_setting(&conn, "terminal", "organization_id", "org-telemetry")
+            .expect("seed organization id");
+        enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "orders".to_string(),
+                record_id: "order-telemetry".to_string(),
+                operation: "INSERT".to_string(),
+                data: json!({
+                    "branchId": TEST_BRANCH_ID,
+                    "customerName": "Ada Lovelace",
+                    "customerPhone": "+15555550123",
+                    "orderType": "pickup",
+                    "paymentMethod": "cash",
+                    "totalAmount": 7.5,
+                    "items": [{
+                        "menuItemId": TEST_MENU_ITEM_ID,
+                        "quantity": 1,
+                        "price": 7.5,
+                        "name": "Americano",
+                        "customizations": {}
+                    }]
+                })
+                .to_string(),
+                organization_id: "org-telemetry".to_string(),
+                priority: Some(0),
+                module_type: Some("orders".to_string()),
+                conflict_strategy: Some("server-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue offline order");
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            200,
+            r#"{"data":{"id":"remote-order"}}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "secret-api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.telemetry.queue_depth_before, 1);
+        assert_eq!(result.telemetry.queue_depth_after, 0);
+        assert_eq!(result.telemetry.replay_attempts, 1);
+        assert_eq!(result.telemetry.terminal_auth_failures, 0);
+        assert_eq!(
+            result.telemetry.scope.organization_id.as_deref(),
+            Some("org-telemetry")
+        );
+        assert_eq!(
+            result.telemetry.scope.terminal_id.as_deref(),
+            Some(TEST_TERMINAL_ID)
+        );
+        assert!(
+            result.telemetry.outcomes.iter().any(|outcome| {
+                outcome.module_type == "orders"
+                    && outcome.status == "processed"
+                    && outcome.count == 1
+            }),
+            "processed order outcome should be grouped for diagnostics"
+        );
+
+        let telemetry_json =
+            serde_json::to_string(&result.telemetry).expect("serialize telemetry snapshot");
+        assert!(
+            !telemetry_json.contains("Ada Lovelace"),
+            "telemetry must not serialize queued payload PII"
+        );
+        assert!(
+            !telemetry_json.contains("+15555550123"),
+            "telemetry must not serialize queued payload phone numbers"
+        );
+        assert!(
+            !telemetry_json.contains("secret-api-key"),
+            "telemetry must not serialize POS API keys"
+        );
+
+        let request = requests.recv().await.expect("captured replay request");
+        assert_eq!(request.request_line, "POST /api/pos/orders HTTP/1.1");
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
     async fn fetch_server_record_sends_terminal_id_header() {
         let item = queue_item(
             "customers",
@@ -7389,6 +7743,17 @@ mod tests {
 
         assert_eq!(result.processed, 0);
         assert_eq!(result.failed, 1);
+        assert_eq!(result.telemetry.replay_attempts, 1);
+        assert_eq!(result.telemetry.terminal_auth_failures, 1);
+        assert!(
+            result.telemetry.outcomes.iter().any(|outcome| {
+                outcome.module_type == "customers"
+                    && outcome.status == "failed"
+                    && outcome.error_class == "terminal_auth"
+                    && outcome.count == 1
+            }),
+            "missing terminal identity should be grouped as a terminal-auth failure"
+        );
         assert!(result.errors.iter().any(|error| {
             error
                 .error
@@ -7664,6 +8029,95 @@ mod tests {
             )
             .expect("read second row");
         assert_eq!(second_status, "pending");
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_marks_non_409_version_conflicts_for_operator_review() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-version-conflict",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentMethod": "cash",
+                "totalAmount": 7.5,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 7.5,
+                    "name": "Americano",
+                    "customizations": {}
+                }]
+            }),
+        );
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(
+                412,
+                r#"{"success":false,"error":"Version conflict","server_version":4}"#,
+            ),
+            MockResponse::json(200, r#"{"data":{"id":"remote-order","version":4}}"#),
+        ])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].http_status, Some(412));
+
+        let replay_request = requests.recv().await.expect("captured replay request");
+        assert_eq!(replay_request.request_line, "POST /api/pos/orders HTTP/1.1");
+
+        let fetch_request = requests.recv().await.expect("captured fetch request");
+        assert_eq!(
+            fetch_request.request_line,
+            "GET /api/pos/sync/orders/order-version-conflict HTTP/1.1"
+        );
+
+        let (status, attempts): (String, i64) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read conflicted queue row");
+        assert_eq!(status, "conflict");
+        assert_eq!(attempts, 0);
+
+        let audit_count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM conflict_audit_log
+                 WHERE entity_id = 'order-version-conflict'
+                   AND entity_type = 'orders'
+                   AND server_version = 4",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read conflict audit row");
+        assert_eq!(audit_count, 1);
 
         clear_terminal_identity();
         server.await.expect("mock server task");

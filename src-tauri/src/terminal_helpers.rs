@@ -1010,12 +1010,16 @@ pub(crate) fn is_terminal_auth_failure(error: &str) -> bool {
                 | "terminal_inactive"
                 | "invalid_terminal_api_key"
                 | "terminal_identity_mismatch"
+                | "per_terminal_auth_required"
+                | "missing_terminal_id"
         );
     }
 
     let lower = error.to_lowercase();
     lower.contains("invalid api key for terminal")
         || lower.contains("terminal identity mismatch")
+        || lower.contains("per-terminal authentication required")
+        || lower.contains("missing terminal_id")
         || lower.contains("api key is invalid or expired")
         || lower.contains("terminal not authorized")
         || lower.contains("terminal not found or inactive")
@@ -1490,6 +1494,19 @@ mod tests {
         );
         assert_eq!(terminal_auth_failure_terminal_active(error), Some(false));
         assert!(is_terminal_auth_failure(error));
+    }
+
+    #[test]
+    fn strict_terminal_endpoint_failures_are_actionable_auth_failures() {
+        for error in [
+            r#"Per-terminal authentication required (HTTP 403): {"success":false,"error":"Per-terminal authentication required","code":"per_terminal_auth_required","authSource":"bearer"}"#,
+            r#"Missing terminal_id (HTTP 401): {"success":false,"error":"Missing terminal_id","code":"missing_terminal_id"}"#,
+        ] {
+            assert!(
+                is_terminal_auth_failure(error),
+                "strict endpoint auth failure should be surfaced to the POS auth recovery UI: {error}"
+            );
+        }
     }
 
     #[test]

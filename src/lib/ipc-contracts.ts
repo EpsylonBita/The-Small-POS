@@ -548,6 +548,29 @@ export interface DiagnosticsLastParitySync {
   legacySyncTriggered: boolean;
   credentialState?: DiagnosticsCredentialState;
   queueStatus?: DiagnosticsParityQueueStatus | null;
+  telemetry?: {
+    startedAt: string;
+    finishedAt: string;
+    queueDepthBefore: number;
+    queueDepthAfter: number;
+    replayAttempts: number;
+    deferred: number;
+    processed: number;
+    failed: number;
+    conflicts: number;
+    terminalAuthFailures: number;
+    scope: {
+      organizationId?: string | null;
+      terminalId?: string | null;
+    };
+    queueStatus: DiagnosticsParityQueueStatus;
+    outcomes: Array<{
+      moduleType: string;
+      status: string;
+      errorClass: string;
+      count: number;
+    }>;
+  } | null;
 }
 
 export interface DiagnosticsCheckoutPaymentBlockers {

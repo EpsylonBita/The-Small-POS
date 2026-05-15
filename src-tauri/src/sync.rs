@@ -308,12 +308,16 @@ fn is_terminal_auth_failure(error: &str) -> bool {
                 | "terminal_inactive"
                 | "invalid_terminal_api_key"
                 | "terminal_identity_mismatch"
+                | "per_terminal_auth_required"
+                | "missing_terminal_id"
         );
     }
 
     let lower = error.to_lowercase();
     lower.contains("invalid api key for terminal")
         || lower.contains("terminal identity mismatch")
+        || lower.contains("per-terminal authentication required")
+        || lower.contains("missing terminal_id")
         || lower.contains("api key is invalid or expired")
         || lower.contains("terminal not authorized")
         || lower.contains("terminal not found or inactive")
@@ -736,7 +740,12 @@ pub(crate) fn terminal_auth_failure_requires_reset(error: &str) -> bool {
 fn terminal_auth_failure_should_pause(error: &str) -> bool {
     matches!(
         crate::terminal_auth_failure_code(error).as_deref(),
-        Some("terminal_not_found" | "terminal_identity_mismatch")
+        Some(
+            "terminal_not_found"
+                | "terminal_identity_mismatch"
+                | "per_terminal_auth_required"
+                | "missing_terminal_id"
+        )
     )
 }
 
@@ -11254,6 +11263,18 @@ fn normalize_adjustment_staff_ids(
     (staff_id, staff_shift_id)
 }
 
+fn load_cached_remote_order_id_for_local_order(
+    db: &DbState,
+    local_order_id: &str,
+) -> Result<Option<String>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    load_local_order_remote_lookup(&conn, local_order_id).map(|lookup| {
+        lookup
+            .and_then(|value| value.supabase_id)
+            .and_then(|candidate| normalize_optional_uuid_str(Some(candidate.as_str())))
+    })
+}
+
 fn rewrite_adjustment_queue_payload(
     payload: &str,
     order_id: Option<&str>,
@@ -11308,29 +11329,53 @@ async fn resolve_adjustment_order_reference(
     payload: &Value,
     parent_order_id: Option<&str>,
 ) -> (Option<String>, Option<String>) {
-    let mut order_id_for_sync =
+    let payload_order_id =
         normalize_optional_uuid_str(str_any(payload, &["orderId", "order_id"]).as_deref());
-    let client_order_id = normalize_optional_uuid_str(
+    let mut order_id_for_sync = payload_order_id.clone();
+    let mut client_order_id = normalize_optional_uuid_str(
         str_any(payload, &["clientOrderId", "client_order_id"]).as_deref(),
     )
     .or_else(|| normalize_optional_uuid_str(parent_order_id));
+    let local_order_candidate = client_order_id.clone().or(payload_order_id);
 
-    if let Some(local_order_id) = client_order_id.as_deref() {
-        match resolve_remote_order_for_local_order(db, admin_url, api_key, local_order_id).await {
-            Ok(Some((remote_order_id, _))) => {
-                if let Some(normalized_remote_order_id) =
-                    normalize_optional_uuid_str(Some(remote_order_id.as_str()))
-                {
-                    order_id_for_sync = Some(normalized_remote_order_id);
+    if let Some(local_order_id) = local_order_candidate.as_deref() {
+        match load_cached_remote_order_id_for_local_order(db, local_order_id) {
+            Ok(Some(remote_order_id)) => {
+                order_id_for_sync = Some(remote_order_id);
+                if client_order_id.is_none() {
+                    client_order_id = Some(local_order_id.to_string());
                 }
             }
-            Ok(None) => {}
             Err(error) => {
                 warn!(
                     local_order_id = %local_order_id,
                     error = %error,
-                    "Adjustment order recovery fell back to client_order_id"
+                    "Adjustment order recovery could not read cached remote order id"
                 );
+            }
+            Ok(None) => {
+                match resolve_remote_order_for_local_order(db, admin_url, api_key, local_order_id)
+                    .await
+                {
+                    Ok(Some((remote_order_id, _))) => {
+                        if let Some(normalized_remote_order_id) =
+                            normalize_optional_uuid_str(Some(remote_order_id.as_str()))
+                        {
+                            order_id_for_sync = Some(normalized_remote_order_id);
+                            if client_order_id.is_none() {
+                                client_order_id = Some(local_order_id.to_string());
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(
+                            local_order_id = %local_order_id,
+                            error = %error,
+                            "Adjustment order recovery fell back to client_order_id"
+                        );
+                    }
+                }
             }
         }
     }
@@ -18233,11 +18278,21 @@ mod tests {
         let inactive_error = r#"Terminal inactive (HTTP 401): {"success":false,"code":"terminal_inactive","error":"inactive"}"#;
         let invalid_key_error = r#"Invalid terminal API key (HTTP 401): {"success":false,"code":"invalid_terminal_api_key","error":"invalid"}"#;
         let missing_terminal_error = r#"Terminal not found (HTTP 401): {"success":false,"code":"terminal_not_found","error":"missing"}"#;
+        let strict_endpoint_error = r#"Per-terminal authentication required (HTTP 403): {"success":false,"code":"per_terminal_auth_required","error":"Per-terminal authentication required","authSource":"bearer"}"#;
+        let missing_terminal_id_error = r#"Missing terminal_id (HTTP 401): {"success":false,"code":"missing_terminal_id","error":"Missing terminal_id"}"#;
 
         assert!(terminal_auth_failure_requires_reset(inactive_error));
         assert!(terminal_auth_failure_requires_reset(invalid_key_error));
         assert!(!terminal_auth_failure_requires_reset(
             missing_terminal_error
+        ));
+        assert!(!terminal_auth_failure_requires_reset(strict_endpoint_error));
+        assert!(!terminal_auth_failure_requires_reset(
+            missing_terminal_id_error
+        ));
+        assert!(terminal_auth_failure_should_pause(strict_endpoint_error));
+        assert!(terminal_auth_failure_should_pause(
+            missing_terminal_id_error
         ));
     }
 
@@ -23171,7 +23226,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO(P0.1 follow-up): repair_orphaned_financial_queue_items doesn't rewrite adjustment.order_id from local-id to supabase-id. Payment-adjustment code is in-flux per CLAUDE.md 1.3.6x hotfix wave. Revisit after wave stabilizes."]
     fn test_repair_orphaned_financial_queue_items_rewrites_adjustment_order_reference() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
