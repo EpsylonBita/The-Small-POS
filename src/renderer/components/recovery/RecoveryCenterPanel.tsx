@@ -435,20 +435,17 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     try {
       const request = buildActionRequest(issue, action);
       const executeAction = () => bridge.recovery.executeAction(request);
-      const result =
-        action.safetyLevel === 'safe'
-          ? await executeAction()
-          : await runWithPrivilegedConfirmation({
-              scope: 'cash_drawer_control',
-              action: executeAction,
-              title: t('recovery.confirmations.cashDrawerControl.title', {
-                defaultValue: 'Confirm recovery action',
-              }),
-              subtitle: t('recovery.confirmations.cashDrawerControl.subtitle', {
-                defaultValue:
-                  'Enter the cashier or manager PIN to run this recovery action.',
-              }),
-            });
+      const result = await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: executeAction,
+        title: t('recovery.confirmations.cashDrawerControl.title', {
+          defaultValue: 'Confirm recovery action',
+        }),
+        subtitle: t('recovery.confirmations.cashDrawerControl.subtitle', {
+          defaultValue:
+            'Enter the cashier or manager PIN to run this recovery action.',
+        }),
+      });
 
       toast.success(
         result.message ||

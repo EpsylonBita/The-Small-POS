@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -24,9 +24,11 @@ import { toast } from 'react-hot-toast';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { subscriptionManager, type SubscriptionStatus } from '../services/SubscriptionManager';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
+import { useOrderStore } from '../hooks/useOrderStore';
 
 interface KitchenOrder {
   id: string;
+  sourceOrderId?: string;
   order_number: string;
   order_type: 'dine-in' | 'pickup' | 'takeaway' | 'delivery' | 'drive-through' | 'dine_in';
   status: 'pending' | 'preparing';
@@ -36,7 +38,7 @@ interface KitchenOrder {
   priority: 'normal' | 'rush' | 'vip';
   notes?: string;
   station_id?: string;
-  source: 'ticket' | 'live-draft';
+  source: 'ticket' | 'live-draft' | 'local-order';
   isDraft: boolean;
   draftSessionId?: string;
   sourceTerminalId?: string;
@@ -61,6 +63,122 @@ interface KdsStation {
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
 const KDS_REALTIME_SUBSCRIPTION_KEY = 'kds-tickets-kitchen-display';
 const KDS_FALLBACK_POLL_INTERVAL_MS = 1500;
+const CLOSED_ORDER_STATUSES = new Set([
+  'completed',
+  'delivered',
+  'cancelled',
+  'canceled',
+  'voided',
+  'refunded',
+]);
+const ACTIVE_LOCAL_KDS_ORDER_STATUSES = new Set(['pending', 'confirmed', 'preparing']);
+
+const normalizeKdsString = (value: unknown): string =>
+  typeof value === 'string' ? value.trim() : '';
+
+const readKdsString = (record: Record<string, unknown> | null | undefined, key: string): string =>
+  normalizeKdsString(record?.[key]);
+
+const isGeneratedMobileTerminalId = (value: string): boolean => value.startsWith('mobile-terminal-');
+
+const isClosedKdsTicket = (
+  ticket: Record<string, unknown>,
+  localOrder: Record<string, unknown> | null
+): boolean => {
+  const ticketStatus = readKdsString(ticket, 'status').toLowerCase();
+  const orderStatus =
+    readKdsString(ticket, 'order_status').toLowerCase() ||
+    readKdsString(localOrder, 'status').toLowerCase();
+
+  return (
+    ticketStatus === 'completed' ||
+    ticketStatus === 'cancelled' ||
+    ticket['order_is_closed'] === true ||
+    localOrder?.['is_closed'] === true ||
+    Boolean(orderStatus && CLOSED_ORDER_STATUSES.has(orderStatus))
+  );
+};
+
+const matchesKdsTerminal = (
+  ticket: Record<string, unknown>,
+  terminalId: string | null,
+  localOrder: Record<string, unknown> | null
+): boolean => {
+  if (!terminalId) return false;
+
+  const ticketSourceTerminalId = readKdsString(ticket, 'source_terminal_id');
+  const ticketTerminalId = readKdsString(ticket, 'terminal_id');
+  const ticketOwnerTerminalId = readKdsString(ticket, 'owner_terminal_id');
+
+  if (ticketSourceTerminalId) return ticketSourceTerminalId === terminalId;
+  if (ticketTerminalId) return ticketTerminalId === terminalId;
+  if (ticketOwnerTerminalId === terminalId) return true;
+
+  const localSourceTerminalId =
+    readKdsString(localOrder, 'source_terminal_id') || readKdsString(localOrder, 'sourceTerminalId');
+  const localTerminalId =
+    readKdsString(localOrder, 'terminal_id') || readKdsString(localOrder, 'terminalId');
+  const localOwnerTerminalId =
+    readKdsString(localOrder, 'owner_terminal_id') || readKdsString(localOrder, 'ownerTerminalId');
+
+  if (localSourceTerminalId) return localSourceTerminalId === terminalId;
+  if (localTerminalId) return localTerminalId === terminalId || isGeneratedMobileTerminalId(localTerminalId);
+  return localOwnerTerminalId === terminalId || isGeneratedMobileTerminalId(localOwnerTerminalId);
+};
+
+const getKitchenOrderDedupeKeys = (order: KitchenOrder): string[] =>
+  [order.id, order.sourceOrderId, order.order_number]
+    .map((value) => normalizeKdsString(value))
+    .filter(Boolean);
+
+const isActiveLocalKitchenOrder = (order: Record<string, unknown>): boolean => {
+  const status = readKdsString(order, 'status').toLowerCase();
+  return order['is_ghost'] !== true && !isClosedKdsTicket({}, order) && ACTIVE_LOCAL_KDS_ORDER_STATUSES.has(status);
+};
+
+const mapLocalOrderToKitchenOrder = (order: Record<string, unknown>): KitchenOrder | null => {
+  const id = readKdsString(order, 'id') || readKdsString(order, 'supabase_id');
+  const orderNumber =
+    readKdsString(order, 'order_number') ||
+    readKdsString(order, 'orderNumber') ||
+    readKdsString(order, 'display_order_number') ||
+    readKdsString(order, 'displayOrderNumber') ||
+    id;
+
+  if (!id || !orderNumber) return null;
+
+  const rawItems = Array.isArray(order['items']) ? (order['items'] as Record<string, unknown>[]) : [];
+  const orderStatus = readKdsString(order, 'status').toLowerCase();
+
+  return {
+    id,
+    sourceOrderId: readKdsString(order, 'supabase_id') || id,
+    order_number: orderNumber,
+    order_type: (readKdsString(order, 'order_type') || readKdsString(order, 'orderType') || 'takeaway') as KitchenOrder['order_type'],
+    status: orderStatus === 'preparing' ? 'preparing' : 'pending',
+    created_at: readKdsString(order, 'created_at') || readKdsString(order, 'createdAt') || new Date().toISOString(),
+    notes: readKdsString(order, 'special_instructions') || readKdsString(order, 'notes') || undefined,
+    table_number: readKdsString(order, 'table_number') || readKdsString(order, 'tableNumber') || undefined,
+    priority: 'normal',
+    source: 'local-order',
+    isDraft: false,
+    draftSessionId: undefined,
+    sourceTerminalId: readKdsString(order, 'source_terminal_id') || readKdsString(order, 'sourceTerminalId') || undefined,
+    items: rawItems.map((item, index) => ({
+      id: readKdsString(item, 'id') || `local-item-${index + 1}`,
+      name: readKdsString(item, 'name') || readKdsString(item, 'menu_item_name') || 'Unknown',
+      quantity: Number(item['quantity']) || 1,
+      station: readKdsString(item, 'station') || 'hot',
+      status: orderStatus === 'preparing' ? 'preparing' : 'pending',
+      notes: readKdsString(item, 'notes') || undefined,
+      modifiers: Array.isArray(item['modifiers'])
+        ? (item['modifiers'] as string[])
+        : Array.isArray(item['customizations'])
+          ? (item['customizations'] as string[])
+          : undefined,
+    })),
+  };
+};
 
 const buildStationsSignature = (stations: KdsStation[]): string =>
   stations
@@ -84,11 +202,32 @@ const KitchenDisplayPage: React.FC = () => {
   const {
     branchId,
     organizationId,
+    terminalId,
     isResolving: isIdentityResolving,
     isReady: isIdentityReady,
     missing,
     refresh: refreshIdentity,
   } = useResolvedPosIdentity('branch');
+  const localOrders = useOrderStore((state) => state.orders);
+  const updateOrderStatus = useOrderStore((state) => state.updateOrderStatus);
+  const localOrderLookup = useMemo(() => {
+    const lookup = new Map<string, Record<string, unknown>>();
+    localOrders.forEach((order) => {
+      const record = order as unknown as Record<string, unknown>;
+      [
+        record['id'],
+        record['supabase_id'],
+        record['order_number'],
+        record['orderNumber'],
+        record['display_order_number'],
+        record['displayOrderNumber'],
+      ].forEach((candidate) => {
+        const key = normalizeKdsString(candidate);
+        if (key) lookup.set(key, record);
+      });
+    });
+    return lookup;
+  }, [localOrders]);
   const [loading, setLoading] = useState(true);
   const [orders, setOrders] = useState<KitchenOrder[]>([]);
   const [stations, setStations] = useState<KdsStation[]>([]);
@@ -157,7 +296,7 @@ const KitchenDisplayPage: React.FC = () => {
     try {
       const statusParam = 'pending,preparing';
       const result = await bridge.adminApi.fetchFromAdmin(
-        `/api/pos/kds?status=${statusParam}&include_live_drafts=true`
+        `/api/pos/kds?status=${statusParam}&include_live_drafts=true&scope=terminal`
       );
 
       if (result?.success && result?.data?.success && result?.data?.tickets) {
@@ -176,11 +315,21 @@ const KitchenDisplayPage: React.FC = () => {
 
         const ticketOrders: KitchenOrder[] = result.data.tickets
           .map((ticket: Record<string, unknown>) => {
+            const localOrder =
+              localOrderLookup.get(readKdsString(ticket, 'order_id')) ||
+              localOrderLookup.get(readKdsString(ticket, 'order_number')) ||
+              localOrderLookup.get(readKdsString(ticket, 'ticket_number')) ||
+              null;
+            if (isClosedKdsTicket(ticket, localOrder) || !matchesKdsTerminal(ticket, terminalId, localOrder)) {
+              return null;
+            }
+
             const status = mapApiStatusToUi(ticket['status'] as string);
             if (status === null) return null;
             const ticketItems = Array.isArray(ticket['items']) ? (ticket['items'] as Record<string, unknown>[]) : [];
             return {
               id: ticket['id'] as string,
+              sourceOrderId: readKdsString(ticket, 'order_id') || undefined,
               order_number: ticket['order_number'] as string || ticket['ticket_number'] as string,
               order_type: (ticket['order_type'] as KitchenOrder['order_type']) || 'takeaway',
               status,
@@ -240,7 +389,21 @@ const KitchenDisplayPage: React.FC = () => {
           };
         });
 
-        const kitchenOrders = [...ticketOrders, ...liveDraftOrders];
+        const seenOrderKeys = new Set(ticketOrders.flatMap(getKitchenOrderDedupeKeys));
+        const localKitchenOrders = localOrders
+          .map((order) => order as unknown as Record<string, unknown>)
+          .filter((order) => isActiveLocalKitchenOrder(order))
+          .filter((order) => matchesKdsTerminal({}, terminalId, order))
+          .map(mapLocalOrderToKitchenOrder)
+          .filter((order): order is KitchenOrder => order !== null)
+          .filter((order) => {
+            const keys = getKitchenOrderDedupeKeys(order);
+            if (keys.some((key) => seenOrderKeys.has(key))) return false;
+            keys.forEach((key) => seenOrderKeys.add(key));
+            return true;
+          });
+
+        const kitchenOrders = [...ticketOrders, ...liveDraftOrders, ...localKitchenOrders];
 
         const filteredOrders = stationFilter === 'all'
           ? kitchenOrders
@@ -266,7 +429,7 @@ const KitchenDisplayPage: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [branchId, bridge, stationFilter, t]);
+  }, [branchId, bridge, localOrderLookup, localOrders, stationFilter, t, terminalId]);
 
   useEffect(() => {
     if (isIdentityResolving) {
@@ -413,7 +576,7 @@ const KitchenDisplayPage: React.FC = () => {
   const handleBumpOrder = async (orderId: string) => {
     const order = orders.find(o => o.id === orderId);
     if (!order) return;
-    if (order.isDraft || order.source !== 'ticket') {
+    if (order.isDraft) {
       return;
     }
     // UI uses: pending -> preparing -> ready (clears from KDS)
@@ -426,6 +589,14 @@ const KitchenDisplayPage: React.FC = () => {
       setOrders(prev => prev.filter(o => o.id !== orderId));
     } else {
       setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: newStatus as 'pending' | 'preparing' } : o));
+    }
+
+    if (order.source === 'local-order') {
+      const ok = await updateOrderStatus(order.sourceOrderId || order.id, newStatus);
+      if (!ok) {
+        fetchOrders();
+      }
+      return;
     }
 
     try {

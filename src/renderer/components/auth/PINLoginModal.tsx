@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { useTranslation } from 'react-i18next'
-import { Delete as DeleteIcon } from 'lucide-react'
+import { Delete as DeleteIcon, LockKeyhole, ShieldCheck } from 'lucide-react'
 
 interface PINLoginModalProps {
   isOpen: boolean
@@ -11,7 +11,13 @@ interface PINLoginModalProps {
   subtitle?: string
 }
 
-export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, onSubmit, title, subtitle }) => {
+export const PINLoginModal: React.FC<PINLoginModalProps> = ({
+  isOpen,
+  onClose,
+  onSubmit,
+  title,
+  subtitle,
+}) => {
   const [pin, setPin] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -19,27 +25,33 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
   const titleToShow = title ?? t('auth.login.title')
   const subtitleToShow = subtitle ?? t('auth.login.subtitle')
   const maskChar = '\u2022'
-  const emptyPin = '-'.repeat(6)
+  const pinSlots = Array.from({ length: 6 }, (_, index) => index)
 
   const handleNumber = (n: string) => {
-    if (pin.length < 6) {
+    if (pin.length < 6 && !loading) {
       setPin(prev => prev + n)
       setError('')
     }
   }
+
   const handleBack = () => {
+    if (loading) return
     setPin(prev => prev.slice(0, -1))
     setError('')
   }
+
   const handleClear = () => {
+    if (loading) return
     setPin('')
     setError('')
   }
+
   const handleSubmit = async () => {
-    if (!pin) {
-      setError(t('auth.login.enterPin'))
+    if (!pin || loading) {
+      if (!pin) setError(t('auth.login.enterPin'))
       return
     }
+
     setLoading(true)
     try {
       const ok = await onSubmit(pin)
@@ -51,10 +63,8 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
     }
   }
 
-  // Handle keyboard input - attach to document when modal is open
   useEffect(() => {
     if (!isOpen) {
-      // Reset state when modal closes
       setPin('')
       setError('')
       setLoading(false)
@@ -62,48 +72,35 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      console.log('PINLoginModal keydown:', e.key, 'isOpen:', isOpen, 'loading:', loading)
-
-      // Don't handle if loading
       if (loading) return
 
-      // Don't intercept if user is typing in an input/textarea field
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-        console.log('Ignoring keydown - user is typing in', target.tagName)
         return
       }
 
-      // Prevent default for all keys we handle
       if (e.key >= '0' && e.key <= '9') {
-        console.log('Number key pressed:', e.key)
         e.preventDefault()
         e.stopPropagation()
         handleNumber(e.key)
       } else if (e.key === 'Backspace') {
-        console.log('Backspace pressed')
         e.preventDefault()
         e.stopPropagation()
         handleBack()
       } else if (e.key === 'Delete') {
-        console.log('Delete pressed')
         e.preventDefault()
         e.stopPropagation()
         handleClear()
       } else if (e.key === 'Enter') {
-        console.log('Enter pressed')
         e.preventDefault()
         e.stopPropagation()
         handleSubmit()
       }
     }
 
-    console.log('Adding keydown listener, isOpen:', isOpen)
-    // Add event listener with capture phase to intercept before modal's handlers
     document.addEventListener('keydown', handleKeyDown, true)
 
     return () => {
-      console.log('Removing keydown listener')
       document.removeEventListener('keydown', handleKeyDown, true)
     }
   }, [isOpen, pin, loading])
@@ -113,38 +110,114 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
       isOpen={isOpen}
       onClose={onClose}
       title={titleToShow}
-      size="md"
-      className="!max-w-lg"
+      size="sm"
+      closeOnBackdrop={false}
+      className="!max-w-[400px] max-h-[calc(100dvh-1.5rem)]"
+      contentClassName="space-y-3"
     >
-          <p className="text-sm text-gray-500 mb-4">{subtitleToShow}</p>
-
-          <div className="bg-gray-100 rounded-xl p-4 text-center mb-3">
-            <div className="text-2xl font-mono tracking-widest">
-              {pin ? maskChar.repeat(pin.length) : emptyPin}
-            </div>
+      <div className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-emerald-950 shadow-sm shadow-emerald-950/5 dark:text-emerald-50">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white">
+            <ShieldCheck size={16} aria-hidden="true" />
           </div>
-          {error && <p className="text-red-600 text-sm mb-3 text-center">{error}</p>}
-
-          <div className="grid grid-cols-3 gap-3 mb-4">
-            {[...'123456789'].map(n => (
-              <button key={n} onClick={() => handleNumber(n)} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold text-gray-900">
-                {n}
-              </button>
-            ))}
-            <button onClick={handleClear} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold text-gray-900">
-              {t('common.clear')}
-            </button>
-            <button onClick={() => handleNumber('0')} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold text-gray-900">
-              0
-            </button>
-            <button onClick={handleBack} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold text-gray-900">
-              <DeleteIcon size={18} aria-hidden="true" />
-            </button>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold">
+              {t('auth.login.pinConfirmationRequired', 'PIN confirmation required')}
+            </p>
+            <p className="mt-1 text-sm leading-4 text-slate-700 dark:text-slate-200">
+              {subtitleToShow}
+            </p>
           </div>
+        </div>
+      </div>
 
-          <button onClick={handleSubmit} disabled={!pin || loading} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white rounded-xl py-3 font-semibold">
-            {loading ? t('auth.login.loading') : t('auth.login.submit')}
+      <div
+        aria-label={t('auth.login.pinEntry', 'PIN entry')}
+        className="rounded-lg border border-slate-300 bg-white p-3 text-center shadow-inner dark:border-white/15 dark:bg-slate-950/80"
+      >
+        <div className="mb-2 flex items-center justify-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+          <LockKeyhole size={16} aria-hidden="true" />
+          <span>{t('auth.login.enterPin', 'Enter PIN')}</span>
+        </div>
+        <div className="grid grid-cols-6 gap-1.5">
+          {pinSlots.map(slot => {
+            const filled = slot < pin.length
+
+            return (
+              <div
+                key={slot}
+                className={[
+                  'flex h-9 items-center justify-center rounded-md border text-lg font-semibold',
+                  filled
+                    ? 'border-emerald-500 bg-emerald-500 text-white shadow-sm'
+                    : 'border-slate-300 bg-slate-100 text-slate-400 dark:border-white/15 dark:bg-slate-900 dark:text-slate-500',
+                ].join(' ')}
+              >
+                {filled ? maskChar : ''}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {error && (
+        <div
+          role="alert"
+          className="rounded-lg border border-red-400/50 bg-red-500/10 px-3 py-2 text-center text-sm font-semibold text-red-700 dark:text-red-200"
+        >
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-3 gap-2">
+        {[...'123456789'].map(n => (
+          <button
+            key={n}
+            type="button"
+            onClick={() => handleNumber(n)}
+            disabled={loading}
+            className="min-h-[48px] rounded-lg border border-slate-300 bg-white text-lg font-semibold text-slate-950 shadow-sm transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white dark:hover:bg-slate-800"
+          >
+            {n}
           </button>
+        ))}
+        <button
+          type="button"
+          onClick={handleClear}
+          disabled={loading || !pin}
+          className="min-h-[48px] rounded-lg border border-slate-300 bg-white px-2 text-sm font-semibold text-slate-800 shadow-sm transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+        >
+          {t('common.clear', 'Clear')}
+        </button>
+        <button
+          type="button"
+          onClick={() => handleNumber('0')}
+          disabled={loading}
+          className="min-h-[48px] rounded-lg border border-slate-300 bg-white text-lg font-semibold text-slate-950 shadow-sm transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white dark:hover:bg-slate-800"
+        >
+          0
+        </button>
+        <button
+          type="button"
+          onClick={handleBack}
+          disabled={loading || !pin}
+          aria-label={t('common.actions.backspace', 'Backspace')}
+          className="flex min-h-[48px] items-center justify-center rounded-lg border border-slate-300 bg-white text-slate-800 shadow-sm transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+        >
+          <DeleteIcon size={20} aria-hidden="true" />
+        </button>
+      </div>
+
+      <button
+        type="button"
+        onClick={handleSubmit}
+        disabled={!pin || loading}
+        className="min-h-[48px] w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 dark:disabled:bg-slate-700 dark:disabled:text-slate-300"
+      >
+        {loading
+          ? t('auth.login.loading')
+          : t('common.actions.confirm', { defaultValue: 'Confirm' })}
+      </button>
     </LiquidGlassModal>
   )
 }
