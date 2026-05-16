@@ -836,6 +836,7 @@ const buildOrderUpdateParentWaitIssues = (
           : 'recovery.issues.orderUpdateParentWait.guidance',
         actions: [
           createRepairOrderUpdateReplayBlockersAction(),
+          createRetryParityModuleAction(),
           createRetryParityItemAction(),
           createRunParitySyncAction(),
         ],

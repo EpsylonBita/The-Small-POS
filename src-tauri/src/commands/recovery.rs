@@ -773,14 +773,23 @@ pub async fn recovery_execute_action(
                 .await
                 .map_err(auth::GuardedCommandError::from)?;
 
-            if stats.remaining_order_blockers > 0 || stats.remaining_parent_wait_blockers > 0 {
+            if stats.remaining_parent_order_inserts > 0
+                || stats.remaining_order_blockers > 0
+                || stats.remaining_parent_wait_blockers > 0
+            {
                 return Err(format!(
-                    "Order replay repair retried {} row(s), repaired {} parent link(s), and quarantined {} stale parent-wait row(s), but {} order update row(s) still fail and {} row(s) still wait for a parent remote order. Last order error: {}{}",
+                    "Order replay repair retried {} parent insert row(s), {} update row(s), repaired {} parent link(s), and quarantined {} stale parent-wait row(s), but {} parent insert row(s) still fail, {} order update row(s) still fail, and {} row(s) still wait for a parent remote order. Last parent insert error: {} Last order error: {}{}",
+                    stats.requeued_parent_order_inserts,
                     stats.requeued_orders,
                     stats.repaired_parent_orders,
                     stats.quarantined_stale_parent_wait_orders,
+                    stats.remaining_parent_order_inserts,
                     stats.remaining_order_blockers,
                     stats.remaining_parent_wait_blockers,
+                    stats
+                        .last_parent_order_insert_error
+                        .as_deref()
+                        .unwrap_or("unknown"),
                     stats
                         .last_order_error
                         .as_deref()
@@ -798,11 +807,15 @@ pub async fn recovery_execute_action(
                 "success": true,
                 "requiresRefresh": true,
                 "message": format!(
-                    "Order replay repair attached {} parent remote order link(s), requeued {} parent-wait row(s), quarantined {} stale parent-wait row(s), retried {} order row(s). First pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Second pass processed {}, failed {}, conflicts {}.",
+                    "Order replay repair requeued {} parent insert row(s), attached {} parent remote order link(s), requeued {} parent-wait row(s), quarantined {} stale parent-wait row(s), retried {} order update row(s). Parent pass processed {}, failed {}, conflicts {}. Update pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Payment pass processed {}, failed {}, conflicts {}.",
+                    stats.requeued_parent_order_inserts,
                     stats.repaired_parent_orders,
                     stats.requeued_parent_wait_orders,
                     stats.quarantined_stale_parent_wait_orders,
                     stats.requeued_orders,
+                    stats.parent_insert_pass.as_ref().map(|value| value.processed).unwrap_or(0),
+                    stats.parent_insert_pass.as_ref().map(|value| value.failed).unwrap_or(0),
+                    stats.parent_insert_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
                     stats.first_pass.processed,
                     stats.first_pass.failed,
                     stats.first_pass.conflicts,
@@ -837,9 +850,33 @@ pub async fn recovery_execute_action(
             let admin_url = load_admin_url(&db)?;
             let api_key = load_pos_api_key()?;
             if should_repair_parent_wait {
-                let _ = sync::repair_order_update_parent_wait_blockers(&db, &admin_url, &api_key)
+                let stats = sync::repair_order_update_replay_blockers(&db, &admin_url, &api_key)
                     .await
                     .map_err(auth::GuardedCommandError::from)?;
+                let status = {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    sync_queue::get_status(&conn)
+                }
+                .map_err(auth::GuardedCommandError::from)?;
+                return Ok(json!({
+                    "success": true,
+                    "requiresRefresh": true,
+                    "message": format!(
+                        "Parent-order recovery ran before retrying the child row: requeued {} parent insert row(s), requeued {} parent-wait row(s), processed {}, failed {}, conflicts {}, remaining {}.",
+                        stats.requeued_parent_order_inserts,
+                        stats.requeued_parent_wait_orders,
+                        stats.parent_insert_pass.as_ref().map(|value| value.processed).unwrap_or(0)
+                            + stats.first_pass.processed
+                            + stats.second_pass.as_ref().map(|value| value.processed).unwrap_or(0),
+                        stats.parent_insert_pass.as_ref().map(|value| value.failed).unwrap_or(0)
+                            + stats.first_pass.failed
+                            + stats.second_pass.as_ref().map(|value| value.failed).unwrap_or(0),
+                        stats.parent_insert_pass.as_ref().map(|value| value.conflicts).unwrap_or(0)
+                            + stats.first_pass.conflicts
+                            + stats.second_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
+                        status.total,
+                    ),
+                }));
             }
             {
                 let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
@@ -873,9 +910,35 @@ pub async fn recovery_execute_action(
             let admin_url = load_admin_url(&db)?;
             let api_key = load_pos_api_key()?;
             if module_type.eq_ignore_ascii_case("orders") {
-                let _ = sync::repair_order_update_parent_wait_blockers(&db, &admin_url, &api_key)
+                let stats = sync::repair_order_update_replay_blockers(&db, &admin_url, &api_key)
                     .await
                     .map_err(auth::GuardedCommandError::from)?;
+                let status = {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    sync_queue::get_status(&conn)
+                }
+                .map_err(auth::GuardedCommandError::from)?;
+                return Ok(json!({
+                    "success": true,
+                    "requiresRefresh": true,
+                    "message": format!(
+                        "Orders recovery retried {} parent insert row(s), {} update row(s), requeued {} parent-wait row(s), promoted {} payment(s). Processed {}, failed {}, conflicts {}, remaining {}.",
+                        stats.requeued_parent_order_inserts,
+                        stats.requeued_orders,
+                        stats.requeued_parent_wait_orders,
+                        stats.promoted_payments,
+                        stats.parent_insert_pass.as_ref().map(|value| value.processed).unwrap_or(0)
+                            + stats.first_pass.processed
+                            + stats.second_pass.as_ref().map(|value| value.processed).unwrap_or(0),
+                        stats.parent_insert_pass.as_ref().map(|value| value.failed).unwrap_or(0)
+                            + stats.first_pass.failed
+                            + stats.second_pass.as_ref().map(|value| value.failed).unwrap_or(0),
+                        stats.parent_insert_pass.as_ref().map(|value| value.conflicts).unwrap_or(0)
+                            + stats.first_pass.conflicts
+                            + stats.second_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
+                        status.total,
+                    ),
+                }));
             }
             let result = {
                 let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;

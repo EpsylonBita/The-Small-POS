@@ -1874,11 +1874,14 @@ fn is_retryable_legacy_order_insert_error(error: &str) -> bool {
     let duplicate_canonical_number_error = lower
         .contains("duplicate key value violates unique constraint")
         && lower.contains("uq_orders_order_number");
+    let recoverable_parent_customer_error = lower.contains("customer not found in organization")
+        && lower.contains("failed to create order");
 
     customizations_shape_error
         || missing_tip_error
         || stale_schema_cache_error
         || duplicate_canonical_number_error
+        || recoverable_parent_customer_error
 }
 
 fn is_rate_limit_error(error: &str) -> bool {
@@ -7214,6 +7217,65 @@ mod tests {
 
         let result = retry_failed_legacy_order_insert_items_limited(&conn, 1)
             .expect("retry failed legacy order rows");
+        assert_eq!(result.retried, 1);
+
+        let retried_row: (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read retried queue row");
+        assert_eq!(retried_row.0, "pending");
+        assert_eq!(retried_row.1, 0);
+        assert_eq!(retried_row.2, None);
+    }
+
+    #[test]
+    fn retry_failed_legacy_order_insert_items_requeues_parent_customer_repair_failures() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "INSERT",
+            "order-customer-parent-1",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "delivery",
+                "paymentMethod": "card",
+                "customerId": "dac7359e-6f88-44df-bca9-2dee9898d0cf",
+                "customerName": "WOLT",
+                "customerPhone": "111",
+                "totalAmount": 7.95,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 7.95,
+                    "name": "Manual item",
+                    "customizations": {}
+                }]
+            }),
+        );
+
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 50,
+                 error_message = ?2
+             WHERE id = ?1",
+            params![
+                queue_id,
+                "HTTP 500: {\"success\":false,\"error\":\"Failed to create order\",\"details\":\"Customer not found in organization\"}"
+            ],
+        )
+        .expect("seed customer parent validation failure");
+
+        let result = retry_failed_legacy_order_insert_items_limited(&conn, 1)
+            .expect("retry failed order parent customer row");
         assert_eq!(result.retried, 1);
 
         let retried_row: (String, i64, Option<String>) = conn

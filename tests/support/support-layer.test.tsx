@@ -768,7 +768,7 @@ test('recovery maps order updates waiting for remote parent to the guided repair
   assert.equal(issue?.params?.totalAmount, '7.70');
   assert.deepEqual(
     issue?.actions.map((action) => action.id),
-    ['repairOrderUpdateReplayBlockers', 'retryParityItem', 'runParitySyncNow'],
+    ['repairOrderUpdateReplayBlockers', 'retryParityModule', 'retryParityItem', 'runParitySyncNow'],
   );
   assert.equal(issue?.actions[0]?.recommended, true);
   assert.equal(
@@ -824,7 +824,7 @@ test('recovery maps stale parent-wait order updates and suppresses processor dup
   assert.equal(issue?.params?.totalAmount, '7.70');
   assert.deepEqual(
     issue?.actions.map((action) => action.id),
-    ['repairOrderUpdateReplayBlockers', 'retryParityItem', 'runParitySyncNow'],
+    ['repairOrderUpdateReplayBlockers', 'retryParityModule', 'retryParityItem', 'runParitySyncNow'],
   );
   assert.equal(issue?.actions[0]?.recommended, true);
   assert.equal(issue?.actions[0]?.confirmationRequired, true);

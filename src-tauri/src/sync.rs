@@ -4009,6 +4009,8 @@ pub(crate) fn requeue_failed_order_validation_rows(db: &DbState) -> Result<usize
 
 #[derive(Debug)]
 pub(crate) struct OrderUpdateReplayRepairStats {
+    pub requeued_parent_order_inserts: usize,
+    pub parent_insert_pass: Option<sync_queue::SyncResult>,
     pub requeued_orders: usize,
     pub repaired_parent_orders: usize,
     pub requeued_parent_wait_orders: usize,
@@ -4016,10 +4018,23 @@ pub(crate) struct OrderUpdateReplayRepairStats {
     pub first_pass: sync_queue::SyncResult,
     pub promoted_payments: usize,
     pub second_pass: Option<sync_queue::SyncResult>,
+    pub remaining_parent_order_inserts: usize,
     pub remaining_order_blockers: usize,
     pub remaining_parent_wait_blockers: usize,
+    pub last_parent_order_insert_error: Option<String>,
     pub last_order_error: Option<String>,
     pub last_parent_wait_error: Option<String>,
+}
+
+fn is_failed_order_insert_parent_blocker_sql() -> &'static str {
+    "table_name = 'orders'
+       AND upper(operation) = 'INSERT'
+       AND status IN ('failed', 'conflict')
+       AND error_message IS NOT NULL
+       AND (
+         lower(error_message) LIKE '%failed to create order%'
+         OR lower(error_message) LIKE '%customer not found in organization%'
+       )"
 }
 
 fn is_order_update_replay_blocker_sql() -> &'static str {
@@ -4062,6 +4077,41 @@ pub(crate) fn requeue_order_update_replay_blockers(db: &DbState) -> Result<usize
     );
     conn.execute(sql.as_str(), [])
         .map_err(|e| format!("requeue order update replay blockers: {e}"))
+}
+
+fn requeue_failed_order_insert_parent_blockers(conn: &Connection) -> Result<usize, String> {
+    let sql = format!(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             attempts = 0,
+             last_attempt = NULL,
+             error_message = NULL,
+             next_retry_at = NULL,
+             retry_delay_ms = 1000,
+             claim_generation = claim_generation + 1
+         WHERE {}",
+        is_failed_order_insert_parent_blocker_sql()
+    );
+    conn.execute(sql.as_str(), [])
+        .map_err(|e| format!("requeue failed order insert parent blockers: {e}"))
+}
+
+fn count_failed_order_insert_parent_blockers(
+    conn: &Connection,
+) -> Result<(usize, Option<String>), String> {
+    let sql = format!(
+        "SELECT COUNT(*), MAX(error_message)
+         FROM parity_sync_queue
+         WHERE {}",
+        is_failed_order_insert_parent_blocker_sql()
+    );
+    conn.query_row(sql.as_str(), [], |row| {
+        Ok((
+            row.get::<_, i64>(0)? as usize,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    })
+    .map_err(|e| format!("count failed order insert parent blockers: {e}"))
 }
 
 fn count_order_update_replay_blockers(
@@ -4401,6 +4451,11 @@ pub(crate) async fn repair_order_update_parent_wait_blockers(
     admin_url: &str,
     api_key: &str,
 ) -> Result<(usize, usize, usize), String> {
+    let requeued_resolved_local_parents = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        requeue_resolved_order_update_parent_wait_rows(&conn)?
+    };
+
     let record_ids = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         load_order_update_parent_wait_record_ids(&conn)?
@@ -4436,7 +4491,9 @@ pub(crate) async fn repair_order_update_parent_wait_blockers(
 
     let requeued = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        requeued_from_remote_payload + requeue_resolved_order_update_parent_wait_rows(&conn)?
+        requeued_resolved_local_parents
+            + requeued_from_remote_payload
+            + requeue_resolved_order_update_parent_wait_rows(&conn)?
     };
     let quarantined = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -4451,6 +4508,15 @@ pub(crate) async fn repair_order_update_replay_blockers(
     admin_url: &str,
     api_key: &str,
 ) -> Result<OrderUpdateReplayRepairStats, String> {
+    let requeued_parent_order_inserts = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        requeue_failed_order_insert_parent_blockers(&conn)?
+    };
+    let parent_insert_pass = if requeued_parent_order_inserts > 0 {
+        Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
+    } else {
+        None
+    };
     let (repaired_parent_orders, requeued_parent_wait_orders, quarantined_stale_parent_wait_orders) =
         repair_order_update_parent_wait_blockers(db, admin_url, api_key).await?;
     let requeued_orders = requeue_order_update_replay_blockers(db)?;
@@ -4460,6 +4526,10 @@ pub(crate) async fn repair_order_update_replay_blockers(
         Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
     } else {
         None
+    };
+    let (remaining_parent_order_inserts, last_parent_order_insert_error) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        count_failed_order_insert_parent_blockers(&conn)?
     };
     let (remaining_order_blockers, last_order_error) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -4471,6 +4541,8 @@ pub(crate) async fn repair_order_update_replay_blockers(
     };
 
     Ok(OrderUpdateReplayRepairStats {
+        requeued_parent_order_inserts,
+        parent_insert_pass,
         requeued_orders,
         repaired_parent_orders,
         requeued_parent_wait_orders,
@@ -4478,8 +4550,10 @@ pub(crate) async fn repair_order_update_replay_blockers(
         first_pass,
         promoted_payments,
         second_pass,
+        remaining_parent_order_inserts,
         remaining_order_blockers,
         remaining_parent_wait_blockers,
+        last_parent_order_insert_error,
         last_order_error,
         last_parent_wait_error,
     })
@@ -24062,6 +24136,65 @@ mod tests {
         assert_eq!(order_attempts, 0);
         assert!(order_error.is_none());
         assert_eq!(payment_status, "conflict");
+    }
+
+    #[test]
+    fn failed_order_insert_parent_blockers_are_requeued_before_child_repairs() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-order-insert-parent-blocked', 'orders', 'ord-parent-blocked', 'INSERT',
+                 '{\"orderId\":\"ord-parent-blocked\",\"customerId\":\"cust-remote\"}', 'org-test',
+                 datetime('now'), 50, 60000, 1, 'orders', 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to create order\",\"details\":\"Customer not found in organization\"}'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-order-update-parent-wait', 'orders', 'ord-parent-blocked', 'UPDATE',
+                 '{\"orderId\":\"ord-parent-blocked\",\"status\":\"delivered\"}', 'org-test',
+                 datetime('now'), 50, 60000, 1, 'orders', 'server-wins', 1, 'conflict',
+                 'Deferred too many times (50x \"Waiting for parent order sync\"); escalated to conflict'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let requeued = requeue_failed_order_insert_parent_blockers(&conn).unwrap();
+        assert_eq!(requeued, 1);
+
+        let (insert_status, insert_attempts, insert_error, update_status): (
+            String,
+            i64,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT status FROM parity_sync_queue WHERE id = 'queue-order-insert-parent-blocked'),
+                    (SELECT attempts FROM parity_sync_queue WHERE id = 'queue-order-insert-parent-blocked'),
+                    (SELECT error_message FROM parity_sync_queue WHERE id = 'queue-order-insert-parent-blocked'),
+                    (SELECT status FROM parity_sync_queue WHERE id = 'queue-order-update-parent-wait')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(insert_status, "pending");
+        assert_eq!(insert_attempts, 0);
+        assert!(insert_error.is_none());
+        assert_eq!(update_status, "conflict");
     }
 
     #[test]
