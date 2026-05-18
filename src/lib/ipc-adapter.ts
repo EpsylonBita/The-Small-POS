@@ -30,6 +30,7 @@ import type {
   UnsettledPaymentBlocker,
   RecoveryActionRequest,
   RecoveryActionResult,
+  RecoveryActionLogEntry,
   RecoveryExportResponse,
   RecoveryListResponse,
   RecoveryPoint,
@@ -94,6 +95,43 @@ export interface ReceiptSamplePreviewResponse {
   supportsTextScale?: boolean;
   isExactPreview?: boolean;
   error?: string;
+}
+
+export interface ExternalDisplayInfo {
+  index: number;
+  id: number;
+  name: string;
+  scaleFactor?: number;
+  position?: { x: number; y: number };
+  size?: { width: number; height: number };
+  workArea?: { x: number; y: number; width: number; height: number };
+}
+
+export interface ExternalDisplayPresentation {
+  contentType: "customer_display" | "kitchen_display" | string;
+  label?: string;
+}
+
+export interface ExternalDisplayCapabilities {
+  success: boolean;
+  supported: boolean;
+  displays: ExternalDisplayInfo[];
+  activePresentations?: ExternalDisplayPresentation[];
+  error?: string;
+}
+
+export interface ExternalDisplayOpenParams {
+  contentType: "customer_display" | "kitchen_display" | string;
+  displayIndex?: number;
+  display_index?: number;
+}
+
+export interface ExternalDisplayOpenResult extends IpcResult {
+  supported?: boolean;
+  activeDisplayId?: number;
+  contentType?: string;
+  label?: string;
+  display?: ExternalDisplayInfo;
 }
 
 // -- Auth / Staff Auth -------------------------------------------------------
@@ -1867,6 +1905,12 @@ export interface PlatformBridge {
     zoomReset(): Promise<void>;
   };
 
+  externalDisplay: {
+    getCapabilities(): Promise<ExternalDisplayCapabilities>;
+    open(params: ExternalDisplayOpenParams): Promise<ExternalDisplayOpenResult>;
+    close(params: { contentType: string }): Promise<IpcResult>;
+  };
+
   // -- Admin API (generic authenticated fetch) -------------------------------
   adminApi: {
     fetchFromAdmin(
@@ -1976,11 +2020,14 @@ export interface PlatformBridge {
   recovery: {
     listPoints(): Promise<RecoveryListResponse>;
     createSnapshot(): Promise<RecoveryPoint>;
+    createPreActionSnapshot(): Promise<RecoveryPoint>;
     exportCurrent(): Promise<RecoveryExportResponse>;
     exportPoint(pointId: string): Promise<RecoveryExportResponse>;
     restorePoint(pointId: string): Promise<RecoveryRestoreResponse>;
     openDir(path?: string): Promise<{ success: boolean; path: string }>;
     executeAction(request: RecoveryActionRequest): Promise<RecoveryActionResult>;
+    recordActionLog(entry: RecoveryActionLogEntry): Promise<RecoveryActionLogEntry>;
+    listActionLog(limit?: number): Promise<RecoveryActionLogEntry[]>;
   };
 
   /**
@@ -2377,6 +2424,11 @@ export const CHANNEL_MAP: Record<string, string> = {
   "window-zoom-out": "window.zoomOut",
   "window-zoom-reset": "window.zoomReset",
 
+  // External monitor / TV display windows
+  "display:list-monitors": "externalDisplay.getCapabilities",
+  "display:open-window": "externalDisplay.open",
+  "display:close-window": "externalDisplay.close",
+
   // Admin API
   "api:fetch-from-admin": "adminApi.fetchFromAdmin",
 
@@ -2413,11 +2465,14 @@ export const CHANNEL_MAP: Record<string, string> = {
   "diagnostic:fix-missing-driver-ids": "diagnostics.fixMissingDriverIds",
   "recovery:list-points": "recovery.listPoints",
   "recovery:create-snapshot": "recovery.createSnapshot",
+  "recovery:create-pre-action-snapshot": "recovery.createPreActionSnapshot",
   "recovery:export-current": "recovery.exportCurrent",
   "recovery:export-point": "recovery.exportPoint",
   "recovery:restore-point": "recovery.restorePoint",
   "recovery:open-dir": "recovery.openDir",
   "recovery:execute-action": "recovery.executeAction",
+  "recovery:record-action-log": "recovery.recordActionLog",
+  "recovery:list-action-log": "recovery.listActionLog",
 
   // Service dashboard metrics. Invoked directly via `invoke(channel)` from
   // ServiceDashboard.tsx; no matching bridge method exists (the dotted value
@@ -3272,6 +3327,14 @@ export class TauriBridge implements PlatformBridge {
     zoomReset: () => this.inv("window-zoom-reset"),
   };
 
+  externalDisplay = {
+    getCapabilities: () => this.inv("display:list-monitors"),
+    open: (params: ExternalDisplayOpenParams) =>
+      this.inv("display:open-window", params),
+    close: (params: { contentType: string }) =>
+      this.inv("display:close-window", params),
+  };
+
   adminApi = {
     fetchFromAdmin: (path: string, opts?: any) =>
       this.inv("api:fetch-from-admin", path, opts),
@@ -3354,6 +3417,8 @@ export class TauriBridge implements PlatformBridge {
   recovery = {
     listPoints: () => this.inv("recovery:list-points"),
     createSnapshot: () => this.inv("recovery:create-snapshot"),
+    createPreActionSnapshot: () =>
+      this.inv("recovery:create-pre-action-snapshot"),
     exportCurrent: () => this.inv("recovery:export-current"),
     exportPoint: (pointId: string) =>
       this.inv("recovery:export-point", { pointId }),
@@ -3365,6 +3430,10 @@ export class TauriBridge implements PlatformBridge {
         : this.inv("recovery:open-dir"),
     executeAction: (request: RecoveryActionRequest) =>
       this.inv("recovery:execute-action", request),
+    recordActionLog: (entry: RecoveryActionLogEntry) =>
+      this.inv("recovery:record-action-log", entry),
+    listActionLog: (limit?: number) =>
+      this.inv("recovery:list-action-log", limit ? { limit } : undefined),
   };
 }
 

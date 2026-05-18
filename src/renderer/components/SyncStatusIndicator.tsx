@@ -17,6 +17,7 @@ import {
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
+import { RecoveryCenterPanel } from './recovery/RecoveryCenterPanel';
 import type { SyncRecoveryOpenContext } from './recovery/SyncRecoveryModal';
 import {
   buildSyncRecoveryIssues,
@@ -39,6 +40,7 @@ import {
   type DiagnosticsLastParitySync,
   type DiagnosticsSystemHealth,
   type DiagnosticsExportOptions,
+  type RecoveryActionLogEntry,
   type SyncFinancialIntegrityResponse,
 } from '../../lib';
 import {
@@ -538,6 +540,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const [recoveryParityItems, setRecoveryParityItems] = useState<
     Awaited<ReturnType<ReturnType<typeof getSyncQueueBridge>['listItems']>>
   >([]);
+  const [recentRecoveryActions, setRecentRecoveryActions] = useState<
+    RecoveryActionLogEntry[]
+  >([]);
 
   const { isMobileWaiter, parentTerminalId } = useFeatures();
   const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(
@@ -632,11 +637,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const loadSystemHealth = useCallback(async () => {
     setSystemLoading(true);
     try {
-      const [data, financialItems, integrity, parityItems] = await Promise.all([
+      const [data, financialItems, integrity, parityItems, recoveryActions] = await Promise.all([
         bridge.diagnostics.getSystemHealth(),
         bridge.sync.getFailedFinancialItems(250),
         bridge.sync.validateFinancialIntegrity(),
         getSyncQueueBridge().listItems({ limit: 250 }),
+        bridge.recovery.listActionLog(25).catch(() => []),
       ]);
       setSystemHealth(data);
       setFinancialStats(
@@ -660,6 +666,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         },
       );
       setRecoveryParityItems(Array.isArray(parityItems) ? parityItems : []);
+      setRecentRecoveryActions(
+        Array.isArray(recoveryActions) ? recoveryActions : [],
+      );
       systemLoaded.current = true;
     } catch (err) {
       console.error('Failed to load system health:', err);
@@ -708,6 +717,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         void getSyncQueueBridge()
           .listItems({ limit: 250 })
           .then((items) => setRecoveryParityItems(Array.isArray(items) ? items : []))
+          .catch(() => {});
+        void bridge.recovery
+          .listActionLog(25)
+          .then((items) => setRecentRecoveryActions(Array.isArray(items) ? items : []))
           .catch(() => {});
       }
     };
@@ -1069,6 +1082,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       lastParitySync: effectiveLastParitySync ?? null,
     });
   };
+
+  const handleRecoveryPanelRefresh = useCallback(async () => {
+    await Promise.all([loadSyncStatus(), loadSystemHealth()]);
+  }, [loadSyncStatus, loadSystemHealth]);
 
   const handleRemoveInvalidOrders = async () => {
     if (!systemHealth?.invalidOrders?.details?.length) return;
@@ -2080,7 +2097,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <div className="min-w-0">
                 <div className={modalEyebrowClass}>{t('sync.health.label')}</div>
                 <h3 className="truncate text-xl font-black tracking-tight text-slate-900 dark:text-white">
-                  {t('sync.labels.syncStatus')}
+                  {t('recovery.center.systemStatusTitle', {
+                    defaultValue: 'System sync status',
+                  })}
                 </h3>
               </div>
               <span
@@ -2119,51 +2138,117 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             className="hide-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5"
             style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' } as React.CSSProperties}
           >
-            {renderOverviewSection()}
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
-              {renderActionableSection()}
-              {renderOperationsSection()}
+            <div className="rounded-[22px] border border-sky-200/90 bg-sky-50/90 px-4 py-4 text-sm text-sky-800 dark:border-sky-400/30 dark:bg-sky-500/10 dark:text-sky-100">
+              {t('sync.recoveryCenter.guidedContextNote', {
+                defaultValue:
+                  'Start with the first blocker. If a known fix exists, the POS can run it or open the exact screen needed to fix the order.',
+              })}
             </div>
-            {renderAdvancedDiagnosticsSection()}
-          </div>
 
-          <div className={footerClass}>
-            {exportPath && (
-              <div className="mb-3 flex flex-col gap-3 rounded-[20px] border border-emerald-200/90 bg-emerald-50/90 p-3 dark:border-emerald-400/30 dark:bg-emerald-500/10 sm:flex-row sm:items-center">
-                <div className="flex min-w-0 flex-1 items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-300" />
-                  <span className="truncate text-sm font-medium text-emerald-700 dark:text-emerald-200">
-                    {t('sync.system.exportSuccess')}
-                  </span>
-                </div>
-                <button
-                  onClick={handleOpenExportDir}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-emerald-700 transition-colors hover:bg-emerald-50 dark:border-emerald-400/30 dark:bg-transparent dark:text-emerald-200 dark:hover:bg-emerald-500/10"
-                >
-                  <FolderOpen className="h-4 w-4" />
-                  {t('sync.system.openFolder')}
-                </button>
+            {systemLoading && !systemHealth ? (
+              <div className="flex h-56 items-center justify-center">
+                <div className="h-12 w-12 animate-spin rounded-full border-4 border-blue-500/30 border-t-blue-500" />
               </div>
+            ) : (
+              <RecoveryCenterPanel
+                issues={sharedRecoveryIssues}
+                recentActions={recentRecoveryActions}
+                terminalContext={systemHealth?.terminalContext ?? null}
+                onRefresh={handleRecoveryPanelRefresh}
+                onSyncNow={handleForceSync}
+                onNavigate={() => setShowDetailPanel(false)}
+                onActionResolved={(entry) =>
+                  setRecentRecoveryActions((current) => [entry, ...current].slice(0, 8))
+                }
+                titleKey="recovery.center.systemStatusTitle"
+                subtitleKey="recovery.center.systemStatusSubtitle"
+              />
             )}
 
-            <div className="flex flex-col gap-3 sm:flex-row">
+            <section className="rounded-[24px] border border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-black/20">
               <button
-                onClick={handleForceSync}
-                disabled={syncStatus.syncInProgress}
-                className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-blue-500 to-cyan-500 px-4 py-3 text-sm font-bold text-white shadow-[0_14px_32px_rgba(59,130,246,0.28)] transition-all hover:from-blue-600 hover:to-cyan-600 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+                type="button"
+                onClick={() => setAdvancedExpanded((value) => !value)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-bold text-slate-800 dark:text-slate-100"
               >
-                <RefreshCw className={cn('h-4 w-4', syncStatus.syncInProgress && 'animate-spin')} />
-                {syncStatus.syncInProgress ? t('sync.status.syncing') : t('sync.actions.forceSync')}
+                <span>
+                  {t('recovery.center.advancedDiagnosticsTitle', {
+                    defaultValue: 'Advanced diagnostics and exports',
+                  })}
+                </span>
+                <ChevronDown
+                  className={cn(
+                    'h-4 w-4 transition-transform',
+                    advancedExpanded && 'rotate-180',
+                  )}
+                />
               </button>
-              <button
-                onClick={handleExport}
-                disabled={exporting}
-                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200/90 bg-white/92 px-4 py-3 text-sm font-bold text-slate-700 transition-all hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]"
-              >
-                <Download className={cn('h-4 w-4', exporting && 'animate-bounce')} />
-                {exporting ? t('sync.system.exporting') : t('sync.system.exportDiagnostics')}
-              </button>
-            </div>
+              {advancedExpanded && (
+                <div className="space-y-5 border-t border-slate-200/80 p-4 dark:border-white/10">
+                  <div className="rounded-[24px] border border-slate-200/80 bg-white/90 p-5 dark:border-white/10 dark:bg-white/[0.04]">
+                    <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="max-w-3xl">
+                        <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
+                          {t('recovery.center.diagnosticFileTitle', {
+                            defaultValue: 'Diagnostic file',
+                          })}
+                        </div>
+                        <h4 className="mt-3 text-xl font-black tracking-tight text-slate-950 dark:text-white">
+                          {t('recovery.center.diagnosticFileHeadline', {
+                            defaultValue: 'Technical details are saved to a file',
+                          })}
+                        </h4>
+                        <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300/85">
+                          {t('recovery.center.diagnosticFileDescription', {
+                            defaultValue:
+                              'To keep this screen simple, queue counts, parity rows, printer state, database details, logs, issue codes, order ids, and the latest recovery result are included in the exported diagnostic bundle instead of being shown here.',
+                          })}
+                        </p>
+                        <p className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                          {t('recovery.center.diagnosticFilePrivacy', {
+                            defaultValue:
+                              'Use this when Contact Dev asks for support details. Sensitive fields are handled by the export settings.',
+                          })}
+                        </p>
+                      </div>
+                      <div className="flex min-w-[220px] flex-col gap-2">
+                        <button
+                          onClick={handleExport}
+                          disabled={exporting}
+                          className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-black text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
+                        >
+                          <Download className={cn('h-4 w-4', exporting && 'animate-bounce')} />
+                          {exporting
+                            ? t('sync.system.exporting')
+                            : t('recovery.center.exportDiagnosticFile', {
+                                defaultValue: 'Export diagnostic file',
+                              })}
+                        </button>
+                        {exportPath && (
+                          <button
+                            onClick={handleOpenExportDir}
+                            className="inline-flex min-h-[42px] items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]"
+                          >
+                            <FolderOpen className="h-4 w-4" />
+                            {t('sync.system.openFolder')}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {exportPath && (
+                      <div className="mt-4 flex flex-col gap-3 rounded-[20px] border border-emerald-200/90 bg-emerald-50/90 p-3 dark:border-emerald-400/30 dark:bg-emerald-500/10 sm:flex-row sm:items-center">
+                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-300" />
+                          <span className="truncate text-sm font-medium text-emerald-700 dark:text-emerald-200">
+                            {t('sync.system.exportSuccess')}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
           </div>
         </div>
           </div>

@@ -70,6 +70,22 @@ function normalizeTransportError(method: string, error?: string | null): string 
   }
 
   const normalized = error.toLowerCase();
+  const statusMatch = error.match(/HTTP\s+(\d{3})/i);
+  const htmlResponse =
+    normalized.includes('<!doctype html') ||
+    normalized.includes('<html') ||
+    normalized.includes('__next_data__') ||
+    normalized.includes('page not found');
+
+  if (htmlResponse) {
+    if (normalized.includes('admin dashboard endpoint not found') || statusMatch?.[1] === '404') {
+      return 'Admin dashboard endpoint not found. Restart or update the admin dashboard, then try again.';
+    }
+    return statusMatch?.[1]
+      ? `Admin dashboard returned an HTML error page (HTTP ${statusMatch[1]}).`
+      : 'Admin dashboard returned an HTML error page.';
+  }
+
   if (
     normalized.includes('failed to fetch') ||
     normalized.includes('network error') ||
@@ -79,6 +95,10 @@ function normalizeTransportError(method: string, error?: string | null): string 
     normalized.includes('offline')
   ) {
     return fallback;
+  }
+
+  if (error.length > 800) {
+    return `${error.slice(0, 400).trim()}...`;
   }
 
   return error;

@@ -211,6 +211,14 @@ fn status_error(status: StatusCode) -> String {
     }
 }
 
+fn looks_like_html_error_body(body: &str) -> bool {
+    let trimmed = body.trim_start().to_ascii_lowercase();
+    trimmed.starts_with("<!doctype html")
+        || trimmed.starts_with("<html")
+        || trimmed.contains("__next_data__")
+        || trimmed.contains("<body")
+}
+
 // ---------------------------------------------------------------------------
 // Connectivity test
 // ---------------------------------------------------------------------------
@@ -399,7 +407,7 @@ pub async fn fetch_from_admin(
             } else {
                 format!("{message} (HTTP {})", status.as_u16())
             }
-        } else if !body_text.trim().is_empty() {
+        } else if !body_text.trim().is_empty() && !looks_like_html_error_body(&body_text) {
             format!(
                 "{} (HTTP {}): {}",
                 status_error(status),

@@ -74,6 +74,7 @@ const FINGERPRINT_TABLES: &[(&str, &[&str])] = &[
 pub enum RecoveryPointKind {
     Scheduled,
     Manual,
+    PreRecoveryAction,
     PreFactoryReset,
     PreEmergencyReset,
     PreClearOperationalData,
@@ -87,6 +88,7 @@ impl RecoveryPointKind {
         match self {
             Self::Scheduled => "scheduled",
             Self::Manual => "manual",
+            Self::PreRecoveryAction => "pre_recovery_action",
             Self::PreFactoryReset => "pre_factory_reset",
             Self::PreEmergencyReset => "pre_emergency_reset",
             Self::PreClearOperationalData => "pre_clear_operational_data",
@@ -99,7 +101,8 @@ impl RecoveryPointKind {
     fn is_destructive(self) -> bool {
         matches!(
             self,
-            Self::PreFactoryReset
+            Self::PreRecoveryAction
+                | Self::PreFactoryReset
                 | Self::PreEmergencyReset
                 | Self::PreClearOperationalData
                 | Self::PreRestore
@@ -375,6 +378,12 @@ pub(crate) fn maybe_apply_pending_restore(app_data_dir: &Path) -> Result<Option<
 
 pub(crate) fn create_manual_snapshot(db: &db::DbState) -> Result<RecoveryPointMetadata, String> {
     create_snapshot_for_db(db, RecoveryPointKind::Manual, None)
+}
+
+pub(crate) fn create_pre_recovery_action_snapshot(
+    db: &db::DbState,
+) -> Result<RecoveryPointMetadata, String> {
+    create_snapshot_for_db(db, RecoveryPointKind::PreRecoveryAction, None)
 }
 
 pub(crate) fn snapshot_before_destructive_action(

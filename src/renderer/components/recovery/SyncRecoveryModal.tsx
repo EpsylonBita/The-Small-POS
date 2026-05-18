@@ -72,11 +72,13 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
         nextFinancialItems,
         nextIntegrity,
         nextParityItems,
+        nextRecentActions,
       ] = await Promise.all([
         bridge.diagnostics.getSystemHealth(),
         bridge.sync.getFailedFinancialItems(250),
         bridge.sync.validateFinancialIntegrity(),
         syncQueue.listItems({ limit: 250 }),
+        bridge.recovery.listActionLog(25).catch(() => []),
       ]);
 
       if (requestId !== loadRequestIdRef.current) {
@@ -88,6 +90,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
       setFinancialItems(Array.isArray(nextFinancialItems) ? nextFinancialItems : []);
       setIntegrity(nextIntegrity ?? EMPTY_INTEGRITY_RESULT);
       setParityItems(Array.isArray(nextParityItems) ? nextParityItems : []);
+      setRecentActions(Array.isArray(nextRecentActions) ? nextRecentActions : []);
     } catch (error) {
       if (requestId !== loadRequestIdRef.current) {
         return;
@@ -110,7 +113,6 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
 
     setSystemHealth(initialContext?.systemHealth ?? null);
     setLastParitySync(initialContext?.lastParitySync ?? null);
-    setRecentActions([]);
     void loadRecoveryState();
   }, [initialContext, isOpen]);
 
@@ -131,7 +133,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
       ? lastParitySync.error || lastParitySync.reason
       : t('sync.recoveryCenter.subtitle', {
           defaultValue:
-            'Uses the same sync-health diagnostics and adds guided repair actions for the visible problems.',
+            'Explains why sync is stuck, offers the safest known solution, and keeps Contact Dev one click away.',
         });
 
   const handleOpenSnapshots = () => {
@@ -161,7 +163,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
                 {t('sync.health.label', { defaultValue: 'Sync health' })}
               </div>
               <h2 className="mt-2 text-2xl font-black tracking-tight text-slate-900 dark:text-white">
-                {t('sync.recoveryCenter.title', { defaultValue: 'Recovery Center' })}
+                {t('sync.recoveryCenter.guidedTitle', { defaultValue: 'Sync recovery assistant' })}
               </h2>
               <p className="mt-2 max-w-3xl text-sm text-slate-600 dark:text-slate-300/80">
                 {headerSubtitle}
@@ -209,9 +211,9 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
 
           <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
             <div className="mb-5 rounded-[22px] border border-sky-200/90 bg-sky-50/90 px-4 py-4 text-sm text-sky-800 dark:border-sky-400/30 dark:bg-sky-500/10 dark:text-sky-100">
-              {t('sync.recoveryCenter.contextNote', {
+              {t('sync.recoveryCenter.guidedContextNote', {
                 defaultValue:
-                  'This recovery view stays in sync with the same blockers shown by the sync explanation panel.',
+                  'Start with the first blocker. If a known fix exists, the POS can run it or open the exact screen needed to fix the order.',
               })}
             </div>
 

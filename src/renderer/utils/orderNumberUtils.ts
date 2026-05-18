@@ -206,3 +206,16 @@ export function formatOrderNumberForDisplay(orderNumber: string): string {
   if (!orderNumber) return '';
   return orderNumber.startsWith('#') ? orderNumber : `#${orderNumber}`;
 }
+
+export function formatCompactOrderNumberForDisplay(orderNumber: string): string {
+  if (!orderNumber) return '';
+
+  const normalized = orderNumber.trim();
+  const withoutHash = normalized.startsWith('#') ? normalized.slice(1).trim() : normalized;
+  const match = withoutHash.match(/^([A-Za-z]+)-\d{8}-(\d+)$/);
+  if (match) {
+    return `${match[1].toUpperCase()} #${match[2]}`;
+  }
+
+  return normalized;
+}

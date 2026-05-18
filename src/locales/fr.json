@@ -1,6 +1,6 @@
 {
   "common": {
-    "all": "Tout",
+    "all": "Tous",
     "actions": {
       "add": "Ajouter",
       "edit": "Modifier",
@@ -131,7 +131,10 @@
       "manager": "Gérant",
       "admin": "Administrateur",
       "staff": "Personnel"
-    }
+    },
+    "close": "Fermer",
+    "retry": "Réessayer",
+    "refresh": "Actualiser"
   },
   "dashboard": {
     "tabs": {
@@ -2168,6 +2171,31 @@
       "pending": "En attente",
       "conflict": "Conflit"
     },
+    "closeoutStages": {
+      "pre_z_report_sync": "synchronisation avant le rapport Z",
+      "z_report_submission": "envoi du rapport Z",
+      "closeout_sync": "synchronisation de clôture"
+    },
+    "blockerReasons": {
+      "pending": "en attente de synchronisation",
+      "processing": "synchronisation en cours",
+      "in_progress": "synchronisation en cours",
+      "failed": "synchronisation échouée",
+      "conflict": "conflit de synchronisation",
+      "deferred": "attend un enregistrement parent requis",
+      "queued_remote": "attend la confirmation de l'administration",
+      "retrying": "attend une nouvelle tentative",
+      "parent_payment_not_synced": "le paiement parent n'est pas encore synchronisé",
+      "parent_payment_missing_canonical_remote_id": "l'identifiant admin du paiement parent est manquant",
+      "ambiguous_canonical_remote_payment": "le paiement parent correspond à plusieurs paiements admin",
+      "Payment not yet synced": "le paiement parent n'est pas encore synchronisé",
+      "Parent payment missing canonical remote id": "l'identifiant admin du paiement parent est manquant",
+      "Ambiguous canonical remote payment": "le paiement parent correspond à plusieurs paiements admin"
+    },
+    "closeoutBlocked": {
+      "single": "Impossible de clôturer la journée pendant {{stage}} car {{orderReference}} est encore bloqué : {{reason}}.",
+      "multiple": "Impossible de clôturer la journée pendant {{stage}} car {{count}} éléments de synchronisation sont encore bloqués."
+    },
     "time": {
       "never": "Jamais",
       "justNow": "à l'instant",
@@ -2396,6 +2424,8 @@
     "recoveryCenter": {
       "title": "Centre de récupération",
       "subtitle": "Utilise les mêmes diagnostics de santé de synchronisation et ajoute des actions guidées de réparation pour les problèmes visibles.",
+      "guidedTitle": "Assistant de récupération de synchronisation",
+      "guidedContextNote": "Commencez par le premier blocage. Si une correction connue existe, le POS peut l'exécuter ou ouvrir exactement l'écran nécessaire pour corriger la commande.",
       "contextNote": "Cette vue de récupération reste alignée sur les mêmes blocages que le panneau d’explication de synchronisation.",
       "noIssues": "Aucun problème de récupération exploitable n’est visible actuellement.",
       "credentialsTitle": "Les identifiants demandent de l’attention",
@@ -2417,8 +2447,8 @@
       "paymentsSection": "Paiements",
       "staffSection": "Personnel et livreurs",
       "refreshSuccess": "Statut de récupération actualisé",
-      "contactOperator": "Contacter un opérateur",
-      "contactOperatorDetail": "Ce problème n’a pas encore de déblocage guidé. Contactez un opérateur et ajoutez une correction dédiée pour ce type de blocage afin que la prochaine occurrence puisse être résolue directement depuis cet écran."
+      "contactOperator": "Contacter Dev",
+      "contactOperatorDetail": "Ce problème n’a pas encore de déblocage guidé. Contactez Dev avec les diagnostics afin que la prochaine occurrence puisse être reliée à une correction en un clic."
     }
   },
   "modals": {
@@ -2958,7 +2988,43 @@
       "periodSince": "Période depuis : {{date}} {{time}}",
       "loadFailed": "Échec du chargement du Z-Report",
       "loading": "Chargement du rapport…",
+      "refresh": "Actualiser le rapport",
+      "closeoutChecklist": "Checklist de clôture",
+      "moneyReconciliation": "Rapprochement des paiements",
+      "reviewBeforeClose": "Vérifier avant la clôture",
+      "actionPanelTitle": "Valider la clôture",
+      "commitHelp": "La validation clôture la journée locale, force la synchronisation des éléments en attente et envoie le rapport Z au tableau de bord admin.",
+      "secondaryActions": "Exports et impression",
+      "reviewItems": "Points à vérifier",
+      "closeoutLoading": "Vérification du rapport",
+      "readyToClose": "Prêt à clôturer",
+      "needsAttention": "À vérifier",
+      "adminSync": "Synchro admin",
+      "syncChecking": "Vérification de la synchronisation locale et admin.",
+      "syncReady": "Aucun blocage de synchronisation détecté.",
+      "syncNeedsRetry": "Le chargement du rapport ou la synchronisation a échoué. Actualisez puis réessayez avant de clôturer.",
+      "paymentsCaptured": "Paiements enregistrés",
+      "paymentsReady": "Tous les paiements de commandes sont équilibrés.",
+      "paymentsNeedAction": "{{count}} blocage(s) de paiement doivent être corrigés avant validation.",
+      "cashDrawerReady": "Les totaux de caisse sont équilibrés.",
+      "cashDrawerNeedsReview": "{{drawers}} caisse(s) non rapprochée(s). Écart : {{variance}}.",
+      "expensesReady": "Aucune dépense en attente de vérification.",
+      "expensesNeedReview": "{{count}} dépense(s) doivent encore être vérifiées.",
+      "staffReady": "Les services du personnel sont disponibles pour ce rapport.",
+      "staffNeedsMainTerminal": "Seul le POS principal peut exécuter ce rapport Z.",
+      "drawerVariance": "Écart de caisse",
+      "closeoutSummary": "Résumé de clôture",
+      "operatingSignals": "Indicateurs opérationnels",
+      "cashFlow": "Flux de caisse",
+      "netCashPosition": "Position nette de caisse",
+      "expectedCash": "Espèces attendues",
+      "staffLedger": "Registre du personnel",
+      "drawerLedger": "Registre des caisses",
+      "expenseLedger": "Registre des dépenses",
+      "noStaffReports": "Aucun rapport du personnel disponible",
+      "cancelled": "Annulées",
       "tabs": {
+        "overview": "Vue d'ensemble",
         "summary": "Résumé",
         "staff": "Performance du personnel",
         "details": "Détails"
@@ -3504,6 +3570,7 @@
     "status": "Statut",
     "ingredient": "Ingrédient",
     "category": "Catégorie",
+    "noCategory": "Aucune catégorie",
     "stock": "Stock",
     "minLevel": "Niveau minimum",
     "value": "Valeur",
@@ -3515,6 +3582,43 @@
     "reason": "Motif",
     "notes": "Notes",
     "notesPlaceholder": "Ajouter des notes sur cet ajustement...",
+    "history": {
+      "open": "Voir l'historique des prix et mouvements",
+      "title": "Historique des prix et mouvements",
+      "currentStock": "Stock actuel",
+      "currentCost": "Coût actuel",
+      "purchased": "Acheté",
+      "used": "Utilisé / retiré",
+      "priceHistory": "Historique des prix fournisseur",
+      "priceHistoryDescription": "Chaque achat issu d'une facture fournisseur est conservé ici afin de voir les changements de coût.",
+      "noPriceHistory": "Aucun historique d'achat fournisseur pour le moment.",
+      "movements": "Mouvements de stock",
+      "noMovements": "Aucun mouvement de stock enregistré pour le moment.",
+      "date": "Date",
+      "invoice": "Facture",
+      "supplier": "Fournisseur",
+      "quantity": "Qté",
+      "unitCost": "Coût unitaire",
+      "change": "Changement",
+      "priceChange": {
+        "initial": "Initial",
+        "same": "Identique"
+      },
+      "movementTypes": {
+        "purchase": "Achat",
+        "adjustment": "Ajustement",
+        "count": "Comptage du stock",
+        "sale": "Vente",
+        "waste": "Perte",
+        "transfer": "Transfert",
+        "return": "Retour"
+      },
+      "errors": {
+        "loadFailed": "Impossible de charger l'historique de l'article",
+        "endpointUnavailable": "L'API d'historique d'inventaire n'est pas disponible sur le tableau de bord admin connecté. Redémarrez ou mettez à jour le tableau de bord admin, puis réessayez.",
+        "itemNotFound": "L'article d'inventaire est introuvable sur le tableau de bord admin connecté."
+      }
+    },
     "reasons": {
       "count": "Comptage du stock",
       "received": "Livraison reçue",
@@ -3999,7 +4103,7 @@
   },
   "suppliers": {
     "title": "Fournisseurs",
-    "subtitle": "Gérer les fournisseurs et les factures",
+    "subtitle": "Gérer les fournisseurs, les factures et le stock importé",
     "total": "Total",
     "active": "Actif",
     "inactive": "Inactif",
@@ -4010,7 +4114,11 @@
     "search": "Rechercher des fournisseurs...",
     "orders": "Commandes",
     "spent": "Dépensé",
-    "invoice": "Facture",
+    "invoice": {
+      "markAsUnpaid": "Marquer impayée",
+      "markedAsUnpaid": "Facture marquée comme impayée",
+      "markAsUnpaidFailed": "Impossible de marquer la facture comme impayée"
+    },
     "supplier": "Fournisseur",
     "amount": "Montant",
     "dueDate": "Date d'échéance",
@@ -4032,7 +4140,12 @@
       "active": "Actif",
       "inactive": "Inactif",
       "preferred": "Préféré",
-      "onHold": "Suspendu"
+      "onHold": "Suspendu",
+      "unpaid": "Impayé",
+      "paid": "Payé",
+      "overdue": "En retard",
+      "cancelled": "Annulé",
+      "partial": "Partiel"
     },
     "invoices": {
       "title": "Factures",
@@ -4045,7 +4158,45 @@
         "unpaid": "Impayée",
         "overdue": "En retard",
         "partiallyPaid": "Partiellement payée"
-      }
+      },
+      "markPaid": "Payé",
+      "markUnpaid": "Impayé",
+      "markedPaid": "Facture marquée comme payée",
+      "markedUnpaid": "Facture marquée comme impayée",
+      "statusFailed": "Impossible de modifier le statut de la facture",
+      "emptyTitle": "Aucune facture trouvée",
+      "emptyDescription": "Les factures fournisseur apparaîtront ici après synchronisation.",
+      "partialPayment": "Partiel",
+      "detailsTitle": "Détails de la facture",
+      "totalSpent": "Total dépensé",
+      "paidTotal": "Total payé",
+      "unpaidTotal": "Total impayé",
+      "invoiceCount": "Factures",
+      "paidAmount": "Payé",
+      "remaining": "Restant",
+      "paymentOptions": "Options de paiement",
+      "paymentAmount": "Montant du paiement",
+      "paymentMethod": "Mode de paiement",
+      "paymentDate": "Date de paiement",
+      "reference": "Référence",
+      "paymentNotes": "Notes de paiement",
+      "recordPayment": "Enregistrer le paiement",
+      "payRemaining": "Payer le solde",
+      "payments": "Paiements",
+      "noPayments": "Aucun paiement enregistré",
+      "noPaymentNeeded": "Cette facture n’a plus de solde.",
+      "paymentRecorded": "Paiement enregistré",
+      "paymentFailed": "Impossible d’enregistrer le paiement",
+      "paymentAmountRequired": "Saisissez un montant",
+      "paymentAmountTooHigh": "Le paiement dépasse le solde restant",
+      "methods": {
+        "cash": "Espèces",
+        "bankTransfer": "Virement bancaire",
+        "check": "Chèque",
+        "creditCard": "Carte de crédit",
+        "other": "Autre"
+      },
+      "invoiceDate": "Date de facture"
     },
     "actions": {
       "viewDetails": "Voir les détails",
@@ -4089,6 +4240,93 @@
       "equipment": "Équipements",
       "cleaning": "Produits d'entretien",
       "other": "Autre"
+    },
+    "unpaid": "Impayé",
+    "noCategory": "Sans catégorie",
+    "unknownSupplier": "Fournisseur inconnu",
+    "code": "Code",
+    "phone": "Téléphone",
+    "email": "E-mail",
+    "address": "Adresse",
+    "paymentTerms": "Conditions de paiement",
+    "noSelection": "Aucun fournisseur sélectionné",
+    "empty": {
+      "title": "Aucun fournisseur trouvé",
+      "description": "Ajoutez ou importez des articles fournisseur pour synchroniser le stock."
+    },
+    "detail": {
+      "title": "Détail fournisseur",
+      "emptyTitle": "Choisir un fournisseur",
+      "emptyDescription": "Les contacts et factures du fournisseur s’afficheront ici."
+    },
+    "import": {
+      "open": "Importer articles",
+      "title": "Importer des articles fournisseur",
+      "subtitle": "Vérifiez les lignes avant de les synchroniser avec le stock.",
+      "supplierName": "Nom du fournisseur",
+      "supplierPlaceholder": "Fresh Farms",
+      "supplierPhone": "Téléphone",
+      "supplierEmail": "Email",
+      "supplierNotes": "Notes fournisseur depuis la facture",
+      "invoiceNumber": "Numéro de facture",
+      "invoiceDate": "Date de facture",
+      "sources": "Source d’import",
+      "addRows": "Ajouter des lignes",
+      "manualRow": "Ligne manuelle",
+      "file": "Excel, CSV, PDF, DOC",
+      "camera": "Scan caméra",
+      "adminNoScanner": "Le scanner et la caméra sont disponibles uniquement sur les terminaux POS.",
+      "hardwareScanner": "Scanner code-barres",
+      "hardwareHelp": "Ouvrez ce panneau et scannez. Le code-barres est ajouté automatiquement.",
+      "barcodePlaceholder": "Code-barres",
+      "addBarcode": "Ajouter code-barres",
+      "scanAdded": "Code-barres ajouté à la revue",
+      "cameraUnavailable": "La détection de code-barres par caméra n’est pas disponible",
+      "noBarcodeFound": "Aucun code-barres trouvé dans l’image",
+      "cameraFailed": "Impossible de scanner cette image",
+      "bestEffortNotice": "L’extraction du document est indicative. Vérifiez chaque ligne avant d’enregistrer.",
+      "fileNeedsReview": "Aucune ligne détectée. Ajoutez des articles manuellement avant l’aperçu.",
+      "fileReadFailed": "Impossible de lire ce fichier. Essayez un autre fichier ou ajoutez les lignes manuellement.",
+      "importedRows": "{{count}} lignes importées. Faites défiler la liste brouillon pour vérifier chaque article avant d’enregistrer.",
+      "supplierRequired": "Le nom du fournisseur est requis.",
+      "rowsRequired": "Ajoutez au moins une ligne article.",
+      "previewReady": "La revue d’import est prête",
+      "previewFailed": "Impossible de prévisualiser l’import",
+      "saved": "Articles fournisseur enregistrés dans le stock",
+      "saveFailed": "Impossible d’enregistrer les articles fournisseur",
+      "draftRows": "Lignes brouillon",
+      "rowCount": "{{count}} lignes",
+      "reviewBeforeSave": "Modifiez quantités, coûts et catégories avant l’aperçu.",
+      "preview": "Aperçu",
+      "review": "Revue de synchronisation du stock",
+      "missingCategories": "Catégories manquantes",
+      "commit": "Enregistrer dans le stock",
+      "saveAfterPreview": "Enregistrer après l’aperçu",
+      "saveRequiresPreview": "Prévisualisez les lignes avant d’enregistrer dans le stock.",
+      "previewThenSaveHelp": "L’aperçu valide le fournisseur, les catégories et les correspondances de stock. L’enregistrement devient disponible après cette vérification.",
+      "endpointUnavailable": "L’API d’import fournisseur n’est pas disponible sur le dashboard admin connecté. Redémarrez ou mettez à jour le dashboard admin, puis relancez l’aperçu.",
+      "adminHtmlError": "Le dashboard admin a renvoyé une page au lieu d’une réponse API. Vérifiez l’URL admin et réessayez.",
+      "itemName": "Nom de l’article",
+      "sku": "SKU",
+      "barcode": "Code-barres",
+      "quantity": "Qté",
+      "cost": "Coût",
+      "unit": "Unité",
+      "category": "Catégorie",
+      "subcategory": "Sous-catégorie",
+      "notes": "Notes",
+      "rowNumber": "Ligne",
+      "noCategory": "Sans catégorie",
+      "noCode": "Sans code",
+      "status": {
+        "create": "Créer",
+        "update": "Mettre à jour",
+        "skip": "Ignorer",
+        "error": "Erreur"
+      }
+    },
+    "summary": {
+      "title": "Résumé fournisseur"
     }
   },
   "tablesView": {
@@ -4183,12 +4421,90 @@
   },
   "staffSchedule": {
     "loading": "Chargement du planning du personnel...",
+    "weeklyProgram": "Planning hebdomadaire du personnel",
+    "weeklyProgramHint": "Consultez la semaine, repérez les manques et ajoutez des services rapidement.",
+    "scheduleTitle": "Planning de la semaine",
+    "scheduleHint": "Touchez un jour ou le bouton plus pour ajouter un service.",
+    "today": "Aujourd'hui",
     "stats": {
       "totalStaff": "Total du personnel",
-      "roles": "Rôles"
+      "roles": "Rôles",
+      "scheduledThisWeek": "Planifiés cette semaine",
+      "todayShifts": "Services aujourd'hui",
+      "unscheduled": "Non planifiés"
+    },
+    "filters": {
+      "all": "Tous les rôles"
+    },
+    "actions": {
+      "addShift": "Ajouter un service",
+      "close": "Fermer",
+      "nextWeek": "Semaine suivante",
+      "previousWeek": "Semaine précédente",
+      "refresh": "Actualiser le planning",
+      "selectStaff": "Sélectionner le personnel"
+    },
+    "days": {
+      "short": {
+        "sun": "Dim",
+        "mon": "Lun",
+        "tue": "Mar",
+        "wed": "Mer",
+        "thu": "Jeu",
+        "fri": "Ven",
+        "sat": "Sam"
+      }
+    },
+    "status": {
+      "scheduled": "Planifié",
+      "active": "Actif",
+      "completed": "Terminé",
+      "cancelled": "Annulé",
+      "no_show": "Absent"
+    },
+    "roles": {
+      "staff": "Personnel"
+    },
+    "presets": {
+      "morning": "Matin 09:00-17:00",
+      "evening": "Soir 12:00-20:00",
+      "closing": "Fermeture 17:00-23:00"
     },
     "noStaff": "Aucun membre du personnel trouvé",
-    "addStaffHint": "Ajoutez des membres du personnel dans le tableau de bord d'administration"
+    "addStaffHint": "Ajoutez des membres du personnel dans le tableau de bord d'administration",
+    "addShift": "Ajouter un service",
+    "addShiftForDay": "Ajouter un service pour ce jour",
+    "addShiftForStaff": "Ajouter un service pour ce membre",
+    "noShifts": "Aucun service",
+    "tapToAddShift": "Touchez pour ajouter",
+    "unscheduled": "Non planifiés cette semaine",
+    "unscheduledHint": "Touchez un nom pour créer rapidement son prochain service.",
+    "everyoneScheduled": "Tout le monde a au moins un service cette semaine.",
+    "fields": {
+      "staff": "Personnel",
+      "startDateTime": "Début (date et heure)",
+      "endDateTime": "Fin (date et heure)",
+      "notes": "Notes",
+      "notesPlaceholder": "Notes facultatives..."
+    },
+    "selectStaff": "Sélectionner le personnel",
+    "nextDayShortcut": "Définir la fin au lendemain",
+    "preview": "Aperçu",
+    "validationLabel": "Validation",
+    "overnightHint": "Pour les services de nuit, choisissez le lendemain comme date de fin.",
+    "createProgram": "Créer le service",
+    "shiftCreated": "Service créé",
+    "savedLocallyQueued": "Enregistré localement et mis en file",
+    "shiftCreateFailed": "Impossible de créer le service",
+    "unknownStaff": "Personnel inconnu",
+    "validation": {
+      "selectStaff": "Veuillez sélectionner un membre du personnel",
+      "selectDateTime": "Veuillez sélectionner les dates et heures de début et de fin",
+      "endAfterStart": "L'heure de fin doit être après l'heure de début"
+    },
+    "errors": {
+      "loadFailed": "Impossible de charger le planning du personnel"
+    }
   },
   "receipt": {
     "header": {
@@ -4502,7 +4818,85 @@
       }
     }
   },
+  "customerDisplay": {
+    "title": "Affichage client",
+    "subtitle": "États de commande en direct pour les écrans clients",
+    "loading": "Chargement de l'affichage client...",
+    "empty": "Aucune commande active à afficher pour le moment.",
+    "orderLine": "Commande ({{number}}) {{status}}",
+    "displaySession": "Session d'affichage",
+    "phases": {
+      "received": "Reçue",
+      "preparing": "En préparation",
+      "ready": "Prête"
+    },
+    "sentences": {
+      "received": "reçue",
+      "preparing": "en préparation",
+      "ready": "prête"
+    },
+    "descriptions": {
+      "received": "Commande reçue",
+      "preparing": "La cuisine prépare la commande",
+      "ready": "Prête pour retrait"
+    },
+    "actions": {
+      "copyTvLink": "Copier le lien TV",
+      "externalDisplay": "Écran externe",
+      "stopExternal": "Arrêter l'écran"
+    },
+    "external": {
+      "monitors": "Moniteurs et TV connectés",
+      "help": "Les écrans câblés et les écrans sans fil du système apparaissent ici. Pour les Smart TV sans mode moniteur, copiez le lien TV."
+    },
+    "status": {
+      "connected": "Connecté",
+      "enabled": "Activé",
+      "ready": "Prêt"
+    },
+    "notices": {
+      "externalRunning": "L'affichage client fonctionne sur le moniteur ou la TV sélectionné.",
+      "externalStopped": "Affichage client externe arrêté.",
+      "tvLinkCopied": "Lien TV copié. Ouvrez-le dans le navigateur d'une Smart TV ou d'un récepteur sans fil."
+    },
+    "errors": {
+      "fetchRowsFailed": "Impossible de charger les commandes de l'affichage client",
+      "startExternalFailed": "Impossible d'ouvrir l'affichage client externe",
+      "stopExternalFailed": "Impossible d'arrêter l'affichage client externe",
+      "createTvLinkFailed": "Impossible de créer le lien d'affichage TV"
+    }
+  },
   "kitchen": {
+    "title": "Affichage cuisine",
+    "subtitle": "Préparation des commandes en temps réel",
+    "pollingFallback": "Actualisation de secours",
+    "pending": "En attente",
+    "preparing": "En préparation",
+    "total": "Total",
+    "avgTime": "Temps moyen",
+    "min": "min",
+    "allStations": "Tout",
+    "justNow": "À l'instant",
+    "startPreparing": "Démarrer la préparation",
+    "markReady": "Marquer prête",
+    "orderBumped": "Commande mise à jour",
+    "bumpError": "Impossible de mettre à jour la commande",
+    "loadError": "Impossible de charger les commandes",
+    "noOrders": "Aucune commande active",
+    "noOrdersDesc": "Les nouvelles commandes apparaîtront ici automatiquement",
+    "externalDisplay": {
+      "copyTvLink": "Copier le lien TV",
+      "open": "Ouvrir sur un écran connecté",
+      "stop": "Arrêter l'écran externe",
+      "connectedDisplays": "Moniteurs et TV connectés",
+      "help": "Les écrans câblés et les écrans sans fil du système apparaissent ici. Pour les Smart TV sans mode moniteur, copiez le lien TV.",
+      "running": "L'affichage cuisine fonctionne sur le moniteur ou la TV sélectionné.",
+      "stopped": "Affichage cuisine externe arrêté.",
+      "openFailed": "Impossible d'ouvrir l'affichage cuisine",
+      "closeFailed": "Impossible de fermer l'affichage cuisine",
+      "tvLinkCopied": "Lien TV KDS copié. Ouvrez-le dans le navigateur d'une Smart TV ou d'un récepteur sans fil.",
+      "tvLinkFailed": "Impossible de créer le lien TV KDS"
+    },
     "liveDraft": {
       "badge": "Brouillon en direct",
       "subtitle": "Panier en cours de préparation",
@@ -4550,6 +4944,14 @@
     "earned": "[NEEDS FR TRANSLATION] Κερδισμένοι",
     "redeemed": "[NEEDS FR TRANSLATION] Εξαργυρωμένοι",
     "canRedeem": "[NEEDS FR TRANSLATION] Μπορεί να εξαργυρώσει",
+    "scan": {
+      "button": "Scanner",
+      "title": "Scanner un membre fidélité",
+      "description": "Scannez le code-barres de la carte fidélité, le code du lecteur NFC ou saisissez le code membre manuellement.",
+      "placeholder": "Carte, téléphone ou code membre",
+      "found": "Membre fidélité trouvé : {{name}}",
+      "notFound": "Aucun membre fidélité trouvé pour {{code}}"
+    },
     "errors": {
       "loadFailed": "[NEEDS FR TRANSLATION] Αποτυχία φόρτωσης δεδομένων πιστότητας"
     }
@@ -4639,6 +5041,14 @@
     "discountValue": "Valeur de la remise",
     "percentage": "Pourcentage",
     "fixed": "Montant fixe",
+    "scan": {
+      "button": "Scanner",
+      "title": "Scanner un coupon",
+      "description": "Scannez un code-barres de coupon ou saisissez le code pour le trouver immédiatement.",
+      "placeholder": "Code coupon ou code-barres",
+      "found": "Coupon {{code}} trouvé",
+      "notFound": "Aucun coupon trouvé pour {{code}}"
+    },
     "errors": {
       "loadFailed": "Échec du chargement des coupons",
       "saveFailed": "Échec de l'enregistrement du coupon",
@@ -4652,6 +5062,28 @@
       "invalidMinOrder": "Le montant minimum de commande est invalide",
       "invalidExpiry": "La date d'expiration est invalide"
     }
+  },
+  "scannerPanel": {
+    "hardwareScanner": "Scanner de code-barres",
+    "serialConnected": "Scanner série connecté",
+    "keyboardReady": "Scanner USB clavier prêt",
+    "lastScan": "Dernier scan",
+    "camera": "Caméra",
+    "cameraUnsupported": "La détection de caméra n'est pas disponible sur cet appareil.",
+    "cameraDetectionFailed": "Impossible de vérifier les caméras connectées.",
+    "cameraBarcodeUnavailable": "La détection de code-barres n'est pas disponible pour cette caméra sur cet appareil.",
+    "checkingDevices": "Vérification des appareils...",
+    "cameraCount": "{{count}} caméra détectée",
+    "noCamera": "Aucune caméra détectée",
+    "loyaltyReaderConnected": "Lecteur de carte fidélité connecté",
+    "loyaltyReaderReady": "Le lecteur de carte fidélité écoute tant que ce scanner est ouvert",
+    "scanNow": "Scanner maintenant",
+    "scanHelp": "Scannez avec un lecteur de code-barres, utilisez la caméra ou saisissez le code manuellement.",
+    "submit": "Utiliser le code",
+    "cameraScan": "Scan caméra",
+    "checkAgain": "Vérifier les appareils",
+    "noBarcodeFound": "Aucun code-barres n'a été trouvé par la caméra.",
+    "cameraScanFailed": "Impossible de scanner cette image de code-barres."
   },
   "ecr": {
     "title": "Terminaux de paiement",
@@ -5026,7 +5458,8 @@
     },
     "messages": {
       "actionSucceeded": "Action terminée avec succès.",
-      "actionFailed": "L'action a échoué. Vérifiez les détails du problème et réessayez."
+      "actionFailed": "L'action a échoué. Vérifiez les détails du problème et réessayez.",
+      "orderPaymentOpenFailed": "Impossible d'ouvrir l'écran de paiement de la commande bloquée."
     },
     "actions": {
       "refresh": {
@@ -5103,8 +5536,16 @@
       "requeueFailedAdjustmentLegacyValidationRows": {
         "label": "Réenfiler les ajustements de validation legacy"
       },
+      "openOrderPaymentFix": {
+        "label": "Ouvrir le paiement de la commande",
+        "description": "Ouvre la commande bloquée afin que le paiement manquant ou impayé puisse être corrigé directement."
+      },
+      "contactDev": {
+        "label": "Contacter Dev",
+        "description": "Exporte des diagnostics sûrs et prépare ce blocage pour le support développeur."
+      },
       "contactOperator": {
-        "label": "Contacter l'operator"
+        "label": "Contacter Dev"
       },
       "confirmTitle": "Confirmer l'action de récupération",
       "confirmMessage": "Cette action modifie les données locales de récupération pour le problème sélectionné."
@@ -5122,14 +5563,70 @@
       "title": "Récupération en libre-service",
       "subtitle": "Utilisez des actions de réparation guidées pour résoudre les problèmes de synchronisation bloqués sans quitter le POS.",
       "needsAttentionTitle": "Nécessite une attention",
-      "needsAttentionSubtitle": "Problèmes bloquants qui nécessitent actuellement une réparation ou l'intervention de l'operator.",
+      "needsAttentionSubtitle": "Problèmes bloquants qui nécessitent actuellement une réparation ou l'aide de Dev.",
       "noBlockingIssues": "Aucun problème de récupération bloquant n'est actuellement visible.",
       "recoveringTitle": "En récupération",
       "recoveringSubtitle": "Problèmes en file, différés ou prêts pour une nouvelle tentative de synchronisation.",
       "noRecoveringIssues": "Aucun problème en récupération n'est actuellement visible.",
       "recentActionsTitle": "Résolu récemment",
       "recentActionsSubtitle": "Chaque tentative de réparation est auditée localement afin que le personnel voie ce qui a été essayé et ce qui a réussi.",
-      "noRecentActions": "Aucune action de récupération n'a encore été enregistrée."
+      "noRecentActions": "Aucune action de récupération n'a encore été enregistrée.",
+      "guidedTitle": "Récupération de synchronisation",
+      "guidedSubtitle": "Le POS vérifie le blocage, propose la solution connue la plus sûre, puis vérifie à nouveau la synchronisation.",
+      "blockedCount": "{{count}} bloquant",
+      "terminalContextLine": "Terminal {{terminalId}}",
+      "remainingIssues": "{{count}} problèmes visibles",
+      "noVisibleBlockerTitle": "Rien ne bloque la synchronisation",
+      "noVisibleBlockerDescription": "Aucune commande, paiement ou ligne de file ne nécessite actuellement une récupération manuelle.",
+      "whatBlocksTitle": "Ce qui bloque la synchronisation",
+      "otherIssuesWaiting": "+{{count}} autres",
+      "automaticSolutionTitle": "Solution automatique",
+      "noKnownSolutionTitle": "Pas encore de correction en un clic",
+      "noKnownSolutionDescription": "Le POS peut expliquer le blocage et préparer des diagnostics pour le support Dev.",
+      "backupBeforeFix": "Une sauvegarde de récupération est créée avant que cette action ne modifie les données locales de synchronisation.",
+      "verificationTitle": "Vérification après correction",
+      "genericVerificationDescription": "Après chaque action, le POS actualise les diagnostics et indique si la file peut continuer.",
+      "lastActionSucceeded": "Dernière action réussie",
+      "lastActionFailed": "Dernière action échouée",
+      "advancedDetailsTitle": "Détails avancés",
+      "systemStatusTitle": "État de synchronisation du système",
+      "systemStatusSubtitle": "Une vue simple de ce qui se passe, pourquoi des commandes peuvent être bloquées et quelle est l’action la plus sûre.",
+      "noFixNeededTitle": "Aucune correction nécessaire",
+      "noFixNeededDescription": "L’application n’a trouvé aucune erreur connue à réparer. Si une commande vient d’être modifiée, lancez la synchronisation puis vérifiez à nouveau.",
+      "healthyVerificationDescription": "Actualisez ce panneau pour vérifier que la file reste vide après le prochain cycle de synchronisation.",
+      "advancedDiagnosticsTitle": "Fichier de diagnostic",
+      "diagnosticFileTitle": "Fichier de diagnostic",
+      "diagnosticFileHeadline": "Les détails techniques sont enregistrés dans un fichier",
+      "diagnosticFileDescription": "Pour garder cet écran simple, les compteurs de file, lignes de parity, état des imprimantes, détails de base de données, journaux, codes de problème, ids de commande et dernier résultat de récupération sont inclus dans le bundle de diagnostic exporté au lieu d’être affichés ici.",
+      "diagnosticFilePrivacy": "Utilisez-le lorsque Contact Dev demande des détails de support. Les champs sensibles sont gérés par les paramètres d’export.",
+      "exportDiagnosticFile": "Exporter le fichier de diagnostic"
+    },
+    "recipes": {
+      "checkoutPaymentOpenPayment": {
+        "label": "Le paiement doit être corrigé dans la commande",
+        "explanation": "C'est un blocage de paiement connu. La correction sûre consiste à rouvrir l'écran de paiement de la commande au lieu de créer automatiquement un paiement.",
+        "verification": "Après l'enregistrement du paiement, actualisez la récupération et relancez la synchronisation. Les commandes suivantes continueront quand cette commande ne bloquera plus la file."
+      },
+      "paymentTotalConflictRepair": {
+        "label": "Réparation connue d'écart paiement/commande",
+        "explanation": "Cette recette actualise la mise à jour de la commande parente, garde les données financières locales intactes et réessaie la ligne de paiement rejetée.",
+        "verification": "La ligne de paiement doit quitter la file en échec après la nouvelle tentative."
+      },
+      "invalidDriverOrderUpdateRepair": {
+        "label": "Réparation connue de chauffeur obsolète",
+        "explanation": "Cette recette retire uniquement l'ancien ID chauffeur du payload de nouvelle tentative et conserve la mise à jour de commande.",
+        "verification": "La mise à jour de commande doit se relancer sans le blocage de chauffeur invalide."
+      },
+      "orderUpdateReplayRepair": {
+        "label": "Réparation connue de replay commande",
+        "explanation": "Cette recette réessaie d'abord les mises à jour de commande compatibles, puis promeut les paiements dépendants seulement après le nettoyage des lignes parentes.",
+        "verification": "Les paiements dépendants doivent se débloquer après la synchronisation de la mise à jour de commande parente."
+      },
+      "catalogAvailabilityRetry": {
+        "label": "Nouvelle tentative connue de disponibilité catalogue",
+        "explanation": "Cette recette réessaie uniquement les flags de disponibilité lorsque la route admin prend en charge cette mise à jour.",
+        "verification": "Les lignes de disponibilité catalogue doivent quitter la file en échec après la nouvelle tentative."
+      }
     },
     "issues": {
       "invalidOrders": {
@@ -5140,7 +5637,7 @@
       "syncBlocker": {
         "title": "Ligne de synchro bloquée pour {{entityType}}",
         "summary": "Une ligne de file est bloquée par {{blockerReason}} et nécessite encore une nouvelle tentative ou une réparation manuelle.",
-        "guidance": "Réessayez d'abord la ligne de synchro bloquée. Si le même blocage revient, contactez l'operator avec la raison du blocage et les détails de la file."
+        "guidance": "Réessayez d'abord la ligne de synchro bloquée. Si le même blocage revient, contactez Dev avec la raison du blocage et les détails de la file."
       },
       "parityMissingCredentials": {
         "title": "Les identifiants du terminal nécessitent une attention",
@@ -5150,7 +5647,7 @@
       "parityProcessorStalled": {
         "title": "Le processeur parity est bloqué",
         "summary": "Le dernier cycle parity a traité {{processed}} éléments et a laissé {{remaining}} éléments en file. Blocage actuel : {{reason}}.",
-        "guidance": "Lancez la synchronisation parity maintenant. Si le même backlog persiste, inspectez les problèmes parity par module ci-dessous ou contactez l'operator. Dernière erreur parity : {{reason}}."
+        "guidance": "Lancez la synchronisation parity maintenant. Si le même backlog persiste, inspectez les problèmes parity par module ci-dessous ou contactez Dev. Dernière erreur parity : {{reason}}."
       },
       "paymentTotalConflict": {
         "title": "Écart paiement/commande",
@@ -5205,12 +5702,12 @@
       "paymentAdjustmentMissingCanonicalRemotePayment": {
         "title": "Ajustement sans paiement distant canonique",
         "summary": "Le paiement parent est applied, mais son identifiant de paiement distant canonique manque encore.",
-        "guidance": "Lancez la réparation des lignes financières orphelines. Si l'ajustement ne peut toujours pas être lié au paiement backend, contactez l'operator."
+        "guidance": "Lancez la réparation des lignes financières orphelines. Si l'ajustement ne peut toujours pas être lié au paiement backend, contactez Dev."
       },
       "financialIntegrity": {
         "title": "Problème d'intégrité financière",
         "summary": "Un enregistrement de paiement ou d'ajustement doit être réparé avant la fin de la synchronisation.",
-        "guidance": "Utilisez l'action de récupération proposée si elle est disponible. Si le problème reste inchangé, contactez l'operator avec le reason code exact."
+        "guidance": "Utilisez l'action de récupération proposée si elle est disponible. Si le problème reste inchangé, contactez Dev avec le reason code exact."
       },
       "legacyFinancialParityOrphan": {
         "title": "Ligne de synchronisation financière legacy obsolète",
@@ -5220,7 +5717,7 @@
       "financialQueueFailed": {
         "title": "Ligne de synchro financière en échec",
         "summary": "Une ligne de synchro financière a échoué avec {{lastError}}.",
-        "guidance": "Utilisez l'action de récupération associée lorsqu'elle existe. Si le même échec revient après une nouvelle tentative, contactez l'operator."
+        "guidance": "Utilisez l'action de récupération associée lorsqu'elle existe. Si le même échec revient après une nouvelle tentative, contactez Dev."
       },
       "checkoutPaymentBlocker": {
         "title": "La commande bloque la clôture de caisse",
@@ -5228,9 +5725,14 @@
         "guidance": "{{suggestedFix}} Total {{totalAmount}}, encaissé {{settledAmount}}, restant {{outstandingAmount}}."
       },
       "contactOperatorFallback": {
-        "title": "Intervention de l'operator requise",
+        "title": "Intervention de Dev requise",
         "summary": "Un backlog de synchronisation est visible, mais aucune solution guidée n'est encore associée à cet échec précis.",
-        "guidance": "Contactez l'operator et joignez le bundle de diagnostics afin que la prochaine occurrence puisse être reliée à une solution guidée."
+        "guidance": "Contactez Dev et joignez le bundle de diagnostics afin que la prochaine occurrence puisse être reliée à une solution guidée."
+      },
+      "contactDevFallback": {
+        "title": "Intervention de Dev requise",
+        "summary": "Un backlog de synchronisation est visible, mais aucune solution guidée n'est encore associée à cet échec précis.",
+        "guidance": "Contactez Dev et joignez le bundle de diagnostics afin que la prochaine occurrence puisse être reliée à une solution guidée."
       }
     }
   },

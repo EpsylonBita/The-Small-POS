@@ -1919,7 +1919,7 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name,
                     delivery_address_id, delivery_latitude, delivery_longitude,
                     delivery_address_fingerprint, delivery_zone_id,
-                    owner_terminal_id, source_terminal_id
+                    owner_terminal_id, source_terminal_id, client_request_id
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
              ORDER BY created_at ASC",
@@ -2022,6 +2022,10 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "owner_terminal_id": row.get::<_, Option<String>>(55)?,
                 "sourceTerminalId": row.get::<_, Option<String>>(56)?,
                 "source_terminal_id": row.get::<_, Option<String>>(56)?,
+                "clientRequestId": row.get::<_, Option<String>>(57)?,
+                "client_request_id": row.get::<_, Option<String>>(57)?,
+                "clientOrderId": row.get::<_, Option<String>>(57)?,
+                "client_order_id": row.get::<_, Option<String>>(57)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -2092,7 +2096,7 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
                 delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name,
                 delivery_address_id, delivery_latitude, delivery_longitude,
-                delivery_address_fingerprint, delivery_zone_id
+                delivery_address_fingerprint, delivery_zone_id, client_request_id
         FROM orders WHERE id = ?1",
         params![id],
         |row| {
@@ -2186,6 +2190,10 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 "delivery_address_fingerprint": row.get::<_, Option<String>>(53)?,
                 "deliveryZoneId": row.get::<_, Option<String>>(54)?,
                 "delivery_zone_id": row.get::<_, Option<String>>(54)?,
+                "clientRequestId": row.get::<_, Option<String>>(55)?,
+                "client_request_id": row.get::<_, Option<String>>(55)?,
+                "clientOrderId": row.get::<_, Option<String>>(55)?,
+                "client_order_id": row.get::<_, Option<String>>(55)?,
             }))
         },
     );
@@ -3920,18 +3928,50 @@ async fn force_sync_once(
 
     match run_sync_cycle_with_auth_guard(db, sync_state, app, "force_sync").await {
         RemoteAuthExecutionOutcome::Success(synced) => {
-            info!("Force sync complete: {synced} items synced");
+            let parity_synced = force_parity_sync_once(db, app).await?;
+            let total_synced = synced + parity_synced;
+            info!(
+                legacy_synced = synced,
+                parity_synced, total_synced, "Force sync complete"
+            );
 
             if let Ok(mut guard) = sync_state.last_sync.lock() {
                 *guard = Some(Utc::now().to_rfc3339());
             }
 
-            Ok(synced)
+            Ok(total_synced)
         }
         RemoteAuthExecutionOutcome::Paused(error) => Err(error),
         RemoteAuthExecutionOutcome::Reset(error) => Err(error),
         RemoteAuthExecutionOutcome::Failed(error) => Err(error),
     }
+}
+
+async fn force_parity_sync_once(db: &DbState, app: &AppHandle) -> Result<usize, String> {
+    let admin_url = match storage::get_credential("admin_dashboard_url") {
+        Some(url) => url,
+        None => return Ok(0),
+    };
+    let api_key = match load_zeroized_pos_api_key_optional() {
+        Some(key) => key,
+        None => return Ok(0),
+    };
+
+    let result = sync_queue::process_queue(&db.conn, admin_url.as_str(), api_key.as_str()).await?;
+    for dead_letter in &result.monetary_dead_letters {
+        let _ = app.emit("sync:dead-letter:monetary", dead_letter);
+    }
+
+    if result.failed > 0 || result.conflicts > 0 {
+        warn!(
+            processed = result.processed,
+            failed = result.failed,
+            conflicts = result.conflicts,
+            "Force sync parity queue finished with unresolved items"
+        );
+    }
+
+    Ok(result.processed.max(0) as usize)
 }
 
 /// Trigger an immediate sync cycle (called by `sync_force`).

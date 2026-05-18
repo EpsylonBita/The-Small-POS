@@ -31,6 +31,8 @@ struct StaffSchedulePayload {
     start_date: Option<String>,
     #[serde(default, alias = "end_date")]
     end_date: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -674,14 +676,21 @@ pub async fn branch_data_get_staff_schedule(
         .unwrap_or_default()
         .unwrap_or_default();
     let branch_id = resolve_branch_id(&db, payload.branch_id)?;
-    let scope_key =
-        normalize_scope_key(&[payload.start_date.as_deref(), payload.end_date.as_deref()]);
+    let role = trimmed(payload.role);
+    let scope_key = normalize_scope_key(&[
+        payload.start_date.as_deref(),
+        payload.end_date.as_deref(),
+        role.as_deref(),
+    ]);
     let mut query = vec![format!("branch_id={branch_id}")];
     if let Some(start_date) = trimmed(payload.start_date) {
         query.push(format!("start_date={start_date}"));
     }
     if let Some(end_date) = trimmed(payload.end_date) {
         query.push(format!("end_date={end_date}"));
+    }
+    if let Some(role) = role {
+        query.push(format!("role={role}"));
     }
     let path = format!("/api/pos/staff-schedule?{}", query.join("&"));
     fetch_branch_scoped_payload(&db, &branch_id, CACHE_KEY_STAFF_SCHEDULE, &scope_key, path).await

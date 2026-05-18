@@ -3,16 +3,13 @@ import {
   AlertTriangle,
   BadgeDollarSign,
   ClipboardList,
-  Clock3,
   Euro,
   FileText,
   Pencil,
   Receipt,
   RefreshCw,
   Trash2,
-  UserRound,
   Users,
-  Wallet,
 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
@@ -357,8 +354,6 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
   const cashierShift = cashierContext.cashierShift;
   const cashierShiftSyncState = cashierContext.cashierShiftSyncState;
-  const displayBranchName = cashierContext.branchName || cashierContext.branchId || '-';
-  const displayTerminalName = cashierContext.terminalName || cashierContext.terminalId;
   const canRecord = Boolean(cashierShift?.id) && !resolving;
   const currentCashierStaffId = cashierShift?.staff_id || staff?.databaseStaffId || staff?.staffId || '';
   const editingPayment = useMemo(
@@ -460,6 +455,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     resolveCashierShiftSyncMessage,
     t,
   ]);
+  const showCashierAttention = !cashierShift || cashierShiftSyncBanner?.variant === 'failed';
 
   const totalExpenses = useMemo(
     () => expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0),
@@ -1209,193 +1205,66 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         contentClassName="space-y-6"
         ariaLabel={t('modals.expense.title', 'Drawer Outflows')}
       >
-        <div className="rounded-[28px] border border-slate-200/70 bg-white/75 p-5 shadow-[0_18px_60px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/70 dark:shadow-[0_24px_80px_rgba(2,6,23,0.42)]">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-2">
-            <p className="text-sm text-slate-500 dark:text-slate-400">
-              {t('modals.expense.subtitle', 'Charge expenses and staff payments to the active cashier drawer.')}
-            </p>
-            <p className="text-sm font-medium text-slate-600 dark:text-slate-300">
-              {t('modals.expense.drawerImpactNote', 'Both tabs below reduce the active cashier drawer for this terminal.')}
-            </p>
-          </div>
-
-          <div className="w-full max-w-md space-y-2 lg:w-[360px]">
-            <div
-              className={`text-sm font-semibold lg:text-right ${
-                cashierShift
-                  ? 'text-emerald-600 dark:text-emerald-300'
-                  : 'text-amber-600 dark:text-amber-300'
-              }`}
-            >
-              {cashierShift
-                ? t('modals.expense.activeCashier', 'Active cashier drawer')
-                : t('modals.expense.noActiveCashier', 'No active cashier drawer')}
-            </div>
-            <div className={`grid gap-2 ${displayTerminalName ? 'grid-cols-2' : 'grid-cols-1'}`}>
-              {displayTerminalName && (
-                <div className="flex h-14 items-center rounded-2xl border border-sky-200/80 bg-sky-50/85 px-4 text-sm font-semibold text-sky-700 shadow-[0_12px_34px_rgba(14,116,144,0.12)] dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-200">
-                  <span className="truncate">
-                    {t('modals.expense.terminalLabel', 'Terminal')}: {displayTerminalName}
-                  </span>
+      {showCashierAttention && (
+        <div
+          className={`rounded-2xl border px-4 py-3 ${
+            !cashierShift || cashierShiftSyncBanner?.variant === 'failed'
+              ? 'border-amber-300/70 bg-amber-50/90 text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100'
+              : 'border-sky-200/80 bg-sky-50/90 text-sky-900 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-100'
+          }`}
+        >
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="mt-0.5 shrink-0">
+                {!cashierShift || cashierShiftSyncBanner?.variant === 'failed' ? (
+                  <AlertTriangle className="h-5 w-5" />
+                ) : (
+                  <RefreshCw className="h-5 w-5" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-black">
+                  {!cashierShift
+                    ? t('modals.expense.noActiveCashier', 'No active cashier drawer')
+                    : cashierShiftSyncBanner?.title}
                 </div>
-              )}
-              <POSGlassButton
-                type="button"
-                variant="secondary"
-                icon={<RefreshCw className="h-4 w-4" />}
-                disabled={resolving}
-                className={`!h-14 !justify-center !rounded-2xl !px-4 ${
-                  displayTerminalName ? '!w-full' : '!w-full'
-                }`}
-                onClick={() => {
-                  void refreshModalData();
-                }}
-              >
-                {t('common.refresh', 'Refresh')}
-              </POSGlassButton>
+                <div className="mt-1 text-sm font-medium opacity-85">
+                  {!cashierShift
+                    ? cashierWarning ||
+                      t(
+                        'modals.expense.noActiveCashierDetail',
+                        'Start a cashier shift on this terminal before recording drawer outflows.',
+                      )
+                    : cashierShiftSyncBanner?.message}
+                </div>
+                {cashierShiftSyncBanner && cashierShiftDisplaySyncStatus && (
+                  <div className="mt-2 text-xs font-semibold opacity-75">
+                    {t('modals.expense.cashierShiftSyncStatusLabel', {
+                      defaultValue: 'Local sync status',
+                    })}
+                    : {cashierShiftDisplaySyncStatus.replace(/_/g, ' ')}
+                  </div>
+                )}
+              </div>
             </div>
+            <POSGlassButton
+              type="button"
+              variant="secondary"
+              icon={<RefreshCw className="h-4 w-4" />}
+              disabled={resolving}
+              className="!h-11 !shrink-0 !justify-center !rounded-xl !px-4"
+              onClick={() => {
+                void refreshModalData();
+              }}
+            >
+              {t('common.refresh', 'Refresh')}
+            </POSGlassButton>
           </div>
         </div>
+      )}
 
-        {cashierShift ? (
-          <>
-            <div className="mt-5 grid gap-3 lg:grid-cols-3">
-              <div className="rounded-2xl border border-emerald-200/70 bg-emerald-50/85 p-4 dark:border-emerald-500/20 dark:bg-emerald-500/10">
-                <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-300">
-                  <UserRound className="h-4 w-4" />
-                  <span className="text-xs font-semibold uppercase tracking-[0.16em]">
-                    {t('modals.expense.cashierLabel', 'Cashier')}
-                  </span>
-                </div>
-                <div className="mt-3 text-lg font-black text-slate-900 dark:text-white">
-                  {cashierShift.staff_name || staff?.name || t('common.roleNames.cashier', 'Cashier')}
-                </div>
-                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                  {t('common.roleNames.cashier', 'Cashier')}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-sky-200/70 bg-sky-50/85 p-4 dark:border-sky-500/20 dark:bg-sky-500/10">
-                <div className="flex items-center gap-2 text-sky-600 dark:text-sky-300">
-                  <Wallet className="h-4 w-4" />
-                  <span className="text-xs font-semibold uppercase tracking-[0.16em]">
-                    {t('modals.expense.branchLabel', 'Branch')}
-                  </span>
-                </div>
-                <div className="mt-3 break-all text-base font-bold text-slate-900 dark:text-white">
-                  {displayBranchName}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-violet-200/70 bg-violet-50/85 p-4 dark:border-violet-500/20 dark:bg-violet-500/10">
-                <div className="flex items-center gap-2 text-violet-600 dark:text-violet-300">
-                  <Clock3 className="h-4 w-4" />
-                  <span className="text-xs font-semibold uppercase tracking-[0.16em]">
-                    {t('modals.expense.shiftStartedLabel', 'Shift started')}
-                  </span>
-                </div>
-                <div className="mt-3 text-base font-bold text-slate-900 dark:text-white">
-                  {formatDateTime(cashierShift.check_in_time, {
-                    day: '2-digit',
-                    month: 'short',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                </div>
-              </div>
-            </div>
-
-            {cashierShiftSyncBanner && (
-              <div
-                className={`mt-5 rounded-3xl border p-5 ${
-                  cashierShiftSyncBanner.variant === 'failed'
-                    ? 'border-amber-300/70 bg-amber-50/90 dark:border-amber-500/20 dark:bg-amber-500/10'
-                    : 'border-sky-200/80 bg-sky-50/90 dark:border-sky-500/20 dark:bg-sky-500/10'
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <div
-                    className={`rounded-2xl p-3 ${
-                      cashierShiftSyncBanner.variant === 'failed'
-                        ? 'bg-amber-100/90 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300'
-                        : 'bg-sky-100/90 text-sky-600 dark:bg-sky-500/20 dark:text-sky-300'
-                    }`}
-                  >
-                    {cashierShiftSyncBanner.variant === 'failed' ? (
-                      <AlertTriangle className="h-5 w-5" />
-                    ) : (
-                      <RefreshCw className="h-5 w-5" />
-                    )}
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">
-                      {cashierShiftSyncBanner.title}
-                    </h3>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                      {cashierShiftSyncBanner.message}
-                    </p>
-                    <div
-                      className={`mt-3 flex flex-wrap gap-2 text-xs font-semibold ${
-                        cashierShiftSyncBanner.variant === 'failed'
-                          ? 'text-amber-800 dark:text-amber-100'
-                          : 'text-sky-800 dark:text-sky-100'
-                      }`}
-                    >
-                      <span
-                        className={`rounded-lg border bg-white/60 px-3 py-1.5 dark:bg-black/10 ${
-                          cashierShiftSyncBanner.variant === 'failed'
-                            ? 'border-amber-300/70 dark:border-amber-500/20'
-                            : 'border-sky-300/70 dark:border-sky-500/20'
-                        }`}
-                      >
-                        {t('modals.expense.cashierShiftIdLabel', {
-                          defaultValue: 'Cashier shift',
-                        })}
-                        : {cashierShift.id}
-                      </span>
-                      <span
-                        className={`rounded-lg border bg-white/60 px-3 py-1.5 dark:bg-black/10 ${
-                          cashierShiftSyncBanner.variant === 'failed'
-                            ? 'border-amber-300/70 dark:border-amber-500/20'
-                            : 'border-sky-300/70 dark:border-sky-500/20'
-                        }`}
-                      >
-                        {t('modals.expense.cashierShiftSyncStatusLabel', {
-                          defaultValue: 'Local sync status',
-                        })}
-                        : {cashierShiftDisplaySyncStatus.replace(/_/g, ' ')}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="mt-5 rounded-3xl border border-amber-300/70 bg-amber-50/90 p-5 dark:border-amber-500/20 dark:bg-amber-500/10">
-            <div className="flex items-start gap-3">
-              <div className="rounded-2xl bg-amber-100/90 p-3 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300">
-                <AlertTriangle className="h-5 w-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">
-                  {t('modals.expense.noActiveCashier', 'No active cashier drawer')}
-                </h3>
-                <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                  {cashierWarning ||
-                    t(
-                      'modals.expense.noActiveCashierDetail',
-                      'Start a cashier shift on this terminal before recording drawer outflows.',
-                    )}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap gap-2">
         {([
           { key: 'expenses', label: t('modals.expense.tabs.expenses', 'Expenses'), icon: <Receipt className="h-4 w-4" /> },
           { key: 'staffPayments', label: t('modals.expense.tabs.staffPayments', 'Staff Payments'), icon: <Users className="h-4 w-4" /> },
@@ -1418,6 +1287,21 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             </button>
           );
         })}
+        </div>
+        {cashierShift && !showCashierAttention && (
+          <POSGlassButton
+            type="button"
+            variant="secondary"
+            icon={<RefreshCw className="h-4 w-4" />}
+            disabled={resolving}
+            className="!h-11 !justify-center !rounded-xl !px-4"
+            onClick={() => {
+              void refreshModalData();
+            }}
+          >
+            {t('common.refresh', 'Refresh')}
+          </POSGlassButton>
+        )}
       </div>
 
       {activeTab === 'expenses' && (

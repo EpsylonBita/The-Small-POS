@@ -952,7 +952,7 @@ test('recovery maps legacy financial parity orphans to the local clear action', 
   assert.ok(issue, 'legacy orphan issue should be present');
   assert.deepEqual(
     issue?.actions.map((action) => action.id),
-    ['clearLegacyFinancialOrphan', 'contactOperator'],
+    ['clearLegacyFinancialOrphan', 'contactDev'],
   );
 });
 

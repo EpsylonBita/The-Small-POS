@@ -131,7 +131,10 @@
       "manager": "Manager",
       "admin": "Admin",
       "staff": "Staff"
-    }
+    },
+    "close": "Close",
+    "retry": "Retry",
+    "refresh": "Refresh"
   },
   "dashboard": {
     "tabs": {
@@ -2168,6 +2171,31 @@
       "pending": "Pending",
       "conflict": "Conflict"
     },
+    "closeoutStages": {
+      "pre_z_report_sync": "pre-Z-report sync",
+      "z_report_submission": "Z-report submission",
+      "closeout_sync": "closeout sync"
+    },
+    "blockerReasons": {
+      "pending": "waiting to sync",
+      "processing": "syncing now",
+      "in_progress": "syncing now",
+      "failed": "sync failed",
+      "conflict": "sync conflict",
+      "deferred": "waiting for a required parent record",
+      "queued_remote": "waiting for admin confirmation",
+      "retrying": "waiting for retry",
+      "parent_payment_not_synced": "parent payment is not synced yet",
+      "parent_payment_missing_canonical_remote_id": "parent payment is missing its admin id",
+      "ambiguous_canonical_remote_payment": "parent payment matched more than one admin payment",
+      "Payment not yet synced": "parent payment is not synced yet",
+      "Parent payment missing canonical remote id": "parent payment is missing its admin id",
+      "Ambiguous canonical remote payment": "parent payment matched more than one admin payment"
+    },
+    "closeoutBlocked": {
+      "single": "Cannot close the day during {{stage}} because {{orderReference}} is still blocked: {{reason}}.",
+      "multiple": "Cannot close the day during {{stage}} because {{count}} sync items are still blocked."
+    },
     "time": {
       "never": "Never",
       "justNow": "just now",
@@ -2396,6 +2424,8 @@
     "recoveryCenter": {
       "title": "Recovery Center",
       "subtitle": "Uses the same sync-health diagnostics and adds guided repair actions for the visible problems.",
+      "guidedTitle": "Sync recovery assistant",
+      "guidedContextNote": "Start with the first blocker. If a known fix exists, the POS can run it or open the exact screen needed to fix the order.",
       "contextNote": "This recovery view stays in sync with the same blockers shown by the sync explanation panel.",
       "noIssues": "No actionable recovery issues are currently visible.",
       "credentialsTitle": "Credentials need attention",
@@ -2417,8 +2447,8 @@
       "paymentsSection": "Payments",
       "staffSection": "Staff and drivers",
       "refreshSuccess": "Recovery status refreshed",
-      "contactOperator": "Contact operator",
-      "contactOperatorDetail": "This issue does not have a guided unblock yet. Contact an operator and add a dedicated fix for this blocker type so the next occurrence can be recovered directly from this screen."
+      "contactOperator": "Contact Dev",
+      "contactOperatorDetail": "This issue does not have a guided unblock yet. Contact Dev and include diagnostics so the next occurrence can be mapped to a one-click fix."
     }
   },
   "modals": {
@@ -2962,7 +2992,43 @@
       "periodSince": "Period since: {{date}} {{time}}",
       "loadFailed": "Failed to load Z Report",
       "loading": "Loading report…",
+      "refresh": "Refresh report",
+      "closeoutChecklist": "Closeout Checklist",
+      "moneyReconciliation": "Money Reconciliation",
+      "reviewBeforeClose": "Review before closing",
+      "actionPanelTitle": "Commit Closeout",
+      "commitHelp": "Commit closes the local business day, forces pending sync items, and sends the Z report to the admin dashboard.",
+      "secondaryActions": "Exports and print",
+      "reviewItems": "Review items",
+      "closeoutLoading": "Checking report",
+      "readyToClose": "Ready to close",
+      "needsAttention": "Needs review",
+      "adminSync": "Admin sync",
+      "syncChecking": "Checking local and admin sync state.",
+      "syncReady": "No sync blocker detected.",
+      "syncNeedsRetry": "Report load or sync failed. Refresh and retry before closing.",
+      "paymentsCaptured": "Payments captured",
+      "paymentsReady": "All order payments are balanced.",
+      "paymentsNeedAction": "{{count}} payment blocker(s) must be resolved before commit.",
+      "cashDrawerReady": "Cash drawer totals are balanced.",
+      "cashDrawerNeedsReview": "{{drawers}} drawer(s) unreconciled. Variance: {{variance}}.",
+      "expensesReady": "No pending expense review.",
+      "expensesNeedReview": "{{count}} expense item(s) still need review.",
+      "staffReady": "Staff shifts are available for this report.",
+      "staffNeedsMainTerminal": "Only the main POS can execute this Z report.",
+      "drawerVariance": "Drawer Variance",
+      "closeoutSummary": "Closeout Summary",
+      "operatingSignals": "Operating Signals",
+      "cashFlow": "Cash Flow",
+      "netCashPosition": "Net Cash Position",
+      "expectedCash": "Expected Cash",
+      "staffLedger": "Staff Ledger",
+      "drawerLedger": "Drawer Ledger",
+      "expenseLedger": "Expense Ledger",
+      "noStaffReports": "No staff reports available",
+      "cancelled": "Cancelled",
       "tabs": {
+        "overview": "Overview",
         "summary": "Summary",
         "staff": "Staff Performance",
         "details": "Details"
@@ -3504,6 +3570,7 @@
     "status": "Status",
     "ingredient": "Ingredient",
     "category": "Category",
+    "noCategory": "No category",
     "stock": "Stock",
     "minLevel": "Min Level",
     "value": "Value",
@@ -3515,6 +3582,43 @@
     "reason": "Reason",
     "notes": "Notes",
     "notesPlaceholder": "Add notes about this adjustment...",
+    "history": {
+      "open": "View price and movement history",
+      "title": "Price and movement history",
+      "currentStock": "Current stock",
+      "currentCost": "Current cost",
+      "purchased": "Purchased",
+      "used": "Used / removed",
+      "priceHistory": "Supplier price history",
+      "priceHistoryDescription": "Each supplier invoice purchase is kept here so cost changes are visible.",
+      "noPriceHistory": "No supplier purchase history yet.",
+      "movements": "Stock movements",
+      "noMovements": "No stock movements recorded yet.",
+      "date": "Date",
+      "invoice": "Invoice",
+      "supplier": "Supplier",
+      "quantity": "Qty",
+      "unitCost": "Unit cost",
+      "change": "Change",
+      "priceChange": {
+        "initial": "Initial",
+        "same": "Same"
+      },
+      "movementTypes": {
+        "purchase": "Purchase",
+        "adjustment": "Adjustment",
+        "count": "Stock count",
+        "sale": "Sale",
+        "waste": "Waste",
+        "transfer": "Transfer",
+        "return": "Return"
+      },
+      "errors": {
+        "loadFailed": "Failed to load item history",
+        "endpointUnavailable": "Inventory history API is not available on the connected admin dashboard. Restart or update the admin dashboard, then try again.",
+        "itemNotFound": "Inventory item was not found on the connected admin dashboard."
+      }
+    },
     "reasons": {
       "count": "Stock Count",
       "received": "Received Delivery",
@@ -3999,7 +4103,7 @@
   },
   "suppliers": {
     "title": "Suppliers",
-    "subtitle": "Manage suppliers and invoices",
+    "subtitle": "Manage suppliers, invoices, and imported inventory",
     "total": "Total",
     "active": "Active",
     "inactive": "Inactive",
@@ -4010,7 +4114,11 @@
     "search": "Search suppliers...",
     "orders": "Orders",
     "spent": "Spent",
-    "invoice": "Invoice",
+    "invoice": {
+      "markAsUnpaid": "Mark unpaid",
+      "markedAsUnpaid": "Invoice marked as unpaid",
+      "markAsUnpaidFailed": "Failed to mark invoice as unpaid"
+    },
     "supplier": "Supplier",
     "amount": "Amount",
     "dueDate": "Due Date",
@@ -4032,7 +4140,12 @@
       "active": "Active",
       "inactive": "Inactive",
       "preferred": "Preferred",
-      "onHold": "On Hold"
+      "onHold": "On Hold",
+      "unpaid": "Unpaid",
+      "paid": "Paid",
+      "overdue": "Overdue",
+      "cancelled": "Cancelled",
+      "partial": "Partial"
     },
     "invoices": {
       "title": "Invoices",
@@ -4045,7 +4158,45 @@
         "unpaid": "Unpaid",
         "overdue": "Overdue",
         "partiallyPaid": "Partially Paid"
-      }
+      },
+      "markPaid": "Paid",
+      "markUnpaid": "Unpaid",
+      "markedPaid": "Invoice marked paid",
+      "markedUnpaid": "Invoice marked unpaid",
+      "statusFailed": "Could not update invoice status",
+      "emptyTitle": "No invoices found",
+      "emptyDescription": "Supplier invoices will appear here when they sync from the admin dashboard.",
+      "partialPayment": "Partial",
+      "detailsTitle": "Invoice details",
+      "totalSpent": "Total spent",
+      "paidTotal": "Paid total",
+      "unpaidTotal": "Unpaid total",
+      "invoiceCount": "Invoices",
+      "paidAmount": "Paid",
+      "remaining": "Remaining",
+      "paymentOptions": "Payment options",
+      "paymentAmount": "Payment amount",
+      "paymentMethod": "Payment method",
+      "paymentDate": "Payment date",
+      "reference": "Reference",
+      "paymentNotes": "Payment notes",
+      "recordPayment": "Record payment",
+      "payRemaining": "Pay remaining",
+      "payments": "Payments",
+      "noPayments": "No payments recorded yet",
+      "noPaymentNeeded": "This invoice has no remaining balance.",
+      "paymentRecorded": "Payment recorded",
+      "paymentFailed": "Could not record payment",
+      "paymentAmountRequired": "Enter a payment amount",
+      "paymentAmountTooHigh": "Payment is higher than the remaining amount",
+      "methods": {
+        "cash": "Cash",
+        "bankTransfer": "Bank transfer",
+        "check": "Check",
+        "creditCard": "Credit card",
+        "other": "Other"
+      },
+      "invoiceDate": "Invoice date"
     },
     "actions": {
       "viewDetails": "View Details",
@@ -4089,6 +4240,93 @@
       "equipment": "Equipment",
       "cleaning": "Cleaning Supplies",
       "other": "Other"
+    },
+    "unpaid": "Unpaid",
+    "noCategory": "No category",
+    "unknownSupplier": "Unknown supplier",
+    "code": "Code",
+    "phone": "Phone",
+    "email": "Email",
+    "address": "Address",
+    "paymentTerms": "Payment terms",
+    "noSelection": "No supplier selected",
+    "empty": {
+      "title": "No suppliers found",
+      "description": "Add or import supplier items to start syncing inventory."
+    },
+    "detail": {
+      "title": "Supplier detail",
+      "emptyTitle": "Pick a supplier",
+      "emptyDescription": "Supplier contact and invoice information will show here."
+    },
+    "import": {
+      "open": "Import items",
+      "title": "Import supplier items",
+      "subtitle": "Review imported rows before syncing them to inventory.",
+      "supplierName": "Supplier name",
+      "supplierPlaceholder": "Fresh Farms",
+      "supplierPhone": "Phone",
+      "supplierEmail": "Email",
+      "supplierNotes": "Supplier notes from invoice",
+      "invoiceNumber": "Invoice number",
+      "invoiceDate": "Invoice date",
+      "sources": "Import source",
+      "addRows": "Add rows",
+      "manualRow": "Manual row",
+      "file": "Excel, CSV, PDF, DOC",
+      "camera": "Camera scan",
+      "adminNoScanner": "Scanner and camera actions are available only on POS terminals.",
+      "hardwareScanner": "Hardware scanner",
+      "hardwareHelp": "Open this drawer and scan. The barcode is added automatically.",
+      "barcodePlaceholder": "Barcode",
+      "addBarcode": "Add barcode",
+      "scanAdded": "Barcode added to review",
+      "cameraUnavailable": "Camera barcode detection is not available on this device",
+      "noBarcodeFound": "No barcode was found in the image",
+      "cameraFailed": "Unable to scan that image",
+      "bestEffortNotice": "Document extraction is best effort. Review every row before saving.",
+      "fileNeedsReview": "No rows were detected. Add items manually before preview.",
+      "fileReadFailed": "Could not read that file. Try another file or add rows manually.",
+      "importedRows": "{{count}} rows imported. Scroll the draft list to review every item before saving.",
+      "supplierRequired": "Supplier name is required.",
+      "rowsRequired": "Add at least one item row.",
+      "previewReady": "Import review is ready",
+      "previewFailed": "Could not preview import",
+      "saved": "Supplier items saved to inventory",
+      "saveFailed": "Failed to save supplier items",
+      "draftRows": "Draft rows",
+      "rowCount": "{{count}} rows",
+      "reviewBeforeSave": "Edit quantities, costs, and categories before preview.",
+      "preview": "Preview",
+      "review": "Review inventory sync",
+      "missingCategories": "Missing categories",
+      "commit": "Save to inventory",
+      "saveAfterPreview": "Save after preview",
+      "saveRequiresPreview": "Preview the rows before saving to inventory.",
+      "previewThenSaveHelp": "Preview validates supplier, category, and inventory matches. The save action becomes available after that check.",
+      "endpointUnavailable": "Supplier import API is not available on the connected admin dashboard. Restart or update the admin dashboard, then try Preview again.",
+      "adminHtmlError": "Admin dashboard returned a page instead of an API response. Check the admin URL and try again.",
+      "itemName": "Item name",
+      "sku": "SKU",
+      "barcode": "Barcode",
+      "quantity": "Qty",
+      "cost": "Cost",
+      "unit": "Unit",
+      "category": "Category",
+      "subcategory": "Subcategory",
+      "notes": "Notes",
+      "rowNumber": "Row",
+      "noCategory": "No category",
+      "noCode": "No code",
+      "status": {
+        "create": "Create",
+        "update": "Update",
+        "skip": "Skip",
+        "error": "Error"
+      }
+    },
+    "summary": {
+      "title": "Supplier summary"
     }
   },
   "tablesView": {
@@ -4183,12 +4421,90 @@
   },
   "staffSchedule": {
     "loading": "Loading staff schedule...",
+    "weeklyProgram": "Weekly Staff Schedule",
+    "weeklyProgramHint": "View the week, spot gaps, and add shifts in seconds.",
+    "scheduleTitle": "Weekly plan",
+    "scheduleHint": "Tap a day or the plus button to add a shift.",
+    "today": "Today",
     "stats": {
       "totalStaff": "Total Staff",
-      "roles": "Roles"
+      "roles": "Roles",
+      "scheduledThisWeek": "Scheduled This Week",
+      "todayShifts": "Today Shifts",
+      "unscheduled": "Unscheduled"
+    },
+    "filters": {
+      "all": "All roles"
+    },
+    "actions": {
+      "addShift": "Add shift",
+      "close": "Close",
+      "nextWeek": "Next week",
+      "previousWeek": "Previous week",
+      "refresh": "Refresh schedule",
+      "selectStaff": "Select staff"
+    },
+    "days": {
+      "short": {
+        "sun": "Sun",
+        "mon": "Mon",
+        "tue": "Tue",
+        "wed": "Wed",
+        "thu": "Thu",
+        "fri": "Fri",
+        "sat": "Sat"
+      }
+    },
+    "status": {
+      "scheduled": "Scheduled",
+      "active": "Active",
+      "completed": "Completed",
+      "cancelled": "Cancelled",
+      "no_show": "No-show"
+    },
+    "roles": {
+      "staff": "Staff"
+    },
+    "presets": {
+      "morning": "Morning 09:00-17:00",
+      "evening": "Evening 12:00-20:00",
+      "closing": "Closing 17:00-23:00"
     },
     "noStaff": "No staff members found",
-    "addStaffHint": "Add staff members in the Admin Dashboard"
+    "addStaffHint": "Add staff members in the Admin Dashboard",
+    "addShift": "Add Shift",
+    "addShiftForDay": "Add shift for this day",
+    "addShiftForStaff": "Add shift for this staff member",
+    "noShifts": "No shifts",
+    "tapToAddShift": "Tap to add one",
+    "unscheduled": "Not Scheduled This Week",
+    "unscheduledHint": "Tap a name to create their next shift quickly.",
+    "everyoneScheduled": "Everyone has at least one shift this week.",
+    "fields": {
+      "staff": "Staff",
+      "startDateTime": "Start (date & time)",
+      "endDateTime": "End (date & time)",
+      "notes": "Notes",
+      "notesPlaceholder": "Optional notes..."
+    },
+    "selectStaff": "Select staff",
+    "nextDayShortcut": "Set end date to next day",
+    "preview": "Preview",
+    "validationLabel": "Validation",
+    "overnightHint": "For overnight shifts, choose the next day as end date.",
+    "createProgram": "Create shift",
+    "shiftCreated": "Shift created",
+    "savedLocallyQueued": "Saved locally and queued",
+    "shiftCreateFailed": "Failed to create shift",
+    "unknownStaff": "Unknown staff",
+    "validation": {
+      "selectStaff": "Please select a staff member",
+      "selectDateTime": "Please select start and end date/time",
+      "endAfterStart": "End time must be after start time"
+    },
+    "errors": {
+      "loadFailed": "Failed to load staff schedule"
+    }
   },
   "receipt": {
     "header": {
@@ -4502,7 +4818,85 @@
       }
     }
   },
+  "customerDisplay": {
+    "title": "Customer Display",
+    "subtitle": "Live order phases for customer-facing screens",
+    "loading": "Loading customer display...",
+    "empty": "No active customer-display orders right now.",
+    "orderLine": "Order ({{number}}) is {{status}}",
+    "displaySession": "Display session",
+    "phases": {
+      "received": "Received",
+      "preparing": "Preparing",
+      "ready": "Ready"
+    },
+    "sentences": {
+      "received": "received",
+      "preparing": "preparing",
+      "ready": "ready"
+    },
+    "descriptions": {
+      "received": "Order received",
+      "preparing": "Kitchen is working",
+      "ready": "Ready for pickup"
+    },
+    "actions": {
+      "copyTvLink": "Copy TV Link",
+      "externalDisplay": "External Display",
+      "stopExternal": "Stop External"
+    },
+    "external": {
+      "monitors": "Connected monitors and TVs",
+      "help": "Cable displays and OS-level wireless displays appear here. For Smart TVs without monitor mode, copy the TV link."
+    },
+    "status": {
+      "connected": "Connected",
+      "enabled": "Enabled",
+      "ready": "Ready"
+    },
+    "notices": {
+      "externalRunning": "Customer display is running on the selected monitor or TV.",
+      "externalStopped": "External customer display stopped.",
+      "tvLinkCopied": "TV link copied. Open it in a Smart TV browser or wireless receiver."
+    },
+    "errors": {
+      "fetchRowsFailed": "Failed to load customer display orders",
+      "startExternalFailed": "Failed to open external customer display",
+      "stopExternalFailed": "Failed to stop external customer display",
+      "createTvLinkFailed": "Failed to create TV display link"
+    }
+  },
   "kitchen": {
+    "title": "Kitchen Display",
+    "subtitle": "Real-time order preparation",
+    "pollingFallback": "Polling fallback",
+    "pending": "Pending",
+    "preparing": "Preparing",
+    "total": "Total",
+    "avgTime": "Avg Time",
+    "min": "min",
+    "allStations": "All",
+    "justNow": "Just now",
+    "startPreparing": "Start Preparing",
+    "markReady": "Mark Ready",
+    "orderBumped": "Order updated",
+    "bumpError": "Failed to update order",
+    "loadError": "Unable to load orders",
+    "noOrders": "No Active Orders",
+    "noOrdersDesc": "New orders will appear here automatically",
+    "externalDisplay": {
+      "copyTvLink": "Copy TV link",
+      "open": "Open on connected display",
+      "stop": "Stop external display",
+      "connectedDisplays": "Connected monitors and TVs",
+      "help": "Cable displays and OS-level wireless displays appear here. For Smart TVs without monitor mode, copy the TV link.",
+      "running": "Kitchen display is running on the selected monitor or TV.",
+      "stopped": "External kitchen display stopped.",
+      "openFailed": "Failed to open kitchen display",
+      "closeFailed": "Failed to close kitchen display",
+      "tvLinkCopied": "KDS TV link copied. Open it in a Smart TV browser or wireless receiver.",
+      "tvLinkFailed": "Failed to create KDS TV link"
+    },
     "liveDraft": {
       "badge": "Live Draft",
       "subtitle": "Live cart in progress",
@@ -4550,6 +4944,14 @@
     "earned": "[NEEDS EN TRANSLATION] Κερδισμένοι",
     "redeemed": "[NEEDS EN TRANSLATION] Εξαργυρωμένοι",
     "canRedeem": "[NEEDS EN TRANSLATION] Μπορεί να εξαργυρώσει",
+    "scan": {
+      "button": "Scan",
+      "title": "Scan loyalty member",
+      "description": "Scan a loyalty card barcode, NFC reader code, or type the member code manually.",
+      "placeholder": "Card, phone, or member code",
+      "found": "Loyalty member found: {{name}}",
+      "notFound": "No loyalty member found for {{code}}"
+    },
     "errors": {
       "loadFailed": "[NEEDS EN TRANSLATION] Αποτυχία φόρτωσης δεδομένων πιστότητας"
     }
@@ -4639,6 +5041,14 @@
     "discountValue": "Discount Value",
     "percentage": "Percentage",
     "fixed": "Fixed Amount",
+    "scan": {
+      "button": "Scan",
+      "title": "Scan coupon",
+      "description": "Scan a coupon barcode or type the coupon code to find it instantly.",
+      "placeholder": "Coupon code or barcode",
+      "found": "Coupon {{code}} found",
+      "notFound": "No coupon found for {{code}}"
+    },
     "errors": {
       "loadFailed": "Failed to load coupons",
       "saveFailed": "Failed to save coupon",
@@ -4652,6 +5062,28 @@
       "invalidMinOrder": "Minimum order amount is invalid",
       "invalidExpiry": "Expiration date is invalid"
     }
+  },
+  "scannerPanel": {
+    "hardwareScanner": "Barcode scanner",
+    "serialConnected": "Serial scanner connected",
+    "keyboardReady": "USB keyboard scanner ready",
+    "lastScan": "Last scan",
+    "camera": "Camera",
+    "cameraUnsupported": "Camera detection is not available on this device.",
+    "cameraDetectionFailed": "Could not check connected cameras.",
+    "cameraBarcodeUnavailable": "Barcode detection is not available for this camera on this device.",
+    "checkingDevices": "Checking devices...",
+    "cameraCount": "{{count}} camera detected",
+    "noCamera": "No camera detected",
+    "loyaltyReaderConnected": "Loyalty card reader connected",
+    "loyaltyReaderReady": "Loyalty card reader will listen while this scanner is open",
+    "scanNow": "Scan now",
+    "scanHelp": "Scan with a barcode scanner, use the camera, or type the code manually.",
+    "submit": "Use code",
+    "cameraScan": "Camera scan",
+    "checkAgain": "Check devices",
+    "noBarcodeFound": "No barcode was found by the camera.",
+    "cameraScanFailed": "Unable to scan that barcode image."
   },
   "ecr": {
     "title": "Payment Terminals",
@@ -5026,7 +5458,8 @@
     },
     "messages": {
       "actionSucceeded": "Action completed successfully.",
-      "actionFailed": "Action failed. Review the issue details and try again."
+      "actionFailed": "Action failed. Review the issue details and try again.",
+      "orderPaymentOpenFailed": "Could not open the blocked order payment screen."
     },
     "actions": {
       "refresh": {
@@ -5103,8 +5536,16 @@
       "requeueFailedAdjustmentLegacyValidationRows": {
         "label": "Requeue legacy validation adjustments"
       },
+      "openOrderPaymentFix": {
+        "label": "Open order payment",
+        "description": "Open the blocked order so the missing or unpaid payment can be corrected directly."
+      },
+      "contactDev": {
+        "label": "Contact Dev",
+        "description": "Export safe diagnostics and prepare this blocker for developer support."
+      },
       "contactOperator": {
-        "label": "Contact operator"
+        "label": "Contact Dev"
       },
       "confirmTitle": "Confirm recovery action",
       "confirmMessage": "This action changes local recovery data for the selected issue."
@@ -5129,7 +5570,63 @@
       "noRecoveringIssues": "No recovering issues are currently visible.",
       "recentActionsTitle": "Resolved recently",
       "recentActionsSubtitle": "Every repair attempt is audited locally so staff can see what was tried and what succeeded.",
-      "noRecentActions": "No recovery actions have been recorded yet."
+      "noRecentActions": "No recovery actions have been recorded yet.",
+      "guidedTitle": "Sync recovery",
+      "guidedSubtitle": "The POS checks the blocker, offers the safest known solution, then verifies sync again.",
+      "blockedCount": "{{count}} blocking",
+      "terminalContextLine": "Terminal {{terminalId}}",
+      "remainingIssues": "{{count}} visible issues",
+      "noVisibleBlockerTitle": "Nothing is blocking sync",
+      "noVisibleBlockerDescription": "No order, payment, or queue item currently needs manual recovery.",
+      "whatBlocksTitle": "What is blocking sync",
+      "otherIssuesWaiting": "+{{count}} more",
+      "automaticSolutionTitle": "Automatic solution",
+      "noKnownSolutionTitle": "No one-click fix yet",
+      "noKnownSolutionDescription": "The POS can explain the blocker and prepare diagnostics for development support.",
+      "backupBeforeFix": "A recovery backup is created before this action changes local sync data.",
+      "verificationTitle": "Check after the fix",
+      "genericVerificationDescription": "After any action, the POS refreshes diagnostics and shows whether the queue can continue.",
+      "lastActionSucceeded": "Last action succeeded",
+      "lastActionFailed": "Last action failed",
+      "advancedDetailsTitle": "Advanced details",
+      "systemStatusTitle": "System sync status",
+      "systemStatusSubtitle": "A simple view of what is happening, why orders may be stuck, and the safest next action.",
+      "noFixNeededTitle": "No fix needed",
+      "noFixNeededDescription": "The app has no matched error to repair. If a new order was just changed, run sync and check again.",
+      "healthyVerificationDescription": "Refresh this panel to verify the queue is still clear after the next sync cycle.",
+      "advancedDiagnosticsTitle": "Diagnostic file",
+      "diagnosticFileTitle": "Diagnostic file",
+      "diagnosticFileHeadline": "Technical details are saved to a file",
+      "diagnosticFileDescription": "To keep this screen simple, queue counts, parity rows, printer state, database details, logs, issue codes, order ids, and the latest recovery result are included in the exported diagnostic bundle instead of being shown here.",
+      "diagnosticFilePrivacy": "Use this when Contact Dev asks for support details. Sensitive fields are handled by the export settings.",
+      "exportDiagnosticFile": "Export diagnostic file"
+    },
+    "recipes": {
+      "checkoutPaymentOpenPayment": {
+        "label": "Payment must be corrected in the order",
+        "explanation": "This is a known payment blocker. The safe fix is to reopen the order payment screen instead of creating a payment automatically.",
+        "verification": "After the payment is saved, refresh recovery and run sync again. Later orders should continue once this order is no longer blocking the queue."
+      },
+      "paymentTotalConflictRepair": {
+        "label": "Known payment/order mismatch repair",
+        "explanation": "This recipe refreshes the parent order update, keeps local financial records intact, and retries the rejected payment row.",
+        "verification": "The payment row should leave the failed queue after the retry finishes."
+      },
+      "invalidDriverOrderUpdateRepair": {
+        "label": "Known stale-driver repair",
+        "explanation": "This recipe removes only the stale driver id from the retry payload and keeps the order update.",
+        "verification": "The order update should retry without the invalid driver blocker."
+      },
+      "orderUpdateReplayRepair": {
+        "label": "Known order replay repair",
+        "explanation": "This recipe retries compatible order updates first, then promotes dependent payments only after the parent rows clear.",
+        "verification": "The dependent payment rows should unblock after the parent order update syncs."
+      },
+      "catalogAvailabilityRetry": {
+        "label": "Known catalog availability retry",
+        "explanation": "This recipe retries only availability flags after the admin route supports the update.",
+        "verification": "Catalog availability rows should leave the failed queue after retry."
+      }
     },
     "issues": {
       "invalidOrders": {
@@ -5140,7 +5637,7 @@
       "syncBlocker": {
         "title": "Blocked sync row for {{entityType}}",
         "summary": "A queue row is blocked by {{blockerReason}} and still needs a retry or manual repair.",
-        "guidance": "Retry the blocked sync row first. If the same blocker returns, contact operator with the blocker reason and queue details."
+        "guidance": "Retry the blocked sync row first. If the same blocker returns, contact Dev with the blocker reason and queue details."
       },
       "parityMissingCredentials": {
         "title": "Terminal credentials need attention",
@@ -5150,7 +5647,7 @@
       "parityProcessorStalled": {
         "title": "Parity processor stalled",
         "summary": "The last parity cycle processed {{processed}} items and still left {{remaining}} queued. Current blocker: {{reason}}.",
-        "guidance": "Run parity sync now. If the same backlog remains, inspect the module-level parity issues below or contact operator. Latest parity error: {{reason}}."
+        "guidance": "Run parity sync now. If the same backlog remains, inspect the module-level parity issues below or contact Dev. Latest parity error: {{reason}}."
       },
       "paymentTotalConflict": {
         "title": "Payment/order mismatch",
@@ -5205,7 +5702,7 @@
       "paymentAdjustmentMissingCanonicalRemotePayment": {
         "title": "Adjustment missing canonical remote payment",
         "summary": "The parent payment is applied, but its canonical remote payment id is still missing.",
-        "guidance": "Run the orphaned financial repair. If the adjustment still cannot be linked to the backend payment, contact operator."
+        "guidance": "Run the orphaned financial repair. If the adjustment still cannot be linked to the backend payment, contact Dev."
       },
       "legacyFinancialParityOrphan": {
         "title": "Stale legacy financial sync row",
@@ -5215,12 +5712,12 @@
       "financialIntegrity": {
         "title": "Financial integrity issue",
         "summary": "A payment or adjustment record needs repair before sync can complete.",
-        "guidance": "Use the suggested recovery action if available. If the issue remains unchanged, contact operator with the exact reason code."
+        "guidance": "Use the suggested recovery action if available. If the issue remains unchanged, contact Dev with the exact reason code."
       },
       "financialQueueFailed": {
         "title": "Failed financial sync row",
         "summary": "A financial sync row failed with {{lastError}}.",
-        "guidance": "Use the mapped recovery action when available. If the same failure returns after retry, contact operator."
+        "guidance": "Use the mapped recovery action when available. If the same failure returns after retry, contact Dev."
       },
       "checkoutPaymentBlocker": {
         "title": "Order blocks shift checkout",
@@ -5228,9 +5725,14 @@
         "guidance": "{{suggestedFix}} Total {{totalAmount}}, settled {{settledAmount}}, outstanding {{outstandingAmount}}."
       },
       "contactOperatorFallback": {
-        "title": "Operator attention required",
+        "title": "Dev attention required",
         "summary": "Sync backlog is visible, but there is no guided fix mapped for this exact failure yet.",
-        "guidance": "Contact operator and include the diagnostics bundle so the next occurrence can be mapped to a guided fix."
+        "guidance": "Contact Dev and include the diagnostics bundle so the next occurrence can be mapped to a guided fix."
+      },
+      "contactDevFallback": {
+        "title": "Dev attention required",
+        "summary": "Sync backlog is visible, but there is no guided fix mapped for this exact failure yet.",
+        "guidance": "Contact Dev and include the diagnostics bundle so the next occurrence can be mapped to a guided fix."
       }
     }
   },

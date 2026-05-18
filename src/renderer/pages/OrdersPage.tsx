@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -206,6 +206,41 @@ const mergeHybridOrders = (localOrders: Order[], remoteOrders: Order[]): Order[]
 };
 
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
+const RECOVERY_ORDER_PAYMENT_TARGET_KEY = 'pos-recovery-order-payment-target';
+
+interface RecoveryOrderPaymentTarget {
+  orderId: string | null;
+  orderNumber: string | null;
+  params: Record<string, unknown>;
+  createdAt: number;
+}
+
+function parseRecoveryOrderPaymentTarget(raw: string | null): RecoveryOrderPaymentTarget | null {
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<RecoveryOrderPaymentTarget>;
+    const orderId = typeof parsed.orderId === 'string' && parsed.orderId.trim()
+      ? parsed.orderId.trim()
+      : null;
+    const orderNumber = typeof parsed.orderNumber === 'string' && parsed.orderNumber.trim()
+      ? parsed.orderNumber.trim()
+      : null;
+    if (!orderId && !orderNumber) {
+      return null;
+    }
+    return {
+      orderId,
+      orderNumber,
+      params: parsed.params && typeof parsed.params === 'object' ? parsed.params : {},
+      createdAt: typeof parsed.createdAt === 'number' ? parsed.createdAt : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
 
 const OrdersPage: React.FC = () => {
   const { t } = useTranslation();
@@ -217,6 +252,10 @@ const OrdersPage: React.FC = () => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [openSelectedOrderPayment, setOpenSelectedOrderPayment] = useState(false);
+  const [recoveryPaymentTarget, setRecoveryPaymentTarget] =
+    useState<RecoveryOrderPaymentTarget | null>(null);
+  const recoveryPaymentAttemptKeyRef = useRef<string | null>(null);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -332,6 +371,90 @@ const OrdersPage: React.FC = () => {
     fetchOrders();
   }, [fetchOrders]);
 
+  useEffect(() => {
+    const consumeStoredRecoveryTarget = () => {
+      const nextTarget = parseRecoveryOrderPaymentTarget(
+        window.sessionStorage.getItem(RECOVERY_ORDER_PAYMENT_TARGET_KEY),
+      );
+      if (nextTarget) {
+        setRecoveryPaymentTarget(nextTarget);
+      }
+    };
+
+    consumeStoredRecoveryTarget();
+    window.addEventListener('pos:open-order-payment', consumeStoredRecoveryTarget);
+    return () => {
+      window.removeEventListener('pos:open-order-payment', consumeStoredRecoveryTarget);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!recoveryPaymentTarget) {
+      return;
+    }
+
+    const targetKey =
+      recoveryPaymentTarget.orderId ||
+      recoveryPaymentTarget.orderNumber ||
+      `${recoveryPaymentTarget.createdAt}`;
+    if (recoveryPaymentAttemptKeyRef.current === targetKey) {
+      return;
+    }
+
+    const matchesTarget = (order: Order) =>
+      (!!recoveryPaymentTarget.orderId && order.id === recoveryPaymentTarget.orderId) ||
+      (!!recoveryPaymentTarget.orderNumber && order.order_number === recoveryPaymentTarget.orderNumber);
+
+    const visibleMatch = orders.find(matchesTarget);
+    if (visibleMatch) {
+      recoveryPaymentAttemptKeyRef.current = targetKey;
+      setSelectedOrder(visibleMatch);
+      setOpenSelectedOrderPayment(true);
+      window.sessionStorage.removeItem(RECOVERY_ORDER_PAYMENT_TARGET_KEY);
+      setRecoveryPaymentTarget(null);
+      return;
+    }
+
+    const lookupId = recoveryPaymentTarget.orderId || recoveryPaymentTarget.orderNumber;
+    if (!lookupId) {
+      return;
+    }
+
+    recoveryPaymentAttemptKeyRef.current = targetKey;
+    let cancelled = false;
+    bridge.orders
+      .getById(lookupId)
+      .then((result: any) => {
+        if (cancelled) {
+          return;
+        }
+        const hydrated = result?.order ?? result?.data ?? result;
+        const normalized = normalizeOrder(hydrated, 'local');
+        if (normalized) {
+          setSelectedOrder(normalized);
+          setOpenSelectedOrderPayment(true);
+          window.sessionStorage.removeItem(RECOVERY_ORDER_PAYMENT_TARGET_KEY);
+          setRecoveryPaymentTarget(null);
+          return;
+        }
+        toast.error(t('recovery.messages.orderPaymentOpenFailed', {
+          defaultValue: 'Could not open the blocked order payment screen.',
+        }));
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn('[OrdersPage] Failed to open recovery payment target:', error);
+          toast.error(t('recovery.messages.orderPaymentOpenFailed', {
+            defaultValue: 'Could not open the blocked order payment screen.',
+          }));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge.orders, orders, recoveryPaymentTarget, t]);
+
   // Refresh from Rust-driven events instead of renderer polling.
   useEffect(() => {
     let disposed = false;
@@ -388,6 +511,7 @@ const OrdersPage: React.FC = () => {
   };
 
   const totalPages = Math.ceil(total / pageSize);
+  const refreshLabel = syncing ? 'Syncing orders' : 'Refresh orders';
 
   const handleClearFilters = () => {
     setStatusFilter('all');
@@ -424,10 +548,11 @@ const OrdersPage: React.FC = () => {
             <button
               onClick={fetchOrders}
               disabled={syncing}
-              className={`px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all text-white ${isDark ? 'border border-blue-500/50 bg-blue-600/90 hover:bg-blue-500' : 'bg-blue-500 hover:bg-blue-600'} ${syncing ? 'opacity-50 cursor-not-allowed' : ''}`}
+              aria-label={refreshLabel}
+              title={refreshLabel}
+              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${syncing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
             >
-              <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Syncing...' : 'Refresh'}
+              <RefreshCw className={`w-5 h-5 ${syncing ? 'animate-spin' : ''}`} />
             </button>
           </div>
 
@@ -521,7 +646,7 @@ const OrdersPage: React.FC = () => {
       </div>
 
       {/* Orders List */}
-      <div className={`flex-1 overflow-y-auto p-6 ${isDark ? 'bg-gradient-to-b from-black via-black to-zinc-950/80' : 'bg-gray-50'}`}>
+      <div className={`flex-1 overflow-y-auto scrollbar-hide p-6 ${isDark ? 'bg-gradient-to-b from-black via-black to-zinc-950/80' : 'bg-gray-50'}`}>
         {orders.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <ShoppingBag className={`w-16 h-16 mb-4 ${isDark ? 'text-zinc-700' : 'text-gray-400'}`} />
@@ -645,7 +770,11 @@ const OrdersPage: React.FC = () => {
         isOpen={!!selectedOrder}
         orderId={selectedOrder?.id || selectedOrder?.order_number || ''}
         order={selectedOrder}
-        onClose={() => setSelectedOrder(null)}
+        openPaymentOnMount={openSelectedOrderPayment}
+        onClose={() => {
+          setSelectedOrder(null);
+          setOpenSelectedOrderPayment(false);
+        }}
         onPrintReceipt={async () => {
           const orderId = selectedOrder?.id;
           if (!orderId) {

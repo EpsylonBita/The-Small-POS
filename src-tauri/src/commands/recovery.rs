@@ -1,6 +1,7 @@
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use tracing::info;
+use uuid::Uuid;
 
 use crate::{api, auth, db, payments, recovery, storage, sync, sync_queue};
 
@@ -81,6 +82,56 @@ fn request_param_i64(request: &Value, key: &str) -> Option<i64> {
         Value::Number(num) => num.as_i64(),
         Value::String(text) => text.trim().parse::<i64>().ok(),
         _ => None,
+    })
+}
+
+fn value_field_str(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn value_field_i64(value: &Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|field| match field {
+        Value::Number(num) => num.as_i64(),
+        Value::String(text) => text.trim().parse::<i64>().ok(),
+        _ => None,
+    })
+}
+
+fn nested_field_str(value: &Value, object_key: &str, key: &str) -> Option<String> {
+    value
+        .get(object_key)
+        .and_then(|nested| value_field_str(nested, key))
+}
+
+fn recovery_log_entry_from_payload(entry: &Value) -> Value {
+    json!({
+        "id": value_field_str(entry, "id").unwrap_or_else(|| Uuid::new_v4().to_string()),
+        "actionId": value_field_str(entry, "actionId").unwrap_or_default(),
+        "issueCode": value_field_str(entry, "issueCode").unwrap_or_default(),
+        "success": entry.get("success").and_then(Value::as_bool).unwrap_or(false),
+        "timestamp": value_field_str(entry, "timestamp")
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        "recipeId": value_field_str(entry, "recipeId"),
+        "recipeVersion": value_field_i64(entry, "recipeVersion"),
+        "snapshotPointId": value_field_str(entry, "snapshotPointId"),
+        "exportPath": value_field_str(entry, "exportPath"),
+        "message": value_field_str(entry, "message"),
+        "errorMessage": value_field_str(entry, "errorMessage"),
+        "actor": {
+            "staffId": nested_field_str(entry, "actor", "staffId"),
+            "staffName": nested_field_str(entry, "actor", "staffName"),
+        },
+        "targetRefs": {
+            "entityId": nested_field_str(entry, "targetRefs", "entityId"),
+            "orderId": nested_field_str(entry, "targetRefs", "orderId"),
+            "orderNumber": nested_field_str(entry, "targetRefs", "orderNumber"),
+            "shiftId": nested_field_str(entry, "targetRefs", "shiftId"),
+        },
     })
 }
 
@@ -365,6 +416,139 @@ pub async fn recovery_create_snapshot(
 }
 
 #[tauri::command]
+pub async fn recovery_create_pre_action_snapshot(
+    db: tauri::State<'_, db::DbState>,
+) -> Result<recovery::RecoveryPointMetadata, String> {
+    recovery::create_pre_recovery_action_snapshot(&db)
+}
+
+#[tauri::command]
+pub async fn recovery_record_action_log(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    let raw_entry = arg0.ok_or_else(|| "Missing recovery action log entry".to_string())?;
+    let entry = recovery_log_entry_from_payload(&raw_entry);
+    let target_refs = entry
+        .get("targetRefs")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let actor = entry.get("actor").cloned().unwrap_or_else(|| json!({}));
+    let id = value_field_str(&entry, "id").unwrap_or_else(|| Uuid::new_v4().to_string());
+    let action_id = value_field_str(&entry, "actionId").unwrap_or_default();
+    let issue_code = value_field_str(&entry, "issueCode").unwrap_or_default();
+    let timestamp =
+        value_field_str(&entry, "timestamp").unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let success = entry
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let payload_json =
+        serde_json::to_string(&raw_entry).map_err(|e| format!("serialize recovery log: {e}"))?;
+
+    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO recovery_action_log (
+            id, action_id, issue_code, issue_id, recipe_id, recipe_version,
+            entity_type, entity_id, order_id, order_number, shift_id, queue_id,
+            snapshot_point_id, export_path, success, message, error_message,
+            actor_staff_id, actor_staff_name, payload_json, created_at
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6,
+            ?7, ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17,
+            ?18, ?19, ?20, ?21
+         )",
+        rusqlite::params![
+            id,
+            action_id,
+            issue_code,
+            value_field_str(&raw_entry, "issueId"),
+            value_field_str(&entry, "recipeId"),
+            value_field_i64(&entry, "recipeVersion"),
+            value_field_str(&raw_entry, "entityType"),
+            value_field_str(&target_refs, "entityId"),
+            value_field_str(&target_refs, "orderId"),
+            value_field_str(&target_refs, "orderNumber"),
+            value_field_str(&target_refs, "shiftId"),
+            value_field_i64(&raw_entry, "queueId"),
+            value_field_str(&entry, "snapshotPointId"),
+            value_field_str(&entry, "exportPath"),
+            if success { 1 } else { 0 },
+            value_field_str(&entry, "message"),
+            value_field_str(&entry, "errorMessage"),
+            value_field_str(&actor, "staffId"),
+            value_field_str(&actor, "staffName"),
+            payload_json,
+            timestamp,
+        ],
+    )
+    .map_err(|e| format!("record recovery action log: {e}"))?;
+
+    Ok(entry)
+}
+
+#[tauri::command]
+pub async fn recovery_list_action_log(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    let limit = arg0
+        .as_ref()
+        .and_then(|value| value_field_i64(value, "limit"))
+        .unwrap_or(25)
+        .clamp(1, 100);
+    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                id, action_id, issue_code, success, created_at, recipe_id,
+                recipe_version, snapshot_point_id, export_path, message,
+                error_message, actor_staff_id, actor_staff_name, entity_id,
+                order_id, order_number, shift_id
+             FROM recovery_action_log
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )
+        .map_err(|e| format!("prepare recovery action log list: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit], |row| {
+            let success: i64 = row.get(3)?;
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "actionId": row.get::<_, String>(1)?,
+                "issueCode": row.get::<_, String>(2)?,
+                "success": success != 0,
+                "timestamp": row.get::<_, String>(4)?,
+                "recipeId": row.get::<_, Option<String>>(5)?,
+                "recipeVersion": row.get::<_, Option<i64>>(6)?,
+                "snapshotPointId": row.get::<_, Option<String>>(7)?,
+                "exportPath": row.get::<_, Option<String>>(8)?,
+                "message": row.get::<_, Option<String>>(9)?,
+                "errorMessage": row.get::<_, Option<String>>(10)?,
+                "actor": {
+                    "staffId": row.get::<_, Option<String>>(11)?,
+                    "staffName": row.get::<_, Option<String>>(12)?,
+                },
+                "targetRefs": {
+                    "entityId": row.get::<_, Option<String>>(13)?,
+                    "orderId": row.get::<_, Option<String>>(14)?,
+                    "orderNumber": row.get::<_, Option<String>>(15)?,
+                    "shiftId": row.get::<_, Option<String>>(16)?,
+                },
+            }))
+        })
+        .map_err(|e| format!("query recovery action log: {e}"))?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row.map_err(|e| format!("read recovery action log row: {e}"))?);
+    }
+
+    Ok(Value::Array(entries))
+}
+
+#[tauri::command]
 pub async fn recovery_export_current(
     db: tauri::State<'_, db::DbState>,
     auth_state: tauri::State<'_, auth::AuthState>,
@@ -470,10 +654,39 @@ pub async fn recovery_execute_action(
                 "screen": "connectionSettings",
             },
         })),
-        "contactOperator" => Ok(json!({
+        "openOrderPaymentFix" => {
+            let order_id = request_field_str(&request, "orderId")
+                .map(ToOwned::to_owned)
+                .or_else(|| request_param_str(&request, "orderId"))
+                .or_else(|| request_param_str(&request, "order_id"));
+            let order_number = request_field_str(&request, "orderNumber")
+                .map(ToOwned::to_owned)
+                .or_else(|| request_param_str(&request, "orderNumber"))
+                .or_else(|| request_param_str(&request, "order_number"));
+            let reason_code = request_field_str(&request, "issueCode")
+                .map(ToOwned::to_owned)
+                .or_else(|| request_param_str(&request, "reasonCode"))
+                .or_else(|| request_param_str(&request, "reason_code"));
+
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": false,
+                "routeTarget": {
+                    "screen": "orderPayment",
+                    "orderId": order_id,
+                    "orderNumber": order_number,
+                    "params": {
+                        "openPayment": true,
+                        "reasonCode": reason_code,
+                    },
+                },
+                "message": "Opening the blocked order payment screen.",
+            }))
+        }
+        "contactDev" | "contactOperator" => Ok(json!({
             "success": true,
             "requiresRefresh": false,
-            "message": "No automated fix is available for this issue yet. Contact operator.",
+            "message": "No safe automated fix is available yet. Diagnostics were prepared for development support.",
         })),
         "clearLegacyFinancialOrphan" => {
             let entity_type = request_field_str(&request, "entityType")

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -21,6 +21,7 @@ interface OrderDetailsModalProps {
   onClose: () => void;
   onPrintReceipt?: () => void;
   onShowCustomerHistory?: (customerPhone: string) => void;
+  openPaymentOnMount?: boolean;
 }
 
 function isCompletedPaymentRecord(payment: any): boolean {
@@ -46,6 +47,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   order,
   onClose,
   onPrintReceipt,
+  openPaymentOnMount = false,
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
@@ -58,6 +60,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [showSplitPaymentModal, setShowSplitPaymentModal] = useState(false);
+  const paymentAutoOpenKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
@@ -635,6 +638,25 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
   const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed';
   const canSplitPayment = !isCancelledOrder && (paymentStatus === 'pending' || paymentStatus === 'partially_paid');
+
+  useEffect(() => {
+    if (!isOpen) {
+      paymentAutoOpenKeyRef.current = null;
+      return;
+    }
+
+    if (!openPaymentOnMount || !canSplitPayment) {
+      return;
+    }
+
+    const autoOpenKey = `${orderId}:${paymentStatus}`;
+    if (paymentAutoOpenKeyRef.current === autoOpenKey) {
+      return;
+    }
+
+    paymentAutoOpenKeyRef.current = autoOpenKey;
+    setShowSplitPaymentModal(true);
+  }, [canSplitPayment, isOpen, openPaymentOnMount, orderId, paymentStatus]);
 
   // Compute footer grid columns based on visible buttons
   const footerButtonCount =

@@ -391,6 +391,7 @@ export interface ScreenCaptureSignalBatchPayload {
 export type RecoveryPointKind =
   | 'scheduled'
   | 'manual'
+  | 'pre_recovery_action'
   | 'pre_factory_reset'
   | 'pre_emergency_reset'
   | 'pre_clear_operational_data'
@@ -678,6 +679,15 @@ export type RecoveryActionSafetyLevel =
   | 'destructive_local'
   | 'destructive_server';
 
+export interface RecoveryKnownSolution {
+  recipeId: string;
+  version: number;
+  labelKey: string;
+  explanationKey: string;
+  verificationKey?: string;
+  requiresSnapshot: boolean;
+}
+
 export interface RecoveryActionDescriptor {
   id: string;
   labelKey: string;
@@ -685,6 +695,9 @@ export interface RecoveryActionDescriptor {
   recommended?: boolean;
   safetyLevel: RecoveryActionSafetyLevel;
   requiresOnline: boolean;
+  requiresSnapshot?: boolean;
+  recipeId?: string;
+  recipeVersion?: number;
   confirmationRequired: boolean;
   confirmTitleKey?: string;
   confirmMessageKey?: string;
@@ -703,6 +716,7 @@ export interface RecoveryIssue {
   summaryKey: string;
   guidanceKey: string;
   actions: RecoveryActionDescriptor[];
+  knownSolution?: RecoveryKnownSolution;
   params?: Record<string, unknown>;
   orderId?: string | null;
   orderNumber?: string | null;
@@ -727,6 +741,9 @@ export interface RecoveryActionRequest {
   zReportId: string | null;
   shiftId: string | null;
   reportDate: string | null;
+  recipeId?: string | null;
+  recipeVersion?: number | null;
+  routeTarget?: RecoveryRouteTarget | null;
   params?: Record<string, unknown>;
 }
 
@@ -735,6 +752,14 @@ export interface RecoveryActionResult {
   requiresRefresh: boolean;
   routeTarget?: RecoveryRouteTarget | null;
   message?: string;
+  snapshotPointId?: string | null;
+  actionLogId?: string | null;
+  recipeId?: string | null;
+  recipeVersion?: number | null;
+  verification?: {
+    status: 'pending' | 'passed' | 'failed' | string;
+    message?: string | null;
+  } | null;
 }
 
 export interface RecoveryActionLogEntry {
@@ -743,6 +768,12 @@ export interface RecoveryActionLogEntry {
   issueCode: string;
   success: boolean;
   timestamp: string;
+  recipeId?: string | null;
+  recipeVersion?: number | null;
+  snapshotPointId?: string | null;
+  exportPath?: string | null;
+  message?: string | null;
+  errorMessage?: string | null;
   actor: {
     staffId: string | null;
     staffName: string | null;

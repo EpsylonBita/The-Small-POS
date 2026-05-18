@@ -9,6 +9,8 @@ import { ModuleProvider } from "./contexts/module-context";
 import { BarcodeScannerProvider } from "./contexts/barcode-scanner-context";
 import RefactoredMainLayout from "./components/RefactoredMainLayout";
 import NewOrderPage from "./pages/NewOrderPage";
+import CustomerDisplayPage from "./pages/CustomerDisplayPage";
+import KitchenDisplayPage from "./pages/KitchenDisplayPage";
 import LoginPage from "./pages/LoginPage";
 import OnboardingPage from "./pages/OnboardingPage";
 import { ErrorBoundary } from "./components/error/ErrorBoundary";
@@ -79,6 +81,41 @@ const PARITY_SYNC_RETRY_INTERVAL_MS = 30_000;
 const TOAST_CONTAINER_STYLE: React.CSSProperties = { zIndex: 2147483647 };
 
 type ConnectionSettingsSection = 'recovery' | null;
+type ExternalDisplayKind = 'customer_display' | 'kitchen_display';
+
+function resolveExternalDisplayKind(hash: string): ExternalDisplayKind | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const candidates: string[] = [];
+  try {
+    const searchValue = new URLSearchParams(window.location.search).get('externalDisplay');
+    if (searchValue) candidates.push(searchValue);
+  } catch {
+    // Ignore malformed URLs; fall through to hash parsing.
+  }
+
+  const hashValue = hash || window.location.hash || '';
+  const hashQuery = hashValue.includes('?') ? hashValue.slice(hashValue.indexOf('?') + 1) : '';
+  if (hashQuery) {
+    try {
+      const hashParam = new URLSearchParams(hashQuery).get('externalDisplay');
+      if (hashParam) candidates.push(hashParam);
+    } catch {
+      // Ignore malformed hashes.
+    }
+  }
+
+  const normalized = candidates[0]?.trim().toLowerCase();
+  if (normalized === 'kitchen_display' || normalized === 'kds' || normalized === 'kitchen') {
+    return 'kitchen_display';
+  }
+  if (normalized === 'customer_display' || normalized === 'customer') {
+    return 'customer_display';
+  }
+  return null;
+}
 
 function normalizeSessionIdentityValue(value: unknown): string | undefined {
   if (typeof value !== 'string') {
@@ -728,7 +765,12 @@ function AppContent() {
 
   useEffect(() => {
     const handleRecoveryRoute = (event: Event) => {
-      const detail = (event as CustomEvent<{ screen?: string; params?: Record<string, unknown> }>).detail;
+      const detail = (event as CustomEvent<{
+        screen?: string;
+        orderId?: string | null;
+        orderNumber?: string | null;
+        params?: Record<string, unknown>;
+      }>).detail;
       if (!detail?.screen) {
         return;
       }
@@ -737,6 +779,28 @@ function AppContent() {
         const requestedSection =
           detail.params?.section === 'recovery' ? 'recovery' : null;
         openConnectionSettings(requestedSection);
+        return;
+      }
+
+      if (detail.screen === 'orderPayment') {
+        setShowSyncRecoveryModal(false);
+        setSyncRecoveryContext(null);
+        if (typeof window !== 'undefined') {
+          window.sessionStorage.setItem(
+            'pos-recovery-order-payment-target',
+            JSON.stringify({
+              orderId: detail.orderId ?? null,
+              orderNumber: detail.orderNumber ?? null,
+              params: detail.params ?? {},
+              createdAt: Date.now(),
+            }),
+          );
+          window.dispatchEvent(
+            new CustomEvent('pos:navigate-view', {
+              detail: { view: 'orders' },
+            }),
+          );
+        }
       }
     };
 
@@ -1033,6 +1097,7 @@ function AppContent() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+  const externalDisplayKind = useMemo(() => resolveExternalDisplayKind(hash), [hash]);
 
   // Check if user is logged in on app start and validate session
   useEffect(() => {
@@ -1242,6 +1307,31 @@ function AppContent() {
     setUser(null);
     // Do NOT clear shift context on explicit logout; EOD Z Report will clear shifts
   };
+
+  if (externalDisplayKind) {
+    const ExternalDisplayPage =
+      externalDisplayKind === 'kitchen_display' ? KitchenDisplayPage : CustomerDisplayPage;
+
+    return (
+      <ErrorBoundary>
+        <ThemeProvider>
+          <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+            <div className="h-screen w-screen overflow-hidden bg-black">
+              <ExternalDisplayPage />
+            </div>
+            <Toaster
+              position="top-center"
+              containerStyle={TOAST_CONTAINER_STYLE}
+              toastOptions={{
+                duration: 3000,
+                style: { background: '#111827', color: '#fff' },
+              }}
+            />
+          </HashRouter>
+        </ThemeProvider>
+      </ErrorBoundary>
+    );
+  }
 
   // Show loading spinner during initial check
   if (isLoading) {

@@ -17,6 +17,7 @@ const entryPoints = [
   path.join(testsRoot, 'services', 'ParitySyncCoordinator.test.ts'),
   path.join(testsRoot, 'services', 'offline-page-capabilities.test.ts'),
   path.join(testsRoot, 'services', 'VerticalOfflineFlows.test.ts'),
+  path.join(testsRoot, 'services', 'supplier-import-parser.test.ts'),
   path.join(testsRoot, 'pages', 'SettingsPage.test.tsx'),
   path.join(testsRoot, 'pages', 'OrderDetailsModal.test.tsx'),
   // Wave 0 regression tests — currently `test.skip`, un-skip as each
@@ -24,6 +25,17 @@ const entryPoints = [
   // D:\The-Small-002\planning\claude\now-create-a-plan-vivid-sutton.md.
   path.join(testsRoot, 'renderer', 'session-storage.test.ts'),
   path.join(testsRoot, 'renderer', 'login-migration.test.ts'),
+  path.join(testsRoot, 'renderer', 'orders-page-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'delivery-zones-page-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'staff-schedule-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'suppliers-page-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'inventory-page-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'coupon-loyalty-scan-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'settings-modal-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'z-report-closeout-sync.test.ts'),
+  path.join(testsRoot, 'renderer', 'display-pages-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'order-number-utils.test.ts'),
+  path.join(testsRoot, 'renderer', 'kds-live-draft-sync.test.ts'),
   // Wave 8 H29 regression: corrupt keyring blob must be rejected by
   // validateSecureSessionUser AND the keyring entry must be cleared.
   path.join(testsRoot, 'renderer', 'secure-session-validation.test.ts'),

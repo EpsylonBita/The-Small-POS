@@ -131,7 +131,10 @@
       "manager": "Manager",
       "admin": "Administrator",
       "staff": "Personal"
-    }
+    },
+    "close": "Schließen",
+    "retry": "Erneut versuchen",
+    "refresh": "Aktualisieren"
   },
   "dashboard": {
     "tabs": {
@@ -2168,6 +2171,31 @@
       "pending": "Ausstehend",
       "conflict": "Konflikt"
     },
+    "closeoutStages": {
+      "pre_z_report_sync": "Synchronisation vor dem Z-Bericht",
+      "z_report_submission": "Z-Bericht-Übermittlung",
+      "closeout_sync": "Tagesabschluss-Synchronisation"
+    },
+    "blockerReasons": {
+      "pending": "wartet auf Synchronisation",
+      "processing": "wird gerade synchronisiert",
+      "in_progress": "wird gerade synchronisiert",
+      "failed": "Synchronisation fehlgeschlagen",
+      "conflict": "Synchronisationskonflikt",
+      "deferred": "wartet auf einen erforderlichen übergeordneten Datensatz",
+      "queued_remote": "wartet auf Admin-Bestätigung",
+      "retrying": "wartet auf Wiederholung",
+      "parent_payment_not_synced": "übergeordnete Zahlung ist noch nicht synchronisiert",
+      "parent_payment_missing_canonical_remote_id": "der Admin-Bezug der übergeordneten Zahlung fehlt",
+      "ambiguous_canonical_remote_payment": "übergeordnete Zahlung passt zu mehr als einer Admin-Zahlung",
+      "Payment not yet synced": "übergeordnete Zahlung ist noch nicht synchronisiert",
+      "Parent payment missing canonical remote id": "der Admin-Bezug der übergeordneten Zahlung fehlt",
+      "Ambiguous canonical remote payment": "übergeordnete Zahlung passt zu mehr als einer Admin-Zahlung"
+    },
+    "closeoutBlocked": {
+      "single": "Der Tag kann während {{stage}} nicht geschlossen werden, weil {{orderReference}} noch blockiert ist: {{reason}}.",
+      "multiple": "Der Tag kann während {{stage}} nicht geschlossen werden, weil {{count}} Synchronisationselemente noch blockiert sind."
+    },
     "time": {
       "never": "Nie",
       "justNow": "gerade eben",
@@ -2396,6 +2424,8 @@
     "recoveryCenter": {
       "title": "Recovery Center",
       "subtitle": "Verwendet dieselben Sync-Health-Diagnosen und ergänzt geführte Reparaturaktionen für die sichtbaren Probleme.",
+      "guidedTitle": "Assistent für Sync-Wiederherstellung",
+      "guidedContextNote": "Beginnen Sie mit dem ersten Blocker. Wenn eine bekannte Lösung existiert, kann das POS sie ausführen oder genau den Bildschirm öffnen, der zur Bestellkorrektur nötig ist.",
       "contextNote": "Diese Recovery-Ansicht bleibt mit denselben Blockern synchron, die auch im Sync-Erklärungspanel angezeigt werden.",
       "noIssues": "Derzeit sind keine umsetzbaren Recovery-Probleme sichtbar.",
       "credentialsTitle": "Zugangsdaten brauchen Aufmerksamkeit",
@@ -2417,8 +2447,8 @@
       "paymentsSection": "Zahlungen",
       "staffSection": "Personal und Fahrer",
       "refreshSuccess": "Recovery-Status aktualisiert",
-      "contactOperator": "Operator kontaktieren",
-      "contactOperatorDetail": "Für dieses Problem gibt es noch keine geführte Entblockung. Kontaktieren Sie einen Operator und ergänzen Sie eine eigene Lösung für diesen Blocker-Typ, damit der nächste Vorfall direkt von diesem Bildschirm aus behoben werden kann."
+      "contactOperator": "Dev kontaktieren",
+      "contactOperatorDetail": "Für dieses Problem gibt es noch keine geführte Entblockung. Kontaktieren Sie Dev und fügen Sie Diagnosen hinzu, damit der nächste Vorfall einer Ein-Klick-Lösung zugeordnet werden kann."
     }
   },
   "modals": {
@@ -2958,7 +2988,43 @@
       "periodSince": "Zeitraum seit: {{date}} {{time}}",
       "loadFailed": "Z-Report konnte nicht geladen werden",
       "loading": "Bericht wird geladen…",
+      "refresh": "Bericht aktualisieren",
+      "closeoutChecklist": "Abschluss-Checkliste",
+      "moneyReconciliation": "Geldabgleich",
+      "reviewBeforeClose": "Vor dem Abschluss prüfen",
+      "actionPanelTitle": "Abschluss senden",
+      "commitHelp": "Der Abschluss schließt den lokalen Geschäftstag, synchronisiert offene Einträge und sendet den Z-Report an das Admin-Dashboard.",
+      "secondaryActions": "Exporte und Druck",
+      "reviewItems": "Prüfpunkte",
+      "closeoutLoading": "Bericht wird geprüft",
+      "readyToClose": "Bereit zum Schließen",
+      "needsAttention": "Prüfung nötig",
+      "adminSync": "Admin-Sync",
+      "syncChecking": "Lokalen und Admin-Sync prüfen.",
+      "syncReady": "Kein Sync-Blocker erkannt.",
+      "syncNeedsRetry": "Berichtsladung oder Sync fehlgeschlagen. Aktualisieren und vor dem Abschluss erneut versuchen.",
+      "paymentsCaptured": "Zahlungen erfasst",
+      "paymentsReady": "Alle Bestellzahlungen sind ausgeglichen.",
+      "paymentsNeedAction": "{{count}} Zahlungsblocker müssen vor dem Senden gelöst werden.",
+      "cashDrawerReady": "Kassenladensummen sind ausgeglichen.",
+      "cashDrawerNeedsReview": "{{drawers}} Kassenlade(n) nicht abgeglichen. Abweichung: {{variance}}.",
+      "expensesReady": "Keine ausstehenden Ausgaben zur Prüfung.",
+      "expensesNeedReview": "{{count}} Ausgabenposten müssen noch geprüft werden.",
+      "staffReady": "Personalschichten sind für diesen Bericht verfügbar.",
+      "staffNeedsMainTerminal": "Nur das Haupt-POS kann diesen Z-Report ausführen.",
+      "drawerVariance": "Kassenabweichung",
+      "closeoutSummary": "Abschlussübersicht",
+      "operatingSignals": "Betriebssignale",
+      "cashFlow": "Kassenfluss",
+      "netCashPosition": "Netto-Kassenbestand",
+      "expectedCash": "Erwartetes Bargeld",
+      "staffLedger": "Personalübersicht",
+      "drawerLedger": "Kassenladenübersicht",
+      "expenseLedger": "Ausgabenübersicht",
+      "noStaffReports": "Keine Personalberichte verfügbar",
+      "cancelled": "Storniert",
       "tabs": {
+        "overview": "Übersicht",
         "summary": "Zusammenfassung",
         "staff": "Personalleistung",
         "details": "Details"
@@ -3504,6 +3570,7 @@
     "status": "Status",
     "ingredient": "Zutat",
     "category": "Kategorie",
+    "noCategory": "Keine Kategorie",
     "stock": "Bestand",
     "minLevel": "Mindestbestand",
     "value": "Wert",
@@ -3515,6 +3582,43 @@
     "reason": "Grund",
     "notes": "Anmerkungen",
     "notesPlaceholder": "Anmerkungen zu dieser Anpassung hinzufügen...",
+    "history": {
+      "open": "Preis- und Bewegungsverlauf anzeigen",
+      "title": "Preis- und Bewegungsverlauf",
+      "currentStock": "Aktueller Bestand",
+      "currentCost": "Aktuelle Kosten",
+      "purchased": "Eingekauft",
+      "used": "Verwendet / entfernt",
+      "priceHistory": "Lieferantenpreisverlauf",
+      "priceHistoryDescription": "Jeder Einkauf aus einer Lieferantenrechnung bleibt hier sichtbar, damit Kostenänderungen nachvollziehbar sind.",
+      "noPriceHistory": "Noch kein Lieferanten-Einkaufsverlauf vorhanden.",
+      "movements": "Bestandsbewegungen",
+      "noMovements": "Noch keine Bestandsbewegungen erfasst.",
+      "date": "Datum",
+      "invoice": "Rechnung",
+      "supplier": "Lieferant",
+      "quantity": "Menge",
+      "unitCost": "Stückkosten",
+      "change": "Änderung",
+      "priceChange": {
+        "initial": "Initial",
+        "same": "Gleich"
+      },
+      "movementTypes": {
+        "purchase": "Einkauf",
+        "adjustment": "Anpassung",
+        "count": "Bestandszählung",
+        "sale": "Verkauf",
+        "waste": "Ausschuss",
+        "transfer": "Transfer",
+        "return": "Rückgabe"
+      },
+      "errors": {
+        "loadFailed": "Artikelverlauf konnte nicht geladen werden",
+        "endpointUnavailable": "Die Inventarverlaufs-API ist im verbundenen Admin-Dashboard nicht verfügbar. Starten oder aktualisieren Sie das Admin-Dashboard und versuchen Sie es erneut.",
+        "itemNotFound": "Der Inventarartikel wurde im verbundenen Admin-Dashboard nicht gefunden."
+      }
+    },
     "reasons": {
       "count": "Inventur",
       "received": "Lieferung erhalten",
@@ -3999,7 +4103,7 @@
   },
   "suppliers": {
     "title": "Lieferanten",
-    "subtitle": "Lieferanten und Rechnungen verwalten",
+    "subtitle": "Lieferanten, Rechnungen und importierten Bestand verwalten",
     "total": "Gesamt",
     "active": "Aktiv",
     "inactive": "Inaktiv",
@@ -4010,7 +4114,11 @@
     "search": "Lieferanten suchen...",
     "orders": "Bestellungen",
     "spent": "Ausgegeben",
-    "invoice": "Rechnung",
+    "invoice": {
+      "markAsUnpaid": "Als unbezahlt markieren",
+      "markedAsUnpaid": "Rechnung als unbezahlt markiert",
+      "markAsUnpaidFailed": "Rechnung konnte nicht als unbezahlt markiert werden"
+    },
     "supplier": "Lieferant",
     "amount": "Betrag",
     "dueDate": "Fälligkeitsdatum",
@@ -4032,7 +4140,12 @@
       "active": "Aktiv",
       "inactive": "Inaktiv",
       "preferred": "Bevorzugt",
-      "onHold": "Pausiert"
+      "onHold": "Pausiert",
+      "unpaid": "Unbezahlt",
+      "paid": "Bezahlt",
+      "overdue": "Überfällig",
+      "cancelled": "Storniert",
+      "partial": "Teilweise"
     },
     "invoices": {
       "title": "Rechnungen",
@@ -4045,7 +4158,45 @@
         "unpaid": "Unbezahlt",
         "overdue": "Überfällig",
         "partiallyPaid": "Teilweise bezahlt"
-      }
+      },
+      "markPaid": "Bezahlt",
+      "markUnpaid": "Unbezahlt",
+      "markedPaid": "Rechnung als bezahlt markiert",
+      "markedUnpaid": "Rechnung als unbezahlt markiert",
+      "statusFailed": "Rechnungsstatus konnte nicht aktualisiert werden",
+      "emptyTitle": "Keine Rechnungen gefunden",
+      "emptyDescription": "Lieferantenrechnungen erscheinen hier nach der Synchronisierung.",
+      "partialPayment": "Teilzahlung",
+      "detailsTitle": "Rechnungsdetails",
+      "totalSpent": "Gesamtausgaben",
+      "paidTotal": "Bezahlt gesamt",
+      "unpaidTotal": "Offen gesamt",
+      "invoiceCount": "Rechnungen",
+      "paidAmount": "Bezahlt",
+      "remaining": "Offen",
+      "paymentOptions": "Zahlungsoptionen",
+      "paymentAmount": "Zahlungsbetrag",
+      "paymentMethod": "Zahlungsart",
+      "paymentDate": "Zahlungsdatum",
+      "reference": "Referenz",
+      "paymentNotes": "Zahlungsnotizen",
+      "recordPayment": "Zahlung erfassen",
+      "payRemaining": "Rest bezahlen",
+      "payments": "Zahlungen",
+      "noPayments": "Noch keine Zahlungen erfasst",
+      "noPaymentNeeded": "Diese Rechnung hat keinen offenen Betrag.",
+      "paymentRecorded": "Zahlung erfasst",
+      "paymentFailed": "Zahlung konnte nicht erfasst werden",
+      "paymentAmountRequired": "Zahlungsbetrag eingeben",
+      "paymentAmountTooHigh": "Zahlung ist höher als der offene Betrag",
+      "methods": {
+        "cash": "Bar",
+        "bankTransfer": "Banküberweisung",
+        "check": "Scheck",
+        "creditCard": "Kreditkarte",
+        "other": "Andere"
+      },
+      "invoiceDate": "Rechnungsdatum"
     },
     "actions": {
       "viewDetails": "Details anzeigen",
@@ -4089,6 +4240,93 @@
       "equipment": "Ausstattung",
       "cleaning": "Reinigungsmittel",
       "other": "Sonstiges"
+    },
+    "unpaid": "Unbezahlt",
+    "noCategory": "Keine Kategorie",
+    "unknownSupplier": "Unbekannter Lieferant",
+    "code": "Code",
+    "phone": "Telefon",
+    "email": "E-Mail",
+    "address": "Adresse",
+    "paymentTerms": "Zahlungsbedingungen",
+    "noSelection": "Kein Lieferant ausgewählt",
+    "empty": {
+      "title": "Keine Lieferanten gefunden",
+      "description": "Fügen Sie Lieferantenartikel hinzu oder importieren Sie sie, um den Bestand zu synchronisieren."
+    },
+    "detail": {
+      "title": "Lieferantendetails",
+      "emptyTitle": "Lieferant auswählen",
+      "emptyDescription": "Kontakt- und Rechnungsdaten werden hier angezeigt."
+    },
+    "import": {
+      "open": "Artikel importieren",
+      "title": "Lieferantenartikel importieren",
+      "subtitle": "Prüfen Sie die Zeilen, bevor sie mit dem Bestand synchronisiert werden.",
+      "supplierName": "Lieferantenname",
+      "supplierPlaceholder": "Fresh Farms",
+      "supplierPhone": "Telefon",
+      "supplierEmail": "E-Mail",
+      "supplierNotes": "Lieferantennotizen aus der Rechnung",
+      "invoiceNumber": "Rechnungsnummer",
+      "invoiceDate": "Rechnungsdatum",
+      "sources": "Importquelle",
+      "addRows": "Zeilen hinzufügen",
+      "manualRow": "Manuelle Zeile",
+      "file": "Excel, CSV, PDF, DOC",
+      "camera": "Kamera-Scan",
+      "adminNoScanner": "Scanner- und Kameraaktionen sind nur auf POS-Terminals verfügbar.",
+      "hardwareScanner": "Barcode-Scanner",
+      "hardwareHelp": "Öffnen Sie dieses Panel und scannen Sie. Der Barcode wird automatisch hinzugefügt.",
+      "barcodePlaceholder": "Barcode",
+      "addBarcode": "Barcode hinzufügen",
+      "scanAdded": "Barcode zur Prüfung hinzugefügt",
+      "cameraUnavailable": "Barcode-Erkennung per Kamera ist auf diesem Gerät nicht verfügbar",
+      "noBarcodeFound": "In diesem Bild wurde kein Barcode gefunden",
+      "cameraFailed": "Dieses Bild konnte nicht gescannt werden",
+      "bestEffortNotice": "Dokumentextraktion erfolgt bestmöglich. Prüfen Sie jede Zeile vor dem Speichern.",
+      "fileNeedsReview": "Keine Zeilen erkannt. Fügen Sie Artikel vor der Vorschau manuell hinzu.",
+      "fileReadFailed": "Die Datei konnte nicht gelesen werden. Versuchen Sie eine andere Datei oder fügen Sie Zeilen manuell hinzu.",
+      "importedRows": "{{count}} Zeilen importiert. Scrollen Sie durch die Entwurfsliste und prüfen Sie jeden Artikel vor dem Speichern.",
+      "supplierRequired": "Lieferantenname ist erforderlich.",
+      "rowsRequired": "Fügen Sie mindestens eine Artikelzeile hinzu.",
+      "previewReady": "Importprüfung ist bereit",
+      "previewFailed": "Importvorschau fehlgeschlagen",
+      "saved": "Lieferantenartikel im Bestand gespeichert",
+      "saveFailed": "Lieferantenartikel konnten nicht gespeichert werden",
+      "draftRows": "Entwurfszeilen",
+      "rowCount": "{{count}} Zeilen",
+      "reviewBeforeSave": "Bearbeiten Sie Mengen, Kosten und Kategorien vor der Vorschau.",
+      "preview": "Vorschau",
+      "review": "Bestandssync prüfen",
+      "missingCategories": "Fehlende Kategorien",
+      "commit": "Im Bestand speichern",
+      "saveAfterPreview": "Nach Vorschau speichern",
+      "saveRequiresPreview": "Prüfen Sie die Zeilen vor dem Speichern im Bestand.",
+      "previewThenSaveHelp": "Die Vorschau prüft Lieferant, Kategorien und Bestandsabgleiche. Danach wird das Speichern verfügbar.",
+      "endpointUnavailable": "Die Lieferantenimport-API ist im verbundenen Admin-Dashboard nicht verfügbar. Starten oder aktualisieren Sie das Admin-Dashboard und versuchen Sie die Vorschau erneut.",
+      "adminHtmlError": "Das Admin-Dashboard hat eine Seite statt einer API-Antwort zurückgegeben. Prüfen Sie die Admin-URL und versuchen Sie es erneut.",
+      "itemName": "Artikelname",
+      "sku": "SKU",
+      "barcode": "Barcode",
+      "quantity": "Menge",
+      "cost": "Kosten",
+      "unit": "Einheit",
+      "category": "Kategorie",
+      "subcategory": "Unterkategorie",
+      "notes": "Notizen",
+      "rowNumber": "Zeile",
+      "noCategory": "Keine Kategorie",
+      "noCode": "Kein Code",
+      "status": {
+        "create": "Erstellen",
+        "update": "Aktualisieren",
+        "skip": "Überspringen",
+        "error": "Fehler"
+      }
+    },
+    "summary": {
+      "title": "Lieferantenübersicht"
     }
   },
   "tablesView": {
@@ -4183,12 +4421,90 @@
   },
   "staffSchedule": {
     "loading": "Personalplan wird geladen...",
+    "weeklyProgram": "Wochenplan Personal",
+    "weeklyProgramHint": "Woche ansehen, Lücken finden und Schichten schnell hinzufügen.",
+    "scheduleTitle": "Wochenplan",
+    "scheduleHint": "Tag oder Plus-Schaltfläche antippen, um eine Schicht hinzuzufügen.",
+    "today": "Heute",
     "stats": {
       "totalStaff": "Personal gesamt",
-      "roles": "Rollen"
+      "roles": "Rollen",
+      "scheduledThisWeek": "Diese Woche eingeplant",
+      "todayShifts": "Schichten heute",
+      "unscheduled": "Nicht eingeplant"
+    },
+    "filters": {
+      "all": "Alle Rollen"
+    },
+    "actions": {
+      "addShift": "Schicht hinzufügen",
+      "close": "Schließen",
+      "nextWeek": "Nächste Woche",
+      "previousWeek": "Vorherige Woche",
+      "refresh": "Plan aktualisieren",
+      "selectStaff": "Personal auswählen"
+    },
+    "days": {
+      "short": {
+        "sun": "So",
+        "mon": "Mo",
+        "tue": "Di",
+        "wed": "Mi",
+        "thu": "Do",
+        "fri": "Fr",
+        "sat": "Sa"
+      }
+    },
+    "status": {
+      "scheduled": "Geplant",
+      "active": "Aktiv",
+      "completed": "Abgeschlossen",
+      "cancelled": "Storniert",
+      "no_show": "Nicht erschienen"
+    },
+    "roles": {
+      "staff": "Personal"
+    },
+    "presets": {
+      "morning": "Vormittag 09:00-17:00",
+      "evening": "Abend 12:00-20:00",
+      "closing": "Schlussdienst 17:00-23:00"
     },
     "noStaff": "Keine Mitarbeiter gefunden",
-    "addStaffHint": "Mitarbeiter im Admin-Dashboard hinzufügen"
+    "addStaffHint": "Mitarbeiter im Admin-Dashboard hinzufügen",
+    "addShift": "Schicht hinzufügen",
+    "addShiftForDay": "Schicht für diesen Tag hinzufügen",
+    "addShiftForStaff": "Schicht für diesen Mitarbeiter hinzufügen",
+    "noShifts": "Keine Schichten",
+    "tapToAddShift": "Zum Hinzufügen tippen",
+    "unscheduled": "Diese Woche nicht eingeplant",
+    "unscheduledHint": "Namen antippen, um schnell die nächste Schicht zu erstellen.",
+    "everyoneScheduled": "Alle haben diese Woche mindestens eine Schicht.",
+    "fields": {
+      "staff": "Personal",
+      "startDateTime": "Beginn (Datum & Uhrzeit)",
+      "endDateTime": "Ende (Datum & Uhrzeit)",
+      "notes": "Notizen",
+      "notesPlaceholder": "Optionale Notizen..."
+    },
+    "selectStaff": "Personal auswählen",
+    "nextDayShortcut": "Enddatum auf nächsten Tag setzen",
+    "preview": "Vorschau",
+    "validationLabel": "Validierung",
+    "overnightHint": "Für Nachtschichten den nächsten Tag als Enddatum wählen.",
+    "createProgram": "Schicht erstellen",
+    "shiftCreated": "Schicht erstellt",
+    "savedLocallyQueued": "Lokal gespeichert und eingereiht",
+    "shiftCreateFailed": "Schicht konnte nicht erstellt werden",
+    "unknownStaff": "Unbekanntes Personal",
+    "validation": {
+      "selectStaff": "Bitte Mitarbeiter auswählen",
+      "selectDateTime": "Bitte Start- und Enddatum/-zeit auswählen",
+      "endAfterStart": "Endzeit muss nach der Startzeit liegen"
+    },
+    "errors": {
+      "loadFailed": "Personalplan konnte nicht geladen werden"
+    }
   },
   "receipt": {
     "header": {
@@ -4502,7 +4818,85 @@
       }
     }
   },
+  "customerDisplay": {
+    "title": "Kundendisplay",
+    "subtitle": "Live-Bestellstatus für kundennahe Bildschirme",
+    "loading": "Kundendisplay wird geladen...",
+    "empty": "Derzeit keine aktiven Bestellungen für das Kundendisplay.",
+    "orderLine": "Bestellung ({{number}}) ist {{status}}",
+    "displaySession": "Display-Sitzung",
+    "phases": {
+      "received": "Empfangen",
+      "preparing": "In Vorbereitung",
+      "ready": "Bereit"
+    },
+    "sentences": {
+      "received": "empfangen",
+      "preparing": "in Vorbereitung",
+      "ready": "bereit"
+    },
+    "descriptions": {
+      "received": "Bestellung empfangen",
+      "preparing": "Die Küche arbeitet daran",
+      "ready": "Bereit zur Abholung"
+    },
+    "actions": {
+      "copyTvLink": "TV-Link kopieren",
+      "externalDisplay": "Externes Display",
+      "stopExternal": "Extern stoppen"
+    },
+    "external": {
+      "monitors": "Verbundene Monitore und TVs",
+      "help": "Kabelgebundene Displays und drahtlose Displays des Betriebssystems erscheinen hier. Für Smart-TVs ohne Monitormodus kopieren Sie den TV-Link."
+    },
+    "status": {
+      "connected": "Verbunden",
+      "enabled": "Aktiviert",
+      "ready": "Bereit"
+    },
+    "notices": {
+      "externalRunning": "Das Kundendisplay läuft auf dem ausgewählten Monitor oder TV.",
+      "externalStopped": "Externes Kundendisplay gestoppt.",
+      "tvLinkCopied": "TV-Link kopiert. Öffnen Sie ihn in einem Smart-TV-Browser oder drahtlosen Empfänger."
+    },
+    "errors": {
+      "fetchRowsFailed": "Bestellungen für das Kundendisplay konnten nicht geladen werden",
+      "startExternalFailed": "Externes Kundendisplay konnte nicht geöffnet werden",
+      "stopExternalFailed": "Externes Kundendisplay konnte nicht gestoppt werden",
+      "createTvLinkFailed": "TV-Display-Link konnte nicht erstellt werden"
+    }
+  },
   "kitchen": {
+    "title": "Küchendisplay",
+    "subtitle": "Bestellvorbereitung in Echtzeit",
+    "pollingFallback": "Polling-Fallback",
+    "pending": "Ausstehend",
+    "preparing": "In Vorbereitung",
+    "total": "Gesamt",
+    "avgTime": "Durchschn. Zeit",
+    "min": "Min.",
+    "allStations": "Alle",
+    "justNow": "Gerade eben",
+    "startPreparing": "Vorbereitung starten",
+    "markReady": "Als bereit markieren",
+    "orderBumped": "Bestellung aktualisiert",
+    "bumpError": "Bestellung konnte nicht aktualisiert werden",
+    "loadError": "Bestellungen konnten nicht geladen werden",
+    "noOrders": "Keine aktiven Bestellungen",
+    "noOrdersDesc": "Neue Bestellungen erscheinen hier automatisch",
+    "externalDisplay": {
+      "copyTvLink": "TV-Link kopieren",
+      "open": "Auf verbundenem Display öffnen",
+      "stop": "Externes Display stoppen",
+      "connectedDisplays": "Verbundene Monitore und TVs",
+      "help": "Kabelgebundene Displays und drahtlose Displays des Betriebssystems erscheinen hier. Für Smart-TVs ohne Monitormodus kopieren Sie den TV-Link.",
+      "running": "Das Küchendisplay läuft auf dem ausgewählten Monitor oder TV.",
+      "stopped": "Externes Küchendisplay gestoppt.",
+      "openFailed": "Küchendisplay konnte nicht geöffnet werden",
+      "closeFailed": "Küchendisplay konnte nicht geschlossen werden",
+      "tvLinkCopied": "KDS-TV-Link kopiert. Öffnen Sie ihn in einem Smart-TV-Browser oder drahtlosen Empfänger.",
+      "tvLinkFailed": "KDS-TV-Link konnte nicht erstellt werden"
+    },
     "liveDraft": {
       "badge": "Live-Entwurf",
       "subtitle": "Live-Warenkorb in Bearbeitung",
@@ -4550,6 +4944,14 @@
     "earned": "[NEEDS DE TRANSLATION] Κερδισμένοι",
     "redeemed": "[NEEDS DE TRANSLATION] Εξαργυρωμένοι",
     "canRedeem": "[NEEDS DE TRANSLATION] Μπορεί να εξαργυρώσει",
+    "scan": {
+      "button": "Scannen",
+      "title": "Treuekunde scannen",
+      "description": "Scannen Sie den Barcode der Treuekarte, den NFC-Reader-Code oder geben Sie den Mitgliedscode manuell ein.",
+      "placeholder": "Karte, Telefon oder Mitgliedscode",
+      "found": "Treuekunde gefunden: {{name}}",
+      "notFound": "Kein Treuemitglied für {{code}} gefunden"
+    },
     "errors": {
       "loadFailed": "[NEEDS DE TRANSLATION] Αποτυχία φόρτωσης δεδομένων πιστότητας"
     }
@@ -4639,6 +5041,14 @@
     "discountValue": "Rabattwert",
     "percentage": "Prozentsatz",
     "fixed": "Festbetrag",
+    "scan": {
+      "button": "Scannen",
+      "title": "Gutschein scannen",
+      "description": "Scannen Sie einen Gutschein-Barcode oder geben Sie den Code ein, um ihn sofort zu finden.",
+      "placeholder": "Gutscheincode oder Barcode",
+      "found": "Gutschein {{code}} gefunden",
+      "notFound": "Kein Gutschein für {{code}} gefunden"
+    },
     "errors": {
       "loadFailed": "Gutscheine konnten nicht geladen werden",
       "saveFailed": "Gutschein konnte nicht gespeichert werden",
@@ -4652,6 +5062,28 @@
       "invalidMinOrder": "Mindestbestellwert ist ungültig",
       "invalidExpiry": "Ablaufdatum ist ungültig"
     }
+  },
+  "scannerPanel": {
+    "hardwareScanner": "Barcode-Scanner",
+    "serialConnected": "Serieller Scanner verbunden",
+    "keyboardReady": "USB-Tastatur-Scanner bereit",
+    "lastScan": "Letzter Scan",
+    "camera": "Kamera",
+    "cameraUnsupported": "Kameraerkennung ist auf diesem Gerät nicht verfügbar.",
+    "cameraDetectionFailed": "Verbundene Kameras konnten nicht geprüft werden.",
+    "cameraBarcodeUnavailable": "Barcode-Erkennung ist für diese Kamera auf diesem Gerät nicht verfügbar.",
+    "checkingDevices": "Geräte werden geprüft...",
+    "cameraCount": "{{count}} Kamera erkannt",
+    "noCamera": "Keine Kamera erkannt",
+    "loyaltyReaderConnected": "Treuekartenleser verbunden",
+    "loyaltyReaderReady": "Der Treuekartenleser hört zu, während dieser Scanner geöffnet ist",
+    "scanNow": "Jetzt scannen",
+    "scanHelp": "Scannen Sie mit einem Barcode-Scanner, verwenden Sie die Kamera oder geben Sie den Code manuell ein.",
+    "submit": "Code verwenden",
+    "cameraScan": "Kamera-Scan",
+    "checkAgain": "Geräte prüfen",
+    "noBarcodeFound": "Die Kamera hat keinen Barcode gefunden.",
+    "cameraScanFailed": "Dieses Barcode-Bild konnte nicht gescannt werden."
   },
   "ecr": {
     "title": "Zahlungsterminals",
@@ -5026,7 +5458,8 @@
     },
     "messages": {
       "actionSucceeded": "Aktion erfolgreich abgeschlossen.",
-      "actionFailed": "Aktion fehlgeschlagen. Prüfen Sie die Details und versuchen Sie es erneut."
+      "actionFailed": "Aktion fehlgeschlagen. Prüfen Sie die Details und versuchen Sie es erneut.",
+      "orderPaymentOpenFailed": "Der Zahlungsbildschirm der blockierten Bestellung konnte nicht geöffnet werden."
     },
     "actions": {
       "refresh": {
@@ -5103,8 +5536,16 @@
       "requeueFailedAdjustmentLegacyValidationRows": {
         "label": "Legacy-Validation-Anpassungen erneut einreihen"
       },
+      "openOrderPaymentFix": {
+        "label": "Bestellzahlung öffnen",
+        "description": "Öffnet die blockierte Bestellung, damit die fehlende oder unbezahlte Zahlung direkt korrigiert werden kann."
+      },
+      "contactDev": {
+        "label": "Dev kontaktieren",
+        "description": "Exportiert sichere Diagnosen und bereitet diesen Blocker für Entwickler-Support vor."
+      },
       "contactOperator": {
-        "label": "Operator kontaktieren"
+        "label": "Dev kontaktieren"
       },
       "confirmTitle": "Wiederherstellungsaktion bestätigen",
       "confirmMessage": "Diese Aktion ändert lokale Wiederherstellungsdaten für das ausgewählte Problem."
@@ -5122,14 +5563,70 @@
       "title": "Selbstbedienungs-Wiederherstellung",
       "subtitle": "Nutzen Sie geführte Reparaturaktionen, um blockierte Synchronisierungsprobleme zu beheben, ohne das POS zu verlassen.",
       "needsAttentionTitle": "Benötigt Aufmerksamkeit",
-      "needsAttentionSubtitle": "Blockierende Probleme, die derzeit eine Reparatur oder einen Eingriff durch den Operator benötigen.",
+      "needsAttentionSubtitle": "Blockierende Probleme, die derzeit eine Reparatur oder Dev-Unterstützung benötigen.",
       "noBlockingIssues": "Derzeit sind keine blockierenden Wiederherstellungsprobleme sichtbar.",
       "recoveringTitle": "Wird wiederhergestellt",
       "recoveringSubtitle": "Probleme, die in der Warteschlange sind, verschoben wurden oder für einen weiteren Synchronisierungsversuch bereit sind.",
       "noRecoveringIssues": "Derzeit sind keine wiederherstellbaren Probleme sichtbar.",
       "recentActionsTitle": "Kürzlich gelöst",
       "recentActionsSubtitle": "Jeder Reparaturversuch wird lokal protokolliert, damit das Personal sehen kann, was versucht wurde und was erfolgreich war.",
-      "noRecentActions": "Es wurden noch keine Wiederherstellungsaktionen aufgezeichnet."
+      "noRecentActions": "Es wurden noch keine Wiederherstellungsaktionen aufgezeichnet.",
+      "guidedTitle": "Sync-Wiederherstellung",
+      "guidedSubtitle": "Das POS prüft den Blocker, bietet die sicherste bekannte Lösung an und prüft danach den Sync erneut.",
+      "blockedCount": "{{count}} blockierend",
+      "terminalContextLine": "Terminal {{terminalId}}",
+      "remainingIssues": "{{count}} sichtbare Probleme",
+      "noVisibleBlockerTitle": "Nichts blockiert die Synchronisierung",
+      "noVisibleBlockerDescription": "Keine Bestellung, Zahlung oder Warteschlangen-Zeile benötigt derzeit manuelle Wiederherstellung.",
+      "whatBlocksTitle": "Was den Sync blockiert",
+      "otherIssuesWaiting": "+{{count}} weitere",
+      "automaticSolutionTitle": "Automatische Lösung",
+      "noKnownSolutionTitle": "Noch keine Ein-Klick-Lösung",
+      "noKnownSolutionDescription": "Das POS kann den Blocker erklären und Diagnosen für Dev-Support vorbereiten.",
+      "backupBeforeFix": "Vor dieser Aktion wird ein Recovery-Backup erstellt, bevor lokale Sync-Daten geändert werden.",
+      "verificationTitle": "Prüfung nach der Lösung",
+      "genericVerificationDescription": "Nach jeder Aktion aktualisiert das POS die Diagnosen und zeigt, ob die Warteschlange weiterlaufen kann.",
+      "lastActionSucceeded": "Letzte Aktion erfolgreich",
+      "lastActionFailed": "Letzte Aktion fehlgeschlagen",
+      "advancedDetailsTitle": "Erweiterte Details",
+      "systemStatusTitle": "System-Sync-Status",
+      "systemStatusSubtitle": "Eine einfache Ansicht dessen, was passiert, warum Bestellungen hängen können und welcher nächste Schritt am sichersten ist.",
+      "noFixNeededTitle": "Keine Korrektur nötig",
+      "noFixNeededDescription": "Die App hat keinen bekannten Fehler zum Reparieren gefunden. Wenn gerade eine Bestellung geändert wurde, starten Sie die Synchronisierung und prüfen Sie erneut.",
+      "healthyVerificationDescription": "Aktualisieren Sie dieses Panel, um zu prüfen, ob die Warteschlange nach dem nächsten Sync-Zyklus weiterhin frei ist.",
+      "advancedDiagnosticsTitle": "Diagnosedatei",
+      "diagnosticFileTitle": "Diagnosedatei",
+      "diagnosticFileHeadline": "Technische Details werden in einer Datei gespeichert",
+      "diagnosticFileDescription": "Damit dieser Bildschirm einfach bleibt, werden Warteschlangenzahlen, Parity-Zeilen, Druckerstatus, Datenbankdetails, Logs, Problemcodes, Bestell-IDs und das letzte Wiederherstellungsergebnis in das exportierte Diagnosepaket geschrieben, statt hier angezeigt zu werden.",
+      "diagnosticFilePrivacy": "Nutzen Sie dies, wenn Contact Dev Supportdetails anfordert. Sensible Felder werden über die Exporteinstellungen behandelt.",
+      "exportDiagnosticFile": "Diagnosedatei exportieren"
+    },
+    "recipes": {
+      "checkoutPaymentOpenPayment": {
+        "label": "Zahlung muss in der Bestellung korrigiert werden",
+        "explanation": "Dies ist ein bekannter Zahlungsblocker. Die sichere Lösung ist, den Zahlungsbildschirm der Bestellung zu öffnen, statt automatisch eine Zahlung zu erzeugen.",
+        "verification": "Speichern Sie die Zahlung, aktualisieren Sie die Wiederherstellung und starten Sie den Sync erneut. Spätere Bestellungen laufen weiter, sobald diese Bestellung die Warteschlange nicht mehr blockiert."
+      },
+      "paymentTotalConflictRepair": {
+        "label": "Bekannte Reparatur für Zahlungs-/Bestellabweichung",
+        "explanation": "Dieses Rezept aktualisiert die Eltern-Bestelländerung, lässt lokale Finanzdaten intakt und wiederholt die abgelehnte Zahlungszeile.",
+        "verification": "Die Zahlungszeile sollte nach dem erneuten Versuch die Fehlerwarteschlange verlassen."
+      },
+      "invalidDriverOrderUpdateRepair": {
+        "label": "Bekannte Reparatur für veralteten Fahrer",
+        "explanation": "Dieses Rezept entfernt nur die veraltete Fahrer-ID aus dem Wiederholungs-Payload und behält die Bestellaktualisierung.",
+        "verification": "Die Bestellaktualisierung sollte ohne den ungültigen Fahrerblocker erneut laufen."
+      },
+      "orderUpdateReplayRepair": {
+        "label": "Bekannte Reparatur für Bestell-Replay",
+        "explanation": "Dieses Rezept wiederholt zuerst kompatible Bestellaktualisierungen und gibt abhängige Zahlungen erst frei, wenn die Elternzeilen bereinigt sind.",
+        "verification": "Die abhängigen Zahlungszeilen sollten entsperrt werden, nachdem die Eltern-Bestellaktualisierung synchronisiert wurde."
+      },
+      "catalogAvailabilityRetry": {
+        "label": "Bekannter Retry für Katalogverfügbarkeit",
+        "explanation": "Dieses Rezept wiederholt nur Verfügbarkeits-Flags, nachdem die Admin-Route diese Aktualisierung unterstützt.",
+        "verification": "Katalogverfügbarkeitszeilen sollten nach dem Retry die Fehlerwarteschlange verlassen."
+      }
     },
     "issues": {
       "invalidOrders": {
@@ -5140,7 +5637,7 @@
       "syncBlocker": {
         "title": "Blockierte Sync-Zeile für {{entityType}}",
         "summary": "Eine Warteschlangenzeile wird durch {{blockerReason}} blockiert und braucht einen neuen Versuch oder eine manuelle Reparatur.",
-        "guidance": "Versuchen Sie zuerst die blockierte Sync-Zeile erneut. Wenn derselbe Blocker zurückkehrt, kontaktieren Sie den Operator mit dem Blocker-Grund und den Warteschlangendetails."
+        "guidance": "Versuchen Sie zuerst die blockierte Sync-Zeile erneut. Wenn derselbe Blocker zurückkehrt, kontaktieren Sie Dev mit dem Blocker-Grund und den Warteschlangendetails."
       },
       "parityMissingCredentials": {
         "title": "Terminal-Zugangsdaten erfordern Aufmerksamkeit",
@@ -5150,7 +5647,7 @@
       "parityProcessorStalled": {
         "title": "Parity-Prozessor hängt",
         "summary": "Der letzte Parity-Zyklus hat {{processed}} Elemente verarbeitet und {{remaining}} weiter in der Warteschlange gelassen. Aktueller Blocker: {{reason}}.",
-        "guidance": "Führen Sie die Parity-Synchronisierung jetzt aus. Wenn derselbe Rückstau bleibt, prüfen Sie die Parity-Probleme auf Modulebene unten oder kontaktieren Sie den Operator. Letzter Parity-Fehler: {{reason}}."
+        "guidance": "Führen Sie die Parity-Synchronisierung jetzt aus. Wenn derselbe Rückstau bleibt, prüfen Sie die Parity-Probleme auf Modulebene unten oder kontaktieren Sie Dev. Letzter Parity-Fehler: {{reason}}."
       },
       "paymentTotalConflict": {
         "title": "Zahlung und Bestellung passen nicht zusammen",
@@ -5205,12 +5702,12 @@
       "paymentAdjustmentMissingCanonicalRemotePayment": {
         "title": "Anpassung ohne kanonische Remote-Zahlung",
         "summary": "Die übergeordnete Zahlung ist applied, aber ihre kanonische Remote-Payment-ID fehlt noch.",
-        "guidance": "Führen Sie die Reparatur für verwaiste Finanzzeilen aus. Wenn die Anpassung weiterhin nicht mit der Backend-Zahlung verknüpft werden kann, kontaktieren Sie den Operator."
+        "guidance": "Führen Sie die Reparatur für verwaiste Finanzzeilen aus. Wenn die Anpassung weiterhin nicht mit der Backend-Zahlung verknüpft werden kann, kontaktieren Sie Dev."
       },
       "financialIntegrity": {
         "title": "Problem mit finanzieller Integrität",
         "summary": "Ein Zahlungs- oder Anpassungseintrag muss repariert werden, bevor die Synchronisierung abgeschlossen werden kann.",
-        "guidance": "Verwenden Sie die vorgeschlagene Wiederherstellungsaktion, wenn verfügbar. Wenn das Problem unverändert bleibt, kontaktieren Sie den Operator mit dem genauen Reason-Code."
+        "guidance": "Verwenden Sie die vorgeschlagene Wiederherstellungsaktion, wenn verfügbar. Wenn das Problem unverändert bleibt, kontaktieren Sie Dev mit dem genauen Reason-Code."
       },
       "legacyFinancialParityOrphan": {
         "title": "Veraltete Legacy-Finanz-Sync-Zeile",
@@ -5220,7 +5717,7 @@
       "financialQueueFailed": {
         "title": "Fehlgeschlagene Finanz-Sync-Zeile",
         "summary": "Eine Finanz-Sync-Zeile ist mit {{lastError}} fehlgeschlagen.",
-        "guidance": "Verwenden Sie die zugeordnete Wiederherstellungsaktion, wenn sie verfügbar ist. Wenn derselbe Fehler nach dem erneuten Versuch zurückkehrt, kontaktieren Sie den Operator."
+        "guidance": "Verwenden Sie die zugeordnete Wiederherstellungsaktion, wenn sie verfügbar ist. Wenn derselbe Fehler nach dem erneuten Versuch zurückkehrt, kontaktieren Sie Dev."
       },
       "checkoutPaymentBlocker": {
         "title": "Bestellung blockiert den Schichtabschluss",
@@ -5228,9 +5725,14 @@
         "guidance": "{{suggestedFix}} Gesamt {{totalAmount}}, erfasst {{settledAmount}}, offen {{outstandingAmount}}."
       },
       "contactOperatorFallback": {
-        "title": "Operator-Eingriff erforderlich",
+        "title": "Dev-Unterstützung erforderlich",
         "summary": "Ein Sync-Rückstau ist sichtbar, aber für diesen genauen Fehler ist noch keine geführte Lösung hinterlegt.",
-        "guidance": "Kontaktieren Sie den Operator und fügen Sie das Diagnostik-Bundle bei, damit der nächste Vorfall einer geführten Lösung zugeordnet werden kann."
+        "guidance": "Kontaktieren Sie Dev und fügen Sie das Diagnostik-Bundle bei, damit der nächste Vorfall einer geführten Lösung zugeordnet werden kann."
+      },
+      "contactDevFallback": {
+        "title": "Dev-Unterstützung erforderlich",
+        "summary": "Ein Sync-Rückstau ist sichtbar, aber für diesen genauen Fehler ist noch keine geführte Lösung hinterlegt.",
+        "guidance": "Kontaktieren Sie Dev und fügen Sie das Diagnostik-Bundle bei, damit der nächste Vorfall einer geführten Lösung zugeordnet werden kann."
       }
     }
   },

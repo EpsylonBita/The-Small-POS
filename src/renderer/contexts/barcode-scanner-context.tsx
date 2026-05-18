@@ -7,6 +7,7 @@
 
 import React, { createContext, useContext, useCallback, useState, useEffect, useRef } from 'react';
 import { useBarcodeScanner, BarcodeScannerState } from '../hooks/useBarcodeScanner';
+import { offEvent, onEvent } from '../../lib';
 
 interface BarcodeScannerContextValue {
   /** Current scanner state */
@@ -64,6 +65,30 @@ export const BarcodeScannerProvider: React.FC<BarcodeScannerProviderProps> = ({
     minBarcodeLength,
     onScan: handleScan,
   });
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    const handleSerialScan = (payload: unknown) => {
+      const source = (payload ?? {}) as Record<string, unknown>;
+      const barcode =
+        typeof payload === 'string'
+          ? payload
+          : typeof source.barcode === 'string'
+            ? source.barcode
+            : typeof source.rawValue === 'string'
+              ? source.rawValue
+              : '';
+
+      const cleanBarcode = barcode.trim();
+      if (cleanBarcode.length >= minBarcodeLength) {
+        simulateScan(cleanBarcode);
+      }
+    };
+
+    onEvent('barcode_scanned_serial', handleSerialScan);
+    return () => offEvent('barcode_scanned_serial', handleSerialScan);
+  }, [enabled, minBarcodeLength, simulateScan]);
 
   // Subscribe function
   const subscribe = useCallback((callback: (barcode: string) => void) => {

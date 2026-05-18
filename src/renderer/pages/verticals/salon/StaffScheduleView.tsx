@@ -100,7 +100,13 @@ const ROLE_COLORS: Record<string, string> = {
   customer: '#6B7280',
 };
 
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
+const SHIFT_STATUS_KEYS = new Set(['scheduled', 'active', 'completed', 'cancelled', 'no_show']);
+const TIME_PRESETS = [
+  { key: 'morning', startHour: '09', startMinute: '00', endHour: '17', endMinute: '00' },
+  { key: 'evening', startHour: '12', startMinute: '00', endHour: '20', endMinute: '00' },
+  { key: 'closing', startHour: '17', startMinute: '00', endHour: '23', endMinute: '00' },
+];
 
 const pad = (v: number): string => String(v).padStart(2, '0');
 
@@ -162,11 +168,9 @@ const getShiftStart = (shift: ScheduleShift): Date | null =>
 const getShiftEnd = (shift: ScheduleShift): Date | null =>
   parseDate(shift.endTime || shift.end_time || shift.scheduled_end || shift.check_out_time);
 
-const statusLabel = (status?: string): string => {
-  if (!status) {
-    return 'scheduled';
-  }
-  return status.replace(/_/g, ' ');
+const normalizeStatus = (status?: string): string => {
+  const normalized = (status || 'scheduled').trim().toLowerCase().replace(/\s+/g, '_');
+  return SHIFT_STATUS_KEYS.has(normalized) ? normalized : 'scheduled';
 };
 
 const HOURS = Array.from({ length: 24 }, (_, index) => pad(index));
@@ -226,12 +230,16 @@ export const StaffScheduleView: React.FC = memo(() => {
       if (branchId) {
         params.append('branch_id', branchId);
       }
+      if (roleFilter !== 'all') {
+        params.append('role', roleFilter);
+      }
       const response = isBrowser()
         ? await posApiGet<ApiResponse>(`/pos/staff-schedule?${params.toString()}`)
         : await bridge.staffSchedule.list({
             start_date: currentWeekStart.toISOString(),
             end_date: weekEnd.toISOString(),
             branch_id: branchId || undefined,
+            role: roleFilter === 'all' ? undefined : roleFilter,
           }) as ApiResponse;
       const payload = ((response as any).data ?? response) as {
         staff?: StaffMember[];
@@ -243,15 +251,15 @@ export const StaffScheduleView: React.FC = memo(() => {
         setStaff(payload.staff);
         setShifts(Array.isArray(payload.shifts) ? payload.shifts : []);
       } else {
-        setError(response.error || payload.error || 'Failed to fetch staff data');
+        setError(response.error || payload.error || t('staffSchedule.errors.loadFailed', 'Failed to fetch staff data'));
       }
     } catch (err: any) {
       console.error('[StaffScheduleView] Fetch error:', err);
-      setError(err.message || 'Failed to load staff schedule');
+      setError(err.message || t('staffSchedule.errors.loadFailed', 'Failed to load staff schedule'));
     } finally {
       setLoading(false);
     }
-  }, [branchId, currentWeekStart, roleFilter]);
+  }, [branchId, currentWeekStart, roleFilter, t]);
 
   useEffect(() => {
     fetchStaffData();
@@ -274,6 +282,20 @@ export const StaffScheduleView: React.FC = memo(() => {
     });
     return Array.from(roles);
   }, [staff]);
+
+  const roleLabelByName = useMemo(() => {
+    const labels = new Map<string, string>();
+    staff.forEach(member => {
+      if (member.role?.name) {
+        labels.set(member.role.name, member.role.displayName || member.role.name.replace(/_/g, ' '));
+      }
+    });
+    return labels;
+  }, [staff]);
+
+  const getRoleLabel = useCallback((roleName: string) => (
+    roleLabelByName.get(roleName) || roleName.replace(/_/g, ' ')
+  ), [roleLabelByName]);
 
   const filteredStaff = useMemo(() => {
     if (roleFilter === 'all') {
@@ -310,19 +332,19 @@ export const StaffScheduleView: React.FC = memo(() => {
       normalized.push({
         id: shift.id,
         staffId,
-        staffName: staffMember?.name || shift.staffName || shift.staff_name || 'Unknown staff',
+        staffName: staffMember?.name || shift.staffName || shift.staff_name || t('staffSchedule.unknownStaff', 'Unknown staff'),
         roleName,
-        roleLabel: staffMember?.role?.displayName || roleName.replace(/_/g, ' '),
+        roleLabel: staffMember?.role?.displayName || getRoleLabel(roleName),
         roleColor: getRoleColor(roleName),
         start,
         end: getShiftEnd(shift),
-        status: statusLabel(shift.status),
+        status: normalizeStatus(shift.status),
       });
     }
 
     normalized.sort((a, b) => a.start.getTime() - b.start.getTime());
     return normalized;
-  }, [roleFilter, shifts, staffMap, weekDateSet]);
+  }, [getRoleLabel, roleFilter, shifts, staffMap, t, weekDateSet]);
 
   const shiftsByDay = useMemo(() => {
     const grouped: Record<string, WeeklyShift[]> = {};
@@ -354,6 +376,20 @@ export const StaffScheduleView: React.FC = memo(() => {
   const scheduledStaffCount = useMemo(() => new Set(weeklyShifts.map(shift => shift.staffId)).size, [weeklyShifts]);
   const scheduledStaffSet = useMemo(() => new Set(weeklyShifts.map(shift => shift.staffId)), [weeklyShifts]);
   const unscheduledStaff = useMemo(() => filteredStaff.filter(member => !scheduledStaffSet.has(member.id)), [filteredStaff, scheduledStaffSet]);
+  const defaultCreateDate = useMemo(
+    () => (weekDateSet.has(todayKey) ? new Date() : new Date(currentWeekStart)),
+    [currentWeekStart, todayKey, weekDateSet],
+  );
+  const refreshScheduleLabel = t('staffSchedule.actions.refresh', 'Refresh schedule');
+
+  const getDayLabel = useCallback((day: Date) => {
+    const key = DAY_KEYS[day.getDay()];
+    return t(`staffSchedule.days.short.${key}`, day.toLocaleDateString([], { weekday: 'short' }));
+  }, [t]);
+
+  const getStatusLabel = useCallback((status: string) => (
+    t(`staffSchedule.status.${status}`, status.replace(/_/g, ' '))
+  ), [t]);
 
   const navigateWeek = (direction: 'prev' | 'next') => {
     setCurrentWeekStart(prev => {
@@ -363,9 +399,9 @@ export const StaffScheduleView: React.FC = memo(() => {
     });
   };
 
-  const openCreateModal = (day: Date) => {
+  const openCreateModal = (day: Date, staffId = '') => {
     setCreateModalDate(new Date(day));
-    setCreateStaffId('');
+    setCreateStaffId(staffId);
     const dayValue = toDateInputValue(day);
     setCreateStartDate(dayValue);
     setCreateEndDate(dayValue);
@@ -383,6 +419,16 @@ export const StaffScheduleView: React.FC = memo(() => {
     }
     setCreateModalOpen(false);
     setCreateModalDate(null);
+  };
+
+  const applyTimePreset = (preset: typeof TIME_PRESETS[number]) => {
+    if (createStartDate) {
+      setCreateEndDate(createStartDate);
+    }
+    setCreateStartHour(preset.startHour);
+    setCreateStartMinute(preset.startMinute);
+    setCreateEndHour(preset.endHour);
+    setCreateEndMinute(preset.endMinute);
   };
 
   const handleCreateShift = async () => {
@@ -441,7 +487,7 @@ export const StaffScheduleView: React.FC = memo(() => {
       toast.success(
         isBrowser()
           ? t('staffSchedule.shiftCreated', 'Shift created')
-          : t('common.savedLocallyQueued', 'Saved locally and queued'),
+          : t('staffSchedule.savedLocallyQueued', 'Saved locally and queued'),
       );
       setCreateModalOpen(false);
       setCreateModalDate(null);
@@ -475,9 +521,28 @@ export const StaffScheduleView: React.FC = memo(() => {
     };
   }, [createStartDate, createStartHour, createStartMinute, createEndDate, createEndHour, createEndMinute, t]);
 
+  const panelClass = isDark
+    ? 'bg-zinc-950/95 border-zinc-800 text-zinc-100'
+    : 'bg-white border-slate-200 text-slate-950 shadow-sm';
+  const softPanelClass = isDark
+    ? 'bg-zinc-900/70 border-zinc-800'
+    : 'bg-slate-50 border-slate-200';
+  const mutedTextClass = isDark ? 'text-zinc-400' : 'text-slate-600';
+  const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${
+    isDark
+      ? 'bg-zinc-900 border-zinc-700 text-zinc-100'
+      : 'bg-white border-slate-300 text-slate-950'
+  }`;
+  const iconButtonClass = `inline-flex h-11 w-11 items-center justify-center rounded-xl border transition-colors ${
+    isDark
+      ? 'bg-zinc-900 border-zinc-700 text-zinc-100 hover:bg-zinc-800'
+      : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
+  }`;
+  const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500 disabled:bg-blue-500/60';
+
   if (loading) {
     return (
-      <div className="h-full flex items-center justify-center">
+      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black' : 'bg-slate-50'}`}>
         <div className="flex flex-col items-center gap-3">
           <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
           <p className={isDark ? 'text-zinc-400' : 'text-gray-600'}>
@@ -501,7 +566,7 @@ export const StaffScheduleView: React.FC = memo(() => {
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white transition-colors"
           >
             <RefreshCw className="w-4 h-4" />
-            {t('common.retry', 'Retry')}
+            {t('common.actions.retry', 'Retry')}
           </button>
         </div>
       </div>
@@ -509,280 +574,295 @@ export const StaffScheduleView: React.FC = memo(() => {
   }
 
   return (
-    <div className={`h-full flex flex-col p-6 gap-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
-      <div className={`rounded-2xl border p-5 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h2 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              {t('staffSchedule.weeklyProgram', 'Weekly Staff Program')}
-            </h2>
-            <p className={`text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-              {t('staffSchedule.weeklyProgramHint', 'See who is working each day and at what time')}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => navigateWeek('prev')}
-              className={`p-2 rounded-lg border transition-colors ${
-                isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-gray-100 border-gray-300 hover:bg-gray-200'
-              }`}
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <div className={`min-w-[170px] px-4 py-2 rounded-lg text-center font-semibold border ${
-              isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'
-            }`}>
-              <span className="inline-flex items-center gap-2">
-                <Calendar className="w-4 h-4 text-blue-500" />
-                {weekLabel}
-              </span>
+    <div className={`h-full min-h-0 overflow-hidden ${isDark ? 'bg-black text-zinc-100' : 'bg-slate-50 text-slate-950'}`}>
+      <div className="mx-auto flex h-full w-full max-w-screen-2xl flex-col gap-4 p-4 md:p-5 xl:p-6">
+        <section className={`rounded-2xl border p-4 md:p-5 ${panelClass}`}>
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+            <div className="space-y-1">
+              <h2 className="text-2xl font-bold md:text-3xl">
+                {t('staffSchedule.weeklyProgram', 'Weekly Staff Program')}
+              </h2>
+              <p className={`text-sm ${mutedTextClass}`}>
+                {t('staffSchedule.weeklyProgramHint', 'See who is working each day and at what time')}
+              </p>
             </div>
-            <button
-              onClick={() => navigateWeek('next')}
-              className={`p-2 rounded-lg border transition-colors ${
-                isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-gray-100 border-gray-300 hover:bg-gray-200'
-              }`}
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-            <button
-              onClick={fetchStaffData}
-              className={`ml-1 px-3 py-2 rounded-lg border inline-flex items-center gap-2 transition-colors ${
-                isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-200' : 'bg-white border-gray-300 hover:bg-gray-100 text-gray-700'
-              }`}
-            >
-              <RefreshCw className="w-4 h-4" />
-              {t('common.refresh', 'Refresh')}
-            </button>
-          </div>
-        </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
-          <div className={`rounded-xl p-3 border ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-blue-50 border-blue-100'}`}>
-            <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-blue-700'}`}>{t('staffSchedule.stats.totalStaff', 'Total Staff')}</p>
-            <p className="text-xl font-bold mt-1 inline-flex items-center gap-2">
-              <Users className="w-5 h-5 text-blue-500" />
-              {filteredStaff.length}
-            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => navigateWeek('prev')}
+                aria-label={t('staffSchedule.actions.previousWeek', 'Previous week')}
+                title={t('staffSchedule.actions.previousWeek', 'Previous week')}
+                className={iconButtonClass}
+              >
+                <ChevronLeft className="h-5 w-5" />
+              </button>
+              <div className={`inline-flex h-11 items-center gap-2 rounded-xl border px-4 text-sm font-semibold ${
+                isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-slate-300'
+              }`}>
+                <Calendar className="h-4 w-4 text-blue-500" />
+                {weekLabel}
+              </div>
+              <button
+                type="button"
+                onClick={() => navigateWeek('next')}
+                aria-label={t('staffSchedule.actions.nextWeek', 'Next week')}
+                title={t('staffSchedule.actions.nextWeek', 'Next week')}
+                className={iconButtonClass}
+              >
+                <ChevronRight className="h-5 w-5" />
+              </button>
+              <button
+                type="button"
+                onClick={fetchStaffData}
+                aria-label={refreshScheduleLabel}
+                title={refreshScheduleLabel}
+                className={iconButtonClass}
+              >
+                <RefreshCw className="h-5 w-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => openCreateModal(defaultCreateDate)}
+                className={primaryButtonClass}
+              >
+                <Plus className="h-4 w-4" />
+                {t('staffSchedule.actions.addShift', 'Add shift')}
+              </button>
+            </div>
           </div>
-          <div className={`rounded-xl p-3 border ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-emerald-50 border-emerald-100'}`}>
-            <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-emerald-700'}`}>{t('staffSchedule.stats.scheduledThisWeek', 'Scheduled This Week')}</p>
-            <p className="text-xl font-bold mt-1 inline-flex items-center gap-2">
-              <UserCheck className="w-5 h-5 text-emerald-500" />
-              {scheduledStaffCount}
-            </p>
-          </div>
-          <div className={`rounded-xl p-3 border ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-amber-50 border-amber-100'}`}>
-            <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-amber-700'}`}>{t('staffSchedule.stats.todayShifts', 'Today Shifts')}</p>
-            <p className="text-xl font-bold mt-1 inline-flex items-center gap-2">
-              <Clock className="w-5 h-5 text-amber-500" />
-              {todayShiftsCount}
-            </p>
-          </div>
-        </div>
 
-        <div className="flex flex-wrap gap-2 mt-4">
-          <button
-            onClick={() => setRoleFilter('all')}
-            className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
-              roleFilter === 'all'
-                ? 'bg-blue-600 border-blue-500 text-white'
-                : isDark
-                  ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800'
-                  : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
-            }`}
-          >
-            {t('common.all', 'All')}
-          </button>
-          {availableRoles.map(role => (
+          <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <div className={`rounded-xl border p-3 ${softPanelClass}`}>
+              <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.totalStaff', 'Total Staff')}</p>
+              <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
+                <Users className="h-5 w-5 text-blue-500" />
+                {filteredStaff.length}
+              </p>
+            </div>
+            <div className={`rounded-xl border p-3 ${softPanelClass}`}>
+              <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.scheduledThisWeek', 'Scheduled This Week')}</p>
+              <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
+                <UserCheck className="h-5 w-5 text-emerald-500" />
+                {scheduledStaffCount}
+              </p>
+            </div>
+            <div className={`rounded-xl border p-3 ${softPanelClass}`}>
+              <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.todayShifts', 'Today Shifts')}</p>
+              <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
+                <Clock className="h-5 w-5 text-amber-500" />
+                {todayShiftsCount}
+              </p>
+            </div>
+            <div className={`rounded-xl border p-3 ${softPanelClass}`}>
+              <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.unscheduled', 'Unscheduled')}</p>
+              <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
+                <Briefcase className="h-5 w-5 text-fuchsia-500" />
+                {unscheduledStaff.length}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 flex gap-2 overflow-x-auto scrollbar-hide pb-1">
             <button
-              key={role}
-              onClick={() => setRoleFilter(role)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium capitalize border transition-colors ${
-                roleFilter === role
-                  ? 'text-white'
+              type="button"
+              onClick={() => setRoleFilter('all')}
+              className={`shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold transition-colors ${
+                roleFilter === 'all'
+                  ? 'bg-blue-600 border-blue-500 text-white'
                   : isDark
                     ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800'
-                    : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
+                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
               }`}
-              style={roleFilter === role ? { backgroundColor: getRoleColor(role), borderColor: getRoleColor(role) } : undefined}
             >
-              {role.replace(/_/g, ' ')}
+              {t('staffSchedule.filters.all', 'All roles')}
             </button>
-          ))}
-        </div>
-      </div>
-
-      <div className={`flex-1 min-h-0 rounded-2xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
-        <div className="h-full overflow-auto">
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-7 gap-3 p-4 min-w-[980px] xl:min-w-0">
-            {weekDays.map(day => {
-              const dayKey = localDateKey(day);
-              const dayShifts = shiftsByDay[dayKey] || [];
-              const today = dayKey === todayKey;
-
-              return (
-                <div
-                  key={dayKey}
-                  onClick={() => openCreateModal(day)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      openCreateModal(day);
-                    }
-                  }}
-                  className={`rounded-xl border min-h-[280px] flex flex-col ${
-                    today
-                      ? isDark
-                        ? 'bg-zinc-900 border-blue-600 shadow-[0_0_0_1px_rgba(37,99,235,0.35)]'
-                        : 'bg-blue-50/60 border-blue-300 shadow-[0_0_0_1px_rgba(59,130,246,0.25)]'
-                      : isDark
-                        ? 'bg-zinc-900 border-zinc-800'
-                        : 'bg-gray-50 border-gray-200'
-                  }`}
-                >
-                  <div className={`px-3 py-3 border-b ${
-                    today
-                      ? isDark
-                        ? 'border-blue-700 bg-blue-950/40'
-                        : 'border-blue-200 bg-blue-50'
-                      : isDark
-                        ? 'border-zinc-800'
-                        : 'border-gray-200'
-                  }`}>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <p className={`text-sm font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{DAY_NAMES[day.getDay()]}</p>
-                          {today && (
-                            <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-full ${
-                              isDark ? 'bg-blue-600/30 text-blue-300 border border-blue-500/40' : 'bg-blue-100 text-blue-700 border border-blue-200'
-                            }`}>
-                              {t('common.today', 'Today')}
-                            </span>
-                          )}
-                        </div>
-                        <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-                          {day.toLocaleDateString([], { day: '2-digit', month: 'short' })}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-xs px-2 py-1 rounded-full ${
-                          dayShifts.length > 0
-                            ? isDark ? 'bg-emerald-900/50 text-emerald-300' : 'bg-emerald-100 text-emerald-700'
-                            : isDark ? 'bg-zinc-800 text-zinc-400' : 'bg-gray-200 text-gray-600'
-                        }`}>
-                          {dayShifts.length}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            openCreateModal(day);
-                          }}
-                          className={`p-1.5 rounded-md border transition-colors ${
-                            isDark
-                              ? 'bg-zinc-800 border-zinc-700 hover:bg-zinc-700 text-zinc-200'
-                              : 'bg-white border-gray-300 hover:bg-gray-100 text-gray-700'
-                          }`}
-                          title={t('staffSchedule.addShiftForDay', 'Add shift for this day')}
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="p-3 space-y-2">
-                    {dayShifts.length === 0 ? (
-                      <div className={`text-xs text-center py-8 rounded-lg border border-dashed ${
-                        isDark ? 'text-zinc-500 border-zinc-700' : 'text-gray-500 border-gray-300'
-                      }`}>
-                        {t('staffSchedule.noShifts', 'No shifts')}
-                      </div>
-                    ) : (
-                      dayShifts.map(shift => (
-                        <div
-                          key={shift.id}
-                          onClick={event => event.stopPropagation()}
-                          className={`rounded-lg px-3 py-2 border-l-4 border ${
-                            isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'
-                          }`}
-                          style={{ borderLeftColor: shift.roleColor }}
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <p className={`text-sm font-semibold leading-tight ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
-                              {shift.staffName}
-                            </p>
-                            <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
-                              shift.status.includes('active')
-                                ? isDark ? 'bg-emerald-900/50 text-emerald-300' : 'bg-emerald-100 text-emerald-700'
-                                : shift.status.includes('cancel')
-                                  ? isDark ? 'bg-red-900/40 text-red-300' : 'bg-red-100 text-red-700'
-                                  : isDark ? 'bg-blue-900/40 text-blue-300' : 'bg-blue-100 text-blue-700'
-                            }`}>
-                              {shift.status}
-                            </span>
-                          </div>
-                          <p className={`text-xs mt-1 capitalize ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-                            <span className="inline-flex items-center gap-1">
-                              <Briefcase className="w-3 h-3" />
-                              {shift.roleLabel}
-                            </span>
-                          </p>
-                          <p className={`text-xs mt-1 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
-                            <span className="inline-flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              {formatTimeRange(shift.start, shift.end)}
-                            </span>
-                          </p>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {unscheduledStaff.length > 0 && (
-        <div className={`rounded-2xl border p-4 ${
-          isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'
-        }`}>
-          <p className={`text-sm font-semibold mb-2 ${isDark ? 'text-zinc-200' : 'text-gray-900'}`}>
-            {t('staffSchedule.unscheduled', 'Not Scheduled This Week')} ({unscheduledStaff.length})
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {unscheduledStaff.map(member => (
-              <span
-                key={member.id}
-                className={`text-xs px-2.5 py-1 rounded-full border ${
-                  isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-300' : 'bg-gray-100 border-gray-200 text-gray-700'
+            {availableRoles.map(role => (
+              <button
+                key={role}
+                type="button"
+                onClick={() => setRoleFilter(role)}
+                className={`shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold capitalize transition-colors ${
+                  roleFilter === role
+                    ? 'text-white'
+                    : isDark
+                      ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
                 }`}
+                style={roleFilter === role ? { backgroundColor: getRoleColor(role), borderColor: getRoleColor(role) } : undefined}
               >
-                {member.name}
-              </span>
+                {getRoleLabel(role)}
+              </button>
             ))}
           </div>
+        </section>
+
+        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide">
+          <div className="space-y-4 pb-1">
+            <section className={`rounded-2xl border p-3 md:p-4 ${panelClass}`}>
+              <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h3 className="text-lg font-semibold">{t('staffSchedule.scheduleTitle', 'This week')}</h3>
+                  <p className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.scheduleHint', 'Tap a day or the plus button to add a shift.')}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-7">
+                {weekDays.map(day => {
+                  const dayKey = localDateKey(day);
+                  const dayShifts = shiftsByDay[dayKey] || [];
+                  const today = dayKey === todayKey;
+
+                  return (
+                    <article
+                      key={dayKey}
+                      className={`flex min-h-64 overflow-hidden flex-col rounded-xl border transition-colors ${
+                        today
+                          ? isDark
+                            ? 'bg-blue-950/20 border-blue-600 shadow-[0_0_0_1px_rgba(37,99,235,0.35)]'
+                            : 'bg-blue-50 border-blue-300 shadow-[0_0_0_1px_rgba(59,130,246,0.2)]'
+                          : softPanelClass
+                      }`}
+                    >
+                      <div className={`border-b px-3 py-3 ${today ? (isDark ? 'border-blue-800' : 'border-blue-200') : (isDark ? 'border-zinc-800' : 'border-slate-200')}`}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-base font-bold">{getDayLabel(day)}</p>
+                              {today && (
+                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                                  isDark ? 'bg-blue-600/20 border-blue-500/50 text-blue-200' : 'bg-blue-100 border-blue-200 text-blue-700'
+                                }`}>
+                                  {t('staffSchedule.today', 'Today')}
+                                </span>
+                              )}
+                            </div>
+                            <p className={`text-xs ${mutedTextClass}`}>
+                              {day.toLocaleDateString([], { day: '2-digit', month: 'short' })}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <span className={`inline-flex h-7 min-w-7 items-center justify-center rounded-full px-1.5 text-xs font-semibold ${
+                              dayShifts.length > 0
+                                ? isDark ? 'bg-emerald-900/50 text-emerald-300' : 'bg-emerald-100 text-emerald-700'
+                                : isDark ? 'bg-zinc-800 text-zinc-400' : 'bg-slate-200 text-slate-600'
+                            }`}>
+                              {dayShifts.length}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => openCreateModal(day)}
+                              aria-label={t('staffSchedule.addShiftForDay', 'Add shift for this day')}
+                              title={t('staffSchedule.addShiftForDay', 'Add shift for this day')}
+                              className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border transition-colors ${
+                                isDark
+                                  ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800'
+                                  : 'bg-white border-slate-300 hover:bg-slate-100'
+                              }`}
+                            >
+                              <Plus className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex-1 space-y-2 overflow-y-auto scrollbar-hide p-3">
+                        {dayShifts.length === 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => openCreateModal(day)}
+                            className={`flex h-full min-h-28 w-full flex-col items-center justify-center rounded-xl border border-dashed px-3 py-6 text-center text-sm transition-colors ${
+                              isDark
+                                ? 'border-zinc-700 text-zinc-500 hover:border-blue-600 hover:text-blue-300'
+                                : 'border-slate-300 text-slate-500 hover:border-blue-300 hover:text-blue-700'
+                            }`}
+                          >
+                            <Plus className="mb-2 h-5 w-5" />
+                            <span className="font-medium">{t('staffSchedule.noShifts', 'No shifts')}</span>
+                            <span className="mt-1 text-xs">{t('staffSchedule.tapToAddShift', 'Tap to add one')}</span>
+                          </button>
+                        ) : (
+                          dayShifts.map(shift => (
+                            <div
+                              key={shift.id}
+                              className={`rounded-xl border-l-4 border px-3 py-2 ${
+                                isDark ? 'bg-black/30 border-zinc-800' : 'bg-white border-slate-200'
+                              }`}
+                              style={{ borderLeftColor: shift.roleColor }}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="text-sm font-semibold leading-tight">{shift.staffName}</p>
+                                <span className={`rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                                  shift.status === 'active'
+                                    ? isDark ? 'bg-emerald-900/50 text-emerald-300' : 'bg-emerald-100 text-emerald-700'
+                                    : shift.status === 'cancelled'
+                                      ? isDark ? 'bg-red-900/40 text-red-300' : 'bg-red-100 text-red-700'
+                                      : isDark ? 'bg-blue-900/40 text-blue-300' : 'bg-blue-100 text-blue-700'
+                                }`}>
+                                  {getStatusLabel(shift.status)}
+                                </span>
+                              </div>
+                              <p className={`mt-1 inline-flex items-center gap-1 text-xs capitalize ${mutedTextClass}`}>
+                                <Briefcase className="h-3 w-3" />
+                                {shift.roleLabel}
+                              </p>
+                              <p className={`mt-1 inline-flex items-center gap-1 text-xs ${isDark ? 'text-zinc-300' : 'text-slate-700'}`}>
+                                <Clock className="h-3 w-3" />
+                                {formatTimeRange(shift.start, shift.end)}
+                              </p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className={`rounded-2xl border p-4 ${panelClass}`}>
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-base font-semibold">
+                    {t('staffSchedule.unscheduled', 'Not Scheduled This Week')} ({unscheduledStaff.length})
+                  </h3>
+                  <p className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.unscheduledHint', 'Tap a name to create their next shift quickly.')}</p>
+                </div>
+              </div>
+              <div className="mt-3 flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+                {unscheduledStaff.length === 0 ? (
+                  <span className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.everyoneScheduled', 'Everyone has at least one shift this week.')}</span>
+                ) : (
+                  unscheduledStaff.map(member => (
+                    <button
+                      key={member.id}
+                      type="button"
+                      onClick={() => openCreateModal(defaultCreateDate, member.id)}
+                      className={`inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors ${
+                        isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                      }`}
+                      title={t('staffSchedule.addShiftForStaff', 'Add shift for this staff member')}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      {member.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            </section>
+          </div>
         </div>
-      )}
+      </div>
 
       {createModalOpen && createModalDate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button
             type="button"
-            aria-label="Close"
+            aria-label={t('staffSchedule.actions.close', 'Close')}
             className="absolute inset-0 bg-black/60"
             onClick={closeCreateModal}
           />
-          <div className={`relative w-full max-w-2xl rounded-2xl border p-6 ${
-            isDark ? 'bg-zinc-950 border-zinc-800 text-zinc-100' : 'bg-white border-gray-200 text-gray-900'
-          }`}>
+          <div className={`relative max-h-[calc(100vh-2rem)] w-full max-w-3xl overflow-y-auto scrollbar-hide rounded-2xl border p-5 md:p-6 ${panelClass}`}>
             <div className="flex items-start justify-between gap-3 mb-4">
               <div>
                 <h3 className="text-2xl font-semibold">{t('staffSchedule.addShift', 'Add Shift')}</h3>
@@ -793,15 +873,14 @@ export const StaffScheduleView: React.FC = memo(() => {
               <button
                 type="button"
                 onClick={closeCreateModal}
-                className={`p-2.5 rounded-lg border ${
-                  isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-gray-50 border-gray-300 hover:bg-gray-100'
-                }`}
+                aria-label={t('staffSchedule.actions.close', 'Close')}
+                className={iconButtonClass}
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="space-y-3">
+            <div className="space-y-4">
               <label className="block">
                 <span className={`text-sm font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                   {t('staffSchedule.fields.staff', 'Staff')}
@@ -809,18 +888,31 @@ export const StaffScheduleView: React.FC = memo(() => {
                 <select
                   value={createStaffId}
                   onChange={e => setCreateStaffId(e.target.value)}
-                  className={`mt-1 w-full px-3 py-3 rounded-xl border text-base ${
-                    isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'
-                  }`}
+                  className={`mt-1 ${inputClass}`}
                 >
                   <option value="">{t('staffSchedule.selectStaff', 'Select staff')}</option>
                   {filteredStaff.map(member => (
                     <option key={member.id} value={member.id}>
-                      {member.name} ({member.role?.displayName || member.role?.name || 'Staff'})
+                      {member.name} ({member.role?.displayName || member.role?.name || t('staffSchedule.roles.staff', 'Staff')})
                     </option>
                   ))}
                 </select>
               </label>
+
+              <div className="flex flex-wrap gap-2">
+                {TIME_PRESETS.map(preset => (
+                  <button
+                    key={preset.key}
+                    type="button"
+                    onClick={() => applyTimePreset(preset)}
+                    className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
+                      isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    {t(`staffSchedule.presets.${preset.key}`, preset.key)}
+                  </button>
+                ))}
+              </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div className={`rounded-xl border p-4 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
@@ -832,17 +924,13 @@ export const StaffScheduleView: React.FC = memo(() => {
                       type="date"
                       value={createStartDate}
                       onChange={e => setCreateStartDate(e.target.value)}
-                      className={`w-full px-3 py-3 rounded-xl border text-base ${
-                        isDark ? 'bg-zinc-950 border-zinc-700' : 'bg-white border-gray-300'
-                      }`}
+                      className={inputClass}
                     />
                     <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
                       <select
                         value={createStartHour}
                         onChange={e => setCreateStartHour(e.target.value)}
-                        className={`px-3 py-3 rounded-xl border text-base ${
-                          isDark ? 'bg-zinc-950 border-zinc-700' : 'bg-white border-gray-300'
-                        }`}
+                        className={inputClass}
                       >
                         {HOURS.map(hour => <option key={`start-hour-${hour}`} value={hour}>{hour}</option>)}
                       </select>
@@ -850,9 +938,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                       <select
                         value={createStartMinute}
                         onChange={e => setCreateStartMinute(e.target.value)}
-                        className={`px-3 py-3 rounded-xl border text-base ${
-                          isDark ? 'bg-zinc-950 border-zinc-700' : 'bg-white border-gray-300'
-                        }`}
+                        className={inputClass}
                       >
                         {MINUTES.map(minute => <option key={`start-minute-${minute}`} value={minute}>{minute}</option>)}
                       </select>
@@ -869,17 +955,13 @@ export const StaffScheduleView: React.FC = memo(() => {
                       type="date"
                       value={createEndDate}
                       onChange={e => setCreateEndDate(e.target.value)}
-                      className={`w-full px-3 py-3 rounded-xl border text-base ${
-                        isDark ? 'bg-zinc-950 border-zinc-700' : 'bg-white border-gray-300'
-                      }`}
+                      className={inputClass}
                     />
                     <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
                       <select
                         value={createEndHour}
                         onChange={e => setCreateEndHour(e.target.value)}
-                        className={`px-3 py-3 rounded-xl border text-base ${
-                          isDark ? 'bg-zinc-950 border-zinc-700' : 'bg-white border-gray-300'
-                        }`}
+                        className={inputClass}
                       >
                         {HOURS.map(hour => <option key={`end-hour-${hour}`} value={hour}>{hour}</option>)}
                       </select>
@@ -887,9 +969,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                       <select
                         value={createEndMinute}
                         onChange={e => setCreateEndMinute(e.target.value)}
-                        className={`px-3 py-3 rounded-xl border text-base ${
-                          isDark ? 'bg-zinc-950 border-zinc-700' : 'bg-white border-gray-300'
-                        }`}
+                        className={inputClass}
                       >
                         {MINUTES.map(minute => <option key={`end-minute-${minute}`} value={minute}>{minute}</option>)}
                       </select>
@@ -917,7 +997,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                   ? isDark ? 'bg-emerald-950/30 border-emerald-900/50 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
                   : isDark ? 'bg-amber-950/30 border-amber-900/50 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-700'
               }`}>
-                <p className="text-sm font-medium">{shiftPreview.valid ? t('staffSchedule.preview', 'Preview') : t('staffSchedule.validation', 'Validation')}</p>
+                <p className="text-sm font-medium">{shiftPreview.valid ? t('staffSchedule.preview', 'Preview') : t('staffSchedule.validationLabel', 'Validation')}</p>
                 <p className="text-sm mt-0.5">{shiftPreview.message}</p>
               </div>
               <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>
@@ -933,9 +1013,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                   onChange={e => setCreateNotes(e.target.value)}
                   rows={3}
                   placeholder={t('staffSchedule.fields.notesPlaceholder', 'Optional notes...')}
-                  className={`mt-1 w-full px-3 py-3 rounded-xl border text-base resize-none ${
-                    isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'
-                  }`}
+                  className={`mt-1 resize-none ${inputClass}`}
                 />
               </label>
             </div>
@@ -949,17 +1027,15 @@ export const StaffScheduleView: React.FC = memo(() => {
                   isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-gray-100 border-gray-300 hover:bg-gray-200'
                 }`}
               >
-                {t('common.cancel', 'Cancel')}
+                {t('common.actions.cancel', 'Cancel')}
               </button>
               <button
                 type="button"
                 onClick={handleCreateShift}
                 disabled={creatingShift}
-                className={`px-5 py-3 rounded-xl text-base font-semibold text-white ${
-                  creatingShift ? 'bg-blue-500/70' : 'bg-blue-600 hover:bg-blue-500'
-                }`}
+                className={primaryButtonClass}
               >
-                {creatingShift ? t('common.saving', 'Saving...') : t('staffSchedule.createProgram', 'Create Program')}
+                {creatingShift ? t('common.actions.saving', 'Saving...') : t('staffSchedule.createProgram', 'Create shift')}
               </button>
             </div>
           </div>

@@ -52,6 +52,10 @@ function createSessionId(): string {
   return `kds-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function buildLiveDraftDeleteEndpoint(sessionId: string): string {
+  return `/api/pos/kds/live-drafts?session_id=${encodeURIComponent(sessionId)}`;
+}
+
 export function useKdsLiveDraftSync({
   enabled,
   isOpen,
@@ -65,6 +69,7 @@ export function useKdsLiveDraftSync({
   const publishTokenRef = useRef(0);
   const lastFingerprintRef = useRef<string>('');
   const didPublishRef = useRef(false);
+  const draftSessionActiveRef = useRef(false);
 
   const resolvedOrderType = normalizeOrderType(orderType);
   const resolvedCustomerName = (customerName || '').trim() || null;
@@ -112,17 +117,19 @@ export function useKdsLiveDraftSync({
     }
   }, []);
 
-  const clearDrafts = useCallback(async () => {
-    const sessionId = sessionIdRef.current;
+  const clearDrafts = useCallback(async (explicitSessionId?: string | null) => {
+    const sessionId = explicitSessionId || sessionIdRef.current;
     if (!sessionId || !terminalId || !branchId || !organizationId) {
       return;
     }
 
     try {
-      await posApiFetch('/api/pos/kds/live-drafts', {
+      await posApiFetch(buildLiveDraftDeleteEndpoint(sessionId), {
         method: 'DELETE',
-        body: JSON.stringify({ session_id: sessionId }),
       });
+      if (sessionIdRef.current === sessionId) {
+        didPublishRef.current = false;
+      }
     } catch (error) {
       console.warn('[useKdsLiveDraftSync] Failed to clear live draft:', error);
     }
@@ -135,15 +142,19 @@ export function useKdsLiveDraftSync({
     }
 
     if (isOpen) {
+      draftSessionActiveRef.current = true;
       sessionIdRef.current = createSessionId();
       lastFingerprintRef.current = '';
       didPublishRef.current = false;
       return;
     }
 
+    const sessionId = sessionIdRef.current;
+    draftSessionActiveRef.current = false;
+    publishTokenRef.current += 1;
     clearScheduledPublish();
-    if (didPublishRef.current) {
-      void clearDrafts();
+    if (didPublishRef.current && sessionId) {
+      void clearDrafts(sessionId);
     }
     sessionIdRef.current = null;
     lastFingerprintRef.current = '';
@@ -186,10 +197,7 @@ export function useKdsLiveDraftSync({
         try {
           if (normalizedItems.length === 0) {
             if (didPublishRef.current) {
-              await posApiFetch('/api/pos/kds/live-drafts', {
-                method: 'DELETE',
-                body: JSON.stringify({ session_id: sessionId }),
-              });
+              await clearDrafts(sessionId);
               didPublishRef.current = false;
             }
             lastFingerprintRef.current = fingerprint;
@@ -206,6 +214,11 @@ export function useKdsLiveDraftSync({
             }),
           });
 
+          if (!draftSessionActiveRef.current || sessionIdRef.current !== sessionId) {
+            await clearDrafts(sessionId);
+            return;
+          }
+
           didPublishRef.current = true;
           lastFingerprintRef.current = fingerprint;
         } catch (error) {
@@ -221,6 +234,7 @@ export function useKdsLiveDraftSync({
     };
   }, [
     branchId,
+    clearDrafts,
     clearScheduledPublish,
     enabled,
     ensureSessionId,
@@ -236,9 +250,12 @@ export function useKdsLiveDraftSync({
   // Safety cleanup.
   useEffect(() => {
     return () => {
+      const sessionId = sessionIdRef.current;
+      draftSessionActiveRef.current = false;
+      publishTokenRef.current += 1;
       clearScheduledPublish();
-      if (didPublishRef.current) {
-        void clearDrafts();
+      if (didPublishRef.current && sessionId) {
+        void clearDrafts(sessionId);
       }
     };
   }, [clearDrafts, clearScheduledPublish]);

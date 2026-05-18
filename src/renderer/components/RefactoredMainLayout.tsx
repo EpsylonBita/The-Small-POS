@@ -1,5 +1,6 @@
 import React, { memo, useEffect, useRef, lazy, Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ReceiptText } from 'lucide-react';
 
 import { BusinessCategoryDashboard } from './dashboards';
 import { NavigationProvider } from '../contexts/navigation-context';
@@ -251,6 +252,22 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     setCurrentView(view);
     console.log('✅ View state updated to:', view);
   };
+
+  useEffect(() => {
+    const handleNavigateView = (event: Event) => {
+      const detail = (event as CustomEvent<{ view?: string }>).detail;
+      const requestedView = detail?.view?.trim();
+      if (!requestedView) {
+        return;
+      }
+      handleViewChange(requestedView);
+    };
+
+    window.addEventListener('pos:navigate-view', handleNavigateView as EventListener);
+    return () => {
+      window.removeEventListener('pos:navigate-view', handleNavigateView as EventListener);
+    };
+  }, [enabledModules, lockedModules, isShiftActive]);
 
   useEffect(() => {
     if (!isShiftActive) {
@@ -556,10 +573,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       {isShiftActive && (
         <button
           onClick={() => setShowExpenses(true)}
-          className="fixed top-16 right-6 z-50 px-4 py-2.5 rounded-xl backdrop-blur-xl bg-white/10 border border-green-500/30 text-green-400 font-semibold shadow-[0_8px_32px_0_rgba(34,197,94,0.3)] hover:bg-white/20 hover:border-green-400/50 hover:shadow-[0_8px_32px_0_rgba(34,197,94,0.5)] hover:scale-105 active:scale-95 transition-all duration-300"
+          className="fixed top-12 right-3 sm:right-4 z-40 rounded-full p-2 text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)] transition-all duration-200 hover:bg-slate-100/80 hover:scale-105 active:scale-95 dark:hover:bg-white/10"
+          aria-label={t('expense.buttonLabel')}
           title={t('expense.buttonLabel')}
         >
-          {t('expense.buttonLabel')}
+          <ReceiptText className="h-6 w-6" aria-hidden="true" />
         </button>
       )}
 

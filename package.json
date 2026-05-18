@@ -1,7 +1,7 @@
 {
   "name": "the-small-pos-tauri",
   "private": true,
-  "version": "1.4.6",
+  "version": "1.4.7",
   "description": "The Small POS - Tauri v2 desktop application",
   "type": "module",
   "scripts": {
@@ -36,6 +36,7 @@
     "framer-motion": "12.23.24",
     "i18next": "^23.12.0",
     "lucide-react": "^0.427.0",
+    "pdfjs-dist": "^4.10.38",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-hot-toast": "^2.4.1",

@@ -17,14 +17,26 @@ import {
   Play,
   Pause,
   LayoutGrid,
-  List
+  List,
+  Copy,
+  Monitor,
+  ScreenShare,
+  X
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
-import { getBridge, offEvent, onEvent } from '../../lib';
+import {
+  getBridge,
+  offEvent,
+  onEvent,
+  type ExternalDisplayCapabilities,
+  type ExternalDisplayInfo,
+} from '../../lib';
 import { subscriptionManager, type SubscriptionStatus } from '../services/SubscriptionManager';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { useOrderStore } from '../hooks/useOrderStore';
+import { environment } from '../../config/environment';
+import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../utils/orderNumberUtils';
 
 interface KitchenOrder {
   id: string;
@@ -42,6 +54,7 @@ interface KitchenOrder {
   isDraft: boolean;
   draftSessionId?: string;
   sourceTerminalId?: string;
+  dedupeKeys?: string[];
 }
 
 interface KitchenOrderItem {
@@ -63,6 +76,7 @@ interface KdsStation {
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
 const KDS_REALTIME_SUBSCRIPTION_KEY = 'kds-tickets-kitchen-display';
 const KDS_FALLBACK_POLL_INTERVAL_MS = 1500;
+const KITCHEN_DISPLAY_CONTENT_TYPE = 'kitchen_display';
 const CLOSED_ORDER_STATUSES = new Set([
   'completed',
   'delivered',
@@ -73,11 +87,73 @@ const CLOSED_ORDER_STATUSES = new Set([
 ]);
 const ACTIVE_LOCAL_KDS_ORDER_STATUSES = new Set(['pending', 'confirmed', 'preparing']);
 
+function readSearchParam(name: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return new URLSearchParams(window.location.search).get(name);
+  } catch {
+    return null;
+  }
+}
+
+function isKitchenExternalDisplayWindow(): boolean {
+  return readSearchParam('externalDisplay') === KITCHEN_DISPLAY_CONTENT_TYPE;
+}
+
+function isKitchenDisplayActive(capabilities: ExternalDisplayCapabilities | null): boolean {
+  return Boolean(
+    capabilities?.activePresentations?.some(
+      (presentation) => presentation.contentType === KITCHEN_DISPLAY_CONTENT_TYPE
+    )
+  );
+}
+
 const normalizeKdsString = (value: unknown): string =>
   typeof value === 'string' ? value.trim() : '';
 
 const readKdsString = (record: Record<string, unknown> | null | undefined, key: string): string =>
   normalizeKdsString(record?.[key]);
+
+const getKdsRecordDedupeKeys = (record: Record<string, unknown> | null | undefined): string[] => {
+  if (!record) return [];
+  return [
+    'id',
+    'supabase_id',
+    'supabaseId',
+    'order_id',
+    'client_order_id',
+    'clientOrderId',
+    'client_request_id',
+    'clientRequestId',
+    'display_order_number',
+    'displayOrderNumber',
+    'order_number',
+    'orderNumber',
+    'ticket_number',
+  ]
+    .map((key) => readKdsString(record, key))
+    .filter(Boolean);
+};
+
+const getKdsVisibleOrderNumber = (
+  primary: Record<string, unknown> | null | undefined,
+  fallback?: Record<string, unknown> | null
+): string => {
+  const primaryVisible = getVisibleOrderNumber({
+    display_order_number: readKdsString(primary, 'display_order_number'),
+    displayOrderNumber: readKdsString(primary, 'displayOrderNumber'),
+    order_number: readKdsString(primary, 'order_number'),
+    orderNumber: readKdsString(primary, 'orderNumber'),
+  });
+  if (primaryVisible) return primaryVisible;
+
+  return getVisibleOrderNumber({
+    display_order_number: readKdsString(fallback, 'display_order_number'),
+    displayOrderNumber: readKdsString(fallback, 'displayOrderNumber'),
+    order_number: readKdsString(fallback, 'order_number'),
+    orderNumber: readKdsString(fallback, 'orderNumber') || readKdsString(fallback, 'ticket_number'),
+  });
+};
 
 const isGeneratedMobileTerminalId = (value: string): boolean => value.startsWith('mobile-terminal-');
 
@@ -127,7 +203,7 @@ const matchesKdsTerminal = (
 };
 
 const getKitchenOrderDedupeKeys = (order: KitchenOrder): string[] =>
-  [order.id, order.sourceOrderId, order.order_number]
+  [...(order.dedupeKeys || []), order.id, order.sourceOrderId, order.order_number]
     .map((value) => normalizeKdsString(value))
     .filter(Boolean);
 
@@ -164,6 +240,7 @@ const mapLocalOrderToKitchenOrder = (order: Record<string, unknown>): KitchenOrd
     isDraft: false,
     draftSessionId: undefined,
     sourceTerminalId: readKdsString(order, 'source_terminal_id') || readKdsString(order, 'sourceTerminalId') || undefined,
+    dedupeKeys: getKdsRecordDedupeKeys(order),
     items: rawItems.map((item, index) => ({
       id: readKdsString(item, 'id') || `local-item-${index + 1}`,
       name: readKdsString(item, 'name') || readKdsString(item, 'menu_item_name') || 'Unknown',
@@ -197,7 +274,7 @@ const buildOrdersSignature = (orders: KitchenOrder[]): string =>
 
 const KitchenDisplayPage: React.FC = () => {
   const bridge = getBridge();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
   const {
     branchId,
@@ -209,19 +286,13 @@ const KitchenDisplayPage: React.FC = () => {
     refresh: refreshIdentity,
   } = useResolvedPosIdentity('branch');
   const localOrders = useOrderStore((state) => state.orders);
+  const loadLocalOrders = useOrderStore((state) => state.loadOrders);
   const updateOrderStatus = useOrderStore((state) => state.updateOrderStatus);
   const localOrderLookup = useMemo(() => {
     const lookup = new Map<string, Record<string, unknown>>();
     localOrders.forEach((order) => {
       const record = order as unknown as Record<string, unknown>;
-      [
-        record['id'],
-        record['supabase_id'],
-        record['order_number'],
-        record['orderNumber'],
-        record['display_order_number'],
-        record['displayOrderNumber'],
-      ].forEach((candidate) => {
+      getKdsRecordDedupeKeys(record).forEach((candidate) => {
         const key = normalizeKdsString(candidate);
         if (key) lookup.set(key, record);
       });
@@ -237,11 +308,34 @@ const KitchenDisplayPage: React.FC = () => {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
+  const [displayCapabilities, setDisplayCapabilities] =
+    useState<ExternalDisplayCapabilities | null>(null);
+  const [displayNotice, setDisplayNotice] = useState<string | null>(null);
+  const [displayError, setDisplayError] = useState<string | null>(null);
+  const [isDisplayBusy, setIsDisplayBusy] = useState(false);
   const realtimeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastOrdersSignatureRef = useRef<string>('');
   const lastStationsSignatureRef = useRef<string>('');
 
   const isDark = resolvedTheme === 'dark';
+  const externalWindow = isKitchenExternalDisplayWindow();
+  const activeExternalDisplay = isKitchenDisplayActive(displayCapabilities);
+  const connectedDisplays = displayCapabilities?.displays || [];
+
+  const fetchExternalDisplayCapabilities = useCallback(async () => {
+    if (externalWindow) return;
+    try {
+      const result = await bridge.externalDisplay.getCapabilities();
+      setDisplayCapabilities(result);
+    } catch (err) {
+      setDisplayCapabilities({
+        success: false,
+        supported: false,
+        displays: [],
+        error: err instanceof Error ? err.message : 'Failed to inspect connected displays',
+      });
+    }
+  }, [bridge, externalWindow]);
 
   // Map API status values back to UI status values
   const mapApiStatusToUi = (apiStatus: string): KitchenOrder['status'] | null => {
@@ -317,20 +411,29 @@ const KitchenDisplayPage: React.FC = () => {
           .map((ticket: Record<string, unknown>) => {
             const localOrder =
               localOrderLookup.get(readKdsString(ticket, 'order_id')) ||
+              localOrderLookup.get(readKdsString(ticket, 'client_order_id')) ||
+              localOrderLookup.get(readKdsString(ticket, 'clientOrderId')) ||
               localOrderLookup.get(readKdsString(ticket, 'order_number')) ||
               localOrderLookup.get(readKdsString(ticket, 'ticket_number')) ||
               null;
-            if (isClosedKdsTicket(ticket, localOrder) || !matchesKdsTerminal(ticket, terminalId, localOrder)) {
+            const ticketMatchesTerminal = terminalId
+              ? matchesKdsTerminal(ticket, terminalId, localOrder)
+              : true;
+            if (isClosedKdsTicket(ticket, localOrder) || !ticketMatchesTerminal) {
               return null;
             }
 
             const status = mapApiStatusToUi(ticket['status'] as string);
             if (status === null) return null;
             const ticketItems = Array.isArray(ticket['items']) ? (ticket['items'] as Record<string, unknown>[]) : [];
+            const visibleOrderNumber =
+              getKdsVisibleOrderNumber(localOrder, ticket) ||
+              readKdsString(ticket, 'order_id') ||
+              readKdsString(ticket, 'id');
             return {
               id: ticket['id'] as string,
-              sourceOrderId: readKdsString(ticket, 'order_id') || undefined,
-              order_number: ticket['order_number'] as string || ticket['ticket_number'] as string,
+              sourceOrderId: readKdsString(localOrder, 'id') || readKdsString(ticket, 'order_id') || undefined,
+              order_number: visibleOrderNumber,
               order_type: (ticket['order_type'] as KitchenOrder['order_type']) || 'takeaway',
               status,
               created_at: ticket['created_at'] as string,
@@ -342,6 +445,10 @@ const KitchenDisplayPage: React.FC = () => {
               isDraft: false,
               draftSessionId: undefined,
               sourceTerminalId: undefined,
+              dedupeKeys: [
+                ...getKdsRecordDedupeKeys(ticket),
+                ...getKdsRecordDedupeKeys(localOrder),
+              ],
               items: ticketItems.map((item: Record<string, unknown>) => ({
                 id: item['id'] as string,
                 name: item['name'] as string || 'Unknown',
@@ -393,7 +500,7 @@ const KitchenDisplayPage: React.FC = () => {
         const localKitchenOrders = localOrders
           .map((order) => order as unknown as Record<string, unknown>)
           .filter((order) => isActiveLocalKitchenOrder(order))
-          .filter((order) => matchesKdsTerminal({}, terminalId, order))
+          .filter((order) => (terminalId ? matchesKdsTerminal({}, terminalId, order) : true))
           .map(mapLocalOrderToKitchenOrder)
           .filter((order): order is KitchenOrder => order !== null)
           .filter((order) => {
@@ -430,6 +537,11 @@ const KitchenDisplayPage: React.FC = () => {
       }
     }
   }, [branchId, bridge, localOrderLookup, localOrders, stationFilter, t, terminalId]);
+
+  useEffect(() => {
+    void fetchExternalDisplayCapabilities();
+    void loadLocalOrders().catch(() => {});
+  }, [fetchExternalDisplayCapabilities, loadLocalOrders]);
 
   useEffect(() => {
     if (isIdentityResolving) {
@@ -627,6 +739,86 @@ const KitchenDisplayPage: React.FC = () => {
     }
   };
 
+  const openExternalDisplay = async (display?: ExternalDisplayInfo) => {
+    setIsDisplayBusy(true);
+    setDisplayNotice(null);
+    setDisplayError(null);
+    try {
+      const result = await bridge.externalDisplay.open({
+        contentType: KITCHEN_DISPLAY_CONTENT_TYPE,
+        displayIndex: display?.index,
+      });
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to open kitchen display');
+      }
+      setDisplayNotice(
+        t('kitchen.externalDisplay.running', 'Kitchen display is running on the selected monitor or TV.')
+      );
+      await fetchExternalDisplayCapabilities();
+    } catch (err) {
+      setDisplayError(
+        err instanceof Error
+          ? err.message
+          : t('kitchen.externalDisplay.openFailed', 'Failed to open kitchen display')
+      );
+    } finally {
+      setIsDisplayBusy(false);
+    }
+  };
+
+  const closeExternalDisplay = async () => {
+    setIsDisplayBusy(true);
+    setDisplayNotice(null);
+    setDisplayError(null);
+    try {
+      const result = await bridge.externalDisplay.close({ contentType: KITCHEN_DISPLAY_CONTENT_TYPE });
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to close kitchen display');
+      }
+      setDisplayNotice(t('kitchen.externalDisplay.stopped', 'External kitchen display stopped.'));
+      await fetchExternalDisplayCapabilities();
+    } catch (err) {
+      setDisplayError(
+        err instanceof Error
+          ? err.message
+          : t('kitchen.externalDisplay.closeFailed', 'Failed to close kitchen display')
+      );
+    } finally {
+      setIsDisplayBusy(false);
+    }
+  };
+
+  const copyKdsTvLink = async () => {
+    setDisplayNotice(null);
+    setDisplayError(null);
+    try {
+      const result = await bridge.adminApi.fetchFromAdmin('/api/pos/kds-display', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'pair' }),
+      });
+      const sessionId = result?.data?.pairing_session_id || result?.data?.pairingSessionId;
+      if (!result?.success || !result?.data?.success || !sessionId) {
+        throw new Error(result?.data?.error || result?.error || 'Failed to create KDS TV link');
+      }
+
+      const language = (i18n.language || 'en').split('-')[0];
+      const theme = isDark ? 'dark' : 'light';
+      const url = `${environment.ADMIN_DASHBOARD_URL.replace(/\/+$/, '')}/display/kds/${encodeURIComponent(
+        sessionId
+      )}?lang=${encodeURIComponent(language)}&theme=${encodeURIComponent(theme)}`;
+      await bridge.clipboard.writeText(url);
+      setDisplayNotice(
+        t('kitchen.externalDisplay.tvLinkCopied', 'KDS TV link copied. Open it in a Smart TV browser or wireless receiver.')
+      );
+    } catch (err) {
+      setDisplayError(
+        err instanceof Error
+          ? err.message
+          : t('kitchen.externalDisplay.tvLinkFailed', 'Failed to create KDS TV link')
+      );
+    }
+  };
+
   const StationIcon = ({ station }: { station: string }) => {
     switch (station) {
       case 'grill': return <Flame className="w-4 h-4 text-orange-500" />;
@@ -649,6 +841,9 @@ const KitchenDisplayPage: React.FC = () => {
   const OrderCard = ({ order }: { order: KitchenOrder }) => {
     const timeColor = getTimeColor(order.created_at);
     const isLiveDraft = order.isDraft;
+    const orderLabel = isLiveDraft
+      ? t('kitchen.liveDraft.badge', 'Live Draft')
+      : formatCompactOrderNumberForDisplay(order.order_number);
     return (
       <motion.div
         initial={false}
@@ -656,10 +851,10 @@ const KitchenDisplayPage: React.FC = () => {
         exit={{ opacity: 0, scale: 0.9 }}
         className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} ${order.priority === 'rush' ? 'ring-2 ring-red-500' : ''}`}
       >
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <span className="text-xl font-bold">
-              {isLiveDraft ? t('kitchen.liveDraft.badge', 'Live Draft') : `#${order.order_number}`}
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            <span className="min-w-0 break-words text-xl font-bold leading-tight">
+              {orderLabel}
             </span>
             <span className={`px-2 py-1 rounded-full text-xs font-medium ${getOrderTypeBadgeColor(order.order_type)}`}>
               {formatOrderType(order.order_type)}
@@ -671,18 +866,18 @@ const KitchenDisplayPage: React.FC = () => {
             )}
             {order.table_number && <span className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{order.table_number}</span>}
           </div>
-          <div className={`flex items-center gap-1 ${timeColor}`}>
+          <div className={`flex shrink-0 items-center gap-1 ${timeColor}`}>
             <Clock className="w-4 h-4" />
             <span className="text-sm font-medium">{getTimeSinceOrder(order.created_at)}</span>
           </div>
         </div>
         <div className="space-y-2 mb-4">
           {order.items.map((item) => (
-            <div key={item.id} className={`flex items-center justify-between p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-              <div className="flex items-center gap-2">
+            <div key={item.id} className={`flex items-center justify-between gap-2 p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className="flex min-w-0 items-center gap-2">
                 <StationIcon station={item.station} />
                 <span className="font-medium">{item.quantity}x</span>
-                <span>{item.name}</span>
+                <span className="min-w-0 break-words">{item.name}</span>
               </div>
               {item.notes && <span className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{item.notes}</span>}
             </div>
@@ -714,7 +909,7 @@ const KitchenDisplayPage: React.FC = () => {
   };
 
   return (
-    <div className={`min-h-screen p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'} ${externalWindow ? 'h-screen' : ''}`}>
       {/* Header + Stats Card */}
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
       <div className="flex items-center justify-between mb-4">
@@ -732,7 +927,43 @@ const KitchenDisplayPage: React.FC = () => {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {!externalWindow && (
+            <>
+              <button
+                type="button"
+                onClick={() => void copyKdsTvLink()}
+                className={`p-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+                title={t('kitchen.externalDisplay.copyTvLink', 'Copy TV link')}
+                aria-label={t('kitchen.externalDisplay.copyTvLink', 'Copy TV link')}
+              >
+                <Copy className="w-5 h-5" />
+              </button>
+              {activeExternalDisplay ? (
+                <button
+                  type="button"
+                  onClick={() => void closeExternalDisplay()}
+                  disabled={isDisplayBusy}
+                  className="p-3 rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-60"
+                  title={t('kitchen.externalDisplay.stop', 'Stop external display')}
+                  aria-label={t('kitchen.externalDisplay.stop', 'Stop external display')}
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void openExternalDisplay(connectedDisplays[1] || connectedDisplays[0])}
+                  disabled={isDisplayBusy}
+                  className="p-3 rounded-xl border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-60"
+                  title={t('kitchen.externalDisplay.open', 'Open on connected display')}
+                  aria-label={t('kitchen.externalDisplay.open', 'Open on connected display')}
+                >
+                  <ScreenShare className="w-5 h-5" />
+                </button>
+              )}
+            </>
+          )}
           <button onClick={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')} className={`p-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}>
             {viewMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
           </button>
@@ -798,8 +1029,57 @@ const KitchenDisplayPage: React.FC = () => {
       </div>
       </div>
 
+      {!externalWindow && connectedDisplays.length > 0 && (
+        <div className={`rounded-2xl border mb-5 p-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+          <div className="mb-3 flex items-center gap-2">
+            <Monitor className="h-5 w-5 text-cyan-400" />
+            <h2 className="font-bold">
+              {t('kitchen.externalDisplay.connectedDisplays', 'Connected monitors and TVs')}
+            </h2>
+          </div>
+          <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+            {connectedDisplays.map((display) => (
+              <button
+                key={display.index}
+                type="button"
+                onClick={() => void openExternalDisplay(display)}
+                disabled={isDisplayBusy}
+                className={`min-w-[210px] rounded-xl border px-3 py-3 text-left transition ${
+                  isDark
+                    ? 'border-zinc-700 bg-zinc-900 hover:bg-zinc-800'
+                    : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
+                } disabled:opacity-60`}
+              >
+                <div className="font-semibold">{display.name}</div>
+                <div className={isDark ? 'text-sm text-zinc-400' : 'text-sm text-gray-600'}>
+                  {display.size?.width || 0} x {display.size?.height || 0}
+                </div>
+              </button>
+            ))}
+          </div>
+          <p className={`mt-3 text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+            {t(
+              'kitchen.externalDisplay.help',
+              'Cable displays and OS-level wireless displays appear here. For Smart TVs without monitor mode, copy the TV link.'
+            )}
+          </p>
+        </div>
+      )}
+
+      {(displayNotice || displayError || displayCapabilities?.error) && !externalWindow && (
+        <div
+          className={`mb-5 rounded-xl border px-4 py-3 text-sm font-medium ${
+            displayError || displayCapabilities?.error
+              ? 'border-red-500/40 bg-red-500/10 text-red-200'
+              : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+          }`}
+        >
+          {displayError || displayCapabilities?.error || displayNotice}
+        </div>
+      )}
+
       {/* Station Filter */}
-      <div className="flex gap-2 mb-5 overflow-x-auto pb-2">
+      <div className="flex gap-2 mb-5 overflow-x-auto pb-2 scrollbar-hide">
         {[{ id: 'all', name: t('kitchen.allStations', 'All'), station_type: 'all' } as KdsStation, ...stations].map((station) => (
           <button
             key={station.id}
@@ -872,7 +1152,7 @@ const KitchenDisplayPage: React.FC = () => {
         </div>
       ) : (
         <AnimatePresence initial={false}>
-          <div className={viewMode === 'grid' ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4' : 'space-y-4'}>
+          <div className={viewMode === 'grid' ? 'grid grid-cols-[repeat(auto-fit,minmax(320px,1fr))] gap-4' : 'space-y-4'}>
             {orders.map((order) => (
               <OrderCard key={order.id} order={order} />
             ))}

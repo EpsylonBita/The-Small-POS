@@ -2,6 +2,7 @@ import type {
   DiagnosticsLastParitySync,
   DiagnosticsSystemHealth,
   RecoveryActionDescriptor,
+  RecoveryKnownSolution,
   RecoveryIssue,
   SyncFinancialIntegrityIssue,
   SyncFinancialIntegrityResponse,
@@ -39,6 +40,92 @@ const MODULE_LABELS: Record<string, string> = {
 const LEGACY_FINANCIAL_PARITY_TABLES = new Set(['payments', 'payment_adjustments']);
 const WAITING_PARENT_BLOCKING_AGE_MS = 10 * 60 * 1000;
 
+interface RecoveryRecipeDefinition extends RecoveryKnownSolution {
+  actionId: string;
+}
+
+const RECOVERY_RECIPES = {
+  checkoutPaymentOpenPayment: {
+    recipeId: 'checkout-payment-blocker.open-payment',
+    version: 1,
+    actionId: 'openOrderPaymentFix',
+    labelKey: 'recovery.recipes.checkoutPaymentOpenPayment.label',
+    explanationKey: 'recovery.recipes.checkoutPaymentOpenPayment.explanation',
+    verificationKey: 'recovery.recipes.checkoutPaymentOpenPayment.verification',
+    requiresSnapshot: false,
+  },
+  paymentTotalConflictRepair: {
+    recipeId: 'payment-total-conflict.repair',
+    version: 1,
+    actionId: 'repairPaymentTotalConflict',
+    labelKey: 'recovery.recipes.paymentTotalConflictRepair.label',
+    explanationKey: 'recovery.recipes.paymentTotalConflictRepair.explanation',
+    verificationKey: 'recovery.recipes.paymentTotalConflictRepair.verification',
+    requiresSnapshot: true,
+  },
+  invalidDriverOrderUpdateRepair: {
+    recipeId: 'invalid-driver-order-update.repair',
+    version: 1,
+    actionId: 'repairInvalidDriverOrderUpdate',
+    labelKey: 'recovery.recipes.invalidDriverOrderUpdateRepair.label',
+    explanationKey: 'recovery.recipes.invalidDriverOrderUpdateRepair.explanation',
+    verificationKey: 'recovery.recipes.invalidDriverOrderUpdateRepair.verification',
+    requiresSnapshot: true,
+  },
+  orderUpdateReplayRepair: {
+    recipeId: 'order-update-replay-blockers.repair',
+    version: 1,
+    actionId: 'repairOrderUpdateReplayBlockers',
+    labelKey: 'recovery.recipes.orderUpdateReplayRepair.label',
+    explanationKey: 'recovery.recipes.orderUpdateReplayRepair.explanation',
+    verificationKey: 'recovery.recipes.orderUpdateReplayRepair.verification',
+    requiresSnapshot: true,
+  },
+  catalogAvailabilityRetry: {
+    recipeId: 'catalog-availability.retry',
+    version: 1,
+    actionId: 'retryParityItem',
+    labelKey: 'recovery.recipes.catalogAvailabilityRetry.label',
+    explanationKey: 'recovery.recipes.catalogAvailabilityRetry.explanation',
+    verificationKey: 'recovery.recipes.catalogAvailabilityRetry.verification',
+    requiresSnapshot: false,
+  },
+} as const satisfies Record<string, RecoveryRecipeDefinition>;
+
+const knownSolutionFromRecipe = (
+  recipe: RecoveryRecipeDefinition,
+): RecoveryKnownSolution => ({
+  recipeId: recipe.recipeId,
+  version: recipe.version,
+  labelKey: recipe.labelKey,
+  explanationKey: recipe.explanationKey,
+  verificationKey: recipe.verificationKey,
+  requiresSnapshot: recipe.requiresSnapshot,
+});
+
+const withRecipe = <T extends RecoveryActionDescriptor>(
+  action: T,
+  recipe: RecoveryRecipeDefinition,
+): T => ({
+  ...action,
+  recommended: true,
+  descriptionKey: action.descriptionKey ?? recipe.explanationKey,
+  recipeId: recipe.recipeId,
+  recipeVersion: recipe.version,
+  requiresSnapshot: recipe.requiresSnapshot,
+});
+
+const withKnownSolution = <T extends RecoveryIssue>(
+  issue: T,
+  recipe: RecoveryRecipeDefinition,
+): T => ({
+  ...issue,
+  knownSolution: knownSolutionFromRecipe(recipe),
+  actions: issue.actions.map((action) =>
+    action.id === recipe.actionId ? withRecipe(action, recipe) : action,
+  ),
+});
+
 const createAction = (
   id: string,
   labelKey: string,
@@ -50,6 +137,9 @@ const createAction = (
   recommended: options.recommended ?? false,
   safetyLevel: options.safetyLevel ?? 'safe',
   requiresOnline: options.requiresOnline ?? false,
+  requiresSnapshot: options.requiresSnapshot ?? false,
+  recipeId: options.recipeId,
+  recipeVersion: options.recipeVersion,
   confirmationRequired: options.confirmationRequired ?? false,
   confirmTitleKey: options.confirmTitleKey,
   confirmMessageKey: options.confirmMessageKey,
@@ -57,8 +147,10 @@ const createAction = (
   routeTarget: options.routeTarget ?? null,
 });
 
-const createContactOperatorAction = (): RecoveryActionDescriptor =>
-  createAction('contactOperator', 'recovery.actions.contactOperator.label');
+const createContactDevAction = (): RecoveryActionDescriptor =>
+  createAction('contactDev', 'recovery.actions.contactDev.label', {
+    descriptionKey: 'recovery.actions.contactDev.description',
+  });
 
 const createOpenConnectionSettingsAction = (): RecoveryActionDescriptor =>
   createAction('openConnectionSettings', 'recovery.actions.openConnectionSettings.label', {
@@ -84,39 +176,51 @@ const createRetryParityModuleAction = (): RecoveryActionDescriptor =>
   createAction('retryParityModule', 'recovery.actions.retryParityModule.label');
 
 const createRepairPaymentTotalConflictAction = (): RecoveryActionDescriptor =>
-  createAction(
-    'repairPaymentTotalConflict',
-    'recovery.actions.repairPaymentTotalConflict.label',
-    {
-      descriptionKey: 'recovery.actions.repairPaymentTotalConflict.description',
-      recommended: true,
-      requiresOnline: true,
-    },
+  withRecipe(
+    createAction(
+      'repairPaymentTotalConflict',
+      'recovery.actions.repairPaymentTotalConflict.label',
+      {
+        descriptionKey: 'recovery.actions.repairPaymentTotalConflict.description',
+        recommended: true,
+        requiresOnline: true,
+        requiresSnapshot: true,
+      },
+    ),
+    RECOVERY_RECIPES.paymentTotalConflictRepair,
   );
 
 const createRepairInvalidDriverOrderUpdateAction = (): RecoveryActionDescriptor =>
-  createAction(
-    'repairInvalidDriverOrderUpdate',
-    'recovery.actions.repairInvalidDriverOrderUpdate.label',
-    {
-      descriptionKey: 'recovery.actions.repairInvalidDriverOrderUpdate.description',
-      recommended: true,
-      requiresOnline: true,
-    },
+  withRecipe(
+    createAction(
+      'repairInvalidDriverOrderUpdate',
+      'recovery.actions.repairInvalidDriverOrderUpdate.label',
+      {
+        descriptionKey: 'recovery.actions.repairInvalidDriverOrderUpdate.description',
+        recommended: true,
+        requiresOnline: true,
+        requiresSnapshot: true,
+      },
+    ),
+    RECOVERY_RECIPES.invalidDriverOrderUpdateRepair,
   );
 
 const createRepairOrderUpdateReplayBlockersAction = (): RecoveryActionDescriptor =>
-  createAction(
-    'repairOrderUpdateReplayBlockers',
-    'recovery.actions.repairOrderUpdateReplayBlockers.label',
-    {
-      descriptionKey: 'recovery.actions.repairOrderUpdateReplayBlockers.description',
-      recommended: true,
-      requiresOnline: true,
-      confirmationRequired: true,
-      confirmTitleKey: 'recovery.actions.repairOrderUpdateReplayBlockers.confirmTitle',
-      confirmMessageKey: 'recovery.actions.repairOrderUpdateReplayBlockers.confirmMessage',
-    },
+  withRecipe(
+    createAction(
+      'repairOrderUpdateReplayBlockers',
+      'recovery.actions.repairOrderUpdateReplayBlockers.label',
+      {
+        descriptionKey: 'recovery.actions.repairOrderUpdateReplayBlockers.description',
+        recommended: true,
+        requiresOnline: true,
+        requiresSnapshot: true,
+        confirmationRequired: true,
+        confirmTitleKey: 'recovery.actions.repairOrderUpdateReplayBlockers.confirmTitle',
+        confirmMessageKey: 'recovery.actions.repairOrderUpdateReplayBlockers.confirmMessage',
+      },
+    ),
+    RECOVERY_RECIPES.orderUpdateReplayRepair,
   );
 
 const createRetrySyncAction = (): RecoveryActionDescriptor =>
@@ -139,14 +243,30 @@ const createRetryFinancialItemAction = (): RecoveryActionDescriptor =>
 const createRetryAllFailedFinancialAction = (): RecoveryActionDescriptor =>
   createAction('retryAllFailedFinancial', 'recovery.actions.retryAllFailedFinancial.label');
 
-const createResolveCheckoutPaymentBlockerAction = (
-  method: 'cash' | 'card',
+const createOpenOrderPaymentFixAction = (
+  blocker: UnsettledPaymentBlocker,
+  method: 'cash' | 'card' | null,
 ): RecoveryActionDescriptor =>
-  createAction(
-    'resolveCheckoutPaymentBlocker',
-    method === 'cash'
-      ? 'modals.zReport.resolveBlockerCash'
-      : 'modals.zReport.resolveBlockerCard',
+  withRecipe(
+    createAction(
+      'openOrderPaymentFix',
+      'recovery.actions.openOrderPaymentFix.label',
+      {
+        descriptionKey: 'recovery.actions.openOrderPaymentFix.description',
+        recommended: true,
+        routeTarget: {
+          screen: 'orderPayment',
+          orderId: blocker.orderId,
+          orderNumber: blocker.orderNumber,
+          params: {
+            openPayment: true,
+            reasonCode: blocker.reasonCode,
+            paymentMethod: method ?? blocker.paymentMethod ?? null,
+          },
+        },
+      },
+    ),
+    RECOVERY_RECIPES.checkoutPaymentOpenPayment,
   );
 
 const createRepairOrphanedFinancialAction = (): RecoveryActionDescriptor =>
@@ -323,7 +443,7 @@ const buildSyncBlockerIssues = (
     titleKey: 'recovery.issues.syncBlocker.title',
     summaryKey: 'recovery.issues.syncBlocker.summary',
     guidanceKey: 'recovery.issues.syncBlocker.guidance',
-    actions: [createRetrySyncAction(), createContactOperatorAction()],
+    actions: [createRetrySyncAction(), createContactDevAction()],
     params: {
       blockerReason: blocker.blockerReason,
       queueStatus: blocker.queueStatus,
@@ -409,7 +529,7 @@ const buildCheckoutPaymentBlockerIssues = (
       Number(blocker.totalAmount || 0) - Number(blocker.settledAmount || 0),
       0,
     );
-    return {
+    const issue = {
       id: `checkout-payment-blocker-${blocker.orderId}`,
       code: blocker.reasonCode,
       severity: 'error',
@@ -419,9 +539,10 @@ const buildCheckoutPaymentBlockerIssues = (
       titleKey: 'recovery.issues.checkoutPaymentBlocker.title',
       summaryKey: 'recovery.issues.checkoutPaymentBlocker.summary',
       guidanceKey: 'recovery.issues.checkoutPaymentBlocker.guidance',
-      actions: preferredMethod
-        ? [createResolveCheckoutPaymentBlockerAction(preferredMethod)]
-        : [createContactOperatorAction()],
+      actions: [
+        createOpenOrderPaymentFixAction(blocker, preferredMethod),
+        createContactDevAction(),
+      ],
       params: {
         orderNumber: blocker.orderNumber,
         reasonCode: blocker.reasonCode,
@@ -438,6 +559,7 @@ const buildCheckoutPaymentBlockerIssues = (
       orderId: blocker.orderId,
       orderNumber: blocker.orderNumber,
     } satisfies RecoveryIssue;
+    return withKnownSolution(issue, RECOVERY_RECIPES.checkoutPaymentOpenPayment);
   });
 };
 
@@ -482,7 +604,7 @@ const buildParityProcessorIssue = (
     titleKey: 'recovery.issues.parityProcessorStalled.title',
     summaryKey: 'recovery.issues.parityProcessorStalled.summary',
     guidanceKey: 'recovery.issues.parityProcessorStalled.guidance',
-    actions: [createRunParitySyncAction(), createContactOperatorAction()],
+    actions: [createRunParitySyncAction(), createContactDevAction()],
     params: {
       processed: lastParitySync?.processed ?? 0,
       remaining: lastParitySync?.remaining ?? total,
@@ -706,7 +828,7 @@ const buildPaymentTotalConflictIssues = (
     const settlementMath = formatSettlementMath(paymentAmount, settlementRefundTotal);
 
     suppressedRows.add(`${item.tableName}:${item.recordId}`);
-    issues.push({
+    issues.push(withKnownSolution({
       id: `payment-total-conflict-${item.id}`,
       code: 'payment_total_conflict',
       severity: 'error',
@@ -740,7 +862,7 @@ const buildPaymentTotalConflictIssues = (
       },
       orderId,
       paymentId,
-    });
+    }, RECOVERY_RECIPES.paymentTotalConflictRepair));
   }
 
   return { issues, suppressedRows };
@@ -1145,7 +1267,7 @@ const buildIntegrityIssue = (
         titleKey: 'recovery.issues.legacyFinancialParityOrphan.title',
         summaryKey: 'recovery.issues.legacyFinancialParityOrphan.summary',
         guidanceKey: 'recovery.issues.legacyFinancialParityOrphan.guidance',
-        actions: [createClearLegacyFinancialOrphanAction(), createContactOperatorAction()],
+        actions: [createClearLegacyFinancialOrphanAction(), createContactDevAction()],
         ...common,
       };
     case 'payment_adjustment_missing_canonical_remote_payment':
@@ -1157,7 +1279,7 @@ const buildIntegrityIssue = (
         titleKey: 'recovery.issues.paymentAdjustmentMissingCanonicalRemotePayment.title',
         summaryKey: 'recovery.issues.paymentAdjustmentMissingCanonicalRemotePayment.summary',
         guidanceKey: 'recovery.issues.paymentAdjustmentMissingCanonicalRemotePayment.guidance',
-        actions: [createRepairOrphanedFinancialAction(), createContactOperatorAction()],
+        actions: [createRepairOrphanedFinancialAction(), createContactDevAction()],
         ...common,
       };
     default:
@@ -1169,7 +1291,7 @@ const buildIntegrityIssue = (
         titleKey: 'recovery.issues.financialIntegrity.title',
         summaryKey: 'recovery.issues.financialIntegrity.summary',
         guidanceKey: 'recovery.issues.financialIntegrity.guidance',
-        actions: [createContactOperatorAction()],
+        actions: [createContactDevAction()],
         ...common,
       };
   }
@@ -1189,7 +1311,7 @@ const buildFinancialQueueIssues = (
     let code = 'financial_queue_failed';
     let actions: RecoveryActionDescriptor[] = [
       createRetryFinancialItemAction(),
-      createContactOperatorAction(),
+      createContactDevAction(),
     ];
 
     if (normalizedError.includes('validation')) {
@@ -1268,16 +1390,16 @@ const buildFallbackIssue = (
   }
 
   return {
-    id: 'sync-fallback-contact-operator',
-    code: 'contact_operator_required',
+    id: 'sync-fallback-contact-dev',
+    code: 'contact_dev_required',
     severity: 'warning',
     status: 'blocking',
     entityType: 'sync',
     entityId: 'fallback',
-    titleKey: 'recovery.issues.contactOperatorFallback.title',
-    summaryKey: 'recovery.issues.contactOperatorFallback.summary',
-    guidanceKey: 'recovery.issues.contactOperatorFallback.guidance',
-    actions: [createContactOperatorAction()],
+    titleKey: 'recovery.issues.contactDevFallback.title',
+    summaryKey: 'recovery.issues.contactDevFallback.summary',
+    guidanceKey: 'recovery.issues.contactDevFallback.guidance',
+    actions: [createContactDevAction()],
     params: {
       totalBacklog,
       parityTotal,

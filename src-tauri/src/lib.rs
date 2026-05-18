@@ -1122,6 +1122,9 @@ pub fn run() {
             commands::system_ui::window_zoom_in,
             commands::system_ui::window_zoom_out,
             commands::system_ui::window_zoom_reset,
+            commands::system_ui::display_list_monitors,
+            commands::system_ui::display_open_window,
+            commands::system_ui::display_close_window,
             // Database
             commands::diagnostics::database_health_check,
             commands::diagnostics::database_get_stats,
@@ -1137,6 +1140,9 @@ pub fn run() {
             // Recovery
             commands::recovery::recovery_list_points,
             commands::recovery::recovery_create_snapshot,
+            commands::recovery::recovery_create_pre_action_snapshot,
+            commands::recovery::recovery_record_action_log,
+            commands::recovery::recovery_list_action_log,
             commands::recovery::recovery_export_current,
             commands::recovery::recovery_export_point,
             commands::recovery::recovery_restore_point,

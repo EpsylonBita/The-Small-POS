@@ -9,12 +9,15 @@ import {
   TrendingUp,
   Gift,
   Star,
-  Mail
+  Mail,
+  ScanLine
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import { formatCurrency } from '../utils/format';
 import { getBridge } from '../../lib';
+import { ScanDevicePanel } from '../components/scanner/ScanDevicePanel';
+import { useLoyaltyReader } from '../hooks/useLoyaltyReader';
 
 interface LoyaltySettings {
   points_per_euro: number;
@@ -34,6 +37,7 @@ interface CustomerLoyalty {
   customer_name?: string;
   customer_email?: string;
   customer_phone?: string;
+  loyalty_card_uid?: string | null;
 }
 
 const LoyaltyPage: React.FC = () => {
@@ -45,6 +49,7 @@ const LoyaltyPage: React.FC = () => {
   const [customers, setCustomers] = useState<CustomerLoyalty[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState<CustomerLoyalty | null>(null);
+  const [showScanPanel, setShowScanPanel] = useState(false);
 
   const isDark = resolvedTheme === 'dark';
   const formatMoney = (amount: number) => formatCurrency(amount);
@@ -99,11 +104,77 @@ const LoyaltyPage: React.FC = () => {
     return Array(stars).fill(0).map((_, i) => <Star key={i} className="w-3 h-3 fill-current" />);
   };
 
+  const findCustomerByCode = useCallback((code: string) => {
+    const needle = code.trim().toLowerCase();
+    if (!needle) return null;
+
+    return customers.find(customer => (
+      customer.loyalty_card_uid?.toLowerCase() === needle ||
+      customer.customer_phone?.replace(/\s+/g, '') === code.trim().replace(/\s+/g, '') ||
+      customer.customer_id?.toLowerCase() === needle ||
+      customer.user_profile_id?.toLowerCase() === needle ||
+      customer.id.toLowerCase() === needle
+    )) || null;
+  }, [customers]);
+
+  const focusScannedCustomer = useCallback((customer: CustomerLoyalty, scannedCode: string) => {
+    setSelectedCustomer(customer);
+    setSearchTerm(customer.customer_name || customer.customer_phone || scannedCode);
+    toast.success(t('loyalty.scan.found', {
+      name: customer.customer_name || t('loyalty.unknownCustomer', 'Unknown Customer'),
+      defaultValue: 'Loyalty member found: {{name}}',
+    }));
+  }, [t]);
+
+  const handleLoyaltyScan = useCallback(async (code: string) => {
+    const scannedCode = code.trim();
+    if (!scannedCode) return;
+
+    const localMatch = findCustomerByCode(scannedCode);
+    if (localMatch) {
+      focusScannedCustomer(localMatch, scannedCode);
+      return;
+    }
+
+    try {
+      const result = await bridge.loyalty.lookupByCard(scannedCode) as any;
+      const customer = result?.customer as CustomerLoyalty | null | undefined;
+      if (result?.success && customer) {
+        setCustomers(prev => prev.some(item => item.id === customer.id) ? prev : [customer, ...prev]);
+        focusScannedCustomer(customer, scannedCode);
+        return;
+      }
+    } catch (error) {
+      console.warn('[LoyaltyPage] Loyalty card lookup failed:', error);
+    }
+
+    setSearchTerm(scannedCode);
+    toast.error(t('loyalty.scan.notFound', { code: scannedCode, defaultValue: 'No loyalty member found for {{code}}' }));
+  }, [bridge.loyalty, findCustomerByCode, focusScannedCustomer, t]);
+
+  const { start: startLoyaltyReader, stop: stopLoyaltyReader } = useLoyaltyReader(false, (card) => {
+    if (showScanPanel) {
+      void handleLoyaltyScan(card.uid);
+    }
+  });
+
+  useEffect(() => {
+    if (!showScanPanel) return;
+
+    void startLoyaltyReader();
+    return () => {
+      void stopLoyaltyReader();
+    };
+  }, [showScanPanel, startLoyaltyReader, stopLoyaltyReader]);
+
   const filteredCustomers = customers.filter(c =>
     !searchTerm ||
     c.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
     c.customer_email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    c.customer_phone?.includes(searchTerm)
+    c.customer_phone?.includes(searchTerm) ||
+    c.loyalty_card_uid?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    c.customer_id?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    c.user_profile_id?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const stats = {
@@ -135,10 +206,10 @@ const LoyaltyPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-full overflow-auto p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
       {/* Header + Stats Card */}
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-3">
             <div className={`p-2 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
               <Award className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
@@ -150,12 +221,25 @@ const LoyaltyPage: React.FC = () => {
               </p>
             </div>
           </div>
-          <button
-            onClick={() => void fetchData()}
-            className={`h-10 w-10 inline-flex items-center justify-center rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
-          >
-            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
-          </button>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              onClick={() => setShowScanPanel(true)}
+              className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
+                isDark
+                  ? 'bg-cyan-500/15 text-cyan-100 border border-cyan-500/40 hover:bg-cyan-500/25'
+                  : 'bg-cyan-50 text-cyan-800 border border-cyan-200 hover:bg-cyan-100'
+              }`}
+            >
+              <ScanLine className="w-4 h-4" />
+              {t('loyalty.scan.button', 'Scan')}
+            </button>
+            <button
+              onClick={() => void fetchData()}
+              className={`h-10 w-10 inline-flex items-center justify-center rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+            >
+              <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
         </div>
 
         {/* Stats */}
@@ -292,6 +376,16 @@ const LoyaltyPage: React.FC = () => {
           ))}
         </div>
       )}
+
+      <ScanDevicePanel
+        open={showScanPanel}
+        title={t('loyalty.scan.title', 'Scan loyalty member')}
+        description={t('loyalty.scan.description', 'Scan a loyalty card barcode, NFC reader code, or type the member code manually.')}
+        manualPlaceholder={t('loyalty.scan.placeholder', 'Card, phone, or member code')}
+        onClose={() => setShowScanPanel(false)}
+        onScan={handleLoyaltyScan}
+        includeLoyaltyReader
+      />
     </div>
   );
 };

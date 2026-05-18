@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 61;
+const CURRENT_SCHEMA_VERSION: i32 = 62;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -427,6 +427,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 61 {
         run_migration_tx(conn, 61, migrate_v61)?;
+    }
+    if current < 62 {
+        run_migration_tx(conn, 62, migrate_v62)?;
     }
 
     Ok(())
@@ -4078,6 +4081,56 @@ fn migrate_v61(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("v61 record schema_version: {e}"))?;
 
     info!("Applied migration v61 (local order terminal ownership scope)");
+    Ok(())
+}
+
+/// Migration v62: durable recovery action audit log.
+///
+/// Recovery recipes are shipped by app updates, but every local attempt still
+/// needs an operator-readable trail so future support can see what recipe ran,
+/// which entity it targeted, and which protective snapshot was created.
+fn migrate_v62(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS recovery_action_log (
+            id TEXT PRIMARY KEY,
+            action_id TEXT NOT NULL,
+            issue_code TEXT NOT NULL,
+            issue_id TEXT,
+            recipe_id TEXT,
+            recipe_version INTEGER,
+            entity_type TEXT,
+            entity_id TEXT,
+            order_id TEXT,
+            order_number TEXT,
+            shift_id TEXT,
+            queue_id INTEGER,
+            snapshot_point_id TEXT,
+            export_path TEXT,
+            success INTEGER NOT NULL DEFAULT 0,
+            message TEXT,
+            error_message TEXT,
+            actor_staff_id TEXT,
+            actor_staff_name TEXT,
+            payload_json TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recovery_action_log_created_at
+          ON recovery_action_log(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_recovery_action_log_issue_code
+          ON recovery_action_log(issue_code, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_recovery_action_log_order_id
+          ON recovery_action_log(order_id, created_at DESC)
+          WHERE order_id IS NOT NULL;
+        ",
+    )
+    .map_err(|e| format!("v62 create recovery_action_log: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (62)", [])
+        .map_err(|e| format!("v62 record schema_version: {e}"))?;
+
+    info!("Applied migration v62 (durable recovery action audit log)");
     Ok(())
 }
 

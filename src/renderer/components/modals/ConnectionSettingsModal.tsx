@@ -41,6 +41,17 @@ interface Props {
   initialSection?: 'recovery' | null
 }
 
+type SettingsSectionId =
+  | 'admin'
+  | 'connection'
+  | 'terminal'
+  | 'security'
+  | 'database'
+  | 'hardware'
+  | 'printing'
+  | 'payments'
+  | 'about'
+
 const parseBooleanSetting = (value: unknown): boolean => {
   if (value === true || value === 1) return true
   if (typeof value === 'string') {
@@ -130,6 +141,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [runtimeTerminalId, setRuntimeTerminalId] = useState('')
   const [runtimeAdminUrl, setRuntimeAdminUrl] = useState('')
   const [runtimeSyncHealth, setRuntimeSyncHealth] = useState('offline')
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>('admin')
 
   const [showPeripheralsSettings, setShowPeripheralsSettings] = useState(false)
   const [showAboutInfo, setShowAboutInfo] = useState(false)
@@ -343,6 +355,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   useEffect(() => {
     if (!isOpen) return
     if (initialSection === 'recovery') {
+      setActiveSettingsSection('database')
       setShowDatabaseSettings(true)
     }
   }, [initialSection, isOpen])
@@ -401,6 +414,26 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       setAboutCopied(true)
       setTimeout(() => setAboutCopied(false), 2000)
     } catch { /* fallback */ }
+  }
+
+  const handleSettingsSectionSelect = (section: SettingsSectionId) => {
+    setActiveSettingsSection(section)
+
+    if (section === 'connection') setShowConnectionSettings(true)
+    if (section === 'terminal') setShowTerminalPreferences(true)
+    if (section === 'security') {
+      setShowPinSettings(true)
+      setShowSecuritySettings(true)
+    }
+    if (section === 'database') setShowDatabaseSettings(true)
+    if (section === 'hardware') setShowPeripheralsSettings(true)
+    if (section === 'about') setShowAboutInfo(true)
+
+    window.setTimeout(() => {
+      document
+        .getElementById(`settings-section-${section}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 0)
   }
 
   const handleSaveConnection = async () => {
@@ -811,6 +844,76 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const syncHealthLabel = t(`settings.managedByAdmin.syncHealth.${runtimeSyncHealth}`, {
     defaultValue: runtimeSyncHealth,
   })
+  const sectionButtonClass = (section: SettingsSectionId) =>
+    `w-full rounded-xl border px-3 py-3 text-left transition-all ${
+      activeSettingsSection === section
+        ? 'border-cyan-400/70 bg-cyan-500/15 text-cyan-950 shadow-[0_0_18px_rgba(34,211,238,0.16)] dark:text-cyan-100'
+        : 'liquid-glass-modal-border bg-white/5 text-slate-700 hover:bg-white/10 dark:text-slate-200 dark:hover:bg-white/10'
+    }`
+  const compactPanelClass = 'rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-3 dark:bg-black/10'
+  const settingsSections: Array<{
+    id: SettingsSectionId
+    label: string
+    detail: string
+    icon: React.ReactNode
+  }> = [
+    {
+      id: 'admin',
+      label: t('settings.managedByAdmin.title', 'Managed by Admin'),
+      detail: syncHealthLabel,
+      icon: <Settings className="h-4 w-4 text-emerald-400" />,
+    },
+    {
+      id: 'connection',
+      label: t('modals.connectionSettings.connectionSettings', 'Connection'),
+      detail: runtimeTerminalId || terminalId || t('settings.managedByAdmin.unassignedTerminal', 'Unassigned terminal'),
+      icon: <Wifi className="h-4 w-4 text-green-400" />,
+    },
+    {
+      id: 'terminal',
+      label: t('settings.terminal.title', 'Terminal'),
+      detail: t('modals.connectionSettings.theme', 'Theme'),
+      icon: <Monitor className="h-4 w-4 text-cyan-400" />,
+    },
+    {
+      id: 'security',
+      label: t('modals.connectionSettings.security', 'Security'),
+      detail: sessionTimeoutEnabled
+        ? t('modals.connectionSettings.sessionTimeoutStatus', { minutes: sessionTimeoutMinutes })
+        : t('modals.connectionSettings.sessionTimeoutOff', 'Session timeout disabled'),
+      icon: <Lock className="h-4 w-4 text-amber-400" />,
+    },
+    {
+      id: 'database',
+      label: t('settings.database.management', 'Database Management'),
+      detail: t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue'),
+      icon: <Database className="h-4 w-4 text-orange-400" />,
+    },
+    {
+      id: 'hardware',
+      label: t('settings.hardware.title', 'Hardware'),
+      detail: t('settings.hardware.helpText', 'Configure local hardware devices for this POS'),
+      icon: <Cable className="h-4 w-4 text-cyan-400" />,
+    },
+    {
+      id: 'printing',
+      label: t('settings.printer.label', 'Printer Settings'),
+      detail: t('settings.printer.helpText', 'Receipt printer configuration'),
+      icon: <Printer className="h-4 w-4 text-purple-400" />,
+    },
+    {
+      id: 'payments',
+      label: t('settings.paymentTerminals.label', 'Payment Terminals'),
+      detail: t('settings.paymentTerminals.helpText', 'Configure ECR payment devices'),
+      icon: <CreditCard className="h-4 w-4 text-emerald-400" />,
+    },
+    {
+      id: 'about',
+      label: t('modals.connectionSettings.about', 'About'),
+      detail: aboutData ? `v${aboutData.version}` : t('modals.connectionSettings.aboutSubtitle', 'Version info'),
+      icon: <Info className="h-4 w-4 text-blue-400" />,
+    },
+  ]
 
   return (
     <>
@@ -818,8 +921,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       isOpen={isOpen}
       onClose={onClose}
       title={t('modals.connectionSettings.title')}
-      size="md"
-      className="!max-w-2xl"
+      size="full"
+      className="!max-w-[min(1180px,96vw)] !max-h-[min(900px,94vh)]"
+      contentClassName="!overflow-hidden !p-4 sm:!p-5"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >
@@ -836,8 +940,92 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           }}
         />
       ) : (
-      <div className="space-y-4">
-        <div className="rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-emerald-500/10 dark:bg-emerald-500/10 px-4 py-4 transition-all">
+      <div
+        data-settings-workbench
+        className="settings-workbench flex min-h-0 flex-1 flex-col gap-4 overflow-hidden"
+      >
+        <div className="grid shrink-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className={compactPanelClass}>
+            <div className="flex items-center gap-3">
+              <Monitor className="h-5 w-5 text-cyan-400" />
+              <div className="min-w-0">
+                <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
+                  {t('settings.managedByAdmin.terminalUnitLabel', 'Terminal unit')}
+                </div>
+                <div className="truncate text-sm font-semibold liquid-glass-modal-text">
+                  {managedTerminalSummary || resolvedTerminalTypeLabel}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className={compactPanelClass}>
+            <div className="flex items-center gap-3">
+              <Wifi className="h-5 w-5 text-green-400" />
+              <div className="min-w-0">
+                <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
+                  {t('settings.managedByAdmin.syncStatusLabel', 'Sync')}
+                </div>
+                <div className="truncate text-sm font-semibold liquid-glass-modal-text">{syncHealthLabel}</div>
+              </div>
+            </div>
+          </div>
+          <div className={compactPanelClass}>
+            <div className="flex items-center gap-3">
+              <Settings className="h-5 w-5 text-emerald-400" />
+              <div className="min-w-0">
+                <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
+                  {t('settings.managedByAdmin.enabledFeaturesLabel', 'Enabled features')}
+                </div>
+                <div className="truncate text-sm font-semibold liquid-glass-modal-text">
+                  {enabledFeatureLabels.length
+                    ? `${enabledFeatureLabels.length}`
+                    : t('settings.managedByAdmin.noRemoteFeaturesEnabled', 'No remote features enabled')}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className={compactPanelClass}>
+            <div className="flex items-center gap-3">
+              <Database className="h-5 w-5 text-orange-400" />
+              <div className="min-w-0">
+                <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
+                  {t('settings.managedByAdmin.enabledModulesLabel', 'Enabled modules')}
+                </div>
+                <div className="truncate text-sm font-semibold liquid-glass-modal-text">
+                  {enabledModuleNames.length
+                    ? `${enabledModuleNames.length}`
+                    : t('settings.managedByAdmin.coreModulesOnly', 'Core modules only')}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[230px_minmax(0,1fr)]">
+          <aside className="flex gap-2 overflow-x-auto rounded-xl border liquid-glass-modal-border bg-white/5 p-2 scrollbar-hide lg:min-h-0 lg:flex-col lg:overflow-y-auto lg:overflow-x-hidden">
+            {settingsSections.map((section) => (
+              <button
+                key={section.id}
+                type="button"
+                onClick={() => handleSettingsSectionSelect(section.id)}
+                className={sectionButtonClass(section.id)}
+                aria-current={activeSettingsSection === section.id ? 'page' : undefined}
+              >
+                <span className="flex items-center gap-3">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-black/5 dark:bg-white/10">
+                    {section.icon}
+                  </span>
+                  <span className="min-w-[120px] lg:min-w-0">
+                    <span className="block text-sm font-semibold">{section.label}</span>
+                    <span className="block truncate text-xs opacity-70">{section.detail}</span>
+                  </span>
+                </span>
+              </button>
+            ))}
+          </aside>
+
+          <div className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-0 scrollbar-hide lg:pr-1">
+        <div id="settings-section-admin" className="rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-emerald-500/10 dark:bg-emerald-500/10 px-4 py-4 transition-all">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-2">
               <div className="flex items-center gap-3">
@@ -925,7 +1113,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
 
         {/* Connection Settings */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showConnectionSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
+        <div id="settings-section-connection" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showConnectionSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
           }`}>
           <button
             onClick={() => setShowConnectionSettings(!showConnectionSettings)}
@@ -1030,7 +1218,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
 
         {/* PIN Settings */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPinSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
+        <div id="settings-section-security" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPinSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
           }`}>
           <button
             onClick={() => setShowPinSettings(!showPinSettings)}
@@ -1105,7 +1293,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
 
         {/* Theme Switcher */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
+        <div id="settings-section-terminal" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Palette className="w-5 h-5 text-pink-400 drop-shadow-[0_0_8px_rgba(244,114,182,0.6)]" />
@@ -1453,7 +1641,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
 
         {/* Database Management */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showDatabaseSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
+        <div id="settings-section-database" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showDatabaseSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
           <button
             onClick={() => setShowDatabaseSettings(!showDatabaseSettings)}
             className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
@@ -1621,7 +1809,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
 
         {/* Hardware Settings */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPeripheralsSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
+        <div id="settings-section-hardware" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPeripheralsSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
           <button
             onClick={() => setShowPeripheralsSettings(!showPeripheralsSettings)}
             className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
@@ -1946,7 +2134,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
 
         {/* Printer Settings trigger */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
+        <div id="settings-section-printing" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Printer className="w-5 h-5 text-purple-400 drop-shadow-[0_0_8px_rgba(192,132,252,0.6)]" />
@@ -1971,7 +2159,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         <PrintQueuePanel />
 
         {/* Payment Terminals Settings trigger */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
+        <div id="settings-section-payments" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <CreditCard className="w-5 h-5 text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
@@ -1989,11 +2177,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </div>
         </div>
 
-      </div>
-      )}
-
         {/* About Section */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showAboutInfo ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
+        <div id="settings-section-about" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showAboutInfo ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
           <button
             onClick={() => setShowAboutInfo(!showAboutInfo)}
             className="w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text"
@@ -2046,6 +2231,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             </div>
           )}
         </div>
+          </div>
+        </div>
+      </div>
+      )}
 
     </LiquidGlassModal>
 

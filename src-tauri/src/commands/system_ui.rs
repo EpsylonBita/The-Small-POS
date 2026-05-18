@@ -1,10 +1,11 @@
 use serde_json::Value;
-use tauri::Emitter;
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing::info;
 
 use crate::db;
 
 const MAX_CLIPBOARD_TEXT_LEN: usize = 1_000_000;
+const DISPLAY_WINDOW_PREFIX: &str = "external-display";
 
 fn value_to_text(value: Value) -> Option<String> {
     match value {
@@ -59,6 +60,196 @@ fn current_window_state(window: &tauri::Window) -> Value {
 
 fn emit_window_state_changed(window: &tauri::Window) {
     let _ = window.emit("window_state_changed", current_window_state(window));
+}
+
+fn display_content_type(arg0: Option<&Value>) -> String {
+    let requested = arg0
+        .and_then(|payload| {
+            crate::value_str(
+                payload,
+                &[
+                    "contentType",
+                    "content_type",
+                    "displayType",
+                    "display_type",
+                    "kind",
+                ],
+            )
+        })
+        .unwrap_or_else(|| "customer_display".to_string())
+        .trim()
+        .to_lowercase();
+
+    match requested.as_str() {
+        "kitchen_display" | "kds" | "kitchen" => "kitchen_display".to_string(),
+        _ => "customer_display".to_string(),
+    }
+}
+
+fn display_window_label(content_type: &str) -> String {
+    format!("{}-{}", DISPLAY_WINDOW_PREFIX, content_type)
+}
+
+fn display_window_title(content_type: &str) -> &'static str {
+    match content_type {
+        "kitchen_display" => "Kitchen Display",
+        _ => "Customer Display",
+    }
+}
+
+fn display_window_url(content_type: &str) -> WebviewUrl {
+    WebviewUrl::App(format!("index.html?externalDisplay={content_type}").into())
+}
+
+fn monitor_to_json(index: usize, monitor: &tauri::Monitor) -> Value {
+    let size = monitor.size();
+    let position = monitor.position();
+    let work_area = monitor.work_area();
+    serde_json::json!({
+        "index": index,
+        "id": index,
+        "name": monitor
+            .name()
+            .cloned()
+            .unwrap_or_else(|| format!("Display {}", index + 1)),
+        "scaleFactor": monitor.scale_factor(),
+        "position": {
+            "x": position.x,
+            "y": position.y,
+        },
+        "size": {
+            "width": size.width,
+            "height": size.height,
+        },
+        "workArea": {
+            "x": work_area.position.x,
+            "y": work_area.position.y,
+            "width": work_area.size.width,
+            "height": work_area.size.height,
+        },
+    })
+}
+
+fn read_display_index(arg0: Option<&Value>) -> Option<usize> {
+    let payload = arg0?;
+    let value = payload
+        .get("displayIndex")
+        .or_else(|| payload.get("display_index"))
+        .or_else(|| payload.get("monitorIndex"))
+        .or_else(|| payload.get("monitor_index"))
+        .or_else(|| payload.get("id"))?;
+
+    if let Some(n) = value.as_u64() {
+        return usize::try_from(n).ok();
+    }
+
+    value
+        .as_str()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+}
+
+fn active_display_windows(app: &tauri::AppHandle) -> Vec<Value> {
+    ["customer_display", "kitchen_display"]
+        .into_iter()
+        .filter_map(|content_type| {
+            let label = display_window_label(content_type);
+            if app.get_webview_window(&label).is_some() {
+                Some(serde_json::json!({
+                    "contentType": content_type,
+                    "label": label,
+                }))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn display_list_monitors(app: tauri::AppHandle) -> Result<Value, String> {
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    let displays: Vec<Value> = monitors
+        .iter()
+        .enumerate()
+        .map(|(index, monitor)| monitor_to_json(index, monitor))
+        .collect();
+
+    Ok(serde_json::json!({
+        "success": true,
+        "supported": true,
+        "displays": displays,
+        "activePresentations": active_display_windows(&app),
+    }))
+}
+
+#[tauri::command]
+pub async fn display_open_window(
+    app: tauri::AppHandle,
+    arg0: Option<Value>,
+) -> Result<Value, String> {
+    let content_type = display_content_type(arg0.as_ref());
+    let label = display_window_label(&content_type);
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    let monitor_index =
+        read_display_index(arg0.as_ref()).unwrap_or_else(|| if monitors.len() > 1 { 1 } else { 0 });
+    let monitor = monitors
+        .get(monitor_index)
+        .or_else(|| monitors.first())
+        .ok_or_else(|| "No monitors are available".to_string())?;
+
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.close();
+    }
+
+    let position = monitor.position();
+    let size = monitor.size();
+    let scale_factor = monitor.scale_factor().max(1.0);
+    let logical_width = f64::from(size.width) / scale_factor;
+    let logical_height = f64::from(size.height) / scale_factor;
+    let logical_x = f64::from(position.x) / scale_factor;
+    let logical_y = f64::from(position.y) / scale_factor;
+
+    let window = WebviewWindowBuilder::new(&app, &label, display_window_url(&content_type))
+        .title(display_window_title(&content_type))
+        .position(logical_x, logical_y)
+        .inner_size(logical_width, logical_height)
+        .decorations(false)
+        .resizable(true)
+        .always_on_top(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let _ = window.set_fullscreen(true);
+    let _ = window.set_focus();
+
+    Ok(serde_json::json!({
+        "success": true,
+        "supported": true,
+        "activeDisplayId": monitor_index,
+        "contentType": content_type,
+        "label": label,
+        "display": monitor_to_json(monitor_index, monitor),
+    }))
+}
+
+#[tauri::command]
+pub async fn display_close_window(
+    app: tauri::AppHandle,
+    arg0: Option<Value>,
+) -> Result<Value, String> {
+    let content_type = display_content_type(arg0.as_ref());
+    let label = display_window_label(&content_type);
+
+    if let Some(window) = app.get_webview_window(&label) {
+        window.close().map_err(|e| e.to_string())?;
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "contentType": content_type,
+        "label": label,
+        "activePresentations": active_display_windows(&app),
+    }))
 }
 
 #[tauri::command]

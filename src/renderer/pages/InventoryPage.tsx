@@ -14,11 +14,14 @@ import {
   BarChart3,
   Plus,
   Minus,
-  Edit3
+  Edit3,
+  History,
+  ReceiptText,
+  X
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
-import { formatCurrency } from '../utils/format';
+import { formatCurrency, formatDate } from '../utils/format';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
 import { getBridge, isBrowser } from '../../lib';
 import { offlineAdjustInventory } from '../services/offline-mutations';
@@ -35,6 +38,55 @@ interface InventoryItem {
   cost_per_unit: number;
   unit_of_measurement: string;
   is_active: boolean;
+}
+
+interface InventoryHistoryInvoice {
+  id: string;
+  invoice_number: string | null;
+  invoice_date: string | null;
+  supplier_name: string | null;
+}
+
+interface InventoryPriceHistoryEntry {
+  movement_id: string;
+  invoice: InventoryHistoryInvoice | null;
+  supplier_name: string | null;
+  invoice_number: string | null;
+  invoice_date: string | null;
+  quantity: number;
+  unit: string | null;
+  cost_per_unit: number;
+  previous_cost_per_unit: number | null;
+  price_delta: number;
+  price_delta_percent: number;
+  price_change: 'initial' | 'same' | 'up' | 'down';
+  total_cost: number;
+  created_at: string;
+}
+
+interface InventoryMovementHistoryEntry {
+  id: string;
+  movement_type: string;
+  quantity: number;
+  unit: string | null;
+  reason_code: string | null;
+  reason_notes: string | null;
+  cost_per_unit: number;
+  total_cost: number;
+  created_at: string;
+  invoice: InventoryHistoryInvoice | null;
+}
+
+interface InventoryHistoryData {
+  item: InventoryItem;
+  price_history: InventoryPriceHistoryEntry[];
+  movements: InventoryMovementHistoryEntry[];
+  summary: {
+    purchased_quantity: number;
+    used_quantity: number;
+    adjusted_quantity: number;
+    latest_purchase_cost: number | null;
+  };
 }
 
 type StockStatus = 'all' | 'critical' | 'low' | 'good';
@@ -82,6 +134,30 @@ function normalizeInventoryItem(item: any): InventoryItem {
   };
 }
 
+function formatHistoryLoadError(error: unknown, t: (key: string, fallback: string) => string): string {
+  const fallback = t('inventory.history.errors.loadFailed', 'Failed to load item history');
+  const raw = error instanceof Error ? error.message : String(error || '');
+  const message = raw.trim();
+  const lower = message.toLowerCase();
+
+  if (!message) {
+    return fallback;
+  }
+
+  if (lower.includes('endpoint not found') || lower.includes('http 404') || lower.includes('page not found')) {
+    return t(
+      'inventory.history.errors.endpointUnavailable',
+      'Inventory history API is not available on the connected admin dashboard. Restart or update the admin dashboard, then try again.'
+    );
+  }
+
+  if (lower.includes('inventory item not found')) {
+    return t('inventory.history.errors.itemNotFound', 'Inventory item was not found on the connected admin dashboard.');
+  }
+
+  return `${fallback}: ${message.length > 240 ? `${message.slice(0, 240).trim()}...` : message}`;
+}
+
 const InventoryPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -91,6 +167,10 @@ const InventoryPage: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<StockStatus>('all');
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+  const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null);
+  const [historyData, setHistoryData] = useState<InventoryHistoryData | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [showAdjustModal, setShowAdjustModal] = useState(false);
   const [adjustmentQty, setAdjustmentQty] = useState(0);
   const [adjustmentReason, setAdjustmentReason] = useState<'count' | 'received' | 'damaged' | 'expired' | 'theft' | 'other'>('count');
@@ -100,6 +180,11 @@ const InventoryPage: React.FC = () => {
   const isDark = resolvedTheme === 'dark';
   const isGreek = i18n.language === 'el';
   const formatMoney = (amount: number) => formatCurrency(amount);
+  const formatQuantity = (amount: number) => new Intl.NumberFormat(i18n.language || undefined, {
+    maximumFractionDigits: 3,
+  }).format(Number.isFinite(amount) ? amount : 0);
+  const formatHistoryDate = (value: string | null | undefined) =>
+    value ? formatDate(value, { day: '2-digit', month: 'short', year: 'numeric' }, i18n.language) : '-';
   const adjustAction = getOfflineActionState('inventory', 'adjust', isOnline);
 
   useEffect(() => {
@@ -253,6 +338,35 @@ const InventoryPage: React.FC = () => {
     setSelectedItem(item);
     setShowAdjustModal(true);
   }, [adjustAction.disabled, adjustAction.message, t]);
+
+  const openHistoryModal = useCallback(async (item: InventoryItem) => {
+    setHistoryItem(item);
+    setHistoryData(null);
+    setHistoryError(null);
+    setHistoryLoading(true);
+
+    try {
+      const endpoint = `pos/inventory/${encodeURIComponent(item.id)}/history`;
+      const invoke = getIpcInvoke();
+      const result = invoke
+        ? await invoke('api:fetch-from-admin', `/api/${endpoint}`)
+        : await posApiGet<InventoryHistoryData & { success?: boolean; error?: string }>(endpoint);
+
+      const success = invoke ? result?.success && result?.data?.success !== false : result.success && result.data?.success !== false;
+      const data = invoke ? result?.data : result.data;
+
+      if (!success || !data) {
+        throw new Error(result?.error || data?.error || data?.details || 'Failed to load inventory history');
+      }
+
+      setHistoryData(data as InventoryHistoryData);
+    } catch (error) {
+      console.error('Failed to load inventory history:', error);
+      setHistoryError(formatHistoryLoadError(error, t));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [t]);
 
   return (
     <div className={`min-h-screen p-6 ${isDark ? 'bg-black text-white' : 'bg-gray-50 text-gray-900'}`}>
@@ -432,7 +546,9 @@ const InventoryPage: React.FC = () => {
                     initial={{ opacity: 0, x: -20 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: index * 0.03 }}
-                    className={`${isDark ? 'hover:bg-zinc-900' : 'hover:bg-gray-50'} transition-colors`}
+                    onClick={() => void openHistoryModal(item)}
+                    className={`${isDark ? 'hover:bg-zinc-900' : 'hover:bg-gray-50'} cursor-pointer transition-colors`}
+                    title={t('inventory.history.open', 'View price and movement history')}
                   >
                     <td className="px-4 py-3"><StatusIcon status={status} /></td>
                     <td className="px-4 py-3 font-medium">{name}</td>
@@ -446,7 +562,10 @@ const InventoryPage: React.FC = () => {
                     <td className="px-4 py-3 text-right font-medium">{formatMoney(item.stock_quantity * item.cost_per_unit)}</td>
                     <td className="px-4 py-3 text-center">
                       <button
-                        onClick={() => openAdjustModal(item)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openAdjustModal(item);
+                        }}
                         disabled={adjustAction.disabled}
                         className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-200'}`}
                         title={adjustAction.message || t('inventory.adjustStock', 'Adjust Stock')}
@@ -468,6 +587,160 @@ const InventoryPage: React.FC = () => {
         </div>
       )}
         </>
+      )}
+
+      {/* Item History Modal */}
+      {historyItem && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setHistoryItem(null)}>
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className={`flex max-h-[90vh] w-full max-w-5xl flex-col rounded-2xl border shadow-2xl ${isDark ? 'bg-zinc-950 border-zinc-800 text-white' : 'bg-white border-gray-200 text-gray-950'}`}
+            onClick={(e: React.MouseEvent) => e.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-5">
+              <div className="min-w-0">
+                <div className={`mb-2 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDark ? 'bg-blue-500/15 text-blue-200' : 'bg-blue-50 text-blue-700'}`}>
+                  <History className="h-3.5 w-3.5" />
+                  {t('inventory.history.title', 'Price and movement history')}
+                </div>
+                <h3 className="truncate text-2xl font-bold">{isGreek ? historyItem.name_el : historyItem.name_en}</h3>
+                <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                  {historyItem.category_name || t('inventory.noCategory', 'No category')}
+                </p>
+              </div>
+              <button
+                onClick={() => setHistoryItem(null)}
+                className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${isDark ? 'border-zinc-700 bg-zinc-900 hover:bg-zinc-800' : 'border-gray-200 bg-white hover:bg-gray-100'}`}
+                aria-label={t('common.close', 'Close')}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-5">
+              {historyLoading ? (
+                <div className="space-y-3">
+                  {[1, 2, 3].map((row) => (
+                    <div key={row} className={`h-20 animate-pulse rounded-xl ${isDark ? 'bg-zinc-900' : 'bg-gray-100'}`} />
+                  ))}
+                </div>
+              ) : historyError ? (
+                <div className={`rounded-xl border p-4 ${isDark ? 'border-red-900 bg-red-950/30 text-red-100' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                  {historyError}
+                </div>
+              ) : historyData ? (
+                <div className="space-y-5">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    {[
+                      { label: t('inventory.history.currentStock', 'Current stock'), value: `${formatQuantity(historyData.item.stock_quantity)} ${historyData.item.unit_of_measurement}` },
+                      { label: t('inventory.history.currentCost', 'Current cost'), value: formatMoney(historyData.item.cost_per_unit) },
+                      { label: t('inventory.history.purchased', 'Purchased'), value: `${formatQuantity(historyData.summary.purchased_quantity)} ${historyData.item.unit_of_measurement}` },
+                      { label: t('inventory.history.used', 'Used / removed'), value: `${formatQuantity(historyData.summary.used_quantity)} ${historyData.item.unit_of_measurement}` },
+                    ].map((tile) => (
+                      <div key={tile.label} className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
+                        <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{tile.label}</p>
+                        <p className="mt-1 truncate text-lg font-bold">{tile.value}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <section>
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <h4 className="font-bold">{t('inventory.history.priceHistory', 'Supplier price history')}</h4>
+                        <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                          {t('inventory.history.priceHistoryDescription', 'Each supplier invoice purchase is kept here so cost changes are visible.')}
+                        </p>
+                      </div>
+                    </div>
+
+                    {historyData.price_history.length === 0 ? (
+                      <div className={`rounded-xl border p-6 text-center ${isDark ? 'border-zinc-800 bg-zinc-900/50 text-zinc-400' : 'border-gray-200 bg-gray-50 text-gray-500'}`}>
+                        {t('inventory.history.noPriceHistory', 'No supplier purchase history yet.')}
+                      </div>
+                    ) : (
+                      <div className={`overflow-hidden rounded-xl border ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
+                        <div className="max-h-72 overflow-y-auto scrollbar-hide">
+                          <table className="w-full min-w-[760px]">
+                            <thead className={isDark ? 'bg-zinc-900' : 'bg-gray-100'}>
+                              <tr>
+                                <th className="px-3 py-2 text-left text-xs font-semibold">{t('inventory.history.date', 'Date')}</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold">{t('inventory.history.invoice', 'Invoice')}</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold">{t('inventory.history.supplier', 'Supplier')}</th>
+                                <th className="px-3 py-2 text-right text-xs font-semibold">{t('inventory.history.quantity', 'Qty')}</th>
+                                <th className="px-3 py-2 text-right text-xs font-semibold">{t('inventory.history.unitCost', 'Unit cost')}</th>
+                                <th className="px-3 py-2 text-right text-xs font-semibold">{t('inventory.history.change', 'Change')}</th>
+                              </tr>
+                            </thead>
+                            <tbody className={`divide-y ${isDark ? 'divide-zinc-800' : 'divide-gray-200'}`}>
+                              {historyData.price_history.map((entry) => {
+                                const isUp = entry.price_change === 'up';
+                                const isDown = entry.price_change === 'down';
+                                const ChangeIcon = isUp ? TrendingUp : isDown ? TrendingDown : ReceiptText;
+                                return (
+                                  <tr key={entry.movement_id} className={isDark ? 'bg-zinc-950' : 'bg-white'}>
+                                    <td className="px-3 py-3 text-sm">{formatHistoryDate(entry.invoice_date || entry.created_at)}</td>
+                                    <td className="px-3 py-3 text-sm font-semibold">{entry.invoice_number || '-'}</td>
+                                    <td className={`px-3 py-3 text-sm ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>{entry.supplier_name || '-'}</td>
+                                    <td className="px-3 py-3 text-right text-sm">{formatQuantity(entry.quantity)} {entry.unit || historyData.item.unit_of_measurement}</td>
+                                    <td className="px-3 py-3 text-right text-sm font-semibold">{formatMoney(entry.cost_per_unit)}</td>
+                                    <td className={`px-3 py-3 text-right text-sm font-semibold ${isUp ? 'text-red-400' : isDown ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                                      <span className="inline-flex items-center justify-end gap-1">
+                                        <ChangeIcon className="h-4 w-4" />
+                                        {entry.price_change === 'initial'
+                                          ? t('inventory.history.priceChange.initial', 'Initial')
+                                          : entry.price_change === 'same'
+                                            ? t('inventory.history.priceChange.same', 'Same')
+                                            : `${entry.price_delta > 0 ? '+' : ''}${formatMoney(entry.price_delta)} (${entry.price_delta_percent > 0 ? '+' : ''}${entry.price_delta_percent.toFixed(1)}%)`}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </section>
+
+                  <section>
+                    <h4 className="mb-3 font-bold">{t('inventory.history.movements', 'Stock movements')}</h4>
+                    {historyData.movements.length === 0 ? (
+                      <div className={`rounded-xl border p-6 text-center ${isDark ? 'border-zinc-800 bg-zinc-900/50 text-zinc-400' : 'border-gray-200 bg-gray-50 text-gray-500'}`}>
+                        {t('inventory.history.noMovements', 'No stock movements recorded yet.')}
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {historyData.movements.map((movement) => (
+                          <div key={movement.id} className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}>
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <p className="font-semibold">{t(`inventory.history.movementTypes.${movement.movement_type}`, movement.movement_type)}</p>
+                                <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                                  {formatHistoryDate(movement.created_at)}
+                                  {movement.invoice?.invoice_number ? ` · ${t('inventory.history.invoice', 'Invoice')} ${movement.invoice.invoice_number}` : ''}
+                                </p>
+                              </div>
+                              <div className="text-right">
+                                <p className="font-bold">{formatQuantity(movement.quantity)} {movement.unit || historyData.item.unit_of_measurement}</p>
+                                <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{movement.cost_per_unit ? formatMoney(movement.cost_per_unit) : '-'}</p>
+                              </div>
+                            </div>
+                            {movement.reason_notes && (
+                              <p className={`mt-2 text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{movement.reason_notes}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </div>
+              ) : null}
+            </div>
+          </motion.div>
+        </div>
       )}
 
       {/* Adjust Stock Modal */}

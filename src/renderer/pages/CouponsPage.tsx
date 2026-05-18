@@ -15,6 +15,7 @@ import {
   Plus,
   Edit3,
   Trash2,
+  ScanLine,
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
@@ -28,6 +29,7 @@ import { formatCurrency, formatDate } from '../utils/format';
 import { getBridge, isBrowser } from '../../lib';
 import { offlineSetCouponActive, offlineUpsertCoupon } from '../services/offline-mutations';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
+import { ScanDevicePanel } from '../components/scanner/ScanDevicePanel';
 
 interface Coupon {
   id: string;
@@ -137,6 +139,7 @@ const CouponsPage: React.FC = () => {
   const [showActiveOnly, setShowActiveOnly] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
+  const [showScanPanel, setShowScanPanel] = useState(false);
   const [editingCoupon, setEditingCoupon] = useState<Coupon | null>(null);
   const [form, setForm] = useState<CouponFormState>(EMPTY_FORM);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -449,6 +452,20 @@ const CouponsPage: React.FC = () => {
     }
   };
 
+  const handleCouponScan = useCallback((code: string) => {
+    const scannedCode = code.trim().toUpperCase();
+    if (!scannedCode) return;
+
+    setSearchTerm(scannedCode);
+    const matchingCoupon = coupons.find(coupon => coupon.code.toUpperCase() === scannedCode);
+    if (matchingCoupon) {
+      toast.success(t('coupons.scan.found', { code: matchingCoupon.code, defaultValue: 'Coupon {{code}} found' }));
+      return;
+    }
+
+    toast.error(t('coupons.scan.notFound', { code: scannedCode, defaultValue: 'No coupon found for {{code}}' }));
+  }, [coupons, t]);
+
   const filteredCoupons = coupons.filter((coupon) => {
     const matchesSearch =
       !searchTerm ||
@@ -470,9 +487,9 @@ const CouponsPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-full overflow-auto p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-3">
           <div className={`p-2 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
             <Ticket className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
@@ -484,7 +501,18 @@ const CouponsPage: React.FC = () => {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <button
+            onClick={() => setShowScanPanel(true)}
+            className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
+              isDark
+                ? 'bg-cyan-500/15 text-cyan-100 border border-cyan-500/40 hover:bg-cyan-500/25'
+                : 'bg-cyan-50 text-cyan-800 border border-cyan-200 hover:bg-cyan-100'
+            }`}
+          >
+            <ScanLine className="w-4 h-4" />
+            {t('coupons.scan.button', 'Scan')}
+          </button>
           <button
             onClick={openCreateModal}
             disabled={saveAction.disabled}
@@ -876,6 +904,15 @@ const CouponsPage: React.FC = () => {
           </motion.div>
         </div>
       )}
+
+      <ScanDevicePanel
+        open={showScanPanel}
+        title={t('coupons.scan.title', 'Scan coupon')}
+        description={t('coupons.scan.description', 'Scan a coupon barcode or type the coupon code to find it instantly.')}
+        manualPlaceholder={t('coupons.scan.placeholder', 'Coupon code or barcode')}
+        onClose={() => setShowScanPanel(false)}
+        onScan={handleCouponScan}
+      />
     </div>
   );
 };
