@@ -1219,6 +1219,16 @@ export interface PlatformBridge {
     verifyCheckInPin(
       request: StaffCheckInPinVerifyRequest,
     ): Promise<StaffCheckInPinVerifyResponse>;
+    resolveQr(request: { qrCode: string }): Promise<{
+      success: boolean;
+      staff?: {
+        id: string;
+        staff_code?: string | null;
+        name?: string | null;
+        branch_id?: string | null;
+      };
+      error?: string;
+    }>;
     /**
      * Pull the staff directory (with currentShift busy-elsewhere info)
      * from the admin dashboard and persist it into the local staff auth
@@ -2649,6 +2659,11 @@ export class TauriBridge implements PlatformBridge {
       this.inv("staff-auth:authenticate-pin", pin),
     verifyCheckInPin: (request: StaffCheckInPinVerifyRequest) =>
       this.inv("staff-auth:verify-check-in-pin", request),
+    resolveQr: (request: { qrCode: string }) =>
+      this.adminFetch("/api/pos/staff/qr/resolve", {
+        method: "POST",
+        body: { qr_code: request.qrCode },
+      }),
     refreshDirectory: (args?: { branchId?: string }) =>
       this.inv("staff-auth:refresh-directory", args ?? {}),
     getSession: () => this.inv("staff-auth:get-session"),

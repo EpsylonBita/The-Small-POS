@@ -142,6 +142,14 @@ const ALL_INTEGRATIONS: Integration[] = [
     icon: <Receipt className="w-6 h-6" />,
     category: 'government',
   },
+  {
+    id: 'ergani_digital_schedule',
+    name: 'ERGANI/Epsilon Digital Schedule',
+    description: 'Greek digital work-card and weekly schedule compliance',
+    icon: <FileText className="w-6 h-6" />,
+    category: 'government',
+    requiredModule: MODULE_IDS.STAFF_SCHEDULE,
+  },
 ];
 
 const CATEGORY_CONFIG: Record<IntegrationCategory, { label: string; icon: typeof Plug }> = {
@@ -165,6 +173,7 @@ const PLUGIN_FORM_CONFIG: Record<string, { requiredFields: PluginFieldKey[]; sup
   'google-analytics': { requiredFields: ['api_key'] },
   woocommerce: { requiredFields: ['store_url', 'api_key', 'api_secret'], supportsProductSync: true, supportsOrderSync: true, supportsInventorySync: true },
   shopify: { requiredFields: ['store_url', 'api_key', 'api_secret'], supportsProductSync: true, supportsOrderSync: true, supportsInventorySync: true },
+  ergani_digital_schedule: { requiredFields: ['api_key', 'api_secret', 'merchant_id'] },
 };
 
 interface PluginFormState {
@@ -624,8 +633,11 @@ export const IntegrationsPage: React.FC = () => {
         const remoteMap = new Map(remoteIntegrations.map((item: any) => [item.provider, item]));
 
         // Map to IntegrationWithStatus
-        const integrationsWithStatus: IntegrationWithStatus[] = filteredIntegrations.map(integration => {
+        const integrationsWithStatus: IntegrationWithStatus[] = filteredIntegrations.flatMap(integration => {
           const remote = remoteMap.get(integration.id);
+          if (integration.id === 'ergani_digital_schedule' && !remote?.is_purchased) {
+            return [];
+          }
           const remoteStatus = remote?.status;
           const mappedStatus = remoteStatus === 'connected'
             ? 'connected'
@@ -635,14 +647,14 @@ export const IntegrationsPage: React.FC = () => {
             ? 'disconnected'
             : (remote?.is_active ? 'connected' : 'disconnected');
 
-          return {
+          return [{
             ...integration,
             status: integration.requiresPartnerCredentials
               ? 'pending'
               : mappedStatus,
             lastSyncedAt: typeof remote?.last_sync_at === 'string' ? remote.last_sync_at : undefined,
             settings: remote?.settings || undefined,
-          };
+          }];
         });
 
         setIntegrations(integrationsWithStatus);
@@ -650,7 +662,10 @@ export const IntegrationsPage: React.FC = () => {
         console.error('Failed to fetch integrations:', err);
         setError(err instanceof Error ? err.message : 'Failed to fetch integrations');
         // Still show integrations as disconnected
-        setIntegrations(filteredIntegrations.map(i => ({ ...i, status: 'disconnected' })));
+        setIntegrations(filteredIntegrations
+          .filter(i => i.id !== 'ergani_digital_schedule')
+          .map(i => ({ ...i, status: 'disconnected' }))
+        );
       } finally {
         setLoading(false);
       }

@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  FileText,
   Plus,
   RefreshCw,
   UserCheck,
@@ -198,6 +199,8 @@ export const StaffScheduleView: React.FC = memo(() => {
   const [createEndMinute, setCreateEndMinute] = useState('00');
   const [createNotes, setCreateNotes] = useState('');
   const [creatingShift, setCreatingShift] = useState(false);
+  const [publishingErgani, setPublishingErgani] = useState(false);
+  const [erganiPublishStatus, setErganiPublishStatus] = useState<string | null>(null);
 
   const isDark = resolvedTheme === 'dark';
   const bridge = getBridge();
@@ -500,6 +503,53 @@ export const StaffScheduleView: React.FC = memo(() => {
     }
   };
 
+  const handlePublishToErgani = async () => {
+    if (!branchId) {
+      toast.error(t('staffSchedule.ergani.noBranch', 'Branch is not configured for this terminal.'));
+      return;
+    }
+    if (weeklyShifts.length === 0) {
+      toast.error(t('staffSchedule.ergani.noShifts', 'No shifts to publish for this week.'));
+      return;
+    }
+
+    const weekEnd = new Date(currentWeekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    const periodStart = localDateKey(currentWeekStart);
+    const periodEnd = localDateKey(weekEnd);
+
+    setPublishingErgani(true);
+    setErganiPublishStatus(null);
+    try {
+      const response = await posApiPost<{
+        status?: string;
+        submission_id?: string;
+        shift_count?: number;
+      }>('/pos/plugins/ergani/schedules/publish', {
+        start_date: periodStart,
+        end_date: periodEnd,
+        shift_ids: weeklyShifts.map(shift => shift.id),
+      });
+
+      if (!response.success) {
+        throw new Error(response.error || 'Failed to publish schedule');
+      }
+
+      const status = response.data?.status || 'queued';
+      setErganiPublishStatus(status);
+      toast.success(
+        status === 'blocked'
+          ? t('staffSchedule.ergani.publishBlocked', 'Schedule queued but blocked until ERGANI setup is complete.')
+          : t('staffSchedule.ergani.publishQueued', 'Schedule publish queued for ERGANI.'),
+      );
+    } catch (err: any) {
+      setErganiPublishStatus('failed');
+      toast.error(err?.message || t('staffSchedule.ergani.publishFailed', 'Failed to publish to ERGANI.'));
+    } finally {
+      setPublishingErgani(false);
+    }
+  };
+
   const shiftPreview = useMemo(() => {
     const startIso = toIsoFromDateAndTimeParts(createStartDate, createStartHour, createStartMinute);
     const endIso = toIsoFromDateAndTimeParts(createEndDate, createEndHour, createEndMinute);
@@ -629,8 +679,25 @@ export const StaffScheduleView: React.FC = memo(() => {
                 <Plus className="h-4 w-4" />
                 {t('staffSchedule.actions.addShift', 'Add shift')}
               </button>
+              <button
+                type="button"
+                onClick={() => void handlePublishToErgani()}
+                disabled={publishingErgani || weeklyShifts.length === 0}
+                className={primaryButtonClass}
+              >
+                <FileText className="h-4 w-4" />
+                {publishingErgani
+                  ? t('staffSchedule.ergani.publishing', 'Publishing...')
+                  : t('staffSchedule.ergani.publish', 'Publish to ERGANI')}
+              </button>
             </div>
           </div>
+
+          {erganiPublishStatus ? (
+            <p className={`mt-3 text-xs ${mutedTextClass}`}>
+              {t('staffSchedule.ergani.lastStatus', 'ERGANI status')}: {erganiPublishStatus}
+            </p>
+          ) : null}
 
           <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
             <div className={`rounded-xl border p-3 ${softPanelClass}`}>

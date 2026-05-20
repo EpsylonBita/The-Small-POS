@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil } from 'lucide-react';
+import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense, StaffPayment } from '../../types';
@@ -433,6 +433,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [availableStaff, setAvailableStaff] = useState<StaffMember[]>([]);
   const [selectedStaff, setSelectedStaff] = useState<StaffMember | null>(null);
   const [enteredPin, setEnteredPin] = useState('');
+  const [staffQrCode, setStaffQrCode] = useState('');
+  const [resolvingStaffQr, setResolvingStaffQr] = useState(false);
   const [roleType, setRoleType] = useState<StaffShiftRole>('cashier');
   const [staffAuthMetadataStatus, setStaffAuthMetadataStatus] = useState<'available' | 'missing'>('available');
 
@@ -974,6 +976,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setCheckInStep('select-staff');
       setSelectedStaff(null);
       setEnteredPin('');
+      setStaffQrCode('');
+      setResolvingStaffQr(false);
       setRoleType('cashier');
       setOpeningCash('');
       setDriverStartingAmount(''); // Reset driver starting amount
@@ -1680,6 +1684,38 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     // Otherwise continue the normal check-in flow
     navigateCheckInStep('enter-pin');
+  };
+
+  const handleStaffQrResolve = async () => {
+    const qrCode = staffQrCode.trim();
+    if (!qrCode || resolvingStaffQr) {
+      return;
+    }
+
+    setResolvingStaffQr(true);
+    setError('');
+    try {
+      const result = await bridge.staffAuth.resolveQr({ qrCode });
+      if (!result?.success || !result.staff?.id) {
+        throw new Error(result?.error || t('modals.staffShift.qrResolveFailed', 'Staff QR badge was not recognized.'));
+      }
+
+      const matchedStaff = availableStaff.find((member) => member.id === result.staff?.id);
+      if (!matchedStaff) {
+        throw new Error(t('modals.staffShift.qrStaffUnavailable', 'This staff member is not available for this terminal.'));
+      }
+
+      setStaffQrCode('');
+      await handleStaffSelect(matchedStaff);
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : t('modals.staffShift.qrResolveFailed', 'Staff QR badge was not recognized.');
+      setError(message);
+    } finally {
+      setResolvingStaffQr(false);
+    }
   };
 
   const getCheckInPinErrorMessage = (
@@ -4663,6 +4699,43 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <p className={`mt-2 max-w-3xl ${checkInMutedTextClass}`}>
               {t('modals.staffShift.selectStaffStepHelper')}
             </p>
+          </div>
+
+          <div className="rounded-[24px] border border-slate-200/90 bg-white/90 p-4 shadow-[0_12px_28px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none">
+            <label className={`block ${checkInEyebrowClass}`}>
+              {t('modals.staffShift.staffQrBadge', 'Staff QR badge')}
+            </label>
+            <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+              <div className="relative flex-1">
+                <QrCode className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={staffQrCode}
+                  onChange={(event) => setStaffQrCode(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void handleStaffQrResolve();
+                    }
+                  }}
+                  placeholder={t('modals.staffShift.staffQrPlaceholder', 'Scan or paste staff QR badge')}
+                  className="min-h-[48px] w-full rounded-2xl border border-slate-200/90 bg-white/95 py-3 pl-12 pr-4 text-sm font-semibold text-slate-900 outline-none transition-colors focus:border-cyan-300 dark:border-white/10 dark:bg-black/20 dark:text-white dark:focus:border-cyan-400/40"
+                />
+              </div>
+              <motion.button
+                type="button"
+                onClick={() => void handleStaffQrResolve()}
+                disabled={resolvingStaffQr || staffQrCode.trim().length === 0}
+                className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-cyan-600 px-5 py-3 text-sm font-bold text-white shadow-[0_12px_28px_rgba(8,145,178,0.22)] transition-colors hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
+                {...getInteractiveMotion('primary', resolvingStaffQr || staffQrCode.trim().length === 0)}
+              >
+                {resolvingStaffQr ? (
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                ) : (
+                  <QrCode className="h-4 w-4" />
+                )}
+                {t('modals.staffShift.resolveQr', 'Use QR')}
+              </motion.button>
+            </div>
           </div>
 
           {loading ? (

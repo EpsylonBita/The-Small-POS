@@ -13,6 +13,7 @@ import { useModules } from '../../../contexts/module-context';
 import { useAcquiredModules } from '../../../hooks/useAcquiredModules';
 import { useSystemClock } from '../../../hooks/useSystemClock';
 import { useReservations } from '../../../hooks/useReservations';
+import { useAppointments } from '../../../hooks/useAppointments';
 import { formatDate, formatTime } from '../../../utils/format';
 import { addLocalDays, parseLocalDateString, startOfLocalDay, toLocalDateString } from '../../../utils/date';
 import {
@@ -30,6 +31,7 @@ import {
   UtensilsCrossed,
   BedDouble,
   Plus,
+  Scissors,
   X,
 } from 'lucide-react';
 import {
@@ -39,6 +41,7 @@ import {
   type ReservationFilters,
   type CreateReservationDto,
 } from '../../../services/ReservationsService';
+import type { Appointment, AppointmentStatus } from '../../../services/AppointmentsService';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -47,7 +50,7 @@ import { offEvent, onEvent } from '../../../../lib';
 
 type QuickFilter = 'today' | 'tomorrow' | 'week' | 'custom';
 type ViewMode = 'timeline' | 'list';
-type ReservationTab = 'tables' | 'rooms';
+type ReservationTab = 'tables' | 'rooms' | 'services';
 
 // Status colors and labels
 const statusColors: Record<ReservationStatus, string> = {
@@ -59,12 +62,22 @@ const statusColors: Record<ReservationStatus, string> = {
   cancelled: 'gray',
 };
 
+const appointmentStatusColors: Record<AppointmentStatus, string> = {
+  scheduled: 'blue',
+  confirmed: 'green',
+  in_progress: 'yellow',
+  completed: 'gray',
+  cancelled: 'red',
+  no_show: 'red',
+};
+
 export const ReservationsView: React.FC = memo(() => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId } = useModules();
   const now = useSystemClock();
-  const { hasTablesModule, hasRoomsModule } = useAcquiredModules();
+  const { hasTablesModule, hasRoomsModule, hasAppointmentsModule, hasServiceCatalogModule } = useAcquiredModules();
+  const hasServiceReservations = hasAppointmentsModule && hasServiceCatalogModule;
   
   // Get branchId from terminal credential cache / IPC
   const [branchId, setBranchId] = useState<string | null>(null);
@@ -133,6 +146,8 @@ export const ReservationsView: React.FC = memo(() => {
     durationMinutes: '90',
     tableId: '',
     roomId: '',
+    checkInDate: '',
+    checkOutDate: '',
     specialRequests: '',
     notes: '',
   });
@@ -141,17 +156,22 @@ export const ReservationsView: React.FC = memo(() => {
 
   // Auto-select tab based on available modules
   useEffect(() => {
-    if (!hasTablesModule && hasRoomsModule) {
-      setActiveTab('rooms');
-    } else if (hasTablesModule && !hasRoomsModule) {
-      setActiveTab('tables');
+    const availableTabs: ReservationTab[] = [
+      ...(hasTablesModule ? ['tables' as const] : []),
+      ...(hasRoomsModule ? ['rooms' as const] : []),
+      ...(hasServiceReservations ? ['services' as const] : []),
+    ];
+    if (availableTabs.length > 0 && !availableTabs.includes(activeTab)) {
+      setActiveTab(availableTabs[0]);
     }
-  }, [hasTablesModule, hasRoomsModule]);
+  }, [activeTab, hasTablesModule, hasRoomsModule, hasServiceReservations]);
 
   useEffect(() => {
     setCreateForm((prev) => ({
       ...prev,
       reservationDate: toLocalDateString(selectedDate),
+      checkInDate: toLocalDateString(selectedDate),
+      checkOutDate: prev.checkOutDate || toLocalDateString(addLocalDays(selectedDate, 1)),
     }));
   }, [selectedDate]);
 
@@ -174,7 +194,9 @@ export const ReservationsView: React.FC = memo(() => {
 
   // Build filters based on selected date and quick filter
   const filters: ReservationFilters = useMemo(() => {
-    const baseFilters: ReservationFilters = {};
+    const baseFilters: ReservationFilters = {
+      kind: activeTab === 'rooms' ? 'room' : 'table',
+    };
     
     if (quickFilter === 'week') {
       const weekStart = new Date(selectedDate);
@@ -194,7 +216,13 @@ export const ReservationsView: React.FC = memo(() => {
     }
 
     return baseFilters;
-  }, [selectedDate, quickFilter, searchTerm]);
+  }, [activeTab, selectedDate, quickFilter, searchTerm]);
+
+  const availableReservationTabs = useMemo<ReservationTab[]>(() => [
+    ...(hasTablesModule ? ['tables' as const] : []),
+    ...(hasRoomsModule ? ['rooms' as const] : []),
+    ...(hasServiceReservations ? ['services' as const] : []),
+  ], [hasTablesModule, hasRoomsModule, hasServiceReservations]);
 
   // Use reservations hook
   const {
@@ -211,11 +239,29 @@ export const ReservationsView: React.FC = memo(() => {
     enableRealtime: true,
   });
 
+  const appointmentFilters = useMemo(() => ({
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+    includeServices: true,
+  }), [filters.dateFrom, filters.dateTo]);
+
+  const {
+    appointments,
+    isLoading: isAppointmentsLoading,
+    refetch: refetchAppointments,
+    updateStatus: updateAppointmentStatus,
+  } = useAppointments({
+    branchId: branchId || '',
+    organizationId: effectiveOrgId || '',
+    filters: appointmentFilters,
+    enableRealtime: true,
+  });
+
   // Filter reservations based on active tab
   // Tables tab shows reservations with table_id, Rooms tab shows reservations with room_id
   const filteredReservations = useMemo(() => {
     if (activeTab === 'tables') {
-      return reservations.filter(r => r.tableId);
+      return reservations.filter(r => !r.roomId);
     } else {
       // Room reservations have room_id set
       return reservations.filter(r => r.roomId);
@@ -234,6 +280,21 @@ export const ReservationsView: React.FC = memo(() => {
     };
   }, [filteredReservations]);
 
+  const visibleStats = useMemo(() => {
+    if (activeTab !== 'services') {
+      return filteredStats;
+    }
+    return {
+      total: appointments.length,
+      pending: appointments.filter((appointment) => appointment.status === 'scheduled').length,
+      confirmed: appointments.filter((appointment) => appointment.status === 'confirmed').length,
+      seated: appointments.filter((appointment) => appointment.status === 'in_progress').length,
+      totalGuests: appointments.length,
+    };
+  }, [activeTab, appointments, filteredStats]);
+
+  const isActiveLoading = activeTab === 'services' ? isAppointmentsLoading : isLoading;
+
   const statusLabels: Record<ReservationStatus, string> = {
     confirmed: t('reservationsView.status.confirmed', { defaultValue: 'Confirmed' }),
     pending: t('reservationsView.status.pending', { defaultValue: 'Pending' }),
@@ -241,6 +302,15 @@ export const ReservationsView: React.FC = memo(() => {
     completed: t('reservationsView.status.completed', { defaultValue: 'Completed' }),
     no_show: t('reservationsView.status.no_show', { defaultValue: 'No Show' }),
     cancelled: t('reservationsView.status.cancelled', { defaultValue: 'Cancelled' }),
+  };
+
+  const appointmentStatusLabels: Record<AppointmentStatus, string> = {
+    scheduled: t('appointmentsView.status.scheduled', { defaultValue: 'Scheduled' }),
+    confirmed: t('appointmentsView.status.confirmed', { defaultValue: 'Confirmed' }),
+    in_progress: t('appointmentsView.status.in_progress', { defaultValue: 'In Progress' }),
+    completed: t('appointmentsView.status.completed', { defaultValue: 'Completed' }),
+    cancelled: t('appointmentsView.status.cancelled', { defaultValue: 'Cancelled' }),
+    no_show: t('appointmentsView.status.no_show', { defaultValue: 'No Show' }),
   };
 
   const handleQuickFilter = useCallback((filter: QuickFilter) => {
@@ -298,16 +368,24 @@ export const ReservationsView: React.FC = memo(() => {
       return;
     }
 
+    if (activeTab === 'rooms' && (!createForm.roomId.trim() || !createForm.checkInDate || !createForm.checkOutDate)) {
+      toast.error(t('reservationsView.validation.roomRequired', { defaultValue: 'Room, check-in date and check-out date are required' }));
+      return;
+    }
+
     const payload: CreateReservationDto = {
+      reservationType: activeTab === 'rooms' ? 'room' : 'table',
       customerName: createForm.customerName.trim(),
       customerPhone: createForm.customerPhone.trim(),
       customerEmail: createForm.customerEmail.trim() || undefined,
       partySize,
-      reservationDate: createForm.reservationDate,
-      reservationTime: createForm.reservationTime,
+      reservationDate: activeTab === 'rooms' ? createForm.checkInDate : createForm.reservationDate,
+      reservationTime: activeTab === 'rooms' ? '15:00' : createForm.reservationTime,
       durationMinutes: Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes : 90,
-      tableId: createForm.tableId.trim() || undefined,
-      roomId: createForm.roomId.trim() || undefined,
+      tableId: activeTab === 'tables' ? createForm.tableId.trim() || undefined : undefined,
+      roomId: activeTab === 'rooms' ? createForm.roomId.trim() || undefined : undefined,
+      checkInDate: activeTab === 'rooms' ? createForm.checkInDate : undefined,
+      checkOutDate: activeTab === 'rooms' ? createForm.checkOutDate : undefined,
       specialRequests: createForm.specialRequests.trim() || undefined,
       notes: createForm.notes.trim() || undefined,
     };
@@ -331,12 +409,14 @@ export const ReservationsView: React.FC = memo(() => {
       durationMinutes: '90',
       tableId: '',
       roomId: '',
+      checkInDate: toLocalDateString(selectedDate),
+      checkOutDate: toLocalDateString(addLocalDays(selectedDate, 1)),
       specialRequests: '',
       notes: '',
     });
     await refetch();
     await openReservationDetails(created.id);
-  }, [createForm, createReservation, refetch, selectedDate, openReservationDetails, t]);
+  }, [activeTab, createForm, createReservation, refetch, selectedDate, openReservationDetails, t]);
 
   const handleAssignTable = useCallback(async () => {
     if (!selectedReservation || !tableAssignmentId.trim()) return;
@@ -393,6 +473,25 @@ export const ReservationsView: React.FC = memo(() => {
     return actions;
   };
 
+  const getAppointmentQuickActions = (appointment: Appointment) => {
+    const actions: { label: string; status: AppointmentStatus; variant: string }[] = [];
+
+    if (appointment.status === 'scheduled') {
+      actions.push({ label: t('reservationsView.actions.confirm', { defaultValue: 'Confirm' }), status: 'confirmed', variant: 'primary' });
+    }
+    if (appointment.status === 'confirmed') {
+      actions.push({ label: t('reservationsView.actions.checkIn', { defaultValue: 'Check In' }), status: 'in_progress', variant: 'success' });
+    }
+    if (appointment.status === 'in_progress') {
+      actions.push({ label: t('reservationsView.actions.complete', { defaultValue: 'Complete' }), status: 'completed', variant: 'primary' });
+    }
+    if (['scheduled', 'confirmed'].includes(appointment.status)) {
+      actions.push({ label: t('reservationsView.actions.noShow', { defaultValue: 'No Show' }), status: 'no_show', variant: 'danger' });
+    }
+
+    return actions;
+  };
+
   if (!branchId || !effectiveOrgId) {
     return (
       <div className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -402,7 +501,7 @@ export const ReservationsView: React.FC = memo(() => {
   }
 
   // Show message if neither module is acquired
-  if (!hasTablesModule && !hasRoomsModule) {
+  if (availableReservationTabs.length === 0) {
     return (
       <div className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
         <Calendar className="w-16 h-16 mb-4 opacity-50" />
@@ -410,7 +509,7 @@ export const ReservationsView: React.FC = memo(() => {
           {t('reservationsView.noModules', { defaultValue: 'No reservation modules available' })}
         </p>
         <p className="text-sm text-center max-w-md">
-          {t('reservationsView.noModulesHint', { defaultValue: 'Please acquire the Tables or Rooms module to manage reservations.' })}
+          {t('reservationsView.noModulesHint', { defaultValue: 'Please acquire Tables, Rooms, or Services to manage reservations.' })}
         </p>
       </div>
     );
@@ -419,59 +518,68 @@ export const ReservationsView: React.FC = memo(() => {
   return (
     <div className="h-full flex flex-col p-4">
       {/* Tabs - only show if both modules are available */}
-      {hasTablesModule && hasRoomsModule && (
+      {availableReservationTabs.length > 1 && (
         <div className={`flex gap-1 mb-4 p-1 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
-          <button
-            onClick={() => setActiveTab('tables')}
-            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium transition-all ${
-              activeTab === 'tables'
-                ? 'bg-blue-600 text-white shadow-lg'
-                : isDark
-                  ? 'text-gray-400 hover:text-white hover:bg-gray-700'
-                  : 'text-gray-600 hover:text-gray-900 hover:bg-white'
-            }`}
-          >
-            <UtensilsCrossed className="w-5 h-5" />
-            {t('reservationsView.tabs.tables', { defaultValue: 'Tables' })}
-            <span className={`ml-1 px-2 py-0.5 rounded-full text-xs ${
-              activeTab === 'tables' ? 'bg-white/20' : isDark ? 'bg-gray-700' : 'bg-gray-200'
-            }`}>
-              {reservations.filter(r => r.tableId).length}
-            </span>
-          </button>
-          <button
-            onClick={() => setActiveTab('rooms')}
-            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium transition-all ${
-              activeTab === 'rooms'
+          {availableReservationTabs.map((tab) => {
+            const Icon = tab === 'rooms' ? BedDouble : tab === 'services' ? Scissors : UtensilsCrossed;
+            const activeClass =
+              tab === 'rooms'
                 ? 'bg-purple-600 text-white shadow-lg'
-                : isDark
-                  ? 'text-gray-400 hover:text-white hover:bg-gray-700'
-                  : 'text-gray-600 hover:text-gray-900 hover:bg-white'
-            }`}
-          >
-            <BedDouble className="w-5 h-5" />
-            {t('reservationsView.tabs.rooms', { defaultValue: 'Rooms' })}
-            <span className={`ml-1 px-2 py-0.5 rounded-full text-xs ${
-              activeTab === 'rooms' ? 'bg-white/20' : isDark ? 'bg-gray-700' : 'bg-gray-200'
-            }`}>
-              {reservations.filter(r => r.roomId).length}
-            </span>
-          </button>
+                : tab === 'services'
+                  ? 'bg-pink-600 text-white shadow-lg'
+                  : 'bg-blue-600 text-white shadow-lg';
+            const count =
+              tab === 'rooms'
+                ? reservations.filter((r) => r.roomId).length
+                : tab === 'services'
+                  ? appointments.length
+                  : reservations.filter((r) => !r.roomId).length;
+            return (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium transition-all ${
+                  activeTab === tab
+                    ? activeClass
+                    : isDark
+                      ? 'text-gray-400 hover:text-white hover:bg-gray-700'
+                      : 'text-gray-600 hover:text-gray-900 hover:bg-white'
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+                {tab === 'rooms'
+                  ? t('reservationsView.tabs.rooms', { defaultValue: 'Rooms' })
+                  : tab === 'services'
+                    ? t('reservationsView.tabs.services', { defaultValue: 'Services' })
+                    : t('reservationsView.tabs.tables', { defaultValue: 'Tables' })}
+                <span className={`ml-1 px-2 py-0.5 rounded-full text-xs ${
+                  activeTab === tab ? 'bg-white/20' : isDark ? 'bg-gray-700' : 'bg-gray-200'
+                }`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
 
       {/* Single module header - show which type of reservations we're viewing */}
-      {(hasTablesModule !== hasRoomsModule) && (
+      {availableReservationTabs.length === 1 && (
         <div className={`flex items-center gap-2 mb-4 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-          {hasTablesModule ? (
+          {activeTab === 'tables' ? (
             <>
               <UtensilsCrossed className="w-6 h-6 text-blue-500" />
               <h2 className="text-xl font-semibold">{t('reservationsView.tabs.tables', { defaultValue: 'Table Reservations' })}</h2>
             </>
-          ) : (
+          ) : activeTab === 'rooms' ? (
             <>
               <BedDouble className="w-6 h-6 text-purple-500" />
               <h2 className="text-xl font-semibold">{t('reservationsView.tabs.rooms', { defaultValue: 'Room Reservations' })}</h2>
+            </>
+          ) : (
+            <>
+              <Scissors className="w-6 h-6 text-pink-500" />
+              <h2 className="text-xl font-semibold">{t('reservationsView.tabs.services', { defaultValue: 'Service Reservations' })}</h2>
             </>
           )}
         </div>
@@ -484,31 +592,31 @@ export const ReservationsView: React.FC = memo(() => {
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('reservationsView.stats.total', { defaultValue: 'Total' })}
             </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredStats.total}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.total}</div>
           </div>
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-yellow-500`}>
               {t('reservationsView.stats.pending', { defaultValue: 'Pending' })}
             </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredStats.pending}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.pending}</div>
           </div>
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-blue-500`}>
               {t('reservationsView.stats.confirmed', { defaultValue: 'Confirmed' })}
             </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredStats.confirmed}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.confirmed}</div>
           </div>
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-green-500`}>
               {t('reservationsView.stats.seated', { defaultValue: 'Seated' })}
             </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredStats.seated}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.seated}</div>
           </div>
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-purple-500`}>
               {t('reservationsView.stats.guests', { defaultValue: 'Guests' })}
             </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredStats.totalGuests}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.totalGuests}</div>
           </div>
         </div>
         <div className="flex gap-2">
@@ -517,23 +625,36 @@ export const ReservationsView: React.FC = memo(() => {
               setCreateForm((prev) => ({
                 ...prev,
                 reservationDate: toLocalDateString(selectedDate),
+                checkInDate: toLocalDateString(selectedDate),
+                checkOutDate: toLocalDateString(addLocalDays(selectedDate, 1)),
               }));
               setShowCreateModal(true);
             }}
+            disabled={activeTab === 'services'}
             className={`px-3 py-2 rounded-lg flex items-center gap-2 ${
-              isDark ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
+              activeTab === 'services'
+                ? isDark ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                : isDark ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
             }`}
-            title={t('reservationsView.create', { defaultValue: 'Create Reservation' })}
+            title={activeTab === 'services'
+              ? t('reservationsView.createServiceInAppointments', { defaultValue: 'Create service bookings from Appointments' })
+              : t('reservationsView.create', { defaultValue: 'Create Reservation' })}
           >
             <Plus className="w-4 h-4" />
             {t('reservationsView.create', { defaultValue: 'Create' })}
           </button>
           <button
-            onClick={() => refetch()}
+            onClick={() => {
+              if (activeTab === 'services') {
+                void refetchAppointments();
+              } else {
+                void refetch();
+              }
+            }}
             className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
             title={t('reservationsView.refresh', { defaultValue: 'Refresh' })}
           >
-            <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-5 h-5 ${isActiveLoading ? 'animate-spin' : ''}`} />
           </button>
           <div className="relative">
             <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
@@ -608,17 +729,17 @@ export const ReservationsView: React.FC = memo(() => {
       </div>
 
       {/* Pending Alert */}
-      {filteredStats.pending > 0 && (
+      {visibleStats.pending > 0 && (
         <div className={`mb-4 p-3 rounded-lg flex items-center gap-2 ${isDark ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-50 border border-yellow-200'}`}>
           <AlertTriangle className="w-5 h-5 text-yellow-500" />
           <span className="text-yellow-600 font-medium">
-            {filteredStats.pending} {t('reservationsView.pendingAlert', { defaultValue: 'reservation(s) pending confirmation' })}
+            {visibleStats.pending} {t('reservationsView.pendingAlert', { defaultValue: 'reservation(s) pending confirmation' })}
           </span>
         </div>
       )}
 
       {/* Loading State */}
-      {isLoading && reservations.length === 0 && (
+      {isActiveLoading && (activeTab === 'services' ? appointments.length === 0 : reservations.length === 0) && (
         <div className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           {t('reservationsView.loading', { defaultValue: 'Loading reservations...' })}
@@ -626,9 +747,70 @@ export const ReservationsView: React.FC = memo(() => {
       )}
 
       {/* Content */}
-      {!isLoading && (
+      {!isActiveLoading && (
         <div className="flex-1 overflow-y-auto">
-          {viewMode === 'list' ? (
+          {activeTab === 'services' ? (
+            <div className="space-y-2">
+              {appointments.map((appointment) => (
+                <div
+                  key={appointment.id}
+                  className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}
+                  style={{ borderLeft: `4px solid var(--${appointmentStatusColors[appointment.status]}-500, #6b7280)` }}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-2">
+                        <span className={`font-medium text-lg ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                          {appointment.customerName || t('reservationsView.walkInCustomer', { defaultValue: 'Walk-in customer' })}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium bg-${appointmentStatusColors[appointment.status]}-500/10 text-${appointmentStatusColors[appointment.status]}-500`}>
+                          {appointmentStatusLabels[appointment.status]}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-4 text-sm">
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-4 h-4" />
+                          {formatTime(appointment.startTime, { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <Scissors className="w-4 h-4" />
+                          {appointment.serviceName || appointment.services?.[0]?.serviceName || t('reservationsView.service', { defaultValue: 'Service' })}
+                        </span>
+                        {appointment.staffName && (
+                          <span className="flex items-center gap-1">
+                            <Users className="w-4 h-4" />
+                            {appointment.staffName}
+                          </span>
+                        )}
+                        {appointment.customerPhone && (
+                          <span className="flex items-center gap-1">
+                            <Phone className="w-4 h-4" />
+                            {appointment.customerPhone}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      {getAppointmentQuickActions(appointment).map((action) => (
+                        <button
+                          key={action.status}
+                          onClick={() => void updateAppointmentStatus(appointment.id, action.status)}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium ${
+                            action.variant === 'primary' ? 'bg-blue-600 text-white hover:bg-blue-700' :
+                            action.variant === 'success' ? 'bg-green-600 text-white hover:bg-green-700' :
+                            action.variant === 'danger' ? 'bg-red-600 text-white hover:bg-red-700' :
+                            isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
+                          }`}
+                        >
+                          {action.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : viewMode === 'list' ? (
             /* List View */
             <div className="space-y-2">
               {filteredReservations.map(res => (
@@ -774,9 +956,11 @@ export const ReservationsView: React.FC = memo(() => {
             </div>
           )}
 
-          {filteredReservations.length === 0 && !isLoading && (
+          {(activeTab === 'services' ? appointments.length === 0 : filteredReservations.length === 0) && !isActiveLoading && (
             <div className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-              <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />
+              {activeTab === 'services'
+                ? <Scissors className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                : <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />}
               <p className="text-lg font-medium mb-2">
                 {t('reservationsView.noReservations', { defaultValue: 'No reservations found' })}
               </p>
@@ -843,26 +1027,52 @@ export const ReservationsView: React.FC = memo(() => {
                 type="time"
                 className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
               />
-              <input
-                value={createForm.durationMinutes}
-                onChange={(event) => setCreateForm((prev) => ({ ...prev, durationMinutes: event.target.value }))}
-                placeholder={t('reservationsView.form.duration', { defaultValue: 'Duration (minutes)' })}
-                type="number"
-                min={15}
-                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
-              />
-              <input
-                value={createForm.tableId}
-                onChange={(event) => setCreateForm((prev) => ({ ...prev, tableId: event.target.value }))}
-                placeholder={t('reservationsView.form.tableId', { defaultValue: 'Table ID (optional)' })}
-                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
-              />
-              <input
-                value={createForm.roomId}
-                onChange={(event) => setCreateForm((prev) => ({ ...prev, roomId: event.target.value }))}
-                placeholder={t('reservationsView.form.roomId', { defaultValue: 'Room ID (optional)' })}
-                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
-              />
+              {activeTab === 'tables' && (
+                <>
+                  <input
+                    value={createForm.durationMinutes}
+                    onChange={(event) => setCreateForm((prev) => ({ ...prev, durationMinutes: event.target.value }))}
+                    placeholder={t('reservationsView.form.duration', { defaultValue: 'Duration (minutes)' })}
+                    type="number"
+                    min={15}
+                    className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+                  />
+                  <input
+                    value={createForm.tableId}
+                    onChange={(event) => setCreateForm((prev) => ({ ...prev, tableId: event.target.value }))}
+                    placeholder={t('reservationsView.form.tableId', { defaultValue: 'Table ID (optional)' })}
+                    className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+                  />
+                </>
+              )}
+              {activeTab === 'rooms' && (
+                <>
+                  <input
+                    value={createForm.roomId}
+                    onChange={(event) => setCreateForm((prev) => ({ ...prev, roomId: event.target.value }))}
+                    placeholder={t('reservationsView.form.roomId', { defaultValue: 'Room ID' })}
+                    className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+                  />
+                  <input
+                    value={createForm.checkInDate}
+                    onChange={(event) => setCreateForm((prev) => ({
+                      ...prev,
+                      checkInDate: event.target.value,
+                      reservationDate: event.target.value,
+                    }))}
+                    type="date"
+                    aria-label={t('reservationsView.form.checkInDate', { defaultValue: 'Check-in date' })}
+                    className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+                  />
+                  <input
+                    value={createForm.checkOutDate}
+                    onChange={(event) => setCreateForm((prev) => ({ ...prev, checkOutDate: event.target.value }))}
+                    type="date"
+                    aria-label={t('reservationsView.form.checkOutDate', { defaultValue: 'Check-out date' })}
+                    className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+                  />
+                </>
+              )}
               <input
                 value={createForm.specialRequests}
                 onChange={(event) => setCreateForm((prev) => ({ ...prev, specialRequests: event.target.value }))}
@@ -979,6 +1189,7 @@ export const ReservationsView: React.FC = memo(() => {
                   </div>
                 </div>
 
+                {!selectedReservation.roomId && (
                 <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-800' : 'bg-gray-50'}`}>
                   <div className={`text-sm mb-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                     {t('reservationsView.assignTable', { defaultValue: 'Assign Table' })}
@@ -1001,6 +1212,7 @@ export const ReservationsView: React.FC = memo(() => {
                     </button>
                   </div>
                 </div>
+                )}
               </div>
             )}
           </div>

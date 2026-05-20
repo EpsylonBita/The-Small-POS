@@ -72,6 +72,7 @@ export interface ReservationFilters {
   dateTo?: string;
   statusFilter?: ReservationStatus | 'all';
   searchTerm?: string;
+  kind?: 'all' | 'table' | 'room';
 }
 
 export interface ReservationStats {
@@ -86,6 +87,7 @@ export interface ReservationStats {
 }
 
 export interface CreateReservationDto {
+  reservationType?: 'table' | 'room';
   customerName: string;
   customerPhone: string;
   customerEmail?: string;
@@ -183,12 +185,16 @@ class ReservationsService {
     status?: string;
     search?: string;
     table_id?: string;
+    room_id?: string;
+    kind?: 'all' | 'table' | 'room';
   }): Promise<{ reservations: any[]; error?: string }> {
     const query = buildQueryString({
       date: params?.date,
       status: params?.status,
       search: params?.search,
       table_id: params?.table_id,
+      room_id: params?.room_id,
+      kind: params?.kind,
     });
 
     const result = isBrowser()
@@ -320,6 +326,7 @@ class ReservationsService {
               date,
               status,
               search,
+              kind: filters?.kind,
             }),
           ),
         );
@@ -343,6 +350,7 @@ class ReservationsService {
           date: filters?.dateFrom || filters?.dateTo,
           status,
           search,
+          kind: filters?.kind,
         });
 
         if (response.error) {
@@ -384,7 +392,9 @@ class ReservationsService {
   }
 
   async createReservation(data: CreateReservationDto): Promise<Reservation> {
+    const reservationType = data.reservationType || (data.roomId ? 'room' : 'table');
     const reservation = await this.createReservationRequest({
+      reservationType,
       customerName: data.customerName,
       customerPhone: data.customerPhone,
       customerEmail: data.customerEmail || undefined,
@@ -392,11 +402,11 @@ class ReservationsService {
       reservationDate: data.reservationDate,
       reservationTime: data.reservationTime,
       durationMinutes: data.durationMinutes || 90,
-      tableId: data.tableId || undefined,
-      roomId: data.roomId || undefined,
-      roomNumber: data.roomNumber || undefined,
-      checkInDate: data.checkInDate || undefined,
-      checkOutDate: data.checkOutDate || undefined,
+      tableId: reservationType === 'table' ? data.tableId || undefined : undefined,
+      roomId: reservationType === 'room' ? data.roomId || undefined : undefined,
+      roomNumber: reservationType === 'room' ? data.roomNumber || undefined : undefined,
+      checkInDate: reservationType === 'room' ? data.checkInDate || data.reservationDate : undefined,
+      checkOutDate: reservationType === 'room' ? data.checkOutDate || undefined : undefined,
       customerId: data.customerId || undefined,
       specialRequests: data.specialRequests || undefined,
       notes: data.notes || undefined,

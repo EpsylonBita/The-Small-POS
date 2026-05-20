@@ -26,12 +26,15 @@ export const MODULE_IDS = {
   RESERVATIONS: 'reservations',
   ROOMS: 'rooms',
   APPOINTMENTS: 'appointments',
+  SERVICE_CATALOG: 'service_catalog',
   DRIVE_THRU: 'drive_through', // Module ID uses underscore
   POS: 'pos',
   MENU: 'menu',
   ORDERS: 'orders',
   CUSTOMERS: 'customers',
   STAFF: 'staff',
+  STAFF_SCHEDULE: 'staff_schedule',
+  PLUGIN_INTEGRATIONS: 'plugin_integrations',
   ANALYTICS: 'analytics',
   INVENTORY: 'inventory',
   LOYALTY: 'loyalty',
@@ -64,6 +67,8 @@ export interface UseAcquiredModulesReturn {
   hasRoomsModule: boolean;
   /** Check if the Appointments module is acquired */
   hasAppointmentsModule: boolean;
+  /** Check if the Service Catalog module is acquired */
+  hasServiceCatalogModule: boolean;
   /** Refresh modules from the server */
   refetch: () => Promise<void>;
 }
@@ -183,6 +188,11 @@ export function useAcquiredModules(
     [hasModule]
   );
 
+  const hasServiceCatalogModule = useMemo(
+    () => hasModule(MODULE_IDS.SERVICE_CATALOG),
+    [hasModule]
+  );
+
   /**
    * Refetch modules from the server
    * Combines both local refresh and admin sync
@@ -202,6 +212,7 @@ export function useAcquiredModules(
     hasTablesModule,
     hasRoomsModule,
     hasAppointmentsModule,
+    hasServiceCatalogModule,
     refetch,
   };
 }
