@@ -383,12 +383,15 @@ pub(crate) struct PaymentRecordInput {
     pub method: String,
     pub amount: f64,
     pub currency: String,
+    pub tip_amount: f64,
     pub cash_received: Option<f64>,
     pub change_given: Option<f64>,
     pub transaction_ref: Option<String>,
     pub discount_amount: f64,
     pub payment_origin: String,
     pub terminal_device_id: Option<String>,
+    pub table_session_id: Option<String>,
+    pub seat_number: Option<i64>,
     pub requested_staff_id: Option<String>,
     pub requested_staff_shift_id: Option<String>,
     pub collected_by: Option<String>,
@@ -567,6 +570,10 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
     if amount <= 0.0 {
         return Err("Amount must be positive".into());
     }
+    let tip_amount = num_field(payload, "tipAmount")
+        .or_else(|| num_field(payload, "tip_amount"))
+        .unwrap_or(0.0)
+        .max(0.0);
 
     let cash_received =
         num_field(payload, "cashReceived").or_else(|| num_field(payload, "cash_received"));
@@ -616,12 +623,20 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         method,
         amount,
         currency: str_field(payload, "currency").unwrap_or_else(|| "EUR".to_string()),
+        tip_amount,
         cash_received,
         change_given,
         transaction_ref,
         discount_amount,
         payment_origin,
         terminal_device_id,
+        table_session_id: str_field(payload, "tableSessionId")
+            .or_else(|| str_field(payload, "table_session_id")),
+        seat_number: payload
+            .get("seatNumber")
+            .or_else(|| payload.get("seat_number"))
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0),
         requested_staff_id: str_field(payload, "staffId")
             .or_else(|| str_field(payload, "staff_id")),
         requested_staff_shift_id: str_field(payload, "staffShiftId")
@@ -1167,6 +1182,9 @@ pub(crate) fn record_payment_in_connection(
             "method": input.method,
             "amount": input.amount,
             "amount_cents": Cents::round_half_even(input.amount).as_i64(),
+            "tipAmount": input.tip_amount,
+            "tip_amount": input.tip_amount,
+            "tip_amount_cents": Cents::round_half_even(input.tip_amount).as_i64(),
             "currency": input.currency,
             "cashReceived": input.cash_received,
             "cash_received_cents": input.cash_received
@@ -1179,6 +1197,10 @@ pub(crate) fn record_payment_in_connection(
             "discount_amount_cents": Cents::round_half_even(input.discount_amount).as_i64(),
             "paymentOrigin": input.payment_origin,
             "terminalDeviceId": input.terminal_device_id,
+            "tableSessionId": input.table_session_id,
+            "table_session_id": input.table_session_id,
+            "seatNumber": input.seat_number,
+            "seat_number": input.seat_number,
             "collectedBy": input.collected_by,
             "staffId": resolved_staff_id,
             "staffShiftId": resolved_shift_id,
@@ -2636,6 +2658,41 @@ mod tests {
             Some("remote-payment-reconstructed")
         );
         assert_eq!(sync_state, "applied");
+    }
+
+    #[test]
+    fn test_build_payment_record_input_preserves_table_service_metadata() {
+        let payload = serde_json::json!({
+            "orderId": "ord-table-payment",
+            "method": "cash",
+            "amount": 11.0,
+            "tipAmount": 1.5,
+            "tableSessionId": "local-table-session:ord-table-payment",
+            "seatNumber": 2,
+            "idempotencyKey": "table-payment-idempotency-1",
+            "items": [{
+                "order_item_id": "order-item-1",
+                "itemIndex": 0,
+                "itemName": "Pasta",
+                "itemQuantity": 1,
+                "itemAmount": 11.0
+            }]
+        });
+
+        let input = build_payment_record_input(&payload).expect("prepare table payment");
+
+        assert_eq!(input.order_id, "ord-table-payment");
+        assert_eq!(input.method, "cash");
+        assert_eq!(input.tip_amount, 1.5);
+        assert_eq!(
+            input.table_session_id.as_deref(),
+            Some("local-table-session:ord-table-payment")
+        );
+        assert_eq!(input.seat_number, Some(2));
+        assert_eq!(input.items.len(), 1);
+        assert_eq!(input.items[0].item_index, 0);
+        assert_eq!(input.items[0].item_quantity, 1);
+        assert_eq!(input.items[0].item_amount, 11.0);
     }
 
     #[test]

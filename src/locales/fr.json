@@ -74,6 +74,7 @@
       "pending": "En attente",
       "completed": "Terminé",
       "cancelled": "Annulé",
+      "closed": "Fermé",
       "approved": "Approuvé",
       "rejected": "Rejeté",
       "draft": "Brouillon",

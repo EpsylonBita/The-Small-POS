@@ -4,12 +4,13 @@
  * Provides table data through terminal-authenticated POS routes only.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { RestaurantTable, TableAPIResponse, TableStatus } from '../types/tables';
 import { transformTableFromAPI } from '../types/tables';
 import { reservationsService } from '../services/ReservationsService';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
+import { buildOptimisticOccupiedTable } from '../utils/tableOrderFlow';
 
 const TABLE_REFRESH_MIN_MS = 30000;
 
@@ -24,7 +25,11 @@ interface UseTablesReturn {
   isLoading: boolean;
   error: Error | null;
   refetch: () => Promise<void>;
-  updateTableStatus: (tableId: string, status: TableStatus) => Promise<boolean>;
+  updateTableStatus: (
+    tableId: string,
+    status: TableStatus,
+    workflow?: Record<string, unknown>,
+  ) => Promise<boolean>;
 }
 
 function formatError(error: unknown): string {
@@ -45,7 +50,33 @@ export function useTables({
   const [tables, setTables] = useState<RestaurantTable[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  const optimisticTableOverridesRef = useRef<Record<string, Partial<RestaurantTable>>>({});
   const bridge = getBridge();
+
+  const mergeOptimisticTableOverrides = useCallback((nextTables: RestaurantTable[]) => {
+    const overrides = optimisticTableOverridesRef.current;
+    return nextTables.map((table) => {
+      const override = overrides[table.id];
+      if (!override) {
+        return table;
+      }
+
+      return {
+        ...table,
+        ...override,
+        currentOrderId: table.currentOrderId || override.currentOrderId,
+        tableSessionId: table.tableSessionId || override.tableSessionId || null,
+        guestCount: table.guestCount ?? override.guestCount ?? null,
+        currentWaiterId: table.currentWaiterId || override.currentWaiterId || null,
+        currentWaiterName: table.currentWaiterName || override.currentWaiterName || null,
+        occupiedSince: table.occupiedSince || override.occupiedSince,
+        floorLevel: table.floorLevel ?? override.floorLevel ?? null,
+        section: table.section ?? override.section ?? null,
+        balance: table.balance || override.balance || null,
+        unpaidBalance: table.unpaidBalance || override.unpaidBalance || 0,
+      };
+    });
+  }, []);
 
   const fetchTables = useCallback(async () => {
     if (!branchId || !organizationId || !enabled) {
@@ -77,7 +108,7 @@ export function useTables({
       }
 
       const tableRows = Array.isArray(payload.tables) ? payload.tables : [];
-      setTables(tableRows.map((row) => transformTableFromAPI(row)));
+      setTables(mergeOptimisticTableOverrides(tableRows.map((row) => transformTableFromAPI(row))));
     } catch (err) {
       console.error('[useTables] Failed to fetch tables:', formatError(err));
       setError(err instanceof Error ? err : new Error('Failed to fetch tables'));
@@ -85,15 +116,88 @@ export function useTables({
     } finally {
       setIsLoading(false);
     }
-  }, [branchId, organizationId, enabled, bridge]);
+  }, [branchId, organizationId, enabled, bridge, mergeOptimisticTableOverrides]);
 
   const updateTableStatus = useCallback(
-    async (tableId: string, status: TableStatus): Promise<boolean> => {
+    async (
+      tableId: string,
+      status: TableStatus,
+      workflow: Record<string, unknown> = {},
+    ): Promise<boolean> => {
+      const nextUpdatedAt = new Date().toISOString();
+      if (status === 'occupied') {
+        optimisticTableOverridesRef.current[tableId] = {
+          status,
+          updatedAt: nextUpdatedAt,
+          currentOrderId: typeof workflow.current_order_id === 'string'
+            ? workflow.current_order_id
+            : optimisticTableOverridesRef.current[tableId]?.currentOrderId,
+          tableSessionId: typeof workflow.table_session_id === 'string'
+            ? workflow.table_session_id
+            : optimisticTableOverridesRef.current[tableId]?.tableSessionId || null,
+          guestCount: typeof workflow.guest_count === 'number'
+            ? workflow.guest_count
+            : optimisticTableOverridesRef.current[tableId]?.guestCount ?? null,
+          occupiedSince: typeof workflow.occupied_since === 'string'
+            ? workflow.occupied_since
+            : optimisticTableOverridesRef.current[tableId]?.occupiedSince || nextUpdatedAt,
+          currentWaiterId: typeof workflow.current_waiter_id === 'string'
+            ? workflow.current_waiter_id
+            : optimisticTableOverridesRef.current[tableId]?.currentWaiterId || null,
+          currentWaiterName: typeof workflow.current_waiter_name === 'string'
+            ? workflow.current_waiter_name
+            : optimisticTableOverridesRef.current[tableId]?.currentWaiterName || null,
+        };
+      } else {
+        delete optimisticTableOverridesRef.current[tableId];
+      }
+
       try {
         setTables((prevTables) =>
           prevTables.map((table) =>
             table.id === tableId
-              ? { ...table, status, updatedAt: new Date().toISOString() }
+              ? status === 'occupied'
+                ? {
+                    ...buildOptimisticOccupiedTable(table, {
+                      orderId: typeof workflow.current_order_id === 'string'
+                        ? workflow.current_order_id
+                        : table.currentOrderId,
+                      tableSessionId: typeof workflow.table_session_id === 'string'
+                        ? workflow.table_session_id
+                        : table.tableSessionId,
+                      guestCount: workflow.guest_count ?? table.guestCount ?? 1,
+                      occupiedSince: typeof workflow.occupied_since === 'string'
+                        ? workflow.occupied_since
+                        : table.occupiedSince ?? new Date().toISOString(),
+                    }),
+                    updatedAt: nextUpdatedAt,
+                    currentWaiterId: typeof workflow.current_waiter_id === 'string'
+                      ? workflow.current_waiter_id
+                      : table.currentWaiterId,
+                    currentWaiterName: typeof workflow.current_waiter_name === 'string'
+                      ? workflow.current_waiter_name
+                      : table.currentWaiterName,
+                  }
+                : {
+                    ...table,
+                    status,
+                    updatedAt: nextUpdatedAt,
+                    currentOrderId: typeof workflow.current_order_id === 'string'
+                      ? workflow.current_order_id
+                      : table.currentOrderId,
+                    tableSessionId: typeof workflow.table_session_id === 'string'
+                      ? workflow.table_session_id
+                      : table.tableSessionId,
+                    guestCount: typeof workflow.guest_count === 'number'
+                      ? workflow.guest_count
+                      : table.guestCount,
+                    currentWaiterId: typeof workflow.current_waiter_id === 'string'
+                      ? workflow.current_waiter_id
+                      : table.currentWaiterId,
+                    currentWaiterName: typeof workflow.current_waiter_name === 'string'
+                      ? workflow.current_waiter_name
+                      : table.currentWaiterName,
+                  }
               : table,
           ),
         );
@@ -101,9 +205,9 @@ export function useTables({
         const result = isBrowser()
           ? await posApiPatch<{ success?: boolean; error?: string }>(
               `/api/pos/tables/${tableId}`,
-              { status },
+              { status, ...workflow },
             )
-          : await bridge.tables.updateStatus(tableId, status);
+          : await bridge.tables.updateStatus(tableId, status, workflow);
 
         if (!result.success) {
           throw new Error(result.error || 'Failed to update table status');
@@ -117,6 +221,10 @@ export function useTables({
         return true;
       } catch (err) {
         console.error('[useTables] Failed to update table status:', formatError(err));
+        if (status === 'occupied') {
+          setError(err instanceof Error ? err : new Error('Failed to update table status'));
+          return false;
+        }
         await fetchTables();
         return false;
       }

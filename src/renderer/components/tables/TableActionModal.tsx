@@ -11,15 +11,15 @@
  * - 3.4: New Reservation displays the reservation creation form
  */
 
-import React, { memo } from 'react';
+import React, { memo, useEffect, useState } from 'react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import type { RestaurantTable, TableStatus } from '../../types/tables';
-import { X, ShoppingCart, Calendar, Users, LayoutGrid, Clock } from 'lucide-react';
+import { X, ShoppingCart, Calendar, Users, LayoutGrid, Clock, Minus, Plus } from 'lucide-react';
 
 interface TableActionModalProps {
   table: RestaurantTable;
-  onNewOrder: () => void;
+  onNewOrder: (guestCount: number) => void;
   onNewReservation: () => void;
   onClose: () => void;
   isOpen: boolean;
@@ -41,6 +41,11 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
+  const [guestCount, setGuestCount] = useState(() => Math.max(1, Number(table.guestCount || 1)));
+
+  useEffect(() => {
+    setGuestCount(Math.max(1, Number(table.guestCount || 1)));
+  }, [table.id, table.guestCount]);
 
   // Status configuration for display
   const statusConfig: Record<TableStatus, { label: string; color: string; bgClass: string }> = {
@@ -77,7 +82,7 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
   };
 
   const handleNewOrder = () => {
-    onNewOrder();
+    onNewOrder(guestCount);
     // Note: Don't call onClose() here - the parent handler manages modal state
   };
 
@@ -160,6 +165,70 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
                 {table.notes}
               </div>
             )}
+
+            <div className={`mt-4 pt-4 border-t ${
+              isDark ? 'border-white/10' : 'border-gray-200'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className={`text-sm font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                    {t('tableActionModal.covers', { defaultValue: 'Covers' })}
+                  </div>
+                  <div className={`text-xs ${isDark ? 'text-white/50' : 'text-gray-500'}`}>
+                    {t('tableActionModal.coversDescription', { defaultValue: 'Guests on this check' })}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setGuestCount((value) => Math.max(1, value - 1))}
+                    className={`p-2 rounded-lg border ${
+                      isDark
+                        ? 'border-white/10 hover:bg-white/10 text-white'
+                        : 'border-gray-200 hover:bg-gray-100 text-gray-700'
+                    }`}
+                    aria-label={t('tableActionModal.decreaseCovers', { defaultValue: 'Decrease covers' })}
+                  >
+                    <Minus className="w-4 h-4" />
+                  </button>
+                  <input
+                    type="number"
+                    min={1}
+                    max={99}
+                    value={guestCount}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      setGuestCount(Number.isFinite(next) ? Math.max(1, Math.min(99, Math.trunc(next))) : 1);
+                    }}
+                    className={`w-16 px-2 py-2 text-center rounded-lg border font-semibold ${
+                      isDark
+                        ? 'bg-white/5 border-white/10 text-white'
+                        : 'bg-white border-gray-200 text-gray-900'
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setGuestCount((value) => Math.min(99, value + 1))}
+                    className={`p-2 rounded-lg border ${
+                      isDark
+                        ? 'border-white/10 hover:bg-white/10 text-white'
+                        : 'border-gray-200 hover:bg-gray-100 text-gray-700'
+                    }`}
+                    aria-label={t('tableActionModal.increaseCovers', { defaultValue: 'Increase covers' })}
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              {typeof table.unpaidBalance === 'number' && table.unpaidBalance > 0 && (
+                <div className={`mt-3 text-sm ${isDark ? 'text-white/70' : 'text-gray-600'}`}>
+                  {t('tableActionModal.unpaidBalance', {
+                    defaultValue: 'Open balance: {{amount}}',
+                    amount: table.unpaidBalance.toFixed(2),
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

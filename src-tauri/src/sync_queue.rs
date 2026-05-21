@@ -1066,8 +1066,10 @@ fn jsonish_value(value: &Value) -> Value {
 
 fn string_field_from_sources(sources: &[&Value], keys: &[&str]) -> Option<String> {
     for source in sources {
-        if let Some(value) = string_field(source, keys) {
-            return Some(value);
+        for key in keys {
+            if let Some(value) = source.get(*key).and_then(string_from_value) {
+                return Some(value);
+            }
         }
     }
     None
@@ -1180,6 +1182,22 @@ fn normalize_payment_method_for_insert(raw_method: Option<&str>) -> String {
     }
 }
 
+fn normalize_payment_method_for_update(raw_method: Option<&str>) -> Option<String> {
+    match raw_method
+        .map(|candidate| candidate.trim().to_ascii_lowercase())
+        .unwrap_or_default()
+        .as_str()
+    {
+        "" | "pending" => None,
+        "cash" => Some("cash".to_string()),
+        "card" => Some("card".to_string()),
+        "digital_wallet" | "digital-wallet" | "wallet" => Some("digital_wallet".to_string()),
+        "gift_card" | "gift-card" => Some("gift_card".to_string()),
+        "other" => Some("other".to_string()),
+        _ => Some("other".to_string()),
+    }
+}
+
 fn customization_key(value: &Value, index: usize) -> String {
     string_from_value(&value["customizationId"])
         .or_else(|| string_from_value(&value["optionId"]))
@@ -1208,25 +1226,39 @@ fn normalize_customizations_for_insert(value: Option<&Value>) -> Value {
     }
 }
 
-fn normalize_order_items_customizations_for_request(items: &Value) -> Value {
-    match jsonish_value(items) {
-        Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(|mut item| {
-                    if let Value::Object(ref mut object) = item {
-                        if object.contains_key("customizations") {
-                            let normalized =
-                                normalize_customizations_for_insert(object.get("customizations"));
-                            object.insert("customizations".to_string(), normalized);
-                        }
-                    }
-                    item
-                })
-                .collect(),
-        ),
-        other => other,
+fn normalize_order_update_items_for_request(items: &Value) -> Option<Value> {
+    let normalized = normalize_order_insert_items(items);
+    if normalized.is_empty() {
+        return None;
     }
+
+    let has_manual_or_stale_item = normalized.iter().any(|item| {
+        item.get("menu_item_id")
+            .and_then(Value::as_str)
+            .filter(|candidate| Uuid::parse_str(candidate).is_ok())
+            .is_none()
+    });
+
+    if has_manual_or_stale_item {
+        // Older admin deployments still have a NOT NULL/FK-constrained
+        // order_items.menu_item_id on the PATCH replacement path. Keep the
+        // replay moving by syncing the status and financial snapshot; the
+        // local table check remains the source for manual line details.
+        return None;
+    }
+
+    Some(Value::Array(normalized))
+}
+
+fn has_unpatchable_order_update_items(items: &Value) -> bool {
+    let normalized = normalize_order_insert_items(items);
+    !normalized.is_empty()
+        && normalized.iter().any(|item| {
+            item.get("menu_item_id")
+                .and_then(Value::as_str)
+                .filter(|candidate| Uuid::parse_str(candidate).is_ok())
+                .is_none()
+        })
 }
 
 fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
@@ -1328,7 +1360,10 @@ fn load_local_order_insert_fallback(
             client_request_id,
             is_ghost,
             ghost_source,
-            ghost_metadata
+            ghost_metadata,
+            table_id,
+            table_session_id,
+            guest_count
          FROM orders
          WHERE id = ?1
          LIMIT 1",
@@ -1419,10 +1454,25 @@ fn load_local_order_insert_fallback(
                 "order_type",
                 row.get::<_, Option<String>>("order_type")?,
             );
-            insert_integer(
+            insert_string(
                 &mut object,
                 "table_number",
-                row.get::<_, Option<i64>>("table_number")?,
+                row.get::<_, Option<String>>("table_number")?,
+            );
+            insert_string(
+                &mut object,
+                "table_id",
+                row.get::<_, Option<String>>("table_id")?,
+            );
+            insert_string(
+                &mut object,
+                "table_session_id",
+                row.get::<_, Option<String>>("table_session_id")?,
+            );
+            insert_integer(
+                &mut object,
+                "guest_count",
+                row.get::<_, Option<i64>>("guest_count")?,
             );
             insert_string(
                 &mut object,
@@ -1693,6 +1743,10 @@ fn build_order_insert_body(
     let order_type = normalize_order_type_for_insert(
         string_field_from_sources(&sources, &["order_type", "orderType"]).as_deref(),
     );
+    // Some admin deployments still require `payment_method` on create even for
+    // unpaid table checks. Keep `payment_status = pending` and omit
+    // `initial_payment`; this compatibility value does not create a payment.
+    let payment_method_json = Value::String(payment_method.clone());
 
     let customer_id = string_field_from_sources(&sources, &["customer_id", "customerId"])
         .or_else(|| nested_string_field_from_sources(&sources, &[&["customer", "id"]]))
@@ -1785,6 +1839,13 @@ fn build_order_insert_body(
     let delivery_zone_id =
         string_field_from_sources(&sources, &["delivery_zone_id", "deliveryZoneId"])
             .filter(|candidate| Uuid::parse_str(candidate).is_ok());
+    let table_id = string_field_from_sources(&sources, &["table_id", "tableId"])
+        .filter(|candidate| Uuid::parse_str(candidate).is_ok());
+    let table_session_id =
+        string_field_from_sources(&sources, &["table_session_id", "tableSessionId"])
+            .filter(|candidate| Uuid::parse_str(candidate).is_ok());
+    let guest_count = integer_field_from_sources(&sources, &["guest_count", "guestCount"])
+        .map(|value| value.clamp(1, 99));
     let ghost_metadata = json_field_from_sources(&sources, &["ghost_metadata", "ghostMetadata"])
         .and_then(|value| match value {
             Value::Object(_) => Some(value),
@@ -1797,14 +1858,14 @@ fn build_order_insert_body(
     // included; manual_discount_mode is a string so no cents needed.
     let tip_amount =
         number_field_from_sources(&sources, &["tip_amount", "tipAmount"]).unwrap_or(0.0);
-    Ok(serde_json::json!({
+    let body = serde_json::json!({
         "client_order_id": string_field_from_sources(&sources, &["client_order_id", "clientOrderId"])
             .unwrap_or_else(|| record_id.to_string()),
         "branch_id": branch_id,
         "items": items,
         "order_type": order_type,
         "payment_status": payment_status,
-        "payment_method": payment_method,
+        "payment_method": payment_method_json,
         "total_amount": total_amount,
         "total_amount_cents": Cents::round_half_even(total_amount).as_i64(),
         "subtotal": subtotal,
@@ -1835,7 +1896,10 @@ fn build_order_insert_body(
         "order_number": string_field_from_sources(&sources, &["order_number", "orderNumber"]),
         "status": string_field_from_sources(&sources, &["status"])
             .unwrap_or_else(|| "pending".to_string()),
-        "table_number": integer_field_from_sources(&sources, &["table_number", "tableNumber"]),
+        "table_number": string_field_from_sources(&sources, &["table_number", "tableNumber"]),
+        "table_id": table_id,
+        "table_session_id": table_session_id,
+        "guest_count": guest_count,
         "delivery_address": delivery_address,
         "delivery_address_id": delivery_address_id,
         "delivery_city": delivery_city,
@@ -1852,7 +1916,9 @@ fn build_order_insert_body(
         "is_ghost": bool_field_from_sources(&sources, &["is_ghost", "isGhost"]).unwrap_or(false),
         "ghost_source": string_field_from_sources(&sources, &["ghost_source", "ghostSource"]),
         "ghost_metadata": ghost_metadata,
-    }))
+    });
+
+    Ok(body)
 }
 
 fn is_order_customizations_schema_error(error: &str) -> bool {
@@ -1868,6 +1934,15 @@ fn is_retryable_legacy_order_insert_error(error: &str) -> bool {
     let missing_tip_error = lower.contains("validation failed")
         && lower.contains("tip_amount")
         && lower.contains("expected number, received null");
+    let null_payment_method_error = lower.contains("validation failed")
+        && lower.contains("payment_method")
+        && lower.contains("received null");
+    let missing_payment_method_error = lower.contains("validation failed")
+        && lower.contains("payment_method")
+        && lower.contains("required");
+    let invalid_payment_method_error = lower.contains("validation failed")
+        && lower.contains("payment_method")
+        && lower.contains("invalid input");
     let stale_schema_cache_error = lower.contains("schema cache")
         && lower.contains("orders")
         && lower.contains("could not find the '");
@@ -1876,12 +1951,19 @@ fn is_retryable_legacy_order_insert_error(error: &str) -> bool {
         && lower.contains("uq_orders_order_number");
     let recoverable_parent_customer_error = lower.contains("customer not found in organization")
         && lower.contains("failed to create order");
+    let table_number_type_error = lower.contains("load_local_order_insert_fallback")
+        && lower.contains("invalid column type")
+        && lower.contains("table_number");
 
     customizations_shape_error
         || missing_tip_error
+        || null_payment_method_error
+        || missing_payment_method_error
+        || invalid_payment_method_error
         || stale_schema_cache_error
         || duplicate_canonical_number_error
         || recoverable_parent_customer_error
+        || table_number_type_error
 }
 
 fn is_rate_limit_error(error: &str) -> bool {
@@ -3692,6 +3774,12 @@ fn prepare_order_request(
             "name_on_ringer",
             "tableNumber",
             "table_number",
+            "tableId",
+            "table_id",
+            "tableSessionId",
+            "table_session_id",
+            "guestCount",
+            "guest_count",
         ],
     );
 
@@ -3730,9 +3818,23 @@ fn prepare_order_request(
         });
     }
 
+    let has_legacy_unpatchable_items = payload
+        .get("items")
+        .filter(|items| !items.is_null())
+        .is_some_and(has_unpatchable_order_update_items);
+
     let mut body = Map::new();
     body.insert("id".to_string(), Value::String(remote_id));
     body.insert("status".to_string(), Value::String(status));
+
+    if has_legacy_unpatchable_items {
+        return Ok(RequestPreparation::Ready(RequestSpec {
+            endpoint: "/api/pos/orders".to_string(),
+            method: Method::PATCH,
+            body: Some(Value::Object(body).to_string()),
+            terminal_id: terminal_id.to_string(),
+        }));
+    }
 
     fn copy_payload_field(
         body: &mut Map<String, Value>,
@@ -3909,6 +4011,27 @@ fn prepare_order_request(
         "table_number",
         true,
     );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["tableId", "table_id"],
+        "table_id",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["tableSessionId", "table_session_id"],
+        "table_session_id",
+        true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["guestCount", "guest_count"],
+        "guest_count",
+        true,
+    );
     // Driver ids stored in local delivery rows are staff ids bound to the
     // driver's local shift lifecycle. Replaying them on a status PATCH after
     // checkout can make admin reject the whole order update as "Invalid
@@ -3930,7 +4053,6 @@ fn prepare_order_request(
         ("deliveryFee", "delivery_fee"),
         ("tipAmount", "tip_amount"),
         ("paymentStatus", "payment_status"),
-        ("paymentMethod", "payment_method"),
     ] {
         for source in &sources {
             if let Some(value) = source.get(camel).or_else(|| source.get(snake)) {
@@ -3939,6 +4061,19 @@ fn prepare_order_request(
                 }
                 break;
             }
+        }
+    }
+    for source in &sources {
+        if let Some(value) = source
+            .get("paymentMethod")
+            .or_else(|| source.get("payment_method"))
+        {
+            if let Some(payment_method) =
+                normalize_payment_method_for_update(string_from_value(value).as_deref())
+            {
+                body.insert("payment_method".to_string(), Value::String(payment_method));
+            }
+            break;
         }
     }
     for (camel, snake) in [
@@ -3962,10 +4097,9 @@ fn prepare_order_request(
     }
     if let Some(items) = payload.get("items") {
         if !items.is_null() {
-            body.insert(
-                "items".to_string(),
-                normalize_order_items_customizations_for_request(items),
-            );
+            if let Some(normalized_items) = normalize_order_update_items_for_request(items) {
+                body.insert("items".to_string(), normalized_items);
+            }
         }
     }
     copy_source_field(
@@ -4094,9 +4228,27 @@ fn prepare_payment_request(
         body["external_transaction_id"] = Value::String(value);
         body["metadata"]["transaction_ref"] = body["external_transaction_id"].clone();
     }
-    if let Some(value) = payload.get("tipAmount").and_then(Value::as_f64) {
+    if let Some(value) = payload
+        .get("tipAmount")
+        .or_else(|| payload.get("tip_amount"))
+        .and_then(Value::as_f64)
+    {
         body["tip_amount"] = Value::from(value);
         body["tip_amount_cents"] = Value::from(Cents::round_half_even(value).as_i64());
+    }
+    if let Some(value) = string_field(payload, &["table_session_id", "tableSessionId"]) {
+        if Uuid::parse_str(value.as_str()).is_ok() {
+            body["table_session_id"] = Value::String(value);
+        } else {
+            body["metadata"]["local_table_session_id"] = Value::String(value);
+        }
+    }
+    if let Some(value) = payload
+        .get("seat_number")
+        .or_else(|| payload.get("seatNumber"))
+        .and_then(Value::as_i64)
+    {
+        body["seat_number"] = Value::from(value);
     }
     if let Some(value) = string_field(payload, &["currency"]) {
         body["currency"] = Value::String(value);
@@ -4640,6 +4792,17 @@ fn is_replay_conflict_response(status: u16, response_body: &str, item: &SyncQueu
     )
 }
 
+fn is_parent_order_wait_response(status: u16, response_body: &str) -> bool {
+    if status != 409 {
+        return false;
+    }
+
+    let lower = response_body.to_ascii_lowercase();
+    lower.contains("waiting for parent order sync")
+        || lower.contains("parent order sync")
+        || lower.contains("parent_order_sync")
+}
+
 /// Process all pending items in the queue by sending them to the admin API.
 ///
 /// Items are processed FIFO within priority bands. On success, items are
@@ -4806,6 +4969,11 @@ pub async fn process_queue(
                             "Skipping stale parity success ack before local apply"
                         );
                     }
+                } else if is_parent_order_wait_response(status, &response_body) {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let reason = "Waiting for parent order sync";
+                    mark_deferred(&db, &item.id, reason, item.claim_generation)?;
+                    telemetry.record_deferred(&item, reason);
                 } else if is_replay_conflict_response(status, &response_body, &item) {
                     let server_record = fetch_server_record(
                         &client,
@@ -5031,6 +5199,28 @@ fn resolve_special_entity_endpoint(item: &SyncQueueItem) -> Option<String> {
             "INSERT" => "/api/pos/appointments".to_string(),
             _ => format!("/api/pos/appointments/{}/status", item.record_id),
         }),
+        "restaurant_table_sessions" => Some(match item.operation.as_str() {
+            "INSERT" => "/api/pos/table-sessions".to_string(),
+            _ => format!("/api/pos/table-sessions/{}", item.record_id),
+        }),
+        "restaurant_table_session_item_transfers" => {
+            let payload = serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Null);
+            let session_id = string_field(
+                &payload,
+                &[
+                    "source_session_id",
+                    "table_session_id",
+                    "tableSessionId",
+                    "session_id",
+                ],
+            )
+            .unwrap_or_else(|| item.record_id.clone());
+            Some(format!(
+                "/api/pos/table-sessions/{}/items/transfer",
+                session_id
+            ))
+        }
+        "restaurant_tables" => Some(format!("/api/pos/tables/{}", item.record_id)),
         "salon_staff_shifts" => Some("/api/pos/staff-schedule".to_string()),
         "drive_thru_orders" => Some("/api/pos/drive-through".to_string()),
         "rooms" => Some(format!("/api/pos/rooms/{}", item.record_id)),
@@ -6047,6 +6237,12 @@ mod tests {
             "product-1",
             serde_json::json!({ "quantity": 9 }),
         );
+        let restaurant_table_item = queue_item(
+            "restaurant_tables",
+            "UPDATE",
+            "table-1",
+            serde_json::json!({ "status": "occupied" }),
+        );
 
         assert_eq!(resolve_endpoint(&inventory_item), "/api/pos/inventory");
         assert_eq!(resolve_endpoint(&coupon_insert), "/api/pos/coupons");
@@ -6071,6 +6267,10 @@ mod tests {
         assert_eq!(
             resolve_endpoint(&product_item),
             "/api/pos/products/product-1"
+        );
+        assert_eq!(
+            resolve_endpoint(&restaurant_table_item),
+            "/api/pos/tables/table-1"
         );
     }
 
@@ -6174,6 +6374,173 @@ mod tests {
                 "name": "Extra Cheese"
             }))
         );
+    }
+
+    #[test]
+    fn prepare_order_request_preserves_string_table_numbers() {
+        let conn = test_connection();
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-table-t1",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "dine-in",
+                "paymentMethod": Value::Null,
+                "paymentStatus": "pending",
+                "tableNumber": "T1",
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 11.0,
+                    "name": "Water"
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(body.get("table_number").and_then(Value::as_str), Some("T1"));
+        assert_eq!(
+            body.get("payment_method").and_then(Value::as_str),
+            Some("cash"),
+            "pending dine-in table saves keep payment_status pending but send a method for old admin validators"
+        );
+    }
+
+    #[test]
+    fn failed_table_number_type_rows_are_auto_retryable() {
+        assert!(is_retryable_legacy_order_insert_error(
+            "sync_queue load_local_order_insert_fallback: Invalid column type Text at index: 14, name: table_number"
+        ));
+    }
+
+    #[test]
+    fn failed_null_payment_method_order_rows_are_auto_retryable() {
+        assert!(is_retryable_legacy_order_insert_error(
+            "HTTP 400: {\"success\":false,\"error\":\"Validation failed\",\"details\":[{\"field\":\"payment_method\",\"message\":\"Expected 'cash' | 'card', received null\"}]}"
+        ));
+    }
+
+    #[test]
+    fn failed_missing_payment_method_order_rows_are_auto_retryable() {
+        assert!(is_retryable_legacy_order_insert_error(
+            "HTTP 400: {\"success\":false,\"error\":\"Validation failed\",\"details\":[{\"field\":\"payment_method\",\"message\":\"Required\"}]}"
+        ));
+    }
+
+    #[test]
+    fn failed_invalid_payment_method_order_rows_are_auto_retryable() {
+        assert!(is_retryable_legacy_order_insert_error(
+            "HTTP 400: {\"success\":false,\"error\":\"Validation failed\",\"details\":[{\"field\":\"payment_method\",\"message\":\"Invalid input\"}]}"
+        ));
+    }
+
+    #[test]
+    fn prepare_order_update_omits_pending_payment_method() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-table-update-pending-payment', 'remote-order-table-update-pending-payment',
+                 '[]', 22.0, 2200, 'pending', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced table order");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-table-update-pending-payment",
+            json!({
+                "orderId": "order-table-update-pending-payment",
+                "status": "pending",
+                "orderType": "dine-in",
+                "paymentMethod": "pending",
+                "paymentStatus": "pending",
+                "totalAmount": 22.0,
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("payment_status").and_then(Value::as_str),
+            Some("pending")
+        );
+        assert_eq!(body.get("payment_method"), None);
+    }
+
+    #[test]
+    fn prepare_order_update_omits_manual_items_for_legacy_admin_patch() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-table-manual-update', 'remote-order-table-manual-update',
+                 '[]', 22.0, 2200, 'pending', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced table order");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-table-manual-update",
+            json!({
+                "orderId": "order-table-manual-update",
+                "status": "pending",
+                "orderType": "dine-in",
+                "paymentStatus": "pending",
+                "subtotal": 22.0,
+                "subtotal_cents": 2200,
+                "totalAmount": 22.0,
+                "total_amount_cents": 2200,
+                "items": [{
+                    "menuItemId": Value::Null,
+                    "menu_item_id": Value::Null,
+                    "quantity": 2,
+                    "unit_price": 11.0,
+                    "total_price": 22.0,
+                    "name": "Manual item",
+                    "customizations": []
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(body.get("items"), None);
+        assert_eq!(body.get("total_amount"), None);
+        assert_eq!(body.get("total_amount_cents"), None);
+        assert_eq!(body.get("payment_status"), None);
+        assert_eq!(body.get("status").and_then(Value::as_str), Some("pending"));
     }
 
     #[test]
@@ -6841,6 +7208,56 @@ mod tests {
                 .and_then(Value::as_str),
             Some("CARD-IDENTITY-1")
         );
+    }
+
+    #[test]
+    fn prepare_payment_request_keeps_local_table_session_in_metadata() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-table-payment-local-session', 'remote-order-table-payment-local-session',
+                 '[]', 22.0, 2200, 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed table order");
+
+        let payload = json!({
+            "paymentId": "pay-table-local-session",
+            "orderId": "order-table-payment-local-session",
+            "amount": 11.0,
+            "method": "cash",
+            "tipAmount": 1.5,
+            "tableSessionId": "local-table-session:order-table-payment-local-session",
+            "seatNumber": 2,
+        });
+        let item = queue_item(
+            "payments",
+            "INSERT",
+            "pay-table-local-session",
+            payload.clone(),
+        );
+        let request = match prepare_payment_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare table payment request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready payment request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse payment request body");
+
+        assert_eq!(body.get("table_session_id"), None);
+        assert_eq!(
+            body.pointer("/metadata/local_table_session_id")
+                .and_then(Value::as_str),
+            Some("local-table-session:order-table-payment-local-session")
+        );
+        assert_eq!(body.get("tip_amount").and_then(Value::as_f64), Some(1.5));
+        assert_eq!(body.get("seat_number").and_then(Value::as_i64), Some(2));
     }
 
     #[test]
@@ -8091,6 +8508,73 @@ mod tests {
             )
             .expect("read second row");
         assert_eq!(second_status, "pending");
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_defers_table_session_open_when_parent_order_is_not_synced() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "restaurant_table_sessions",
+            "INSERT",
+            "table-session-event-1",
+            json!({
+                "client_event_id": "table-session-event-1",
+                "branch_id": TEST_BRANCH_ID,
+                "primary_table_id": "table-1",
+                "table_id": "table-1",
+                "table_number": "T1",
+                "guest_count": 2,
+                "active_order_client_id": "local-table-order-1"
+            }),
+        );
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            409,
+            r#"{"success":false,"error":"Waiting for parent order sync before opening table session"}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let request = requests
+            .recv()
+            .await
+            .expect("captured table-session request");
+        assert_eq!(
+            request.request_line,
+            "POST /api/pos/table-sessions HTTP/1.1"
+        );
+
+        let row: (String, i64, Option<String>, Option<String>) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts, error_message, next_retry_at
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read deferred table-session row");
+        assert_eq!(row.0, "pending");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2.as_deref(), Some("Waiting for parent order sync"));
+        assert!(row.3.is_some(), "deferred row should have a retry time");
 
         clear_terminal_identity();
         server.await.expect("mock server task");

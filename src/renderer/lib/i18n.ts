@@ -1,10 +1,6 @@
 import i18n from 'i18next'
 import { initReactI18next } from 'react-i18next'
-import enTranslations from '../../locales/en.json'
-import elTranslations from '../../locales/el.json'
-import deTranslations from '../../locales/de.json'
-import frTranslations from '../../locales/fr.json'
-import itTranslations from '../../locales/it.json'
+import { localeBundles } from '../../locales/bundles'
 
 // Read persisted language from localStorage before initialization
 const savedLanguage = localStorage.getItem('language') || 'en'
@@ -14,19 +10,19 @@ i18n
   .init({
     resources: {
       en: {
-        translation: enTranslations
+        translation: localeBundles.en
       },
       el: {
-        translation: elTranslations
+        translation: localeBundles.el
       },
       de: {
-        translation: deTranslations
+        translation: localeBundles.de
       },
       fr: {
-        translation: frTranslations
+        translation: localeBundles.fr
       },
       it: {
-        translation: itTranslations
+        translation: localeBundles.it
       }
     },
     lng: savedLanguage, // Use persisted language or default to 'en'

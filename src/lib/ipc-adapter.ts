@@ -690,6 +690,12 @@ export interface CreateOrderPayload {
   customer_name?: string;
   customer_phone?: string;
   table_id?: string;
+  table_number?: string;
+  tableNumber?: string;
+  table_session_id?: string;
+  tableSessionId?: string;
+  guest_count?: number;
+  guestCount?: number;
   notes?: string;
   discount?: number;
   staff_id?: string;
@@ -868,8 +874,12 @@ export interface CustomerAddress {
 
 export interface RecordPaymentParams {
   orderId: string;
+  order_id?: string;
   method: "cash" | "card";
+  payment_method?: "cash" | "card";
   amount: number;
+  amount_cents?: number;
+  currency?: string;
   discountAmount?: number;
   cashReceived?: number;
   changeGiven?: number;
@@ -880,11 +890,26 @@ export interface RecordPaymentParams {
   staffId?: string;
   staffShiftId?: string;
   collectedBy?: "cashier_drawer" | "driver_shift";
+  tipAmount?: number;
+  tip_amount?: number;
+  tip_amount_cents?: number;
+  tableSessionId?: string;
+  table_session_id?: string;
+  seatNumber?: number;
+  seat_number?: number;
+  idempotencyKey?: string;
+  idempotency_key?: string;
   items?: Array<{
     itemIndex: number;
     itemName?: string;
     itemQuantity?: number;
     itemAmount: number;
+    order_item_id?: string;
+    item_name?: string;
+    item_quantity?: number;
+    item_amount?: number;
+    item_amount_cents?: number;
+    quantity?: number;
   }>;
 }
 
@@ -1536,6 +1561,7 @@ export interface PlatformBridge {
     updateStatus(
       tableId: string,
       status: string,
+      workflow?: Record<string, unknown>,
     ): Promise<AdminApiBridgeResponse<any>>;
   };
 
@@ -2957,8 +2983,21 @@ export class TauriBridge implements PlatformBridge {
     list: (params?: TableBridgeListParams) =>
       this.inv("branch-data:get-tables", params || {}),
     get: (tableId: string) => this.adminFetch(`/api/pos/tables/${tableId}`),
-    updateStatus: (tableId: string, status: string) =>
-      this.inv("branch-data:update-table-status", { tableId, status }),
+    updateStatus: (
+      tableId: string,
+      status: string,
+      workflow?: Record<string, unknown>,
+    ) => {
+      const hasWorkflow =
+        workflow &&
+        Object.keys(workflow).some((key) => workflow[key] !== undefined);
+      return hasWorkflow
+        ? this.adminFetch(`/api/pos/tables/${encodeURIComponent(tableId)}`, {
+            method: "PATCH",
+            body: { status, ...workflow },
+          })
+        : this.inv("branch-data:update-table-status", { tableId, status });
+    },
   };
 
   staffSchedule = {

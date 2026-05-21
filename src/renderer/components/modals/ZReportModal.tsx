@@ -350,11 +350,102 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       case 'driver':
         return 'border-indigo-300/30 bg-indigo-500/15 text-indigo-100';
       case 'cashier':
+      case 'manager':
         return 'border-amber-300/30 bg-amber-500/15 text-amber-100';
+      case 'server':
+      case 'waiter':
+        return 'border-cyan-300/30 bg-cyan-500/15 text-cyan-100';
       default:
         return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
     }
   };
+
+  const getShiftStatusBadgeClasses = (status?: string) => {
+    switch (String(status || '').toLowerCase()) {
+      case 'active':
+        return 'border-emerald-300/30 bg-emerald-500/15 text-emerald-100';
+      case 'closed':
+        return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
+      default:
+        return 'border-amber-300/30 bg-amber-500/15 text-amber-100';
+    }
+  };
+
+  const formatShiftStatus = (staff: any) => {
+    const status = String(staff?.shiftStatus || (staff?.checkOut ? 'closed' : 'active')).toLowerCase();
+    if (status === 'active') {
+      return t('common.status.active', { defaultValue: 'Active' });
+    }
+    if (status === 'closed') {
+      return t('modals.zReport.closed', { defaultValue: 'Closed' });
+    }
+    return status || '—';
+  };
+
+  const toFiniteNumberOrNull = (value: unknown): number | null => {
+    if (value === null || value === undefined || value === '') return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
+
+  const resolveStaffReturnAmount = (staff: any): number => {
+    const candidates = [
+      staff?.returnedToDrawerAmount,
+      staff?.driver?.cashToReturn,
+      staff?.drawer?.expected,
+    ];
+    for (const candidate of candidates) {
+      const numeric = toFiniteNumberOrNull(candidate);
+      if (numeric !== null) return numeric;
+    }
+    return 0;
+  };
+
+  const resolveDrawerExpectedAmount = (drawer: any): number => {
+    const explicit = toFiniteNumberOrNull(drawer?.expected);
+    if (explicit !== null) return explicit;
+    return (
+      Number(drawer?.opening || 0) +
+      Number(drawer?.cashSales || 0) -
+      Number(drawer?.refunds || 0) -
+      Number(drawer?.drops || 0) -
+      Number(drawer?.staffPayments || 0) -
+      Number(drawer?.driverCashGiven || 0) +
+      Number(drawer?.driverCashReturned || 0)
+    );
+  };
+
+  const getDrawerStatusBadge = (drawer: any) => {
+    if (drawer?.reconciled) {
+      return {
+        label: t('modals.zReport.reconciled'),
+        className: 'border-emerald-300/30 bg-emerald-500/15 text-emerald-100',
+      };
+    }
+    if (!drawer?.closedAt) {
+      return {
+        label: t('common.status.active', { defaultValue: 'Active' }),
+        className: 'border-cyan-300/30 bg-cyan-500/15 text-cyan-100',
+      };
+    }
+    return {
+      label: t('modals.zReport.needsAttention'),
+      className: 'border-amber-300/30 bg-amber-500/15 text-amber-100',
+    };
+  };
+
+  const orderTypeFilterOptions = [
+    { value: 'all' as const, label: t('modals.zReport.filters.allTypes') },
+    { value: 'delivery' as const, label: t('modals.zReport.filters.delivery') },
+    { value: 'dine-in' as const, label: t('modals.zReport.filters.dineIn') },
+    { value: 'pickup' as const, label: t('modals.zReport.filters.pickup') },
+  ];
+
+  const paymentMethodFilterOptions = [
+    { value: 'all' as const, label: t('modals.zReport.filters.allPayments') },
+    { value: 'cash' as const, label: t('modals.zReport.filters.cash') },
+    { value: 'card' as const, label: t('modals.zReport.filters.card') },
+  ];
 
   const handleRefreshReport = useCallback(() => {
     setSubmitResult(null);
@@ -858,16 +949,50 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                     <section className="grid gap-4 2xl:grid-cols-2">
                       <div className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
                         <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.drawerLedger')}</h3>
-                        <div className="mt-4 space-y-2">
-                          {drawerRows.length > 0 ? drawerRows.map((drawer) => (
-                            <div key={drawer.id} className={`grid grid-cols-[minmax(0,1fr)_auto] gap-3 rounded-xl border p-3 ${dashboardTileClass}`}>
-                              <div className="min-w-0">
-                                <div className="truncate text-sm font-black">{drawer.staffName || '-'}</div>
-                                <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>{t('modals.zReport.expected')}: {formatMoney(drawer.expected)}</div>
-                              </div>
-                              <div className={`text-right text-sm font-black ${(drawer.variance ?? 0) === 0 ? 'text-emerald-600 dark:text-emerald-300' : 'text-amber-600 dark:text-amber-300'}`}>{formatMoney(drawer.variance)}</div>
-                            </div>
-                          )) : (
+                        <div className="mt-4 space-y-3">
+                          {drawerRows.length > 0 ? drawerRows.map((drawer) => {
+                            const expected = resolveDrawerExpectedAmount(drawer);
+                            const variance = Number(drawer.variance || 0);
+                            const status = getDrawerStatusBadge(drawer);
+                            const stats = [
+                              { key: 'opening', label: t('modals.zReport.opening'), value: drawer.opening, tone: strongTextClass },
+                              { key: 'cash', label: t('modals.zReport.cashSales'), value: drawer.cashSales, tone: 'text-amber-600 dark:text-amber-300' },
+                              { key: 'card', label: t('modals.zReport.cardSales'), value: drawer.cardSales, tone: 'text-blue-600 dark:text-blue-300' },
+                              { key: 'drops', label: t('modals.zReport.drops'), value: drawer.drops, tone: strongTextClass },
+                              { key: 'given', label: t('modals.zReport.driverCashGiven'), value: drawer.driverCashGiven, tone: 'text-orange-600 dark:text-orange-300' },
+                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: 'text-cyan-600 dark:text-cyan-300' },
+                              { key: 'staff', label: t('modals.zReport.staffPayments'), value: drawer.staffPayments, tone: 'text-rose-600 dark:text-rose-300' },
+                              { key: 'variance', label: t('modals.zReport.variance'), value: variance, tone: Math.abs(variance) < 0.01 ? 'text-emerald-600 dark:text-emerald-300' : 'text-amber-600 dark:text-amber-300' },
+                            ];
+
+                            return (
+                              <article key={drawer.id} className={`rounded-xl border p-4 ${dashboardTileClass}`}>
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className={`truncate text-base font-black ${strongTextClass}`}>{drawer.staffName || '-'}</div>
+                                    <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>
+                                      {formatWindowDateTime(drawer.openedAt)} - {drawer.closedAt ? formatWindowDateTime(drawer.closedAt) : t('common.status.active', { defaultValue: 'Active' })}
+                                    </div>
+                                  </div>
+                                  <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${status.className}`}>{status.label}</span>
+                                </div>
+
+                                <div className="mt-4 rounded-xl border border-white/[0.12] bg-black/10 p-4">
+                                  <div className={`text-[11px] font-black uppercase tracking-[0.12em] ${softTextClass}`}>{t('modals.zReport.expected')}</div>
+                                  <div className="mt-2 text-3xl font-black text-emerald-600 dark:text-emerald-300">{formatMoney(expected)}</div>
+                                </div>
+
+                                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 2xl:grid-cols-4">
+                                  {stats.map((row) => (
+                                    <div key={row.key} className="min-w-0 rounded-lg border border-white/[0.12] bg-black/10 p-3">
+                                      <div className={`break-words text-xs font-black leading-4 ${softTextClass}`}>{row.label}</div>
+                                      <div className={`mt-1 break-words text-base font-black ${row.tone}`}>{formatMoney(row.value)}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </article>
+                            );
+                          }) : (
                             <div className="rounded-xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noDrawers')}</div>
                           )}
                         </div>
@@ -895,24 +1020,50 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                   {activeTab === 'staff' && (
                     <section className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
                       <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.staffPerformance')}</h3>
-                      <div className="mt-4 overflow-x-auto scrollbar-hide">
+                      <div className="mt-4">
                         {staffReportsSorted.length > 0 ? (
-                          <table className="min-w-full text-sm">
-                            <tbody>
-                              {staffReportsSorted.map((staff) => {
-                                const shiftWindow = resolveShiftWindow(staff);
-                                return (
-                                  <tr key={staff.staffShiftId} className="border-b border-slate-200 last:border-b-0 dark:border-white/10">
-                                    <td className={`py-3 pr-4 font-black ${strongTextClass}`}>{staff.staffName || staff.staffId}</td>
-                                    <td className="py-3 pr-4"><span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getRoleBadgeClasses(staff.role)}`}>{staff.role}</span></td>
-                                    <td className={`py-3 pr-4 text-xs font-semibold ${softTextClass}`}>{formatWindowDateTime(shiftWindow.start)} - {staff.checkOut ? formatWindowDateTime(shiftWindow.end) : t('common.status.active', { defaultValue: 'Active' })}</td>
-                                    <td className={`py-3 pr-4 text-right font-black ${strongTextClass}`}>{resolveShiftActivityCount(staff)}</td>
-                                    <td className="py-3 text-right font-black text-emerald-600 dark:text-emerald-300">{formatMoney(resolveShiftEarnedTotal(staff))}</td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
+                          <div className="grid gap-3 xl:grid-cols-2">
+                            {staffReportsSorted.map((staff) => {
+                              const shiftWindow = resolveShiftWindow(staff);
+                              const statusLabel = formatShiftStatus(staff);
+                              const statusValue = String(staff.shiftStatus || (staff.checkOut ? 'closed' : 'active'));
+                              const activityLabel = String(staff.role || '').toLowerCase() === 'driver'
+                                ? t('modals.zReport.deliveries')
+                                : t('modals.zReport.orders');
+                              const statRows = [
+                                { key: 'activity', label: activityLabel, value: resolveShiftActivityCount(staff), tone: strongTextClass },
+                                { key: 'sales', label: t('modals.zReport.sales'), value: formatMoney(resolveShiftEarnedTotal(staff)), tone: 'text-emerald-600 dark:text-emerald-300' },
+                                { key: 'cash', label: t('modals.zReport.cash'), value: formatMoney(staff.orders?.cashAmount), tone: 'text-amber-600 dark:text-amber-300' },
+                                { key: 'card', label: t('modals.zReport.card'), value: formatMoney(staff.orders?.cardAmount), tone: 'text-blue-600 dark:text-blue-300' },
+                                { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: 'text-cyan-600 dark:text-cyan-300' },
+                              ];
+                              return (
+                                <article key={staff.staffShiftId} className={`rounded-xl border p-4 ${dashboardTileClass}`}>
+                                  <div className="flex flex-wrap items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <div className={`truncate text-base font-black ${strongTextClass}`}>{staff.staffName || staff.staffId}</div>
+                                      <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>
+                                        {formatWindowDateTime(shiftWindow.start)} - {staff.checkOut ? formatWindowDateTime(shiftWindow.end) : t('common.status.active', { defaultValue: 'Active' })}
+                                      </div>
+                                    </div>
+                                    <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                                      <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getRoleBadgeClasses(staff.role)}`}>{staff.role || '—'}</span>
+                                      <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getShiftStatusBadgeClasses(statusValue)}`}>{statusLabel}</span>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                    {statRows.map((row) => (
+                                      <div key={row.key} className="min-w-0 rounded-lg border border-white/[0.12] bg-black/10 p-3">
+                                        <div className={`break-words text-xs font-black leading-4 ${softTextClass}`}>{row.label}</div>
+                                        <div className={`mt-1 break-words text-base font-black ${row.tone}`}>{row.value}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </article>
+                              );
+                            })}
+                          </div>
                         ) : (
                           <div className="rounded-xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noStaffReports')}</div>
                         )}
@@ -924,18 +1075,39 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                     <section className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.orderDetails')}</h3>
-                        <div className="flex flex-wrap gap-2">
-                          <select value={orderTypeFilter} onChange={(e) => setOrderTypeFilter(e.target.value as typeof orderTypeFilter)} className={`rounded-xl border px-3 py-2 text-sm font-bold ${glassControlClass}`}>
-                            <option value="all">{t('modals.zReport.filters.allTypes')}</option>
-                            <option value="delivery">{t('modals.zReport.filters.delivery')}</option>
-                            <option value="dine-in">{t('modals.zReport.filters.dineIn')}</option>
-                            <option value="pickup">{t('modals.zReport.filters.pickup')}</option>
-                          </select>
-                          <select value={paymentMethodFilter} onChange={(e) => setPaymentMethodFilter(e.target.value as typeof paymentMethodFilter)} className={`rounded-xl border px-3 py-2 text-sm font-bold ${glassControlClass}`}>
-                            <option value="all">{t('modals.zReport.filters.allPayments')}</option>
-                            <option value="cash">{t('modals.zReport.filters.cash')}</option>
-                            <option value="card">{t('modals.zReport.filters.card')}</option>
-                          </select>
+                        <div className="flex flex-col gap-2 xl:items-end">
+                          <div className="flex flex-wrap gap-1 rounded-xl border border-white/[0.12] bg-black/10 p-1 backdrop-blur-xl">
+                            {orderTypeFilterOptions.map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => setOrderTypeFilter(option.value)}
+                                className={`min-h-[36px] rounded-lg px-3 text-xs font-black transition ${
+                                  orderTypeFilter === option.value
+                                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                                    : 'text-slate-200/80 hover:bg-white/[0.1]'
+                                }`}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="flex flex-wrap gap-1 rounded-xl border border-white/[0.12] bg-black/10 p-1 backdrop-blur-xl">
+                            {paymentMethodFilterOptions.map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => setPaymentMethodFilter(option.value)}
+                                className={`min-h-[36px] rounded-lg px-3 text-xs font-black transition ${
+                                  paymentMethodFilter === option.value
+                                    ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+                                    : 'text-slate-200/80 hover:bg-white/[0.1]'
+                                }`}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       </div>
                       <div className="mt-4 space-y-2">

@@ -74,6 +74,7 @@
       "pending": "Pending",
       "completed": "Completed",
       "cancelled": "Cancelled",
+      "closed": "Closed",
       "approved": "Approved",
       "rejected": "Rejected",
       "draft": "Draft",

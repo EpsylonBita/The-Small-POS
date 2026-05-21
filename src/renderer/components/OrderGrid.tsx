@@ -7,6 +7,7 @@ import OrderCard from './order/OrderCard';
 import SkeletonLoader from './ui/SkeletonLoader';
 import LoadingSpinner from './ui/LoadingSpinner';
 import type { StoreMapOrigin } from '../utils/delivery-routing';
+import { isTableServiceOrder, shouldShowInStandardOrderLane } from '../utils/tableOrderFlow';
 
 const isCancelledOrderStatus = (status: unknown): boolean => {
   const normalized = String(status || '').toLowerCase();
@@ -78,15 +79,12 @@ const OrderGrid = memo<OrderGridProps>(({
     // Then apply tab-based filtering
     if (activeTab === 'orders') {
       // Show pending, confirmed, preparing, and ready orders
-      filtered = filtered.filter(order => {
-        const status = (order.status || '').toLowerCase();
-        return ['pending', 'confirmed', 'preparing', 'ready'].includes(status);
-      });
+      filtered = filtered.filter(order => shouldShowInStandardOrderLane(order as any));
     } else if (activeTab === 'delivered') {
       // Show delivered orders (include completed)
       filtered = filtered.filter(order => {
         const status = (order.status || '').toLowerCase();
-        return status === 'delivered' || status === 'completed';
+        return !isTableServiceOrder(order as any) && (status === 'delivered' || status === 'completed');
       });
     } else if (activeTab === 'canceled') {
       // Show cancelled orders

@@ -722,6 +722,18 @@ const isStaleOrderUpdateParentWait = (item: SyncQueueItem): boolean => {
       normalized.includes('waiting for parent order sync'));
 };
 
+const hasPendingParentOrderInsert = (
+  parityItems: SyncQueueItem[],
+  recordId: string,
+): boolean =>
+  parityItems.some((item) =>
+    item.tableName === 'orders' &&
+    item.operation?.toUpperCase() === 'INSERT' &&
+    item.recordId === recordId &&
+    ['pending', 'processing'].includes(item.status) &&
+    !item.errorMessage,
+  );
+
 const extractPaymentTotalConflictMetric = (
   message: string,
   label: string,
@@ -922,7 +934,9 @@ const buildInvalidDriverOrderIssues = (
 const buildOrderUpdateParentWaitIssues = (
   parityItems: SyncQueueItem[],
 ): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
-  const rows = parityItems.filter(isOrderUpdateWaitingForParentOrderSync);
+  const rows = parityItems
+    .filter(isOrderUpdateWaitingForParentOrderSync)
+    .filter((item) => !hasPendingParentOrderInsert(parityItems, item.recordId));
   if (rows.length === 0) {
     return { issues: [], suppressedRows: new Set() };
   }
@@ -937,47 +951,47 @@ const buildOrderUpdateParentWaitIssues = (
   const suppressedRows = new Set(rows.map((item) => `${item.tableName}:${item.recordId}`));
   const stale = rows.some(isStaleOrderUpdateParentWait);
 
+  const issue = withKnownSolution({
+    id: `order-update-parent-wait-${sample.id}`,
+    code: stale ? 'stale_order_update_parent_wait' : 'order_update_parent_wait',
+    severity: stale ? 'error' : 'warning',
+    status: 'blocking',
+    entityType: 'order',
+    entityId: orderId,
+    titleKey: stale
+      ? 'recovery.issues.staleOrderUpdateParentWait.title'
+      : 'recovery.issues.orderUpdateParentWait.title',
+    summaryKey: stale
+      ? 'recovery.issues.staleOrderUpdateParentWait.summary'
+      : 'recovery.issues.orderUpdateParentWait.summary',
+    guidanceKey: stale
+      ? 'recovery.issues.staleOrderUpdateParentWait.guidance'
+      : 'recovery.issues.orderUpdateParentWait.guidance',
+    actions: [
+      createRepairOrderUpdateReplayBlockersAction(),
+      createRetryParityModuleAction(),
+      createRetryParityItemAction(),
+      createRunParitySyncAction(),
+    ],
+    params: {
+      count: rows.length,
+      sampleItemId: sample.id,
+      sampleTableName: sample.tableName,
+      sampleRecordId: sample.recordId,
+      sampleError: sample.errorMessage ?? null,
+      lastError: sample.errorMessage ?? null,
+      moduleType: sample.moduleType || 'orders',
+      orderId,
+      orderNumber,
+      totalAmount,
+    },
+    orderId,
+    orderNumber,
+  }, RECOVERY_RECIPES.orderUpdateReplayRepair);
+
   return {
     suppressedRows,
-    issues: [
-      {
-        id: `order-update-parent-wait-${sample.id}`,
-        code: stale ? 'stale_order_update_parent_wait' : 'order_update_parent_wait',
-        severity: stale ? 'error' : 'warning',
-        status: 'blocking',
-        entityType: 'order',
-        entityId: orderId,
-        titleKey: stale
-          ? 'recovery.issues.staleOrderUpdateParentWait.title'
-          : 'recovery.issues.orderUpdateParentWait.title',
-        summaryKey: stale
-          ? 'recovery.issues.staleOrderUpdateParentWait.summary'
-          : 'recovery.issues.orderUpdateParentWait.summary',
-        guidanceKey: stale
-          ? 'recovery.issues.staleOrderUpdateParentWait.guidance'
-          : 'recovery.issues.orderUpdateParentWait.guidance',
-        actions: [
-          createRepairOrderUpdateReplayBlockersAction(),
-          createRetryParityModuleAction(),
-          createRetryParityItemAction(),
-          createRunParitySyncAction(),
-        ],
-        params: {
-          count: rows.length,
-          sampleItemId: sample.id,
-          sampleTableName: sample.tableName,
-          sampleRecordId: sample.recordId,
-          sampleError: sample.errorMessage ?? null,
-          lastError: sample.errorMessage ?? null,
-          moduleType: sample.moduleType || 'orders',
-          orderId,
-          orderNumber,
-          totalAmount,
-        },
-        orderId,
-        orderNumber,
-      },
-    ],
+    issues: [issue],
   };
 };
 

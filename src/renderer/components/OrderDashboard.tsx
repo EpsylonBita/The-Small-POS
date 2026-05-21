@@ -44,8 +44,20 @@ import type {
 import { OrderApprovalPanel } from "./order/OrderApprovalPanel";
 import { OrderConflictBanner } from "./OrderConflictBanner";
 import { LiquidGlassModal } from "./ui/pos-glass-components";
-import { TableSelector, TableActionModal, ReservationForm } from "./tables";
+import { TableSelector, TableActionModal, TableCheckManagerModal, ReservationForm } from "./tables";
 import type { CreateReservationDto } from "./tables";
+import {
+  ArrowRightLeft,
+  Banknote,
+  CheckCircle2,
+  Clock3,
+  Layers,
+  Plus,
+  ReceiptText,
+  UserCheck,
+  Users,
+  WalletCards,
+} from "lucide-react";
 import { toLocalDateString } from "../utils/date";
 import { reservationsService } from "../services/ReservationsService";
 import { PrintPreviewModal } from "./modals/PrintPreviewModal";
@@ -106,6 +118,21 @@ import {
   withMaterializedCustomerAddresses,
 } from "../utils/customer-addresses";
 import { resolvePersistedCustomerId } from "../utils/persisted-customer-id";
+import { posApiPost } from "../utils/api-helpers";
+import { formatCurrency } from "../utils/format";
+import {
+  buildOptimisticOccupiedTable,
+  buildTableOrderCreateFields,
+  getTableNumberForTableServiceOrder,
+  isTableServiceOrder,
+  isUnsettledOrderPaymentStatus,
+  normalizeTableNumberForMatch,
+  shouldShowInStandardOrderLane,
+} from "../utils/tableOrderFlow";
+import {
+  enqueueTableSessionOpen,
+  isRetryableTableServiceError,
+} from "../utils/tableSessionOfflineQueue";
 
 interface OrderDashboardProps {
   className?: string;
@@ -275,6 +302,60 @@ const resolveEditableOrderType = (order: Pick<Order, "orderType" | "order_type">
   return "pickup";
 };
 
+const parseDateMs = (value: unknown): number | null => {
+  if (!value) return null;
+  const parsed = new Date(String(value)).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const formatOccupiedSince = (value: unknown, nowMs: number): string | null => {
+  const startedMs = parseDateMs(value);
+  if (!startedMs) return null;
+
+  const elapsedMinutes = Math.max(0, Math.floor((nowMs - startedMs) / 60000));
+  const hours = Math.floor(elapsedMinutes / 60);
+  const minutes = elapsedMinutes % 60;
+  const duration = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+  const time = new Date(startedMs).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  return `${time} · ${duration}`;
+};
+
+const getTableFloorValue = (table: RestaurantTable): string => {
+  const raw = table.floorLevel ?? (table as any).floor_level ?? 1;
+  return raw === null || raw === undefined || raw === "" ? "1" : String(raw);
+};
+
+const readTableBalance = (table: RestaurantTable) => {
+  const balance = table.balance || {};
+  const total = Math.max(0, Number(balance.order_total ?? 0) || 0);
+  const due = Math.max(
+    0,
+    Number(table.unpaidBalance ?? balance.outstanding_balance ?? 0) || 0,
+  );
+  const paid = Math.max(
+    0,
+    Number(balance.paid_total ?? (total > 0 ? total - due : 0)) || 0,
+  );
+  const tips = Math.max(0, Number(balance.tip_total ?? 0) || 0);
+  return { total, paid, due, tips };
+};
+
+const formatTableCardNumber = (value: unknown): string => {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "#T";
+  }
+  return raw.startsWith("#")
+    ? raw
+    : /^T/i.test(raw)
+      ? `#${raw}`
+      : `#T${raw}`;
+};
+
 export const OrderDashboard = memo<OrderDashboardProps>(
   ({ className = "", orderFilter }) => {
     const bridge = getBridge();
@@ -384,11 +465,101 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Fetch tables for the Tables tab - use actual IDs
     // Only enable fetching when both IDs are available
-    const { tables } = useTables({
+    const { tables, refetch: refetchTables, updateTableStatus } = useTables({
       branchId: effectiveBranchId || "",
       organizationId: organizationId || "",
       enabled: Boolean(effectiveBranchId && organizationId),
     });
+    const activeTableOrdersByNumber = useMemo(() => {
+      const map = new Map<string, Order>();
+      const activeStatuses = new Set(["pending", "confirmed", "preparing", "ready"]);
+
+      for (const order of orders) {
+        const status = String(order.status || "").toLowerCase();
+        if (
+          !activeStatuses.has(status) ||
+          !isTableServiceOrder(order as any) ||
+          !isUnsettledOrderPaymentStatus(order as any)
+        ) {
+          continue;
+        }
+
+        const tableNumber = getTableNumberForTableServiceOrder(order as any);
+        if (tableNumber && !map.has(tableNumber)) {
+          map.set(tableNumber, order);
+        }
+      }
+
+      return map;
+    }, [orders]);
+
+    const displayTables = useMemo(
+      () =>
+        tables.map((table) => {
+          const tableKey =
+            normalizeTableNumberForMatch(table.tableNumber) ||
+            normalizeTableNumberForMatch((table as any).number) ||
+            String(table.tableNumber);
+          const tableOrder = activeTableOrdersByNumber.get(tableKey);
+          if (!tableOrder) {
+            return table;
+          }
+
+          const optimisticTable = buildOptimisticOccupiedTable(table, {
+            orderId: table.currentOrderId || tableOrder.id,
+            tableSessionId:
+              table.tableSessionId ||
+              (tableOrder as any).tableSessionId ||
+              (tableOrder as any).table_session_id ||
+              null,
+            guestCount:
+              table.guestCount ||
+              (tableOrder as any).guestCount ||
+              (tableOrder as any).guest_count ||
+              table.capacity ||
+              1,
+            occupiedSince:
+              table.occupiedSince ||
+              (tableOrder as any).created_at ||
+              (tableOrder as any).createdAt ||
+              new Date().toISOString(),
+          });
+
+          const orderTotal = Math.max(
+            0,
+            Number(
+              (tableOrder as any).totalAmount ??
+                (tableOrder as any).total_amount ??
+                0,
+            ) || 0,
+          );
+          const existingBalance = optimisticTable.balance || null;
+          if (orderTotal > 0 && !existingBalance?.order_total) {
+            return {
+              ...optimisticTable,
+              unpaidBalance: optimisticTable.unpaidBalance || orderTotal,
+              balance: {
+                ...(existingBalance || {}),
+                order_total: orderTotal,
+                paid_total: existingBalance?.paid_total ?? 0,
+                tip_total: existingBalance?.tip_total ?? 0,
+                outstanding_balance:
+                  optimisticTable.unpaidBalance ||
+                  existingBalance?.outstanding_balance ||
+                  orderTotal,
+                payment_status:
+                  existingBalance?.payment_status ||
+                  (tableOrder as any).paymentStatus ||
+                  (tableOrder as any).payment_status ||
+                  null,
+              },
+            };
+          }
+
+          return optimisticTable;
+        }),
+      [activeTableOrdersByNumber, tables],
+    );
 
     // State for computed values
     const [filteredOrders, setFilteredOrders] = useState<Order[]>([]);
@@ -405,16 +576,190 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       "pickup" | "delivery" | null
     >(null);
     const [activeTab, setActiveTab] = useState<TabId>("orders");
+    const [tableClockMs, setTableClockMs] = useState(() => Date.now());
+    const [tableFloorFilter, setTableFloorFilter] = useState("all");
+    const [tableStatusFilter, setTableStatusFilter] = useState<TableStatus | "all">(
+      "all",
+    );
 
     // State for table order flow
     const [showTableSelector, setShowTableSelector] = useState(false);
     const [showTableActionModal, setShowTableActionModal] = useState(false);
+    const [showTableCheckManager, setShowTableCheckManager] = useState(false);
     const [showReservationForm, setShowReservationForm] = useState(false);
     const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(
       null,
     );
+    const [tableGuestCount, setTableGuestCount] = useState(1);
     const [isOrderTypeTransitioning, setIsOrderTypeTransitioning] =
       useState(false);
+
+    const tableFloorOptions = useMemo(() => {
+      const floors = Array.from(
+        new Set(displayTables.map((table) => getTableFloorValue(table))),
+      );
+      return floors.sort((left, right) => {
+        const leftNumber = Number(left);
+        const rightNumber = Number(right);
+        if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+          return leftNumber - rightNumber;
+        }
+        return left.localeCompare(right);
+      });
+    }, [displayTables]);
+
+    const effectiveTableFloorFilter =
+      tableFloorFilter === "all" || tableFloorOptions.includes(tableFloorFilter)
+        ? tableFloorFilter
+        : "all";
+
+    const getTableFloorLabel = useCallback(
+      (floor: string) =>
+        floor === "all"
+          ? t("tablesDashboard.allFloors", "All floors")
+          : t("tablesDashboard.floorNumber", {
+              defaultValue: "Floor {{floor}}",
+              floor,
+            }),
+      [t],
+    );
+
+    const tableStatusConfig = useMemo(() => {
+      const light = resolvedTheme === "light";
+      return {
+        available: {
+          label: t("tablesDashboard.tableStatus.available", "Available"),
+          card:
+            light
+              ? "border-emerald-300 bg-emerald-50/90 hover:border-emerald-500 hover:shadow-emerald-500/10"
+              : "border-emerald-400/35 bg-emerald-500/10 hover:border-emerald-300/70 hover:shadow-emerald-950/30",
+          badge:
+            light
+              ? "border-emerald-200 bg-emerald-100 text-emerald-700"
+              : "border-emerald-400/25 bg-emerald-400/10 text-emerald-200",
+          accent: "bg-emerald-500",
+          value: "text-emerald-600 dark:text-emerald-300",
+        },
+        occupied: {
+          label: t("tablesDashboard.tableStatus.occupied", "Occupied"),
+          card:
+            light
+              ? "border-blue-300 bg-blue-50/95 hover:border-blue-500 hover:shadow-blue-500/10"
+              : "border-blue-400/45 bg-blue-500/10 hover:border-blue-300/75 hover:shadow-blue-950/35",
+          badge:
+            light
+              ? "border-blue-200 bg-blue-100 text-blue-700"
+              : "border-blue-400/30 bg-blue-400/10 text-blue-200",
+          accent: "bg-blue-500",
+          value: "text-blue-600 dark:text-blue-300",
+        },
+        reserved: {
+          label: t("tablesDashboard.tableStatus.reserved", "Reserved"),
+          card:
+            light
+              ? "border-amber-300 bg-amber-50 hover:border-amber-500 hover:shadow-amber-500/10"
+              : "border-amber-400/40 bg-amber-500/10 hover:border-amber-300/70 hover:shadow-amber-950/30",
+          badge:
+            light
+              ? "border-amber-200 bg-amber-100 text-amber-700"
+              : "border-amber-400/30 bg-amber-400/10 text-amber-200",
+          accent: "bg-amber-500",
+          value: "text-amber-600 dark:text-amber-300",
+        },
+        cleaning: {
+          label: t("tablesDashboard.tableStatus.cleaning", "Cleaning"),
+          card:
+            light
+              ? "border-slate-300 bg-slate-50 hover:border-slate-400"
+              : "border-slate-400/25 bg-white/[0.045] hover:border-slate-300/50",
+          badge:
+            light
+              ? "border-slate-200 bg-slate-100 text-slate-700"
+              : "border-slate-400/25 bg-slate-400/10 text-slate-200",
+          accent: "bg-slate-500",
+          value: "text-slate-600 dark:text-slate-300",
+        },
+        maintenance: {
+          label: t("tablesDashboard.tableStatus.maintenance", "Maintenance"),
+          card:
+            light
+              ? "border-orange-300 bg-orange-50 hover:border-orange-500"
+              : "border-orange-400/35 bg-orange-500/10 hover:border-orange-300/65",
+          badge:
+            light
+              ? "border-orange-200 bg-orange-100 text-orange-700"
+              : "border-orange-400/25 bg-orange-400/10 text-orange-200",
+          accent: "bg-orange-500",
+          value: "text-orange-600 dark:text-orange-300",
+        },
+        unavailable: {
+          label: t("tablesDashboard.tableStatus.unavailable", "Unavailable"),
+          card:
+            light
+              ? "border-slate-300 bg-slate-100 hover:border-slate-400"
+              : "border-slate-500/25 bg-slate-800/35 hover:border-slate-400/45",
+          badge:
+            light
+              ? "border-slate-300 bg-slate-200 text-slate-700"
+              : "border-slate-500/25 bg-slate-500/10 text-slate-300",
+          accent: "bg-slate-500",
+          value: "text-slate-600 dark:text-slate-300",
+        },
+      } satisfies Record<TableStatus, {
+        label: string;
+        card: string;
+        badge: string;
+        accent: string;
+        value: string;
+      }>;
+    }, [resolvedTheme, t]);
+
+    const floorScopedTables = useMemo(
+      () =>
+        effectiveTableFloorFilter === "all"
+          ? displayTables
+          : displayTables.filter(
+              (table) => getTableFloorValue(table) === effectiveTableFloorFilter,
+            ),
+      [displayTables, effectiveTableFloorFilter],
+    );
+
+    const tableGridStats = useMemo(() => {
+      const total = floorScopedTables.length;
+      const occupied = floorScopedTables.filter(
+        (table) => table.status === "occupied",
+      ).length;
+      const available = floorScopedTables.filter(
+        (table) => table.status === "available",
+      ).length;
+      const reserved = floorScopedTables.filter(
+        (table) => table.status === "reserved",
+      ).length;
+      const cleaning = floorScopedTables.filter(
+        (table) => table.status === "cleaning",
+      ).length;
+      const due = floorScopedTables.reduce(
+        (sum, table) => sum + readTableBalance(table).due,
+        0,
+      );
+      return {
+        total,
+        occupied,
+        available,
+        reserved,
+        cleaning,
+        due,
+        occupancyRate: total > 0 ? Math.round((occupied / total) * 100) : 0,
+      };
+    }, [floorScopedTables]);
+
+    const visibleTableCards = useMemo(
+      () =>
+        tableStatusFilter === "all"
+          ? floorScopedTables
+          : floorScopedTables.filter((table) => table.status === tableStatusFilter),
+      [floorScopedTables, tableStatusFilter],
+    );
 
     // State for modals
     const [showDriverModal, setShowDriverModal] = useState(false);
@@ -473,7 +818,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [showOrderTypeModal, setShowOrderTypeModal] = useState(false);
     const [showMenuModal, setShowMenuModal] = useState(false);
     const [selectedOrderType, setSelectedOrderType] = useState<
-      "pickup" | "delivery" | null
+      "pickup" | "delivery" | "dine-in" | null
     >(null);
 
     // State for split payment flow (rendered independently of MenuModal)
@@ -938,6 +1283,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       [stopAlertLoop],
     );
 
+    useEffect(() => {
+      if (!displayTables.some((table) => table.status === "occupied" || table.occupiedSince)) {
+        return;
+      }
+
+      const timer = window.setInterval(() => setTableClockMs(Date.now()), 60000);
+      return () => window.clearInterval(timer);
+    }, [displayTables]);
+
     // Update computed values when dependencies change
     useEffect(() => {
       if (!orders) return;
@@ -977,18 +1331,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       // Apply tab-specific filters
       switch (activeTab) {
         case "orders":
-          filtered = filtered.filter(
-            (order) =>
-              order.status === "pending" ||
-              order.status === "confirmed" ||
-              order.status === "preparing" ||
-              order.status === "ready",
+          filtered = filtered.filter((order) =>
+            shouldShowInStandardOrderLane(order as any),
           );
           break;
         case "delivered":
           filtered = filtered.filter(
             (order) =>
-              order.status === "delivered" || order.status === "completed",
+              !isTableServiceOrder(order as any) &&
+              (order.status === "delivered" || order.status === "completed"),
           );
           break;
         case "canceled":
@@ -999,25 +1350,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setFilteredOrders(filtered);
 
       // Calculate order counts for tabs
+      const openTableCount = displayTables.filter(
+        (table) =>
+          table.status === "occupied" ||
+          Boolean(table.tableSessionId || table.currentOrderId),
+      ).length;
       const counts = {
         orders: 0,
         delivered: 0,
         canceled: 0,
-        tables: 0, // Will be updated separately from tables data
+        tables: openTableCount,
       };
 
       baseOrders.forEach((order) => {
-        if (
-          order.status === "pending" ||
-          order.status === "confirmed" ||
-          order.status === "preparing" ||
-          order.status === "ready"
-        ) {
+        const isTableOrder = isTableServiceOrder(order as any);
+        if (!isTableOrder && shouldShowInStandardOrderLane(order as any)) {
           counts.orders++;
           return;
         }
 
-        if (order.status === "delivered" || order.status === "completed") {
+        if (!isTableOrder && (order.status === "delivered" || order.status === "completed")) {
           counts.delivered++;
           return;
         }
@@ -1028,7 +1380,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       });
 
       setOrderCounts(counts);
-    }, [orders, filter, activeTab, orderFilter]);
+    }, [orders, filter, activeTab, orderFilter, displayTables]);
 
     // Handle tab change
     const handleTabChange = useCallback(
@@ -1045,13 +1397,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Update tables count when tables data changes
     useEffect(() => {
-      if (tables) {
+      if (displayTables) {
+        const openTableCount = displayTables.filter(
+          (table) =>
+            table.status === "occupied" ||
+            Boolean(table.tableSessionId || table.currentOrderId),
+        ).length;
         setOrderCounts((prev) => ({
           ...prev,
-          tables: tables.length,
+          tables: openTableCount,
         }));
       }
-    }, [tables]);
+    }, [displayTables]);
 
     // Handle order selection
     const handleToggleOrderSelection = (orderId: string) => {
@@ -1209,18 +1566,34 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
     };
 
+    const tableHasOpenCheck = useCallback((table: RestaurantTable) => {
+      return table.status === "occupied" || Boolean(table.tableSessionId || table.currentOrderId);
+    }, []);
+
+    const openTableCheckManager = useCallback((table: RestaurantTable) => {
+      setSelectedTable(table);
+      setShowTableActionModal(false);
+      setShowTableSelector(false);
+      setShowTableCheckManager(true);
+    }, []);
+
     // Handle table selection from TableSelector
     const handleTableSelectorSelect = useCallback((table: RestaurantTable) => {
       setSelectedTable(table);
       setShowTableSelector(false);
+      if (tableHasOpenCheck(table)) {
+        openTableCheckManager(table);
+        return;
+      }
       setShowTableActionModal(true);
-    }, []);
+    }, [openTableCheckManager, tableHasOpenCheck]);
 
     // Handle New Order action from TableActionModal
-    const handleTableNewOrder = useCallback(() => {
+    const handleTableNewOrder = useCallback((guestCount = 1) => {
       if (selectedTable) {
-        setSelectedOrderType("pickup"); // Table orders use pickup pricing
+        setSelectedOrderType("dine-in");
         setOrderType("dine-in");
+        setTableGuestCount(Math.max(1, Math.min(99, Math.trunc(Number(guestCount) || 1))));
         setTableNumber(selectedTable.tableNumber.toString());
         setCustomerInfo({
           name:
@@ -1307,8 +1680,53 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Handle table selection from Tables tab grid
     const handleTableSelect = useCallback((table: RestaurantTable) => {
       setSelectedTable(table);
+      if (tableHasOpenCheck(table)) {
+        openTableCheckManager(table);
+        return;
+      }
       setShowTableActionModal(true);
-    }, []);
+    }, [openTableCheckManager, tableHasOpenCheck]);
+
+    const handleTableCheckAddItems = useCallback((table: RestaurantTable, guestCount: number, session: any) => {
+      const activeOrderId = session?.active_order_id || table.currentOrderId;
+      const targetOrder = activeOrderId
+        ? orders.find(order =>
+            order.id === activeOrderId ||
+            order.supabase_id === activeOrderId ||
+            order.order_number === activeOrderId ||
+            order.orderNumber === activeOrderId,
+          )
+        : null;
+
+      setTableGuestCount(Math.max(1, Math.min(99, Math.trunc(Number(guestCount) || 1))));
+      setSelectedTable({
+        ...table,
+        tableSessionId: session?.id || table.tableSessionId || null,
+        currentOrderId: activeOrderId || table.currentOrderId,
+      });
+      setShowTableCheckManager(false);
+
+      if (targetOrder) {
+        setCurrentEditOrderId(targetOrder.id);
+        setCurrentEditSupabaseId(targetOrder.supabase_id || targetOrder.id);
+        setCurrentEditOrderNumber(targetOrder.order_number || targetOrder.orderNumber);
+        setEditingOrderType("dine-in");
+        setShowEditMenuModal(true);
+        return;
+      }
+
+      if (activeOrderId) {
+        toast.error(
+          t("orderDashboard.tableOrderNotLoaded", {
+            defaultValue: "This table check is open, but the linked order is not loaded locally yet. Refresh orders and try again.",
+          }),
+        );
+        void silentRefresh();
+        return;
+      }
+
+      handleTableNewOrder(guestCount);
+    }, [handleTableNewOrder, orders, silentRefresh, t]);
 
     // Handle menu modal close
     const handleMenuModalClose = () => {
@@ -1321,6 +1739,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setExistingCustomer(null);
       setSpecialInstructions("");
       setTableNumber("");
+      setTableGuestCount(1);
       setAddressValid(false);
       setDeliveryZoneInfo(null);
       setShowPhoneLookupModal(false);
@@ -2065,6 +2484,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Handle order completion from menu modal
     const handleOrderComplete = async (orderData: any): Promise<void> => {
       const isSplitPayment = orderData.paymentData?.method === "pending";
+      const isTablePaymentSave = orderData.paymentData?.method === "table";
       let createdOrderId: string | undefined;
       try {
         console.log(
@@ -2421,7 +2841,24 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               }
             : undefined;
         const isTableOrder =
-          orderType === "dine-in" || Boolean(tableNumber?.trim());
+          orderType === "dine-in" ||
+          orderData.orderType === "dine-in" ||
+          isTablePaymentSave ||
+          Boolean(tableNumber?.trim());
+        const tableOrderFields = buildTableOrderCreateFields({
+          serviceOrderType: isTableOrder
+            ? "dine-in"
+            : selectedOrderType || orderData.orderType || "pickup",
+          pricingOrderType: selectedOrderType || orderData.orderType || "pickup",
+          table: selectedTable,
+          tableNumber,
+          tableSessionId: selectedTable?.tableSessionId || null,
+          guestCount: tableGuestCount,
+        });
+        const {
+          order_type: tableOrderType,
+          ...tableOrderCreateFields
+        } = tableOrderFields;
         const persistedCustomerName = isTableOrder
           ? pickMeaningfulOrderCustomerName(
               orderData.customer?.name,
@@ -2475,10 +2912,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           branch_id: effectiveBranchId || null,
           organization_id: organizationId || null,
           status: "pending" as const,
-          order_type: selectedOrderType || "pickup",
+          order_type: (tableOrderType ||
+            selectedOrderType ||
+            "pickup") as Order["orderType"],
           payment_method: isGhostOrder
             ? null
             : orderData.paymentData?.method || "cash",
+          ...tableOrderCreateFields,
           initialPayment,
           // Full delivery address fields for proper sync to Supabase
           delivery_address: deliveryAddress,
@@ -2495,10 +2935,110 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderToCreate,
         );
 
-        const result = await createOrder(orderToCreate);
+        const result = await createOrder(orderToCreate as any);
 
         if (result.success) {
           createdOrderId = result.orderId;
+
+          if (isTableOrder && result.orderId && selectedTable) {
+            const tableSessionOpenPayload = {
+              action: "open",
+              table_id: selectedTable.id,
+              table_number: selectedTable.tableNumber,
+              active_order_id: result.orderId,
+              active_order_client_id:
+                (result as any).clientOrderId ||
+                (result as any).client_order_id ||
+                (result as any).clientRequestId ||
+                (result as any).client_request_id ||
+                null,
+              guest_count: tableGuestCount,
+              customer_name:
+                persistedCustomerName ||
+                `Table ${selectedTable.tableNumber}`,
+              client_event_id: `pos-tauri-table-session-${result.orderId}`,
+            };
+            try {
+              const sessionResult = await posApiPost<{
+                success?: boolean;
+                session?: { id?: string };
+                table?: unknown;
+                error?: string;
+              }>("/api/pos/table-sessions", tableSessionOpenPayload);
+              const sessionPayload = sessionResult.data;
+              if (!sessionResult.success || sessionPayload?.success === false) {
+                throw new Error(
+                  sessionResult.error ||
+                    sessionPayload?.error ||
+                    "Failed to open table session",
+                );
+              }
+              const sessionId =
+                sessionPayload?.session?.id ||
+                selectedTable.tableSessionId ||
+                null;
+              await updateTableStatus(
+                selectedTable.id,
+                "occupied",
+                {
+                  action: "assign_order",
+                  current_order_id: result.orderId,
+                  table_session_id: sessionId,
+                  guest_count: tableGuestCount,
+                  customer_name:
+                    persistedCustomerName ||
+                    `Table ${selectedTable.tableNumber}`,
+                  occupied_since: new Date().toISOString(),
+                },
+              );
+            } catch (sessionError) {
+              console.warn(
+                "[OrderDashboard] Table session open failed, falling back to table status assignment:",
+                sessionError,
+              );
+              let queuedTableSessionRetry = false;
+              if (isRetryableTableServiceError(sessionError)) {
+                try {
+                  await enqueueTableSessionOpen({
+                    organizationId,
+                    branchId: effectiveBranchId || branchId || null,
+                    payload: tableSessionOpenPayload,
+                  });
+                  queuedTableSessionRetry = true;
+                } catch (queueError) {
+                  console.warn(
+                    "[OrderDashboard] Failed to queue table session open:",
+                    queueError,
+                  );
+                }
+              }
+              await updateTableStatus(selectedTable.id, "occupied", {
+                action: "assign_order",
+                current_order_id: result.orderId,
+                table_session_id: selectedTable.tableSessionId || null,
+                guest_count: tableGuestCount,
+                customer_name:
+                  persistedCustomerName ||
+                  `Table ${selectedTable.tableNumber}`,
+                occupied_since: new Date().toISOString(),
+              });
+              if (queuedTableSessionRetry) {
+                toast.success(
+                  t("orderDashboard.tableSessionQueued", {
+                    defaultValue:
+                      "Table saved locally; session sync queued.",
+                  }),
+                );
+              } else {
+                toast.error(
+                  t("orderDashboard.tableSessionSyncFailed", {
+                    defaultValue:
+                      "Order saved, but table-session sync needs retry.",
+                  }),
+                );
+              }
+            }
+          }
 
           // Capture split payment data for the SplitPaymentModal (rendered in OrderDashboard).
           // This must happen before the finally block closes MenuModal.
@@ -2538,7 +3078,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             });
           }
 
-          toast.success(t("orderDashboard.orderCreated"));
+          toast.success(
+            isTableOrder
+              ? t("orderDashboard.orderSavedToTable", {
+                  defaultValue: "Order saved to table",
+                })
+              : t("orderDashboard.orderCreated"),
+          );
           // Refresh orders in background - don't block UI
           silentRefresh().catch((err) =>
             console.debug("[OrderDashboard] Background refresh error:", err),
@@ -2560,7 +3106,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               });
           }
 
-          if (result.orderId && !isSplitPayment) {
+          if (result.orderId && !isSplitPayment && !isTableOrder) {
             if (initialPayment) {
               await silentRefresh().catch((err) => {
                 console.debug(
@@ -2622,7 +3168,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   );
                 });
             }
-          } else {
+          } else if (!isTableOrder) {
             console.warn(
               "[OrderDashboard] No orderId in result, skipping auto-print",
             );
@@ -2638,6 +3184,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setSelectedOrderType(null);
         setExistingCustomer(null);
         setCustomerInfo({ name: "", phone: "" });
+        setSelectedTable(null);
+        setTableNumber("");
+        setTableGuestCount(1);
       }
     };
 
@@ -2903,6 +3452,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           ...request,
           items: normalizeEditOrderItems(request.items),
         }));
+        const isTableEditRequest = (request: EditSettlementRequest): boolean => {
+          const sourceOrder = orders.find((order) => order.id === request.orderId);
+          return (
+            isTableServiceOrder(sourceOrder as any) ||
+            isTableServiceOrder({
+              ...(request.orderUpdates || {}),
+              orderType: (request.orderUpdates as any)?.orderType,
+              order_type: (request.orderUpdates as any)?.order_type,
+            } as any)
+          );
+        };
 
         const previews = await Promise.all(
           normalizedRequests.map((request) =>
@@ -2968,6 +3528,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }
 
           if (refreshedPreview?.requiredAction === "collect") {
+            if (isTableEditRequest(request)) {
+              toast.success(
+                t("orderDashboard.tableOrderUpdated", {
+                  defaultValue: "Table check updated. Balance stays open until the customer pays.",
+                }),
+              );
+              await silentRefresh().catch(() => {});
+              void refetchTables();
+              return;
+            }
+
             openEditSettlementCollectionPrompt(refreshedPreview, request);
             toast.success(
               t("orderDashboard.orderEditAwaitingPayment", {
@@ -3036,6 +3607,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         loadOrders,
         normalizeEditOrderItems,
         openEditSettlementCollectionPrompt,
+        orders,
+        refetchTables,
         resetEditOrderState,
         silentRefresh,
         t,
@@ -4259,8 +4832,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       try {
         const targetOrder = orders.find((order) => order.id === orderData.orderId);
         const targetOrderType = resolveEditableOrderType({
-          orderType: orderData.orderType as Order["orderType"],
-          order_type: orderData.orderType as Order["order_type"],
+          orderType:
+            (orderData.orderType as Order["orderType"]) ||
+            targetOrder?.orderType,
+          order_type:
+            (orderData.orderType as Order["order_type"]) ||
+            targetOrder?.order_type,
         });
         const settlementPayload = deriveEditSettlementPayload(
           targetOrder,
@@ -4447,16 +5024,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         {/* Orders Grid or Tables Grid based on active tab */}
         {activeTab === "tables" ? (
-          /* Tables Grid - shown when Tables tab is active */
           <div
             ref={orderGridRef}
-            className={`rounded-xl p-4 ${
+            className={`overflow-hidden rounded-2xl border p-4 shadow-sm transition-colors ${
               resolvedTheme === "light"
-                ? "bg-white/80 border border-gray-200/50"
-                : "bg-white/5 border border-white/10"
+                ? "border-slate-200/80 bg-white/90"
+                : "border-white/10 bg-slate-950/45"
             }`}
           >
-            {tables.length === 0 ? (
+            {displayTables.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <svg
                   className={`w-16 h-16 mb-4 ${resolvedTheme === "light" ? "text-gray-300" : "text-white/20"}`}
@@ -4484,40 +5060,463 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 </p>
               </div>
             ) : (
-              <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-3">
-                {tables.map((table) => {
-                  const statusColors: Record<TableStatus, string> = {
-                    available:
-                      "border-green-500 bg-green-500/10 text-green-500",
-                    occupied: "border-blue-500 bg-blue-500/10 text-blue-500",
-                    reserved:
-                      "border-yellow-500 bg-yellow-500/10 text-yellow-500",
-                    cleaning: "border-gray-500 bg-gray-500/10 text-gray-500",
-                    maintenance:
-                      "border-orange-500 bg-orange-500/10 text-orange-500",
-                    unavailable:
-                      "border-slate-500 bg-slate-500/10 text-slate-500",
-                  };
-                  return (
-                    <button
-                      key={table.id}
-                      onClick={() => handleTableSelect(table)}
-                      className={`aspect-square p-3 rounded-xl border-2 transition-all hover:scale-105 active:scale-95 ${statusColors[table.status]}`}
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="grid w-full grid-cols-3 gap-2 sm:w-auto sm:min-w-[390px]">
+                    <div
+                      className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
+                        resolvedTheme === "light"
+                          ? "border-slate-200 bg-slate-50"
+                          : "border-white/10 bg-white/[0.055]"
+                      }`}
                     >
-                      <div className="h-full flex flex-col items-center justify-center">
-                        <span className="text-2xl font-bold">
-                          #{table.tableNumber}
-                        </span>
-                        <span className="text-xs mt-1 opacity-70">
-                          {table.capacity} seats
-                        </span>
-                        <span className="text-[10px] mt-1 capitalize">
-                          {table.status}
-                        </span>
+                      <div
+                        className={`text-[11px] font-bold uppercase tracking-wide ${
+                          resolvedTheme === "light"
+                            ? "text-slate-500"
+                            : "text-slate-400"
+                        }`}
+                      >
+                        {t("tablesDashboard.occupied", "Occupied")}
                       </div>
+                      <div
+                        className={`mt-1 text-xl font-black ${
+                          resolvedTheme === "light"
+                            ? "text-slate-950"
+                            : "text-white"
+                        }`}
+                      >
+                        {tableGridStats.occupied}/{tableGridStats.total}
+                      </div>
+                    </div>
+                    <div
+                      className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
+                        resolvedTheme === "light"
+                          ? "border-slate-200 bg-slate-50"
+                          : "border-white/10 bg-white/[0.055]"
+                      }`}
+                    >
+                      <div
+                        className={`text-[11px] font-bold uppercase tracking-wide ${
+                          resolvedTheme === "light"
+                            ? "text-slate-500"
+                            : "text-slate-400"
+                        }`}
+                      >
+                        {t("tablesDashboard.openDue", "Open due")}
+                      </div>
+                      <div className="mt-1 text-xl font-black text-amber-600 dark:text-amber-300">
+                        {formatCurrency(tableGridStats.due)}
+                      </div>
+                    </div>
+                    <div
+                      className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
+                        resolvedTheme === "light"
+                          ? "border-slate-200 bg-slate-50"
+                          : "border-white/10 bg-white/[0.055]"
+                      }`}
+                    >
+                      <div
+                        className={`text-[11px] font-bold uppercase tracking-wide ${
+                          resolvedTheme === "light"
+                            ? "text-slate-500"
+                            : "text-slate-400"
+                        }`}
+                      >
+                        {t("tablesDashboard.rate", "Rate")}
+                      </div>
+                      <div
+                        className={`mt-1 text-xl font-black ${
+                          tableGridStats.occupancyRate > 80
+                            ? "text-red-500"
+                            : tableGridStats.occupancyRate > 50
+                              ? "text-amber-500"
+                              : "text-emerald-500"
+                        }`}
+                      >
+                        {tableGridStats.occupancyRate}%
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {(
+                      [
+                        "all",
+                        "available",
+                        "occupied",
+                        "reserved",
+                        "cleaning",
+                      ] as const
+                    ).map((status) => (
+                      <button
+                        key={status}
+                        type="button"
+                        onClick={() => setTableStatusFilter(status)}
+                        className={`rounded-xl px-3 py-2 text-sm font-bold transition-all active:scale-95 ${
+                          tableStatusFilter === status
+                            ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20"
+                            : resolvedTheme === "light"
+                              ? "bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+                              : "bg-white/[0.06] text-slate-200 hover:bg-white/[0.1]"
+                        }`}
+                      >
+                        {status === "all"
+                          ? t("tablesDashboard.all", "All")
+                          : tableStatusConfig[status].label}
+                        {status !== "all" ? (
+                          <span className="ml-1 opacity-70">
+                            {status === "available"
+                              ? tableGridStats.available
+                              : status === "occupied"
+                                ? tableGridStats.occupied
+                                : status === "reserved"
+                                  ? tableGridStats.reserved
+                                  : tableGridStats.cleaning}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div
+                  className={`flex items-center gap-2 overflow-x-auto rounded-xl border p-1 backdrop-blur-xl scrollbar-hide ${
+                    resolvedTheme === "light"
+                      ? "border-slate-200 bg-slate-50"
+                      : "border-white/10 bg-white/[0.055]"
+                  }`}
+                >
+                  <span
+                    className={`ml-2 mr-1 inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-bold uppercase tracking-wide ${
+                      resolvedTheme === "light"
+                        ? "text-slate-500"
+                        : "text-slate-400"
+                    }`}
+                  >
+                    <Layers className="h-3.5 w-3.5" />
+                    {t("tablesDashboard.floor", "Floor")}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setTableFloorFilter("all")}
+                    className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
+                      effectiveTableFloorFilter === "all"
+                        ? "bg-blue-600 text-white"
+                        : resolvedTheme === "light"
+                          ? "text-slate-700 hover:bg-white"
+                          : "text-slate-200 hover:bg-white/[0.08]"
+                    }`}
+                  >
+                    {getTableFloorLabel("all")}
+                  </button>
+                  {tableFloorOptions.map((floor) => (
+                    <button
+                      key={floor}
+                      type="button"
+                      onClick={() => setTableFloorFilter(floor)}
+                      className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
+                        effectiveTableFloorFilter === floor
+                          ? "bg-blue-600 text-white"
+                          : resolvedTheme === "light"
+                            ? "text-slate-700 hover:bg-white"
+                            : "text-slate-200 hover:bg-white/[0.08]"
+                      }`}
+                    >
+                      {getTableFloorLabel(floor)}
                     </button>
-                  );
-                })}
+                  ))}
+                </div>
+
+                {visibleTableCards.length === 0 ? (
+                  <div
+                    className={`rounded-xl border border-dashed py-10 text-center font-semibold ${
+                      resolvedTheme === "light"
+                        ? "border-slate-300 text-slate-500"
+                        : "border-white/15 text-white/50"
+                    }`}
+                  >
+                    {t("tablesDashboard.noMatchingTables", "No tables match these filters")}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
+                    {visibleTableCards.map((table) => {
+                      const visual =
+                        tableStatusConfig[table.status] ||
+                        tableStatusConfig.available;
+                      const balance = readTableBalance(table);
+                      const hasOpenCheck =
+                        table.status === "occupied" ||
+                        Boolean(table.tableSessionId || table.currentOrderId) ||
+                        balance.total > 0;
+                      const paidPercent =
+                        balance.total > 0
+                          ? Math.min(
+                              100,
+                              Math.round((balance.paid / balance.total) * 100),
+                            )
+                          : 0;
+                      const occupiedSinceLabel =
+                        hasOpenCheck && table.occupiedSince
+                          ? formatOccupiedSince(table.occupiedSince, tableClockMs)
+                          : null;
+                      const waiterName =
+                        table.currentWaiterName ||
+                        t("tablesDashboard.unassigned", "Unassigned");
+                      const guestCount =
+                        table.guestCount || table.capacity || 0;
+
+                      return (
+                        <div
+                          key={table.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => handleTableSelect(table)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              handleTableSelect(table);
+                            }
+                          }}
+                          className={`group min-h-[230px] cursor-pointer rounded-2xl border p-4 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-blue-400/45 ${visual.card}`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div
+                                className={`inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide ${
+                                  resolvedTheme === "light"
+                                    ? "text-slate-500"
+                                    : "text-slate-400"
+                                }`}
+                              >
+                                <Layers className="h-3.5 w-3.5" />
+                                {getTableFloorLabel(getTableFloorValue(table))}
+                              </div>
+                              <div
+                                className={`mt-1 truncate text-4xl font-black ${
+                                  resolvedTheme === "light"
+                                    ? "text-slate-950"
+                                    : "text-white"
+                                }`}
+                              >
+                                {formatTableCardNumber(table.tableNumber)}
+                              </div>
+                            </div>
+                            <span
+                              className={`shrink-0 rounded-xl border px-2.5 py-1 text-xs font-black ${visual.badge}`}
+                            >
+                              {visual.label}
+                            </span>
+                          </div>
+
+                          <div className="mt-4 grid grid-cols-2 gap-2">
+                            <div
+                              className={`rounded-xl border px-3 py-2 ${
+                                resolvedTheme === "light"
+                                  ? "border-white/80 bg-white/70"
+                                  : "border-white/10 bg-black/20"
+                              }`}
+                            >
+                              <div
+                                className={`flex items-center gap-1 text-xs font-semibold ${
+                                  resolvedTheme === "light"
+                                    ? "text-slate-500"
+                                    : "text-slate-400"
+                                }`}
+                              >
+                                <Users className="h-3.5 w-3.5" />
+                                {t("tablesDashboard.covers", "Covers")}
+                              </div>
+                              <div
+                                className={`mt-1 font-black ${
+                                  resolvedTheme === "light"
+                                    ? "text-slate-950"
+                                    : "text-white"
+                                }`}
+                              >
+                                {guestCount}/{table.capacity}
+                              </div>
+                            </div>
+                            <div
+                              className={`rounded-xl border px-3 py-2 ${
+                                resolvedTheme === "light"
+                                  ? "border-white/80 bg-white/70"
+                                  : "border-white/10 bg-black/20"
+                              }`}
+                            >
+                              <div
+                                className={`flex items-center gap-1 text-xs font-semibold ${
+                                  resolvedTheme === "light"
+                                    ? "text-slate-500"
+                                    : "text-slate-400"
+                                }`}
+                              >
+                                <UserCheck className="h-3.5 w-3.5" />
+                                {t("tablesDashboard.waiter", "Waiter")}
+                              </div>
+                              <div
+                                className={`mt-1 truncate font-black ${
+                                  table.currentWaiterName
+                                    ? resolvedTheme === "light"
+                                      ? "text-slate-950"
+                                      : "text-white"
+                                    : "text-slate-400"
+                                }`}
+                              >
+                                {waiterName}
+                              </div>
+                            </div>
+                          </div>
+
+                          {hasOpenCheck ? (
+                            <div className="mt-4">
+                              <div className="flex items-end justify-between gap-3">
+                                <div>
+                                  <div
+                                    className={`text-[11px] font-black uppercase tracking-wide ${
+                                      resolvedTheme === "light"
+                                        ? "text-slate-500"
+                                        : "text-slate-400"
+                                    }`}
+                                  >
+                                    {t("tablesDashboard.due", "Due")}
+                                  </div>
+                                  <div
+                                    className={`text-3xl font-black ${
+                                      balance.due > 0
+                                        ? "text-amber-600 dark:text-amber-300"
+                                        : "text-emerald-600 dark:text-emerald-300"
+                                    }`}
+                                  >
+                                    {formatCurrency(balance.due)}
+                                  </div>
+                                </div>
+                                <div
+                                  className={`text-right text-xs font-semibold ${
+                                    resolvedTheme === "light"
+                                      ? "text-slate-500"
+                                      : "text-slate-400"
+                                  }`}
+                                >
+                                  <div>
+                                    {t("tablesDashboard.total", "Total")}{" "}
+                                    {formatCurrency(balance.total)}
+                                  </div>
+                                  <div className="text-emerald-600 dark:text-emerald-300">
+                                    {t("tablesDashboard.paid", "Paid")}{" "}
+                                    {formatCurrency(balance.paid)}
+                                  </div>
+                                </div>
+                              </div>
+                              <div
+                                className={`mt-3 h-2 overflow-hidden rounded-full ${
+                                  resolvedTheme === "light"
+                                    ? "bg-white/80"
+                                    : "bg-black/30"
+                                }`}
+                              >
+                                <div
+                                  className={`h-full rounded-full transition-all duration-500 ${visual.accent}`}
+                                  style={{ width: `${paidPercent}%` }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              className={`mt-4 rounded-xl border px-3 py-3 ${
+                                resolvedTheme === "light"
+                                  ? "border-emerald-200 bg-white/70"
+                                  : "border-emerald-400/20 bg-emerald-400/10"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 text-sm font-black text-emerald-700 dark:text-emerald-300">
+                                <CheckCircle2 className="h-4 w-4" />
+                                {t(
+                                  "tablesDashboard.readyForGuests",
+                                  "Ready for guests",
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          <div
+                            className={`mt-4 flex flex-wrap items-center gap-2 text-xs ${
+                              resolvedTheme === "light"
+                                ? "text-slate-500"
+                                : "text-slate-400"
+                            }`}
+                          >
+                            {occupiedSinceLabel ? (
+                              <span className="inline-flex items-center gap-1 rounded-lg border border-blue-400/20 bg-blue-500/10 px-2 py-1 font-bold text-blue-700 dark:text-blue-200">
+                                <Clock3 className="h-3.5 w-3.5" />
+                                {occupiedSinceLabel}
+                              </span>
+                            ) : null}
+                            {table.currentOrderId ? (
+                              <span
+                                className={`inline-flex max-w-full items-center gap-1 rounded-lg border px-2 py-1 font-semibold ${
+                                  resolvedTheme === "light"
+                                    ? "border-slate-200 bg-white/60"
+                                    : "border-white/10 bg-white/[0.04]"
+                                }`}
+                              >
+                                <ReceiptText className="h-3.5 w-3.5 shrink-0" />
+                                <span className="truncate">
+                                  {String(table.currentOrderId).slice(0, 10)}
+                                </span>
+                              </span>
+                            ) : null}
+                          </div>
+
+                          <div className="mt-4 grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleTableSelect(table);
+                              }}
+                              className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-black transition-all active:scale-95 ${
+                                hasOpenCheck
+                                  ? "bg-blue-600 text-white group-hover:bg-blue-500"
+                                  : "bg-emerald-600 text-white group-hover:bg-emerald-500"
+                              }`}
+                            >
+                              {hasOpenCheck ? (
+                                <WalletCards className="h-4 w-4" />
+                              ) : (
+                                <Plus className="h-4 w-4" />
+                              )}
+                              {hasOpenCheck
+                                ? t("tablesDashboard.openCheck", "Open check")
+                                : t("tablesDashboard.newOrder", "New order")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleTableSelect(table);
+                              }}
+                              className={`inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-black transition-all active:scale-95 ${
+                                resolvedTheme === "light"
+                                  ? "border-slate-200 bg-white/75 text-slate-700 hover:bg-white"
+                                  : "border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.1]"
+                              }`}
+                            >
+                              {hasOpenCheck ? (
+                                <Banknote className="h-4 w-4" />
+                              ) : (
+                                <ArrowRightLeft className="h-4 w-4" />
+                              )}
+                              {hasOpenCheck
+                                ? t("tablesDashboard.pay", "Pay")
+                                : t("tablesDashboard.assign", "Assign")}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -4686,7 +5685,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         {/* Table Selector Modal (for table orders) */}
         <TableSelector
           isOpen={showTableSelector}
-          tables={tables}
+          tables={displayTables}
           onTableSelect={handleTableSelectorSelect}
           onClose={() => setShowTableSelector(false)}
         />
@@ -4700,6 +5699,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             onNewReservation={handleTableNewReservation}
             onClose={() => {
               setShowTableActionModal(false);
+              setSelectedTable(null);
+            }}
+          />
+        )}
+
+        {selectedTable && (
+          <TableCheckManagerModal
+            isOpen={showTableCheckManager}
+            table={selectedTable}
+            tables={displayTables}
+            localOrders={orders}
+            onAddItems={handleTableCheckAddItems}
+            onRefreshTables={refetchTables}
+            onRefreshOrders={silentRefresh}
+            onClose={() => {
+              setShowTableCheckManager(false);
               setSelectedTable(null);
             }}
           />

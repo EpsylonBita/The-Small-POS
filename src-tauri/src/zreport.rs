@@ -1212,6 +1212,7 @@ struct ReportStaffShift {
     staff_id: String,
     staff_name: Option<String>,
     role_type: String,
+    status: String,
     opening_cash: f64,
     closing_cash: Option<f64>,
     expected_cash: Option<f64>,
@@ -1265,6 +1266,48 @@ fn display_staff_name(shift: &ReportStaffShift) -> String {
 
 fn ensure_staff_payments_table(conn: &Connection) {
     let _ = crate::shifts::ensure_staff_payments_table(conn);
+}
+
+fn drawer_money_cents_expr(alias: Option<&str>, column: &str) -> String {
+    let column_ref = alias
+        .map(|alias| format!("{alias}.{column}"))
+        .unwrap_or_else(|| column.to_string());
+    let cents_ref = alias
+        .map(|alias| format!("{alias}.{column}_cents"))
+        .unwrap_or_else(|| format!("{column}_cents"));
+    format!("COALESCE({cents_ref}, CAST(ROUND({column_ref} * 100) AS INTEGER), 0)")
+}
+
+fn drawer_expected_cents_expr(alias: Option<&str>) -> String {
+    let col = |name: &str| {
+        alias
+            .map(|alias| format!("{alias}.{name}"))
+            .unwrap_or_else(|| name.to_string())
+    };
+    format!(
+        "COALESCE(
+            {expected_cents},
+            CAST(ROUND({expected_amount} * 100) AS INTEGER),
+            {opening}
+              + {cash_sales}
+              - {refunds}
+              - {expenses}
+              - {staff_payments}
+              - {drops}
+              - {driver_given}
+              + {driver_returned}
+        )",
+        expected_cents = col("expected_amount_cents"),
+        expected_amount = col("expected_amount"),
+        opening = drawer_money_cents_expr(alias, "opening_amount"),
+        cash_sales = drawer_money_cents_expr(alias, "total_cash_sales"),
+        refunds = drawer_money_cents_expr(alias, "total_refunds"),
+        expenses = drawer_money_cents_expr(alias, "total_expenses"),
+        staff_payments = drawer_money_cents_expr(alias, "total_staff_payments"),
+        drops = drawer_money_cents_expr(alias, "cash_drops"),
+        driver_given = drawer_money_cents_expr(alias, "driver_cash_given"),
+        driver_returned = drawer_money_cents_expr(alias, "driver_cash_returned"),
+    )
 }
 
 fn load_staff_expense_items(conn: &Connection, shift_id: &str) -> Result<Vec<Value>, String> {
@@ -1367,11 +1410,13 @@ fn load_staff_payment_items(
 }
 
 fn load_staff_drawer_snapshot(conn: &Connection, shift_id: &str) -> Result<Option<Value>, String> {
+    let expected_expr = drawer_expected_cents_expr(None);
     conn.query_row(
-        // W4b-iii: cents-with-real-fallback shim on 10 monetary cols.
-        "SELECT
+        &format!(
+            // W4b-iii: cents-with-real-fallback shim on 10 monetary cols.
+            "SELECT
                 COALESCE(opening_amount_cents, CAST(ROUND(opening_amount * 100) AS INTEGER), 0),
-                COALESCE(expected_amount_cents, CAST(ROUND(expected_amount * 100) AS INTEGER)),
+                {expected_expr},
                 COALESCE(closing_amount_cents, CAST(ROUND(closing_amount * 100) AS INTEGER)),
                 COALESCE(variance_amount_cents, CAST(ROUND(variance_amount * 100) AS INTEGER)),
                 COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER), 0),
@@ -1381,7 +1426,8 @@ fn load_staff_drawer_snapshot(conn: &Connection, shift_id: &str) -> Result<Optio
                 COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER), 0),
                 COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER), 0)
          FROM cash_drawer_sessions
-         WHERE staff_shift_id = ?1",
+         WHERE staff_shift_id = ?1"
+        ),
         params![shift_id],
         |row| {
             Ok(serde_json::json!({
@@ -1409,12 +1455,13 @@ fn load_drawer_rows_for_period(
     lower_bound_mode: LowerBoundMode,
 ) -> Result<Vec<Value>, String> {
     let opened_at_predicate = lower_bound_mode.sql_predicate("cds.opened_at", "?1");
+    let expected_expr = drawer_expected_cents_expr(Some("cds"));
     let mut stmt = conn
         .prepare(&format!(
             // W4b-iii: cents-with-real-fallback shim on 10 monetary cols.
             "SELECT cds.id, cds.staff_shift_id, ss.staff_name,
                     COALESCE(cds.opening_amount_cents, CAST(ROUND(cds.opening_amount * 100) AS INTEGER), 0),
-                    COALESCE(cds.expected_amount_cents, CAST(ROUND(cds.expected_amount * 100) AS INTEGER)),
+                    {expected_expr},
                     COALESCE(cds.closing_amount_cents, CAST(ROUND(cds.closing_amount * 100) AS INTEGER)),
                     COALESCE(cds.variance_amount_cents, CAST(ROUND(cds.variance_amount * 100) AS INTEGER)),
                     COALESCE(cds.total_cash_sales_cents, CAST(ROUND(cds.total_cash_sales * 100) AS INTEGER), 0),
@@ -1461,12 +1508,13 @@ fn load_drawer_rows_for_period(
 }
 
 fn load_drawer_rows_for_shift(conn: &Connection, shift_id: &str) -> Result<Vec<Value>, String> {
+    let expected_expr = drawer_expected_cents_expr(Some("cds"));
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             // W4b-iii: cents-with-real-fallback shim on 10 monetary cols.
             "SELECT cds.id, cds.staff_shift_id, ss.staff_name,
                     COALESCE(cds.opening_amount_cents, CAST(ROUND(cds.opening_amount * 100) AS INTEGER), 0),
-                    COALESCE(cds.expected_amount_cents, CAST(ROUND(cds.expected_amount * 100) AS INTEGER)),
+                    {expected_expr},
                     COALESCE(cds.closing_amount_cents, CAST(ROUND(cds.closing_amount * 100) AS INTEGER)),
                     COALESCE(cds.variance_amount_cents, CAST(ROUND(cds.variance_amount * 100) AS INTEGER)),
                     COALESCE(cds.total_cash_sales_cents, CAST(ROUND(cds.total_cash_sales * 100) AS INTEGER), 0),
@@ -1479,8 +1527,8 @@ fn load_drawer_rows_for_shift(conn: &Connection, shift_id: &str) -> Result<Vec<V
              FROM cash_drawer_sessions cds
              LEFT JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
              WHERE cds.staff_shift_id = ?1
-             ORDER BY cds.opened_at ASC",
-        )
+             ORDER BY cds.opened_at ASC"
+        ))
         .map_err(|e| format!("prepare drawer rows for shift: {e}"))?;
 
     let rows = stmt
@@ -2117,7 +2165,7 @@ fn build_staff_report(
         "role": shift.role_type,
         "checkIn": shift.check_in_time,
         "checkOut": shift.check_out_time,
-        "shiftStatus": "closed",
+        "shiftStatus": shift.status,
         "orders": orders_value,
         "ordersDetails": orders_details,
         "ordersTruncated": orders_truncated,
@@ -2370,6 +2418,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         staff_id: staff_id.clone(),
         staff_name: staff_name.clone(),
         role_type: role_type.clone(),
+        status: status.clone(),
         opening_cash,
         closing_cash,
         expected_cash,
@@ -3328,7 +3377,11 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
 ///
 /// The returned value is not persisted. Callers choose whether the snapshot
 /// is used as a preview or materialized into `z_reports` and `sync_queue`.
-fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZReport, String> {
+fn build_z_report_for_date(
+    db: &DbState,
+    payload: &Value,
+    include_active_shifts: bool,
+) -> Result<BuiltDateZReport, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let branch_id = str_field(payload, "branchId")
@@ -3356,8 +3409,18 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         "Generating multi-shift Z-report"
     );
 
-    // --- Query all closed shifts since period_start for this branch ---
+    // --- Query all reportable shifts since period_start for this branch ---
+    //
+    // Live previews include active shifts so the Z modal can show current
+    // staff status and order activity. Final Z generation still passes
+    // `include_active_shifts = false`, and submission keeps its active-shift
+    // precondition before any persisted report is created.
     let shift_start_predicate = lower_bound_mode.sql_predicate("check_in_time", "?1");
+    let shift_status_filter = if include_active_shifts {
+        "status IN ('closed', 'active')"
+    } else {
+        "status = 'closed'"
+    };
     let mut shift_stmt = conn
         .prepare(&format!(
             "SELECT id, staff_id, staff_name, role_type, status,
@@ -3368,7 +3431,7 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
              FROM staff_shifts
              WHERE {shift_start_predicate}
                AND (branch_id = ?2 OR branch_id IS NULL)
-               AND status = 'closed'
+               AND {shift_status_filter}
                AND (?3 IS NULL OR COALESCE(check_out_time, check_in_time) <= ?3)
              ORDER BY check_in_time ASC"
         ))
@@ -3381,6 +3444,7 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
                 staff_id: row.get(1)?,
                 staff_name: row.get(2)?,
                 role_type: row.get(3)?,
+                status: row.get(4)?,
                 opening_cash: row.get(5)?,
                 closing_cash: row.get(6)?,
                 expected_cash: row.get(7)?,
@@ -3583,13 +3647,14 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
 
     // --- Cash drawer sessions (aggregate across all shifts) ---
     // W4b-iii: cents-with-real-fallback shim on 12 monetary SUMs.
+    let drawer_expected_expr = drawer_expected_cents_expr(None);
     let mut drawer_agg = conn
         .query_row(
             &format!(
                 "SELECT
                     COALESCE(SUM(COALESCE(opening_amount_cents, CAST(ROUND(opening_amount * 100) AS INTEGER))), 0),
                     COALESCE(SUM(COALESCE(closing_amount_cents, CAST(ROUND(closing_amount * 100) AS INTEGER))), 0),
-                    COALESCE(SUM(COALESCE(expected_amount_cents, CAST(ROUND(expected_amount * 100) AS INTEGER))), 0),
+                    COALESCE(SUM({drawer_expected_expr}), 0),
                     COALESCE(SUM(COALESCE(variance_amount_cents, CAST(ROUND(variance_amount * 100) AS INTEGER))), 0),
                     COALESCE(SUM(COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER))), 0),
                     COALESCE(SUM(COALESCE(total_card_sales_cents, CAST(ROUND(total_card_sales * 100) AS INTEGER))), 0),
@@ -3926,7 +3991,7 @@ pub fn preview_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value,
         return Ok(existing);
     }
 
-    let built = build_z_report_for_date(db, payload)?;
+    let built = build_z_report_for_date(db, payload, true)?;
     if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
     }
@@ -3938,7 +4003,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         return Ok(existing);
     }
 
-    let built = build_z_report_for_date(db, payload)?;
+    let built = build_z_report_for_date(db, payload, false)?;
     if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
         return Ok(preview_response_from_built_date_z_report(&built, true));
@@ -5733,6 +5798,136 @@ mod tests {
         assert_eq!(
             queue_count, 0,
             "preview should not enqueue z_report sync rows"
+        );
+    }
+
+    #[test]
+    fn test_preview_z_report_for_date_includes_active_shift_orders_and_open_drawer() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                    opening_cash_amount, opening_cash_amount_cents,
+                    check_in_time, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'active-zr-shift', 'staff-active', 'Active Cashier', 'branch-1', 'term-1',
+                    'cashier', 100.0, 10000, '2026-05-21T07:00:00Z', 'active', 2,
+                    'pending', '2026-05-21T07:00:00Z', '2026-05-21T07:00:00Z'
+                 )",
+                [],
+            )
+            .expect("insert active shift");
+
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opening_amount_cents,
+                    total_cash_sales, total_cash_sales_cents,
+                    total_card_sales, total_card_sales_cents,
+                    total_refunds, total_refunds_cents,
+                    total_expenses, total_expenses_cents,
+                    cash_drops, cash_drops_cents,
+                    driver_cash_given, driver_cash_given_cents,
+                    driver_cash_returned, driver_cash_returned_cents,
+                    total_staff_payments, total_staff_payments_cents,
+                    reconciled, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'active-zr-drawer', 'active-zr-shift', 'staff-active', 'branch-1', 'term-1',
+                    100.0, 10000, 13.0, 1300, 0.0, 0, 0.0, 0, 0.0, 0,
+                    0.0, 0, 0.0, 0, 0.0, 0, 0.0, 0, 0,
+                    '2026-05-21T07:00:00Z', '2026-05-21T07:00:00Z', '2026-05-21T07:00:00Z'
+                 )",
+                [],
+            )
+            .expect("insert active drawer");
+
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, branch_id, items,
+                    total_amount, total_amount_cents, status, order_type,
+                    payment_status, staff_shift_id, table_number,
+                    discount_amount, discount_amount_cents,
+                    tip_amount, tip_amount_cents,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'active-zr-order', 'ORD-ACTIVE-1', 'branch-1', '[]',
+                    22.0, 2200, 'completed', 'dine-in',
+                    'partially_paid', 'active-zr-shift', 'T1',
+                    0.0, 0, 0.0, 0,
+                    'pending', '2026-05-21T08:00:00Z', '2026-05-21T08:00:00Z'
+                 )",
+                [],
+            )
+            .expect("insert active order");
+
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status,
+                    staff_shift_id, currency, created_at, updated_at
+                 ) VALUES (
+                    'active-zr-payment', 'active-zr-order', 'cash', 13.0, 1300, 'completed',
+                    'active-zr-shift', 'EUR', '2026-05-21T08:05:00Z', '2026-05-21T08:05:00Z'
+                 )",
+                [],
+            )
+            .expect("insert active payment");
+        }
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-05-21",
+        });
+        let result = preview_z_report_for_date(&db, &payload)
+            .expect("live preview should include active shift data");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["preview"], true);
+        let report_json = result["report"]["reportJson"]
+            .as_object()
+            .expect("preview reportJson object");
+        assert_eq!(report_json["shifts"]["total"], 1);
+        assert_eq!(report_json["sales"]["totalOrders"], 1);
+        assert_eq!(report_json["sales"]["totalSales"], 22.0);
+        assert_eq!(report_json["sales"]["cashSales"], 13.0);
+        assert_eq!(report_json["cashDrawer"]["expected"], 113.0);
+
+        let drawers = report_json["drawers"].as_array().expect("drawer rows");
+        assert_eq!(drawers.len(), 1);
+        assert_eq!(drawers[0]["expected"], 113.0);
+        assert_eq!(drawers[0]["cashSales"], 13.0);
+
+        let staff_reports = report_json["staffReports"]
+            .as_array()
+            .expect("staffReports");
+        assert_eq!(staff_reports.len(), 1);
+        assert_eq!(staff_reports[0]["shiftStatus"], "active");
+        assert_eq!(staff_reports[0]["orders"]["count"], 1);
+        assert_eq!(staff_reports[0]["orders"]["cashAmount"], 13.0);
+        assert_eq!(staff_reports[0]["orders"]["totalAmount"], 22.0);
+        assert_eq!(staff_reports[0]["drawer"]["expected"], 113.0);
+        assert_eq!(
+            staff_reports[0]["ordersDetails"][0]["orderNumber"],
+            "ORD-ACTIVE-1"
+        );
+
+        let generate_result = generate_z_report_for_date(&db, &payload)
+            .expect("final generation should not persist active-only preview");
+        assert_eq!(generate_result["preview"], true);
+        assert_eq!(
+            generate_result["report"]["reportJson"]["shifts"]["total"],
+            0
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let z_reports_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM z_reports", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            z_reports_count, 0,
+            "active live preview must not materialize a final z_report"
         );
     }
 

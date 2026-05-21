@@ -41,6 +41,7 @@ import {
 } from '../../utils/saved-address-geolocation';
 import { isLegacyFallbackAddress } from '../../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
+import { shouldBypassPaymentForTableOrder } from '../../utils/tableOrderFlow';
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge, isBrowser } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
@@ -1426,6 +1427,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
     if (shouldBypassPaymentWithGhostMode) {
       await handlePaymentComplete(undefined);
+      return;
+    }
+
+    if (shouldBypassPaymentForTableOrder({
+      orderType,
+      editMode,
+      ghostMode: shouldBypassPaymentWithGhostMode,
+    })) {
+      await handlePaymentComplete({ method: 'table', status: 'pending', amount: 0 });
       return;
     }
 

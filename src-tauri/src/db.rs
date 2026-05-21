@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 62;
+const CURRENT_SCHEMA_VERSION: i32 = 63;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -431,6 +431,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current < 62 {
         run_migration_tx(conn, 62, migrate_v62)?;
     }
+    if current < 63 {
+        run_migration_tx(conn, 63, migrate_v63)?;
+    }
 
     Ok(())
 }
@@ -546,6 +549,9 @@ fn migrate_v1(conn: &Connection) -> Result<(), String> {
             cancellation_reason TEXT,
             order_type TEXT DEFAULT 'dine-in',
             table_number TEXT,
+            table_id TEXT,
+            table_session_id TEXT,
+            guest_count INTEGER,
             delivery_address TEXT,
             delivery_notes TEXT,
             name_on_ringer TEXT,
@@ -4134,6 +4140,44 @@ fn migrate_v62(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v63: durable local table-service order references.
+///
+/// The renderer and admin API both carry `table_id`, `table_session_id`, and
+/// `guest_count`, but the local SQLite order table only had the display
+/// `table_number`. That made local-first table checks depend on labels such as
+/// `T1`, and prevented offline table-session replay from recovering cleanly.
+fn migrate_v63(conn: &Connection) -> Result<(), String> {
+    for (column, column_type) in [
+        ("table_id", "TEXT"),
+        ("table_session_id", "TEXT"),
+        ("guest_count", "INTEGER"),
+    ] {
+        if !column_exists(conn, "orders", column)? {
+            let sql = format!("ALTER TABLE orders ADD COLUMN {column} {column_type}");
+            conn.execute(&sql, [])
+                .map_err(|e| format!("v63 add orders.{column}: {e}"))?;
+        }
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_orders_table_id
+          ON orders(table_id)
+          WHERE table_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_orders_table_session_id
+          ON orders(table_session_id)
+          WHERE table_session_id IS NOT NULL;
+        ",
+    )
+    .map_err(|e| format!("v63 create table-service order indexes: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (63)", [])
+        .map_err(|e| format!("v63 record schema_version: {e}"))?;
+
+    info!("Applied migration v63 (local table-service order references)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -5019,6 +5063,19 @@ mod tests {
             })
             .expect("read schema version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_v63_adds_table_service_order_columns() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        for column in ["table_id", "table_session_id", "guest_count"] {
+            assert!(
+                column_exists(&conn, "orders", column).expect("column check"),
+                "orders.{column} should exist after v63"
+            );
+        }
     }
 
     #[test]

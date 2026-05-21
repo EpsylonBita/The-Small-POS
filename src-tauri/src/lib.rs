@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 // Crate-wide clippy allowances for pragmatic patterns that appear frequently
 // in POS domain code:
 // - `too_many_arguments`: sync and financial paths take wide multi-column

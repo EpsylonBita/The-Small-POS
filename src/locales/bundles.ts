@@ -8,6 +8,11 @@ import elHotfix from './overlays/el.sync-hotfix.json';
 import deHotfix from './overlays/de.sync-hotfix.json';
 import frHotfix from './overlays/fr.sync-hotfix.json';
 import itHotfix from './overlays/it.sync-hotfix.json';
+import enTableCheck from './overlays/en.table-check.json';
+import elTableCheck from './overlays/el.table-check.json';
+import deTableCheck from './overlays/de.table-check.json';
+import frTableCheck from './overlays/fr.table-check.json';
+import itTableCheck from './overlays/it.table-check.json';
 import enSupport from './support/en.json';
 import elSupport from './support/el.json';
 import deSupport from './support/de.json';
@@ -38,9 +43,9 @@ function mergeLocaleBundle(base: unknown, extension: unknown): unknown {
 }
 
 export const localeBundles = {
-  en: mergeLocaleBundle(mergeLocaleBundle(enBase, enHotfix), { support: enSupport }) as LocaleBundle,
-  el: mergeLocaleBundle(mergeLocaleBundle(elBase, elHotfix), { support: elSupport }) as LocaleBundle,
-  de: mergeLocaleBundle(mergeLocaleBundle(deBase, deHotfix), { support: deSupport }) as LocaleBundle,
-  fr: mergeLocaleBundle(mergeLocaleBundle(frBase, frHotfix), { support: frSupport }) as LocaleBundle,
-  it: mergeLocaleBundle(mergeLocaleBundle(itBase, itHotfix), { support: itSupport }) as LocaleBundle,
+  en: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(enBase, enHotfix), enTableCheck), { support: enSupport }) as LocaleBundle,
+  el: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(elBase, elHotfix), elTableCheck), { support: elSupport }) as LocaleBundle,
+  de: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(deBase, deHotfix), deTableCheck), { support: deSupport }) as LocaleBundle,
+  fr: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(frBase, frHotfix), frTableCheck), { support: frSupport }) as LocaleBundle,
+  it: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(itBase, itHotfix), itTableCheck), { support: itSupport }) as LocaleBundle,
 } as const;

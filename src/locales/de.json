@@ -74,6 +74,7 @@
       "pending": "Ausstehend",
       "completed": "Abgeschlossen",
       "cancelled": "Storniert",
+      "closed": "Geschlossen",
       "approved": "Genehmigt",
       "rejected": "Abgelehnt",
       "draft": "Entwurf",

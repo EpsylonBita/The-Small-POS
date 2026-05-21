@@ -60,6 +60,7 @@ export {
   type ReceiptSamplePreviewRequest,
   type ReceiptSamplePreviewResponse,
   type ResolvePaymentBlockerParams,
+  type RecordPaymentParams,
 } from './ipc-adapter';
 
 export type {

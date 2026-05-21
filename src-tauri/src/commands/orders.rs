@@ -2613,6 +2613,9 @@ pub async fn order_save_from_remote(
     let order_type =
         value_str(&order_data, &["order_type", "orderType"]).unwrap_or_else(|| "pickup".into());
     let table_number = value_str(&order_data, &["table_number", "tableNumber"]);
+    let table_id = value_str(&order_data, &["table_id", "tableId"]);
+    let table_session_id = value_str(&order_data, &["table_session_id", "tableSessionId"]);
+    let guest_count = value_i64(&order_data, &["guest_count", "guestCount"]);
     let delivery_address = value_str(
         &order_data,
         &["delivery_address", "deliveryAddress", "address"],
@@ -2721,8 +2724,9 @@ pub async fn order_save_from_remote(
                 tax_amount, tax_amount_cents,
                 subtotal, subtotal_cents,
                 status,
-                order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
-                delivery_floor, delivery_notes, name_on_ringer, special_instructions,
+                order_type, table_number, table_id, table_session_id, guest_count,
+                delivery_address, delivery_city, delivery_postal_code, delivery_floor,
+                delivery_notes, name_on_ringer, special_instructions,
                 created_at, updated_at, estimated_time, supabase_id, sync_status,
                 payment_status, payment_transaction_id, staff_shift_id,
                 staff_id, driver_id, driver_name, discount_percentage,
@@ -2742,16 +2746,17 @@ pub async fn order_save_from_remote(
                 ?14,
                 ?15, ?16, ?17, ?18, ?19,
                 ?20, ?21, ?22, ?23,
-                ?24, ?25, ?26, ?27, 'synced',
-                ?28, ?29, ?30,
-                ?31, ?32, ?33, ?34,
-                ?35, ?36,
-                ?37, ?38,
-                1, ?39, ?40, ?41,
-                ?42, ?43, ?44,
-                ?45,
-                ?46, ?47,
-                ?48, ?49, ?50
+                ?24, ?25, ?26,
+                ?27, ?28, ?29, ?30, 'synced',
+                ?31, ?32, ?33,
+                ?34, ?35, ?36, ?37,
+                ?38, ?39,
+                ?40, ?41,
+                1, ?42, ?43, ?44,
+                ?45, ?46, ?47,
+                ?48,
+                ?49, ?50,
+                ?51, ?52, ?53
             )",
             rusqlite::params![
                 local_id,
@@ -2770,6 +2775,9 @@ pub async fn order_save_from_remote(
                 status,
                 order_type,
                 table_number,
+                table_id,
+                table_session_id,
+                guest_count,
                 delivery_address,
                 delivery_city,
                 delivery_postal_code,

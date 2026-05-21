@@ -8,7 +8,22 @@ import { ReservationInfoPanel } from './ReservationInfoPanel';
 import { FloatingActionButton } from '../ui/FloatingActionButton';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
-import { ClipboardList, CheckCircle, XCircle, LayoutGrid, Users, RefreshCw, Truck } from 'lucide-react';
+import {
+  ArrowRightLeft,
+  Banknote,
+  CheckCircle,
+  ClipboardList,
+  Clock3,
+  LayoutGrid,
+  Plus,
+  ReceiptText,
+  RefreshCw,
+  Truck,
+  UserCheck,
+  Users,
+  WalletCards,
+  XCircle,
+} from 'lucide-react';
 import { formatCurrency, formatTime as formatTimeValue } from '../../utils/format';
 import { toLocalDateString } from '../../utils/date';
 
@@ -777,75 +792,201 @@ interface TablesTabContentProps {
   onNavigateToMenu?: (tableId: string, tableNumber: number) => void;
 }
 
-const TablesTabContent: React.FC<TablesTabContentProps> = memo(({ 
-  tables, 
-  isDark, 
+const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
+  tables,
+  isDark,
   branchId,
   organizationId,
   onTableSelect,
-  onNavigateToMenu 
+  onNavigateToMenu
 }) => {
   const { t } = useI18n();
+  const now = useSystemClock();
   const [filter, setFilter] = useState<TableStatus | 'all'>('all');
+  const [floorFilter, setFloorFilter] = useState('all');
   const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(null);
   const [showReservationPanel, setShowReservationPanel] = useState(false);
 
-  // Calculate occupancy stats
+  const textStrong = isDark ? 'text-white' : 'text-slate-950';
+  const textMuted = isDark ? 'text-slate-300/75' : 'text-slate-600';
+  const shellClass = isDark
+    ? 'border-white/10 bg-slate-950/55 shadow-[0_18px_45px_rgba(0,0,0,0.35)]'
+    : 'border-slate-200/80 bg-white/85 shadow-[0_18px_45px_rgba(15,23,42,0.08)]';
+  const subtleClass = isDark
+    ? 'border-white/10 bg-white/[0.045]'
+    : 'border-slate-200/90 bg-slate-50/90';
+
+  const getFloorValue = useCallback((table: RestaurantTable) => {
+    const raw = table.floorLevel ?? (table as any).floor_level ?? 1;
+    return raw === null || raw === undefined || raw === '' ? '1' : String(raw);
+  }, []);
+
+  const floorLabel = useCallback((floor: string) => {
+    if (floor === 'all') {
+      return t('tablesDashboard.allFloors', { defaultValue: 'All floors' });
+    }
+    return t('tablesDashboard.floorNumber', { defaultValue: 'Floor {{floor}}', floor });
+  }, [t]);
+
+  const floorOptions = useMemo(() => {
+    const values = Array.from(new Set(tables.map(table => getFloorValue(table))));
+    return values.sort((left, right) => {
+      const leftNumber = Number(left);
+      const rightNumber = Number(right);
+      if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+        return leftNumber - rightNumber;
+      }
+      return left.localeCompare(right);
+    });
+  }, [getFloorValue, tables]);
+
+  useEffect(() => {
+    if (floorFilter !== 'all' && !floorOptions.includes(floorFilter)) {
+      setFloorFilter('all');
+    }
+  }, [floorFilter, floorOptions]);
+
+  const floorScopedTables = useMemo(
+    () => floorFilter === 'all'
+      ? tables
+      : tables.filter(table => getFloorValue(table) === floorFilter),
+    [floorFilter, getFloorValue, tables],
+  );
+
   const stats = useMemo(() => {
-    const total = tables.length;
-    const available = tables.filter(t => t.status === 'available').length;
-    const occupied = tables.filter(t => t.status === 'occupied').length;
-    const reserved = tables.filter(t => t.status === 'reserved').length;
-    const cleaning = tables.filter(t => t.status === 'cleaning').length;
+    const total = floorScopedTables.length;
+    const available = floorScopedTables.filter(table => table.status === 'available').length;
+    const occupied = floorScopedTables.filter(table => table.status === 'occupied').length;
+    const reserved = floorScopedTables.filter(table => table.status === 'reserved').length;
+    const cleaning = floorScopedTables.filter(table => table.status === 'cleaning').length;
+    const due = floorScopedTables.reduce((sum, table) => {
+      const balance = table.balance || {};
+      const outstanding = Number(table.unpaidBalance ?? balance.outstanding_balance ?? 0);
+      return sum + (Number.isFinite(outstanding) ? outstanding : 0);
+    }, 0);
     const occupancyRate = total > 0 ? Math.round((occupied / total) * 100) : 0;
 
-    return { total, available, occupied, reserved, cleaning, occupancyRate };
-  }, [tables]);
+    return { total, available, occupied, reserved, cleaning, due, occupancyRate };
+  }, [floorScopedTables]);
 
-  // Filter tables based on selected filter
   const filteredTables = useMemo(() => {
-    if (filter === 'all') return tables;
-    return tables.filter(t => t.status === filter);
-  }, [tables, filter]);
+    if (filter === 'all') return floorScopedTables;
+    return floorScopedTables.filter(table => table.status === filter);
+  }, [filter, floorScopedTables]);
 
-  const statusConfig: Record<TableStatus, { color: string; label: string; bgClass: string }> = {
+  const statusConfig: Record<TableStatus, {
+    label: string;
+    cardClass: string;
+    badgeClass: string;
+    iconClass: string;
+    progressClass: string;
+  }> = {
     available: {
-      color: 'green',
       label: t('tablesDashboard.tableStatus.available', { defaultValue: 'Available' }),
-      bgClass: 'border-green-500 bg-green-500/10'
+      cardClass: isDark
+        ? 'border-emerald-400/35 bg-emerald-500/10 hover:border-emerald-300/65'
+        : 'border-emerald-300 bg-emerald-50/90 hover:border-emerald-500',
+      badgeClass: isDark
+        ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
+        : 'border-emerald-200 bg-emerald-100 text-emerald-700',
+      iconClass: 'text-emerald-500',
+      progressClass: 'bg-emerald-500',
     },
     occupied: {
-      color: 'blue',
       label: t('tablesDashboard.tableStatus.occupied', { defaultValue: 'Occupied' }),
-      bgClass: 'border-blue-500 bg-blue-500/10'
+      cardClass: isDark
+        ? 'border-blue-400/45 bg-blue-500/10 hover:border-blue-300/75'
+        : 'border-blue-300 bg-blue-50/95 hover:border-blue-500',
+      badgeClass: isDark
+        ? 'border-blue-400/30 bg-blue-400/10 text-blue-200'
+        : 'border-blue-200 bg-blue-100 text-blue-700',
+      iconClass: 'text-blue-500',
+      progressClass: 'bg-blue-500',
     },
     reserved: {
-      color: 'yellow',
       label: t('tablesDashboard.tableStatus.reserved', { defaultValue: 'Reserved' }),
-      bgClass: 'border-yellow-500 bg-yellow-500/10'
+      cardClass: isDark
+        ? 'border-amber-400/40 bg-amber-500/10 hover:border-amber-300/70'
+        : 'border-amber-300 bg-amber-50 hover:border-amber-500',
+      badgeClass: isDark
+        ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+        : 'border-amber-200 bg-amber-100 text-amber-700',
+      iconClass: 'text-amber-500',
+      progressClass: 'bg-amber-500',
     },
     cleaning: {
-      color: 'gray',
       label: t('tablesDashboard.tableStatus.cleaning', { defaultValue: 'Cleaning' }),
-      bgClass: 'border-gray-500 bg-gray-500/10'
+      cardClass: isDark
+        ? 'border-slate-400/25 bg-white/[0.045] hover:border-slate-300/50'
+        : 'border-slate-300 bg-slate-50 hover:border-slate-400',
+      badgeClass: isDark
+        ? 'border-slate-400/25 bg-slate-400/10 text-slate-200'
+        : 'border-slate-200 bg-slate-100 text-slate-700',
+      iconClass: 'text-slate-500',
+      progressClass: 'bg-slate-500',
     },
     maintenance: {
-      color: 'orange',
       label: t('tablesDashboard.tableStatus.maintenance', { defaultValue: 'Maintenance' }),
-      bgClass: 'border-orange-500 bg-orange-500/10'
+      cardClass: isDark
+        ? 'border-orange-400/35 bg-orange-500/10 hover:border-orange-300/65'
+        : 'border-orange-300 bg-orange-50 hover:border-orange-500',
+      badgeClass: isDark
+        ? 'border-orange-400/25 bg-orange-400/10 text-orange-200'
+        : 'border-orange-200 bg-orange-100 text-orange-700',
+      iconClass: 'text-orange-500',
+      progressClass: 'bg-orange-500',
     },
     unavailable: {
-      color: 'slate',
       label: t('tablesDashboard.tableStatus.unavailable', { defaultValue: 'Unavailable' }),
-      bgClass: 'border-slate-500 bg-slate-500/10'
+      cardClass: isDark
+        ? 'border-slate-500/25 bg-slate-800/35 hover:border-slate-400/45'
+        : 'border-slate-300 bg-slate-100 hover:border-slate-400',
+      badgeClass: isDark
+        ? 'border-slate-500/25 bg-slate-500/10 text-slate-300'
+        : 'border-slate-300 bg-slate-200 text-slate-700',
+      iconClass: 'text-slate-500',
+      progressClass: 'bg-slate-500',
     },
   };
 
+  const readBalance = useCallback((table: RestaurantTable) => {
+    const balance = table.balance || {};
+    const total = Math.max(0, Number(balance.order_total ?? 0) || 0);
+    const due = Math.max(0, Number(table.unpaidBalance ?? balance.outstanding_balance ?? 0) || 0);
+    const paid = Math.max(0, Number(balance.paid_total ?? (total > 0 ? total - due : 0)) || 0);
+    const tips = Math.max(0, Number(balance.tip_total ?? 0) || 0);
+    return { total, paid, due, tips };
+  }, []);
+
+  const formatOccupiedDuration = useCallback((value?: string | null) => {
+    if (!value) {
+      return null;
+    }
+    const startedAt = new Date(value).getTime();
+    if (!Number.isFinite(startedAt)) {
+      return null;
+    }
+    const elapsedMinutes = Math.max(0, Math.floor((now.getTime() - startedAt) / 60000));
+    const hours = Math.floor(elapsedMinutes / 60);
+    const minutes = elapsedMinutes % 60;
+    const duration = hours > 0
+      ? t('tablesDashboard.time.hoursMinutes', { defaultValue: '{{hours}}h {{minutes}}m', hours, minutes })
+      : t('tablesDashboard.time.minutes', { defaultValue: '{{minutes}}m', minutes });
+    const since = new Date(startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return { since, duration };
+  }, [now, t]);
+
   const handleTableClick = (table: RestaurantTable) => {
     setSelectedTable(table);
-    // Show reservation panel for reserved tables
     setShowReservationPanel(table.status === 'reserved');
     onTableSelect?.(table);
+  };
+
+  const handleTableKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, table: RestaurantTable) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      handleTableClick(table);
+    }
   };
 
   const handleClosePanel = () => {
@@ -870,97 +1011,238 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
   }
 
   return (
-    <div className="h-full flex gap-4">
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col">
-        {/* Stats & Filters */}
-        <div className="flex items-center justify-between mb-4">
-          {/* Occupancy Stats */}
-          <div className="flex gap-3">
-            <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-              <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                {t('tablesDashboard.occupancy', { defaultValue: 'Occupancy' })}
+    <div className="flex h-full min-h-0 gap-4">
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="mb-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="grid min-w-[360px] grid-cols-3 gap-2">
+              <div className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
+                <div className={`text-[11px] font-semibold uppercase tracking-wide ${textMuted}`}>
+                  {t('tablesDashboard.occupied', { defaultValue: 'Occupied' })}
+                </div>
+                <div className={`mt-1 text-xl font-bold ${textStrong}`}>{stats.occupied}/{stats.total}</div>
               </div>
-              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                {stats.occupied}/{stats.total}
+              <div className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
+                <div className={`text-[11px] font-semibold uppercase tracking-wide ${textMuted}`}>
+                  {t('tablesDashboard.openDue', { defaultValue: 'Open due' })}
+                </div>
+                <div className="mt-1 text-xl font-bold text-amber-600 dark:text-amber-300">{formatCurrency(stats.due)}</div>
+              </div>
+              <div className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
+                <div className={`text-[11px] font-semibold uppercase tracking-wide ${textMuted}`}>
+                  {t('tablesDashboard.rate', { defaultValue: 'Rate' })}
+                </div>
+                <div className={`mt-1 text-xl font-bold ${
+                  stats.occupancyRate > 80
+                    ? 'text-red-500'
+                    : stats.occupancyRate > 50
+                      ? 'text-amber-500'
+                      : 'text-emerald-500'
+                }`}>
+                  {stats.occupancyRate}%
+                </div>
               </div>
             </div>
-            <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-              <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                {t('tablesDashboard.rate', { defaultValue: 'Rate' })}
-              </div>
-              <div className={`text-xl font-bold ${
-                stats.occupancyRate > 80 
-                  ? 'text-red-500' 
-                  : stats.occupancyRate > 50 
-                    ? 'text-yellow-500' 
-                    : 'text-green-500'
-              }`}>
-                {stats.occupancyRate}%
-              </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {(['all', 'available', 'occupied', 'reserved', 'cleaning'] as const).map(status => (
+                <button
+                  key={status}
+                  type="button"
+                  onClick={() => setFilter(status)}
+                  className={`rounded-xl px-3 py-2 text-sm font-semibold transition-all ${
+                    filter === status
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20'
+                      : isDark
+                        ? 'bg-white/[0.06] text-slate-200 hover:bg-white/[0.1]'
+                        : 'bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50'
+                  }`}
+                >
+                  {status === 'all' ? t('tablesDashboard.all', { defaultValue: 'All' }) : statusConfig[status].label}
+                  {status !== 'all' ? (
+                    <span className="ml-1 opacity-70">
+                      {status === 'available'
+                        ? stats.available
+                        : status === 'occupied'
+                          ? stats.occupied
+                          : status === 'reserved'
+                            ? stats.reserved
+                            : stats.cleaning}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
             </div>
           </div>
 
-          {/* Status Filters */}
-          <div className="flex gap-2">
-            {(['all', 'available', 'occupied', 'reserved', 'cleaning'] as const).map(f => (
+          <div className={`flex items-center gap-2 rounded-xl border p-1 backdrop-blur-xl ${subtleClass}`}>
+            <span className={`ml-2 mr-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+              <LayoutGrid className="h-3.5 w-3.5" />
+              {t('tablesDashboard.floor', { defaultValue: 'Floor' })}
+            </span>
+            <button
+              type="button"
+              onClick={() => setFloorFilter('all')}
+              className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                floorFilter === 'all'
+                  ? 'bg-blue-600 text-white'
+                  : isDark
+                    ? 'text-slate-200 hover:bg-white/[0.08]'
+                    : 'text-slate-700 hover:bg-white'
+              }`}
+            >
+              {floorLabel('all')}
+            </button>
+            {floorOptions.map(floor => (
               <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`px-3 py-1.5 rounded-lg text-sm transition-all ${
-                  filter === f
+                key={floor}
+                type="button"
+                onClick={() => setFloorFilter(floor)}
+                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  floorFilter === floor
                     ? 'bg-blue-600 text-white'
                     : isDark
-                      ? 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      ? 'text-slate-200 hover:bg-white/[0.08]'
+                      : 'text-slate-700 hover:bg-white'
                 }`}
               >
-                {f === 'all' 
-                  ? t('tablesDashboard.all', { defaultValue: 'All' }) 
-                  : statusConfig[f].label}
-                {f !== 'all' && (
-                  <span className="ml-1 opacity-70">
-                    ({f === 'available' ? stats.available 
-                      : f === 'occupied' ? stats.occupied 
-                      : f === 'reserved' ? stats.reserved 
-                      : stats.cleaning})
-                  </span>
-                )}
+                {floorLabel(floor)}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Tables Grid */}
-        <div className="flex-1 overflow-y-auto scrollbar-hide">
-          <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-            {filteredTables.map(table => (
-              <button
-                key={table.id}
-                onClick={() => handleTableClick(table)}
-                className={`aspect-square p-3 rounded-xl border-2 transition-all hover:scale-105 ${
-                  statusConfig[table.status].bgClass
-                } ${
-                  selectedTable?.id === table.id ? 'ring-2 ring-blue-500' : ''
-                }`}
-              >
-                <div className="h-full flex flex-col items-center justify-center">
-                  <LayoutGrid className={`w-6 h-6 mb-1 text-${statusConfig[table.status].color}-500`} />
-                  <div className={`font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                    #{table.tableNumber}
+        <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-3 pb-3">
+            {filteredTables.map(table => {
+              const visual = statusConfig[table.status] || statusConfig.available;
+              const balance = readBalance(table);
+              const paidPercent = balance.total > 0 ? Math.min(100, Math.round((balance.paid / balance.total) * 100)) : 0;
+              const occupiedInfo = formatOccupiedDuration(table.occupiedSince);
+              const waiterName = table.currentWaiterName || t('tablesDashboard.unassigned', { defaultValue: 'Unassigned' });
+              const guestCount = table.guestCount || table.capacity || 0;
+              const isSelected = selectedTable?.id === table.id;
+              const hasOpenCheck = table.status === 'occupied' || Boolean(table.tableSessionId || table.currentOrderId);
+
+              return (
+                <div
+                  key={table.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleTableClick(table)}
+                  onKeyDown={(event) => handleTableKeyDown(event, table)}
+                  className={`group min-h-[205px] cursor-pointer rounded-xl border p-4 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-blue-400/45 ${
+                    visual.cardClass
+                  } ${isSelected ? 'ring-2 ring-blue-500/70' : ''}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className={`flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+                        <LayoutGrid className="h-3.5 w-3.5" />
+                        {floorLabel(getFloorValue(table))}
+                      </div>
+                      <div className={`mt-1 truncate text-3xl font-black ${textStrong}`}>#{table.tableNumber}</div>
+                    </div>
+                    <span className={`shrink-0 rounded-lg border px-2.5 py-1 text-xs font-bold ${visual.badgeClass}`}>
+                      {visual.label}
+                    </span>
                   </div>
-                  <div className={`flex items-center gap-1 text-xs mt-1 ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
-                    <Users className="w-3 h-3" />
-                    <span>{table.capacity}</span>
+
+                  <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
+                    <div className={`rounded-lg border px-3 py-2 ${isDark ? 'border-white/10 bg-black/20' : 'border-white/70 bg-white/65'}`}>
+                      <div className={`flex items-center gap-1 text-xs font-medium ${textMuted}`}>
+                        <Users className="h-3.5 w-3.5" />
+                        {t('tablesDashboard.covers', { defaultValue: 'Covers' })}
+                      </div>
+                      <div className={`mt-1 font-bold ${textStrong}`}>{guestCount}/{table.capacity}</div>
+                    </div>
+                    <div className={`rounded-lg border px-3 py-2 ${isDark ? 'border-white/10 bg-black/20' : 'border-white/70 bg-white/65'}`}>
+                      <div className={`flex items-center gap-1 text-xs font-medium ${textMuted}`}>
+                        <UserCheck className="h-3.5 w-3.5" />
+                        {t('tablesDashboard.waiter', { defaultValue: 'Waiter' })}
+                      </div>
+                      <div className={`mt-1 truncate font-bold ${textStrong}`}>{waiterName}</div>
+                    </div>
+                  </div>
+
+                  {hasOpenCheck ? (
+                    <div className="mt-4">
+                      <div className="flex items-end justify-between gap-3">
+                        <div>
+                          <div className={`text-[11px] font-bold uppercase tracking-wide ${textMuted}`}>
+                            {t('tablesDashboard.due', { defaultValue: 'Due' })}
+                          </div>
+                          <div className={`text-2xl font-black ${balance.due > 0 ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-600 dark:text-emerald-300'}`}>
+                            {formatCurrency(balance.due)}
+                          </div>
+                        </div>
+                        <div className={`text-right text-xs ${textMuted}`}>
+                          <div>{t('tablesDashboard.total', { defaultValue: 'Total' })} {formatCurrency(balance.total)}</div>
+                          <div className="font-semibold text-emerald-600 dark:text-emerald-300">
+                            {t('tablesDashboard.paid', { defaultValue: 'Paid' })} {formatCurrency(balance.paid)}
+                          </div>
+                        </div>
+                      </div>
+                      <div className={`mt-3 h-2 overflow-hidden rounded-full ${isDark ? 'bg-black/25' : 'bg-white/75'}`}>
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${visual.progressClass}`}
+                          style={{ width: `${paidPercent}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className={`mt-4 rounded-lg border px-3 py-3 ${isDark ? 'border-emerald-400/20 bg-emerald-400/10' : 'border-emerald-200 bg-white/70'}`}>
+                      <div className="flex items-center gap-2 text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                        <CheckCircle className="h-4 w-4" />
+                        {t('tablesDashboard.readyForGuests', { defaultValue: 'Ready for guests' })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className={`mt-4 flex flex-wrap items-center gap-2 text-xs ${textMuted}`}>
+                    {occupiedInfo ? (
+                      <span className="inline-flex items-center gap-1 rounded-lg border border-blue-400/20 bg-blue-500/10 px-2 py-1 font-semibold text-blue-700 dark:text-blue-200">
+                        <Clock3 className="h-3.5 w-3.5" />
+                        {occupiedInfo.since} · {occupiedInfo.duration}
+                      </span>
+                    ) : null}
+                    {table.currentOrderId ? (
+                      <span className="inline-flex max-w-full items-center gap-1 rounded-lg border border-slate-400/20 px-2 py-1">
+                        <ReceiptText className="h-3.5 w-3.5" />
+                        <span className="truncate">{String(table.currentOrderId).slice(0, 10)}</span>
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-2 gap-2">
+                    <span className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
+                      hasOpenCheck
+                        ? 'bg-blue-600 text-white group-hover:bg-blue-500'
+                        : 'bg-emerald-600 text-white group-hover:bg-emerald-500'
+                    }`}>
+                      {hasOpenCheck ? <WalletCards className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                      {hasOpenCheck
+                        ? t('tablesDashboard.openCheck', { defaultValue: 'Open check' })
+                        : t('tablesDashboard.newOrder', { defaultValue: 'New order' })}
+                    </span>
+                    <span className={`inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-bold ${
+                      isDark
+                        ? 'border-white/10 bg-white/[0.06] text-slate-200'
+                        : 'border-slate-200 bg-white/75 text-slate-700'
+                    }`}>
+                      {hasOpenCheck ? <Banknote className="h-4 w-4" /> : <ArrowRightLeft className="h-4 w-4" />}
+                      {hasOpenCheck
+                        ? t('tablesDashboard.pay', { defaultValue: 'Pay' })
+                        : t('tablesDashboard.assign', { defaultValue: 'Assign' })}
+                    </span>
                   </div>
                 </div>
-              </button>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
 
-      {/* Sidebar - Table Details or Reservation Info */}
       {selectedTable && (
         showReservationPanel ? (
           <ReservationInfoPanel
@@ -972,71 +1254,88 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
             onNavigateToMenu={onNavigateToMenu}
           />
         ) : (
-          <div className={`w-72 rounded-2xl p-4 ${isDark ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                {t('tablesDashboard.tableDetails', { defaultValue: 'Table' })} #{selectedTable.tableNumber}
-              </h3>
-              <button 
-                onClick={handleClosePanel} 
-                className={`${isDark ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-700'}`}
+          <div className={`w-80 shrink-0 rounded-xl border p-4 backdrop-blur-xl ${shellClass}`}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className={`text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+                  {floorLabel(getFloorValue(selectedTable))}
+                </p>
+                <h3 className={`truncate text-xl font-black ${textStrong}`}>
+                  {t('tablesDashboard.tableDetails', { defaultValue: 'Table' })} #{selectedTable.tableNumber}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={handleClosePanel}
+                className={`rounded-lg p-2 transition-colors ${
+                  isDark ? 'text-slate-300 hover:bg-white/[0.08] hover:text-white' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                }`}
+                aria-label={t('common.close', { defaultValue: 'Close' })}
               >
                 <XCircle className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="space-y-3">
-              <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
-                <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                  {t('tablesDashboard.status', { defaultValue: 'Status' })}
-                </div>
-                <div className={`font-medium text-${statusConfig[selectedTable.status].color}-500`}>
-                  {statusConfig[selectedTable.status].label}
-                </div>
-              </div>
-
-              <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
-                <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                  {t('tablesDashboard.capacity', { defaultValue: 'Capacity' })}
-                </div>
-                <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                  {selectedTable.capacity} {t('tablesDashboard.guests', { defaultValue: 'guests' })}
-                </div>
-              </div>
-
-              {selectedTable.currentOrderId && (
-                <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
-                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                    {t('tablesDashboard.currentOrder', { defaultValue: 'Current Order' })}
+            {(() => {
+              const visual = statusConfig[selectedTable.status] || statusConfig.available;
+              const balance = readBalance(selectedTable);
+              const occupiedInfo = formatOccupiedDuration(selectedTable.occupiedSince);
+              return (
+                <div className="mt-4 space-y-3">
+                  <div className={`rounded-xl border p-3 ${subtleClass}`}>
+                    <div className={`text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+                      {t('tablesDashboard.status', { defaultValue: 'Status' })}
+                    </div>
+                    <div className={`mt-1 inline-flex rounded-lg border px-2.5 py-1 text-sm font-bold ${visual.badgeClass}`}>
+                      {visual.label}
+                    </div>
                   </div>
-                  <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                    {selectedTable.currentOrderId}
+                  <div className={`rounded-xl border p-3 ${subtleClass}`}>
+                    <div className={`text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+                      {t('tablesDashboard.balance', { defaultValue: 'Balance' })}
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <div>
+                        <p className={`text-xs ${textMuted}`}>{t('tablesDashboard.due', { defaultValue: 'Due' })}</p>
+                        <p className="text-lg font-black text-amber-600 dark:text-amber-300">{formatCurrency(balance.due)}</p>
+                      </div>
+                      <div>
+                        <p className={`text-xs ${textMuted}`}>{t('tablesDashboard.paid', { defaultValue: 'Paid' })}</p>
+                        <p className="text-lg font-black text-emerald-600 dark:text-emerald-300">{formatCurrency(balance.paid)}</p>
+                      </div>
+                    </div>
                   </div>
+                  <div className={`rounded-xl border p-3 ${subtleClass}`}>
+                    <div className={`flex items-center justify-between gap-3 text-sm ${textMuted}`}>
+                      <span className="inline-flex items-center gap-1.5">
+                        <Users className="h-4 w-4" />
+                        {selectedTable.guestCount || selectedTable.capacity} / {selectedTable.capacity}
+                      </span>
+                      <span className="inline-flex min-w-0 items-center gap-1.5">
+                        <UserCheck className="h-4 w-4 shrink-0" />
+                        <span className="truncate">{selectedTable.currentWaiterName || t('tablesDashboard.unassigned', { defaultValue: 'Unassigned' })}</span>
+                      </span>
+                    </div>
+                    {occupiedInfo ? (
+                      <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-blue-400/20 bg-blue-500/10 px-2 py-1 text-xs font-semibold text-blue-700 dark:text-blue-200">
+                        <Clock3 className="h-3.5 w-3.5" />
+                        {occupiedInfo.since} · {occupiedInfo.duration}
+                      </div>
+                    ) : null}
+                  </div>
+                  {selectedTable.notes ? (
+                    <div className={`rounded-xl border p-3 ${subtleClass}`}>
+                      <div className={`text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+                        {t('tablesDashboard.notes', { defaultValue: 'Notes' })}
+                      </div>
+                      <div className={`mt-1 text-sm font-medium ${textStrong}`}>
+                        {selectedTable.notes}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-              )}
-
-              {selectedTable.notes && (
-                <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
-                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                    {t('tablesDashboard.notes', { defaultValue: 'Notes' })}
-                  </div>
-                  <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                    {selectedTable.notes}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="mt-4 space-y-2">
-              <button className="w-full py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors">
-                {t('tablesDashboard.viewOrder', { defaultValue: 'View Order' })}
-              </button>
-              <button className={`w-full py-2 rounded-lg transition-colors ${
-                isDark ? 'bg-gray-700 text-white hover:bg-gray-600' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}>
-                {t('tablesDashboard.changeStatus', { defaultValue: 'Change Status' })}
-              </button>
-            </div>
+              );
+            })()}
           </div>
         )
       )}

@@ -322,6 +322,15 @@ pub fn load_branch_window_payment_blockers(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           AND NOT (
+             LOWER(TRIM(COALESCE(o.order_type, ''))) IN ('dine-in', 'dine_in', 'table')
+             AND LOWER(TRIM(COALESCE(o.payment_status, ''))) = 'pending'
+             AND (
+               TRIM(COALESCE(o.table_number, '')) <> ''
+               OR TRIM(COALESCE(o.table_id, '')) <> ''
+               OR TRIM(COALESCE(o.table_session_id, '')) <> ''
+             )
+           )
          ORDER BY COALESCE(o.updated_at, o.created_at) ASC, o.id ASC",
         order_blocker_row_select()
     );
@@ -442,6 +451,38 @@ mod tests {
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].reason_code, "missing_local_payment_row");
         assert_eq!(blockers[0].order_number, "ORD-1");
+    }
+
+    #[test]
+    fn branch_window_blockers_ignore_open_pending_table_checks() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, order_type, table_number, payment_status, created_at, updated_at
+            ) VALUES (
+                'ord-table-open', 'ORD-TABLE-1', 'branch-1', '[]', 11.0, 1100,
+                'pending', 'dine-in', 'T1', 'pending',
+                '2026-03-26T16:53:37Z', '2026-03-26T17:19:54Z'
+            )",
+            [],
+        )
+        .unwrap();
+
+        let blockers = load_branch_window_payment_blockers(
+            &conn,
+            "branch-1",
+            "2026-03-26T00:00:00Z",
+            Some("2026-03-27T00:00:00Z"),
+            true,
+        )
+        .expect("branch blockers");
+
+        assert!(
+            blockers.is_empty(),
+            "open table checks should not show as missing checkout payments"
+        );
     }
 
     #[test]

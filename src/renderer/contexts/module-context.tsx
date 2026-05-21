@@ -230,6 +230,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   
   // Ref to track sync in progress (doesn't cause re-renders)
   const isSyncingRef = useRef(false);
+  const hasInitializedModulesRef = useRef(false);
   // Ref to store previous apiModules for comparison without causing re-renders.
   // (Used by the "removed modules" detector — compares previous API response
   // ids against the new ones — and is updated each cycle in
@@ -803,6 +804,11 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    * is fetched in the background.
    */
   useEffect(() => {
+    if (hasInitializedModulesRef.current) {
+      return;
+    }
+    hasInitializedModulesRef.current = true;
+
     let isMounted = true;
     
     // Step 1: Load cached modules immediately for instant UI (Requirement 5.2)

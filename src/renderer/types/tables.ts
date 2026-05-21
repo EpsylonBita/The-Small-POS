@@ -14,6 +14,9 @@ export interface RestaurantTable {
   branchId: string;
   tableNumber: number;
   capacity: number;
+  floorLevel?: number | null;
+  floorPlanId?: string | null;
+  section?: string | null;
   status: TableStatus;
   positionX: number | null;
   positionY: number | null;
@@ -23,7 +26,25 @@ export interface RestaurantTable {
   updatedAt: string;
   // Optional fields for runtime state
   currentOrderId?: string;
+  tableSessionId?: string | null;
+  guestCount?: number | null;
+  unpaidBalance?: number;
+  balance?: {
+    order_total?: number;
+    paid_total?: number;
+    tip_total?: number;
+    outstanding_balance?: number;
+    payment_status?: string | null;
+  } | null;
+  seatSummary?: Array<{
+    seat_number: number | null;
+    item_count: number;
+    quantity: number;
+  }>;
   serverId?: string;
+  currentWaiterId?: string | null;
+  currentWaiterName?: string | null;
+  customerName?: string | null;
   occupiedSince?: string;
 }
 
@@ -60,6 +81,9 @@ export interface TableAPIResponse {
   branch_id: string;
   table_number: number;
   capacity: number;
+  floor_level?: number | null;
+  floor_plan_id?: string | null;
+  section?: string | null;
   status: TableStatus;
   position_x: number | null;
   position_y: number | null;
@@ -67,6 +91,16 @@ export interface TableAPIResponse {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  current_order_id?: string | null;
+  table_session_id?: string | null;
+  guest_count?: number | null;
+  current_waiter_id?: string | null;
+  current_waiter_name?: string | null;
+  customer_name?: string | null;
+  occupied_since?: string | null;
+  unpaid_balance?: number | null;
+  balance?: RestaurantTable['balance'];
+  seat_summary?: RestaurantTable['seatSummary'];
 }
 
 // Transformation functions
@@ -77,6 +111,9 @@ export function transformTableFromAPI(apiTable: TableAPIResponse): RestaurantTab
     branchId: apiTable.branch_id,
     tableNumber: apiTable.table_number,
     capacity: apiTable.capacity,
+    floorLevel: apiTable.floor_level ?? null,
+    floorPlanId: apiTable.floor_plan_id ?? null,
+    section: apiTable.section ?? null,
     status: apiTable.status,
     positionX: apiTable.position_x,
     positionY: apiTable.position_y,
@@ -84,6 +121,16 @@ export function transformTableFromAPI(apiTable: TableAPIResponse): RestaurantTab
     notes: apiTable.notes,
     createdAt: apiTable.created_at,
     updatedAt: apiTable.updated_at,
+    currentOrderId: apiTable.current_order_id || undefined,
+    tableSessionId: apiTable.table_session_id || null,
+    guestCount: apiTable.guest_count ?? null,
+    currentWaiterId: apiTable.current_waiter_id || null,
+    currentWaiterName: apiTable.current_waiter_name || null,
+    customerName: apiTable.customer_name || null,
+    occupiedSince: apiTable.occupied_since || undefined,
+    unpaidBalance: Number(apiTable.unpaid_balance || apiTable.balance?.outstanding_balance || 0),
+    balance: apiTable.balance || null,
+    seatSummary: apiTable.seat_summary || [],
   };
 }
 

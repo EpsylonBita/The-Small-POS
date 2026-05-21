@@ -366,6 +366,9 @@ pub struct SyncState {
 struct RecurringSyncRecoverySummary {
     business_day_repairs: usize,
     z_report_business_date_repairs: usize,
+    missing_parent_order_insert_requeues: usize,
+    resolved_parent_wait_order_requeues: usize,
+    resolved_table_session_parent_requeues: usize,
     cashier_reference_requeues: usize,
     retryable_shift_requeues: usize,
     stale_in_progress_requeues: usize,
@@ -384,6 +387,9 @@ impl RecurringSyncRecoverySummary {
     fn total_actions(&self) -> usize {
         self.business_day_repairs
             + self.z_report_business_date_repairs
+            + self.missing_parent_order_insert_requeues
+            + self.resolved_parent_wait_order_requeues
+            + self.resolved_table_session_parent_requeues
             + self.cashier_reference_requeues
             + self.retryable_shift_requeues
             + self.stale_in_progress_requeues
@@ -1197,6 +1203,20 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         .unwrap_or_else(|| "dine-in".to_string());
     let table_number =
         str_field(payload, "tableNumber").or_else(|| str_field(payload, "table_number"));
+    let table_id = str_field(payload, "tableId").or_else(|| str_field(payload, "table_id"));
+    let table_session_id =
+        str_field(payload, "tableSessionId").or_else(|| str_field(payload, "table_session_id"));
+    let guest_count = payload
+        .get("guestCount")
+        .or_else(|| payload.get("guest_count"))
+        .and_then(|value| {
+            value.as_i64().or_else(|| {
+                value
+                    .as_str()
+                    .and_then(|raw| raw.trim().parse::<i64>().ok())
+            })
+        })
+        .map(|value| value.clamp(1, 99));
     let delivery_address =
         str_field(payload, "deliveryAddress").or_else(|| str_field(payload, "delivery_address"));
     let delivery_address_id = str_field(payload, "deliveryAddressId")
@@ -1362,8 +1382,9 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         "INSERT INTO orders (
             id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
             items, total_amount, tax_amount, subtotal, status,
-            order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
-            delivery_floor, delivery_notes, name_on_ringer, special_instructions,
+            order_type, table_number, table_id, table_session_id, guest_count,
+            delivery_address, delivery_city, delivery_postal_code, delivery_floor,
+            delivery_notes, name_on_ringer, special_instructions,
             created_at, updated_at, estimated_time, sync_status, payment_status,
             staff_shift_id, staff_id, driver_id, driver_name, discount_percentage,
             discount_amount, tip_amount, version, terminal_id, owner_terminal_id,
@@ -1376,12 +1397,13 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17,
             ?18, ?19, ?20, ?21,
-            ?22, ?23, ?24, 'pending', ?25,
-            ?26, ?27, ?28, ?29, ?30,
-            ?31, ?32, 1, ?33, ?34,
-            ?35, ?36, ?37, ?38,
-            ?39, ?40, ?41, ?42, ?43,
-            ?44, ?45, ?46, ?47, ?48
+            ?22, ?23, ?24,
+            ?25, ?26, ?27, 'pending', ?28,
+            ?29, ?30, ?31, ?32, ?33,
+            ?34, ?35, 1, ?36, ?37,
+            ?38, ?39, ?40, ?41,
+            ?42, ?43, ?44, ?45, ?46,
+            ?47, ?48, ?49, ?50, ?51
         )",
         params![
             &order_id,
@@ -1398,6 +1420,9 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &status,
             &order_type,
             &table_number,
+            &table_id,
+            &table_session_id,
+            &guest_count,
             &delivery_address,
             &delivery_city,
             &delivery_postal_code,
@@ -1536,6 +1561,22 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             obj.insert("deliveryZoneId".to_string(), Value::String(value.clone()));
             obj.insert("delivery_zone_id".to_string(), Value::String(value.clone()));
         }
+        if let Some(value) = table_number.as_ref() {
+            obj.insert("tableNumber".to_string(), Value::String(value.clone()));
+            obj.insert("table_number".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = table_id.as_ref() {
+            obj.insert("tableId".to_string(), Value::String(value.clone()));
+            obj.insert("table_id".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = table_session_id.as_ref() {
+            obj.insert("tableSessionId".to_string(), Value::String(value.clone()));
+            obj.insert("table_session_id".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = guest_count {
+            obj.insert("guestCount".to_string(), Value::from(value));
+            obj.insert("guest_count".to_string(), Value::from(value));
+        }
         // Ensure the Rust-generated order number is synced to admin
         if let Some(ref num) = order_number {
             obj.insert("orderNumber".to_string(), Value::String(num.clone()));
@@ -1637,13 +1678,19 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     drop(conn);
 
-    // Skip auto-print for ghost orders and pending/split payment orders.
+    // Skip auto-print for ghost orders, pending/split payment orders, and
+    // unpaid dine-in checks saved to a table.
     // Split payment receipts are printed after individual payments are recorded.
-    let skip_auto_print = is_ghost || payment_method.as_deref() == Some("pending");
+    let is_pending_table_order = order_type.eq_ignore_ascii_case("dine-in")
+        && persisted_payment_status.eq_ignore_ascii_case("pending")
+        && initial_payment_payload.is_none();
+    let skip_auto_print =
+        is_ghost || payment_method.as_deref() == Some("pending") || is_pending_table_order;
     info!(
         order_id = %order_id,
         payment_method = ?payment_method,
         is_ghost = %is_ghost,
+        is_pending_table_order = %is_pending_table_order,
         skip_auto_print = %skip_auto_print,
         "Auto-print decision for new order"
     );
@@ -1919,7 +1966,14 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name,
                     delivery_address_id, delivery_latitude, delivery_longitude,
                     delivery_address_fingerprint, delivery_zone_id,
-                    owner_terminal_id, source_terminal_id, client_request_id
+                    owner_terminal_id, source_terminal_id, client_request_id,
+                    table_id, table_session_id, guest_count,
+                    COALESCE((
+                        SELECT SUM(COALESCE(op.amount, 0))
+                        FROM order_payments op
+                        WHERE op.order_id = orders.id
+                          AND op.status = 'completed'
+                    ), 0)
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
              ORDER BY created_at ASC",
@@ -2026,6 +2080,14 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "client_request_id": row.get::<_, Option<String>>(57)?,
                 "clientOrderId": row.get::<_, Option<String>>(57)?,
                 "client_order_id": row.get::<_, Option<String>>(57)?,
+                "tableId": row.get::<_, Option<String>>(58)?,
+                "table_id": row.get::<_, Option<String>>(58)?,
+                "tableSessionId": row.get::<_, Option<String>>(59)?,
+                "table_session_id": row.get::<_, Option<String>>(59)?,
+                "guestCount": row.get::<_, Option<i64>>(60)?,
+                "guest_count": row.get::<_, Option<i64>>(60)?,
+                "paidTotal": row.get::<_, f64>(61)?,
+                "paid_total": row.get::<_, f64>(61)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -2096,7 +2158,14 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
                 delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name,
                 delivery_address_id, delivery_latitude, delivery_longitude,
-                delivery_address_fingerprint, delivery_zone_id, client_request_id
+                delivery_address_fingerprint, delivery_zone_id, client_request_id,
+                table_id, table_session_id, guest_count,
+                COALESCE((
+                    SELECT SUM(COALESCE(op.amount, 0))
+                    FROM order_payments op
+                    WHERE op.order_id = orders.id
+                      AND op.status = 'completed'
+                ), 0)
         FROM orders WHERE id = ?1",
         params![id],
         |row| {
@@ -2194,6 +2263,14 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 "client_request_id": row.get::<_, Option<String>>(55)?,
                 "clientOrderId": row.get::<_, Option<String>>(55)?,
                 "client_order_id": row.get::<_, Option<String>>(55)?,
+                "tableId": row.get::<_, Option<String>>(56)?,
+                "table_id": row.get::<_, Option<String>>(56)?,
+                "tableSessionId": row.get::<_, Option<String>>(57)?,
+                "table_session_id": row.get::<_, Option<String>>(57)?,
+                "guestCount": row.get::<_, Option<i64>>(58)?,
+                "guest_count": row.get::<_, Option<i64>>(58)?,
+                "paidTotal": row.get::<_, f64>(59)?,
+                "paid_total": row.get::<_, f64>(59)?,
             }))
         },
     );
@@ -2646,6 +2723,88 @@ fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
             warn!(
                 error = %error,
                 "Recurring sync recovery failed to repair retryable z-report business-date mismatches"
+            );
+        }
+    }
+
+    match db.conn.lock() {
+        Ok(conn) => {
+            match requeue_failed_order_insert_parent_blockers(&conn) {
+                Ok(requeued) => {
+                    summary.missing_parent_order_insert_requeues += requeued;
+                    if requeued > 0 {
+                        info!(
+                            requeued,
+                            "Recurring sync recovery requeued failed parent order INSERT rows"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Recurring sync recovery failed to requeue failed parent order INSERT rows"
+                    );
+                }
+            }
+
+            match requeue_missing_parent_order_insert_rows(&conn) {
+                Ok(recreated) => {
+                    summary.missing_parent_order_insert_requeues += recreated;
+                    if recreated > 0 {
+                        info!(
+                            recreated,
+                            "Recurring sync recovery recreated missing parent order INSERT rows"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Recurring sync recovery failed to recreate missing parent order INSERT rows"
+                    );
+                }
+            }
+
+            match requeue_resolved_order_update_parent_wait_rows(&conn) {
+                Ok(requeued) => {
+                    summary.resolved_parent_wait_order_requeues = requeued;
+                    if requeued > 0 {
+                        info!(
+                            requeued,
+                            "Recurring sync recovery requeued order updates whose parent order is now synced"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Recurring sync recovery failed to requeue resolved parent-wait order updates"
+                    );
+                }
+            }
+
+            match requeue_resolved_table_session_parent_wait_rows(&conn) {
+                Ok(requeued) => {
+                    summary.resolved_table_session_parent_requeues = requeued;
+                    if requeued > 0 {
+                        info!(
+                            requeued,
+                            "Recurring sync recovery requeued table sessions whose parent order is now synced"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Recurring sync recovery failed to requeue resolved table-session parent rows"
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Recurring sync recovery could not lock database for missing parent order INSERT repair"
             );
         }
     }
@@ -4074,6 +4233,14 @@ fn is_failed_order_insert_parent_blocker_sql() -> &'static str {
        AND (
          lower(error_message) LIKE '%failed to create order%'
          OR lower(error_message) LIKE '%customer not found in organization%'
+         OR (
+           lower(error_message) LIKE '%validation failed%'
+           AND lower(error_message) LIKE '%payment_method%'
+           AND (
+             lower(error_message) LIKE '%required%'
+             OR lower(error_message) LIKE '%received null%'
+           )
+         )
        )"
 }
 
@@ -4119,6 +4286,50 @@ pub(crate) fn requeue_order_update_replay_blockers(db: &DbState) -> Result<usize
         .map_err(|e| format!("requeue order update replay blockers: {e}"))
 }
 
+fn minimize_manual_order_update_replay_blockers(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET data = json_object(
+                 'orderId', record_id,
+                 'status', COALESCE(
+                   NULLIF(TRIM(COALESCE(json_extract(data, '$.status'), '')), ''),
+                   (SELECT NULLIF(TRIM(COALESCE(orders.status, '')), '')
+                    FROM orders
+                    WHERE orders.id = parity_sync_queue.record_id
+                    LIMIT 1),
+                   'pending'
+                 )
+             ),
+             status = 'pending',
+             attempts = 0,
+             last_attempt = NULL,
+             error_message = NULL,
+             next_retry_at = NULL,
+             retry_delay_ms = 1000,
+             claim_generation = claim_generation + 1
+         WHERE table_name = 'orders'
+           AND upper(operation) = 'UPDATE'
+           AND status IN ('pending', 'processing', 'failed', 'conflict')
+           AND error_message IS NOT NULL
+           AND lower(error_message) LIKE '%failed to update order%'
+           AND EXISTS (
+             SELECT 1
+             FROM orders
+             WHERE orders.id = parity_sync_queue.record_id
+               AND EXISTS (
+                 SELECT 1
+                 FROM json_each(orders.items) AS item
+                 WHERE COALESCE(
+                   NULLIF(TRIM(COALESCE(json_extract(item.value, '$.menu_item_id'), '')), ''),
+                   NULLIF(TRIM(COALESCE(json_extract(item.value, '$.menuItemId'), '')), '')
+                 ) IS NULL
+               )
+           )",
+        [],
+    )
+    .map_err(|e| format!("minimize manual order update replay blockers: {e}"))
+}
+
 fn requeue_failed_order_insert_parent_blockers(conn: &Connection) -> Result<usize, String> {
     let sql = format!(
         "UPDATE parity_sync_queue
@@ -4134,6 +4345,177 @@ fn requeue_failed_order_insert_parent_blockers(conn: &Connection) -> Result<usiz
     );
     conn.execute(sql.as_str(), [])
         .map_err(|e| format!("requeue failed order insert parent blockers: {e}"))
+}
+
+fn local_order_has_syncable_items(items_json: &str) -> bool {
+    serde_json::from_str::<Value>(items_json)
+        .ok()
+        .and_then(|value| value.as_array().map(|items| !items.is_empty()))
+        .unwrap_or(false)
+}
+
+fn non_empty_setting_or_storage(conn: &Connection, key: &str) -> Option<String> {
+    db::get_setting(conn, "terminal", key)
+        .or_else(|| storage::get_credential(key))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn requeue_missing_parent_order_insert_rows(conn: &Connection) -> Result<usize, String> {
+    let sql = format!(
+        "SELECT DISTINCT waiting.record_id,
+                waiting.organization_id,
+                COALESCE(orders.items, '[]'),
+                COALESCE(orders.branch_id, ''),
+                COALESCE(orders.terminal_id, '')
+         FROM (
+             SELECT record_id, organization_id
+             FROM parity_sync_queue
+             WHERE {}
+             UNION
+             SELECT COALESCE(
+                       NULLIF(TRIM(COALESCE(json_extract(data, '$.orderId'), '')), ''),
+                       NULLIF(TRIM(COALESCE(json_extract(data, '$.order_id'), '')), '')
+                    ) AS record_id,
+                    organization_id
+             FROM parity_sync_queue
+             WHERE table_name = 'payments'
+               AND upper(operation) = 'INSERT'
+               AND status IN ('pending', 'processing', 'failed', 'conflict')
+               AND error_message IS NOT NULL
+               AND lower(error_message) LIKE '%waiting for parent order sync%'
+             UNION
+             SELECT COALESCE(
+                       NULLIF(TRIM(COALESCE(json_extract(data, '$.active_order_client_id'), '')), ''),
+                       NULLIF(TRIM(COALESCE(json_extract(data, '$.client_order_id'), '')), ''),
+                       NULLIF(TRIM(COALESCE(json_extract(data, '$.order_id'), '')), ''),
+                       NULLIF(TRIM(COALESCE(json_extract(data, '$.active_order_id'), '')), '')
+                    ) AS record_id,
+                    organization_id
+             FROM parity_sync_queue
+             WHERE table_name = 'restaurant_table_sessions'
+               AND upper(operation) = 'INSERT'
+               AND status IN ('pending', 'processing', 'failed', 'conflict')
+               AND error_message IS NOT NULL
+               AND lower(error_message) LIKE '%parent order sync%'
+         ) waiting
+         JOIN orders ON orders.id = waiting.record_id
+         WHERE waiting.record_id IS NOT NULL
+           AND NULLIF(TRIM(COALESCE(orders.supabase_id, '')), '') IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM parity_sync_queue parent
+             WHERE parent.table_name = 'orders'
+               AND upper(parent.operation) = 'INSERT'
+               AND parent.record_id = waiting.record_id
+               AND parent.status IN ('pending', 'processing', 'failed', 'conflict')
+           )
+         ORDER BY waiting.record_id",
+        is_order_update_parent_wait_sql()
+    );
+
+    let candidates: Vec<(String, String, String, String, String)> = {
+        let mut stmt = conn
+            .prepare(sql.as_str())
+            .map_err(|e| format!("prepare missing parent order insert rows: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| format!("query missing parent order insert rows: {e}"))?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            candidates.push(row.map_err(|e| format!("read missing parent order insert row: {e}"))?);
+        }
+        candidates
+    };
+
+    let terminal_setting = non_empty_setting_or_storage(conn, "terminal_id");
+    let branch_setting = non_empty_setting_or_storage(conn, "branch_id");
+    let org_setting = non_empty_setting_or_storage(conn, "organization_id");
+    let mut recreated = 0usize;
+
+    for (order_id, queue_org_id, items_json, order_branch_id, order_terminal_id) in candidates {
+        if !local_order_has_syncable_items(items_json.as_str()) {
+            warn!(
+                order_id = %order_id,
+                "Skipping missing parent order INSERT recreation because the local order has no syncable items"
+            );
+            continue;
+        }
+
+        let organization_id = Some(queue_org_id.trim().to_string())
+            .filter(|value| !value.is_empty() && value != "pending-org")
+            .or_else(|| org_setting.clone())
+            .unwrap_or_else(|| "pending-org".to_string());
+        let branch_id = Some(order_branch_id.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| branch_setting.clone());
+        let terminal_id = Some(order_terminal_id.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| terminal_setting.clone());
+
+        let mut payload = Map::new();
+        payload.insert(
+            "syncRecoveryReason".to_string(),
+            Value::String("missing_parent_order_insert_recreated".to_string()),
+        );
+        payload.insert(
+            "organization_id".to_string(),
+            Value::String(organization_id.clone()),
+        );
+        if let Some(branch_id) = branch_id {
+            payload.insert("branch_id".to_string(), Value::String(branch_id));
+        }
+        if let Some(terminal_id) = terminal_id {
+            payload.insert("terminal_id".to_string(), Value::String(terminal_id));
+        }
+
+        match sync_queue::enqueue(
+            conn,
+            &sync_queue::EnqueueInput {
+                table_name: "orders".to_string(),
+                record_id: order_id.clone(),
+                operation: "INSERT".to_string(),
+                data: Value::Object(payload).to_string(),
+                organization_id,
+                priority: Some(10),
+                module_type: Some("orders".to_string()),
+                conflict_strategy: Some("server-wins".to_string()),
+                version: Some(1),
+            },
+        ) {
+            Ok(queue_id) => {
+                recreated += 1;
+                info!(
+                    order_id = %order_id,
+                    queue_id = %queue_id,
+                    "Recreated missing parent order INSERT queue row for parent-wait order updates"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    order_id = %order_id,
+                    error = %error,
+                    "Failed to recreate missing parent order INSERT queue row"
+                );
+            }
+        }
+    }
+
+    Ok(recreated)
+}
+
+fn requeue_or_recreate_parent_order_inserts(conn: &Connection) -> Result<usize, String> {
+    let requeued = requeue_failed_order_insert_parent_blockers(conn)?;
+    let recreated = requeue_missing_parent_order_insert_rows(conn)?;
+    Ok(requeued + recreated)
 }
 
 fn count_failed_order_insert_parent_blockers(
@@ -4177,8 +4559,17 @@ fn count_order_update_parent_wait_blockers(
 ) -> Result<(usize, Option<String>), String> {
     let sql = format!(
         "SELECT COUNT(*), MAX(error_message)
-         FROM parity_sync_queue
-         WHERE {}",
+         FROM parity_sync_queue child
+         WHERE {}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM parity_sync_queue parent
+             WHERE parent.table_name = 'orders'
+               AND upper(parent.operation) = 'INSERT'
+               AND parent.record_id = child.record_id
+               AND parent.status IN ('pending', 'processing')
+               AND parent.error_message IS NULL
+           )",
         is_order_update_parent_wait_sql()
     );
     conn.query_row(sql.as_str(), [], |row| {
@@ -4235,6 +4626,43 @@ fn requeue_resolved_order_update_parent_wait_rows(conn: &Connection) -> Result<u
     );
     conn.execute(sql.as_str(), [])
         .map_err(|e| format!("requeue resolved order update parent wait rows: {e}"))
+}
+
+fn requeue_resolved_table_session_parent_wait_rows(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             attempts = 0,
+             last_attempt = NULL,
+             error_message = NULL,
+             next_retry_at = NULL,
+             retry_delay_ms = 1000,
+             priority = CASE WHEN priority < 5 THEN 5 ELSE priority END,
+             claim_generation = claim_generation + 1
+         WHERE table_name = 'restaurant_table_sessions'
+           AND upper(operation) = 'INSERT'
+           AND status IN ('pending', 'failed', 'conflict')
+           AND (
+             priority < 5
+             OR (
+               error_message IS NOT NULL
+               AND lower(error_message) LIKE '%parent order sync%'
+             )
+           )
+           AND EXISTS (
+             SELECT 1
+             FROM orders
+             WHERE orders.id = COALESCE(
+               NULLIF(TRIM(COALESCE(json_extract(parity_sync_queue.data, '$.active_order_client_id'), '')), ''),
+               NULLIF(TRIM(COALESCE(json_extract(parity_sync_queue.data, '$.client_order_id'), '')), ''),
+               NULLIF(TRIM(COALESCE(json_extract(parity_sync_queue.data, '$.order_id'), '')), ''),
+               NULLIF(TRIM(COALESCE(json_extract(parity_sync_queue.data, '$.active_order_id'), '')), '')
+             )
+             AND NULLIF(TRIM(COALESCE(orders.supabase_id, '')), '') IS NOT NULL
+           )",
+        [],
+    )
+    .map_err(|e| format!("requeue resolved table session parent wait rows: {e}"))
 }
 
 fn infer_repaired_order_update_status(payload: &Value, remote_order: &Value) -> String {
@@ -4550,7 +4978,7 @@ pub(crate) async fn repair_order_update_replay_blockers(
 ) -> Result<OrderUpdateReplayRepairStats, String> {
     let requeued_parent_order_inserts = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        requeue_failed_order_insert_parent_blockers(&conn)?
+        requeue_or_recreate_parent_order_inserts(&conn)?
     };
     let parent_insert_pass = if requeued_parent_order_inserts > 0 {
         Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
@@ -4559,6 +4987,16 @@ pub(crate) async fn repair_order_update_replay_blockers(
     };
     let (repaired_parent_orders, requeued_parent_wait_orders, quarantined_stale_parent_wait_orders) =
         repair_order_update_parent_wait_blockers(db, admin_url, api_key).await?;
+    let minimized_manual_update_replays = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        minimize_manual_order_update_replay_blockers(&conn)?
+    };
+    if minimized_manual_update_replays > 0 {
+        info!(
+            count = minimized_manual_update_replays,
+            "Minimized manual-item order update replay blockers for legacy admin compatibility"
+        );
+    }
     let requeued_orders = requeue_order_update_replay_blockers(db)?;
     let first_pass = sync_queue::process_queue(&db.conn, admin_url, api_key).await?;
     let promoted_payments = reconcile_deferred_payments(db)?;
@@ -6616,6 +7054,15 @@ pub(crate) fn mark_local_payment_applied(
         .map_err(|e| format!("savepoint mark_local_payment_applied: {e}"))?;
 
     let result = (|| -> Result<(), String> {
+        let order_id: Option<String> = conn
+            .query_row(
+                "SELECT order_id FROM order_payments WHERE id = ?1 LIMIT 1",
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("load payment order for apply: {e}"))?;
+
         conn.execute(
             "UPDATE order_payments
              SET sync_status = 'synced',
@@ -6630,7 +7077,12 @@ pub(crate) fn mark_local_payment_applied(
         )
         .map_err(|e| format!("mark local payment applied: {e}"))?;
 
-        mark_payment_queue_row_synced(conn, payment_id, synced_at)
+        mark_payment_queue_row_synced(conn, payment_id, synced_at)?;
+        if let Some(order_id) = order_id {
+            recompute_local_order_payment_snapshot(conn, &order_id, synced_at)?;
+        }
+
+        Ok(())
     })();
 
     match result {
@@ -7826,11 +8278,50 @@ fn defer_payment_total_conflict_while_parent_order_lags_with_conn(
         (other_completed_cents + payment_amount_cents - local_total_cents).abs() <= 1;
     let server_existing_matches_local_base =
         (other_completed_cents - server_existing_cents).abs() <= 1;
+    let local_outstanding_cents = (local_total_cents - other_completed_cents).max(0);
+    let payment_fits_local_outstanding = payment_amount_cents <= local_outstanding_cents + 1;
 
-    if !(payment_matches_local_delta
+    let local_total_is_backed_by_items = conn
+        .query_row(
+            "SELECT COALESCE(items, '[]'),
+                    COALESCE(delivery_fee_cents, CAST(ROUND(delivery_fee * 100) AS INTEGER), 0),
+                    COALESCE(discount_amount_cents, CAST(ROUND(discount_amount * 100) AS INTEGER), 0),
+                    COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
+                    COALESCE(tax_amount_cents, CAST(ROUND(tax_amount * 100) AS INTEGER), 0)
+             FROM orders
+             WHERE id = ?1
+             LIMIT 1",
+            params![payment_context.order_id.as_str()],
+            |row| {
+                let items_json: String = row.get(0)?;
+                let delivery_fee_cents: i64 = row.get(1)?;
+                let discount_amount_cents: i64 = row.get(2)?;
+                let tip_amount_cents: i64 = row.get(3)?;
+                let tax_amount_cents: i64 = row.get(4)?;
+                let reconstructed_without_tax = order_items_gross_total_cents(&items_json)
+                    .map(|items_total| {
+                        (items_total + delivery_fee_cents + tip_amount_cents
+                            - discount_amount_cents)
+                            .max(0)
+                    })
+                    .unwrap_or(0);
+                let reconstructed_with_tax =
+                    (reconstructed_without_tax + tax_amount_cents).max(0);
+                Ok(reconstructed_without_tax > 0
+                    && ((local_total_cents - reconstructed_without_tax).abs() <= 1
+                        || (local_total_cents - reconstructed_with_tax).abs() <= 1))
+            },
+        )
+        .unwrap_or(false);
+
+    let full_delta_payment_waits_for_parent = payment_matches_local_delta
         && payment_fills_local_total
-        && server_existing_matches_local_base)
-    {
+        && server_existing_matches_local_base;
+    let partial_payment_waits_for_item_backed_parent = local_total_is_backed_by_items
+        && server_existing_matches_local_base
+        && payment_fits_local_outstanding;
+
+    if !(full_delta_payment_waits_for_parent || partial_payment_waits_for_item_backed_parent) {
         return Ok(None);
     }
 
@@ -7945,6 +8436,23 @@ fn recompute_local_order_payment_snapshot(
     };
 
     payments::recompute_order_payment_state(conn, order_id, now, &payment_id)
+}
+
+fn local_order_has_completed_payment_rows(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'
+         )",
+        params![order_id],
+        |row| row.get::<_, i64>(0).map(|value| value != 0),
+    )
+    .map_err(|e| format!("check local completed payment rows: {e}"))
 }
 
 fn hydrate_local_payment_from_remote(
@@ -8849,6 +9357,21 @@ async fn reconcile_remote_orders(
                             )
                             .unwrap_or(0);
                         if updated > 0 {
+                            if local_order_has_completed_payment_rows(&conn, &local_id)
+                                .unwrap_or(false)
+                            {
+                                if let Err(error) = recompute_local_order_payment_snapshot(
+                                    &conn,
+                                    &local_id,
+                                    updated_at.as_str(),
+                                ) {
+                                    warn!(
+                                        order_id = %local_id,
+                                        error = %error,
+                                        "Failed to re-derive local payment status after remote order snapshot"
+                                    );
+                                }
+                            }
                             reconciled += 1;
                             let status_changed = previous_status
                                 .as_deref()
@@ -9869,7 +10392,7 @@ fn sync_remote_order_snapshot_into_local(
     // The CAST(ROUND(?N * 100) AS INTEGER) is NULL when ?N is NULL, so
     // the outer COALESCE keeps the existing cents value when no new
     // REAL is provided.
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE orders
          SET supabase_id = COALESCE(?1, supabase_id),
              order_number = COALESCE(?2, order_number),
@@ -9974,14 +10497,18 @@ fn sync_remote_order_snapshot_into_local(
             local_order_id,
         ],
     )
-    .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))
-    .inspect(|_rows| {
-        // W6: inbound remote `payment_method` is consumed by sync
-        // payload construction upstream but is no longer persisted
-        // locally (column dropped in v55). Derived per read via
-        // `derive_payment_method`.
-        let _ = &payment_method;
-    })
+    .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))?;
+
+    // W6: inbound remote `payment_method` is consumed by sync payload
+    // construction upstream but is no longer persisted locally (column
+    // dropped in v55). Derived per read via `derive_payment_method`.
+    let _ = &payment_method;
+
+    if updated > 0 && local_order_has_completed_payment_rows(conn, local_order_id)? {
+        recompute_local_order_payment_snapshot(conn, local_order_id, updated_at.as_str())?;
+    }
+
+    Ok(updated)
 }
 
 fn extract_remote_orders_from_response(response: &Value) -> Vec<Value> {
@@ -12011,15 +12538,22 @@ fn build_normalized_order_operation(
             }
         })
         .filter(|id| Uuid::parse_str(id).is_ok());
-    let table_number = i64_any(source, &["tableNumber", "table_number"])
-        .or_else(|| i64_any(&payload_data, &["tableNumber", "table_number"]))
+    let table_number = str_any(source, &["tableNumber", "table_number"])
+        .or_else(|| str_any(&payload_data, &["tableNumber", "table_number"]))
         .or_else(|| {
-            str_any(source, &["tableNumber", "table_number"]).and_then(|s| s.parse::<i64>().ok())
-        })
-        .or_else(|| {
-            str_any(&payload_data, &["tableNumber", "table_number"])
-                .and_then(|s| s.parse::<i64>().ok())
+            i64_any(source, &["tableNumber", "table_number"])
+                .or_else(|| i64_any(&payload_data, &["tableNumber", "table_number"]))
+                .map(|value| value.to_string())
         });
+    let table_id = str_any(source, &["tableId", "table_id"])
+        .or_else(|| str_any(&payload_data, &["tableId", "table_id"]))
+        .filter(|id| Uuid::parse_str(id).is_ok());
+    let table_session_id = str_any(source, &["tableSessionId", "table_session_id"])
+        .or_else(|| str_any(&payload_data, &["tableSessionId", "table_session_id"]))
+        .filter(|id| Uuid::parse_str(id).is_ok());
+    let guest_count = i64_any(source, &["guestCount", "guest_count"])
+        .or_else(|| i64_any(&payload_data, &["guestCount", "guest_count"]))
+        .map(|value| value.clamp(1, 99));
     let estimated_ready_time = i64_any(source, &["estimatedTime", "estimated_time"])
         .or_else(|| i64_any(&payload_data, &["estimatedTime", "estimated_time"]));
     let driver_id = str_any(source, &["driverId", "driver_id"])
@@ -12110,6 +12644,9 @@ fn build_normalized_order_operation(
         "delivery_notes": str_any(source, &["deliveryNotes", "delivery_notes"]).or_else(|| str_any(&payload_data, &["deliveryNotes", "delivery_notes"])),
         "name_on_ringer": str_any(source, &["nameOnRinger", "name_on_ringer"]).or_else(|| str_any(&payload_data, &["nameOnRinger", "name_on_ringer"])),
         "table_number": table_number,
+        "table_id": table_id,
+        "table_session_id": table_session_id,
+        "guest_count": guest_count,
         "estimated_ready_time": estimated_ready_time,
         "driver_id": driver_id,
         "created_at": str_any(source, &["createdAt", "created_at"]).or_else(|| str_any(&payload_data, &["createdAt", "created_at"])),
@@ -12145,6 +12682,10 @@ fn copy_order_update_payload_fields(payload_value: &Value, body: &mut Value) {
         ("deliveryLongitude", "delivery_longitude"),
         ("deliveryAddressFingerprint", "delivery_address_fingerprint"),
         ("deliveryZoneId", "delivery_zone_id"),
+        ("tableNumber", "table_number"),
+        ("tableId", "table_id"),
+        ("tableSessionId", "table_session_id"),
+        ("guestCount", "guest_count"),
         ("cancellationReason", "cancellation_reason"),
     ] {
         let value = payload_value
@@ -14342,6 +14883,17 @@ async fn sync_payment_items(
             .get("paymentOrigin")
             .or_else(|| data.get("payment_origin"))
             .and_then(Value::as_str);
+        let table_session_id = data
+            .get("table_session_id")
+            .or_else(|| data.get("tableSessionId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let seat_number = data
+            .get("seat_number")
+            .or_else(|| data.get("seatNumber"))
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0);
 
         // Build the POST body for /api/pos/payments.
         // W4d-i: emit BOTH `amount`/`tip_amount` (legacy float, what the
@@ -14365,6 +14917,12 @@ async fn sync_payment_items(
         }
         if let Some(currency) = currency {
             body["currency"] = Value::String(currency.to_string());
+        }
+        if let Some(table_session_id) = table_session_id {
+            body["table_session_id"] = Value::String(table_session_id.to_string());
+        }
+        if let Some(seat_number) = seat_number {
+            body["seat_number"] = serde_json::json!(seat_number);
         }
         // Include terminal_id as metadata for traceability
         body["metadata"] = serde_json::json!({
@@ -19630,6 +20188,89 @@ mod tests {
     }
 
     #[test]
+    fn test_payment_total_conflict_defers_item_backed_table_partial_payment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let items = serde_json::json!([
+            {
+                "id": "manual-table-item",
+                "name": "Manual Item",
+                "quantity": 2,
+                "unit_price": 11.0,
+                "total_price": 22.0
+            }
+        ])
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, order_number, items, total_amount, total_amount_cents,
+                subtotal, subtotal_cents, tax_amount, tax_amount_cents,
+                status, payment_status, order_type, sync_status, created_at, updated_at
+            ) VALUES (
+                'ord-table-lagged-partial', 'remote-table-lagged-partial', 'ORD-TABLE-LAG',
+                ?1, 22.0, 2200, 22.0, 2200, 0.0, 0,
+                'completed', 'partially_paid', 'dine-in', 'synced', datetime('now'), datetime('now')
+            )",
+            params![items],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-table-base', 'ord-table-lagged-partial', 'cash', 11.0, 1100, 'EUR', 'completed',
+                'remote-pay-table-base', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                sync_status, sync_state, sync_last_error, created_at, updated_at
+            ) VALUES (
+                'pay-table-extra-partial', 'ord-table-lagged-partial', 'cash', 2.0, 200, 'EUR', 'completed',
+                'failed', 'failed', 'Payment exceeds order total', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+
+        let resolution = resolve_payment_total_conflict_with_server_hint_with_conn(
+            &conn,
+            "pay-table-extra-partial",
+            "HTTP 422: {\"success\":false,\"error\":\"Payment exceeds order total\",\"details\":\"Order total: 11, tip: 0, existing completed: 11, payment: 2\"}",
+            "2026-05-21T08:25:00Z",
+        )
+        .expect("server hint conflict resolver should not fail");
+
+        assert!(
+            resolution.is_none(),
+            "item-backed local table total should defer the payment instead of voiding it"
+        );
+
+        let (payment_status, sync_status, sync_state): (String, String, String) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = 'pay-table-extra-partial'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_status, "completed");
+        assert_eq!(sync_status, "pending");
+        assert_eq!(sync_state, "waiting_parent");
+
+        assert!(has_outstanding_local_order_queue(
+            &conn,
+            "ord-table-lagged-partial"
+        ));
+    }
+
+    #[test]
     fn test_payment_total_conflict_defers_when_remote_order_total_lags_local_delivery_delta() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -22794,6 +23435,46 @@ mod tests {
     }
 
     #[test]
+    fn test_run_recurring_sync_recovery_requeues_failed_table_parent_inserts() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-recurring-table-parent-payment-required', 'orders', 'ord-recurring-table-parent', 'INSERT',
+                 '{\"orderId\":\"ord-recurring-table-parent\",\"orderType\":\"dine-in\",\"paymentStatus\":\"pending\",\"paymentMethod\":null}',
+                 'org-test', datetime('now'), 1, 60000, 1, 'orders',
+                 'server-wins', 1, 'failed',
+                 'HTTP 400: {\"success\":false,\"error\":\"Validation failed\",\"details\":[{\"field\":\"payment_method\",\"message\":\"Required\"}]}'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let summary = run_recurring_sync_recovery(&db);
+        assert_eq!(summary.missing_parent_order_insert_requeues, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (status, attempts, error_message): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-recurring-table-parent-payment-required'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert!(error_message.is_none());
+    }
+
+    #[test]
     fn test_requeue_stale_in_progress_sync_rows_requeues_abandoned_rows() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -24179,6 +24860,63 @@ mod tests {
     }
 
     #[test]
+    fn manual_order_update_replay_blockers_are_minimized_before_retry() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents,
+                 status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-manual-replay', 'ORD-MANUAL-REPLAY',
+                 '[{\"menu_item_id\":null,\"name\":\"Manual item\",\"quantity\":2,\"unit_price\":11,\"total_price\":22}]',
+                 22.0, 2200, 'pending', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-manual-order-replay', 'orders', 'ord-manual-replay', 'UPDATE',
+                 '{\"orderId\":\"ord-manual-replay\",\"status\":\"pending\",\"totalAmount\":22,\"subtotal\":22,\"items\":[{\"menu_item_id\":null,\"quantity\":2,\"unit_price\":11}]}',
+                 'org-test', datetime('now'), 7, 60000, 1, 'orders', 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to update order\"}'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let minimized = minimize_manual_order_update_replay_blockers(&conn).unwrap();
+        assert_eq!(minimized, 1);
+
+        let (status, attempts, error, data): (String, i64, Option<String>, String) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, data
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-manual-order-replay'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&data).unwrap();
+
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert!(error.is_none());
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "orderId": "ord-manual-replay",
+                "status": "pending"
+            })
+        );
+    }
+
+    #[test]
     fn failed_order_insert_parent_blockers_are_requeued_before_child_repairs() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -24235,6 +24973,83 @@ mod tests {
         assert_eq!(insert_attempts, 0);
         assert!(insert_error.is_none());
         assert_eq!(update_status, "conflict");
+    }
+
+    #[test]
+    fn failed_table_order_insert_payment_method_validation_is_requeued_as_parent_blocker() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-table-order-insert-payment-required', 'orders', 'ord-table-parent', 'INSERT',
+                 '{\"orderId\":\"ord-table-parent\",\"orderType\":\"dine-in\",\"paymentStatus\":\"pending\",\"paymentMethod\":null}',
+                 'org-test', datetime('now'), 1, 60000, 1, 'orders',
+                 'server-wins', 1, 'failed',
+                 'HTTP 400: {\"success\":false,\"error\":\"Validation failed\",\"details\":[{\"field\":\"payment_method\",\"message\":\"Required\"}]}'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let requeued = requeue_failed_order_insert_parent_blockers(&conn).unwrap();
+        assert_eq!(requeued, 1);
+
+        let (status, attempts, error_message): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-table-order-insert-payment-required'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert!(error_message.is_none());
+    }
+
+    #[test]
+    fn parent_wait_blocker_count_ignores_children_while_parent_insert_is_pending() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-parent-insert-now-pending', 'orders', 'ord-parent-pending', 'INSERT',
+                 '{\"orderId\":\"ord-parent-pending\",\"orderType\":\"dine-in\",\"paymentStatus\":\"pending\",\"paymentMethod\":null}',
+                 'org-test', datetime('now'), 0, 1000, 1, 'orders',
+                 'server-wins', 1, 'pending', NULL
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-child-waits-parent-pending', 'orders', 'ord-parent-pending', 'UPDATE',
+                 '{\"orderId\":\"ord-parent-pending\",\"status\":\"pending\"}',
+                 'org-test', datetime('now'), 50, 60000, 1, 'orders',
+                 'server-wins', 1, 'conflict',
+                 'Deferred too many times (50x \"Waiting for parent order sync\"); escalated to conflict'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let (count, last_error) = count_order_update_parent_wait_blockers(&conn).unwrap();
+        assert_eq!(count, 0);
+        assert!(last_error.is_none());
     }
 
     #[test]
@@ -24659,6 +25474,102 @@ mod tests {
 
         assert_eq!(queue_rows, 1);
         assert_eq!(audit_rows, 0);
+    }
+
+    #[test]
+    fn missing_parent_order_insert_repair_recreates_parent_from_local_order_once() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "organization_id", "org-test").expect("set org setting");
+        db::set_setting(
+            &conn,
+            "terminal",
+            "branch_id",
+            "11111111-1111-4111-8111-111111111111",
+        )
+        .expect("set branch setting");
+        db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
+            .expect("set terminal setting");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents,
+                 status, payment_status, order_type, branch_id, terminal_id,
+                 sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-missing-parent-insert', 'ORD-MISSING-PARENT',
+                 '[{\"name\":\"Water\",\"quantity\":1,\"price\":2.5,\"total_price\":2.5}]',
+                 2.5, 250, 'pending', 'pending', 'dine-in',
+                 '11111111-1111-4111-8111-111111111111', 'terminal-test',
+                 'pending', '2026-05-20T18:00:00Z', '2026-05-20T18:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message, next_retry_at
+             ) VALUES (
+                 'queue-child-parent-wait', 'orders', 'ord-missing-parent-insert', 'UPDATE',
+                 '{\"orderId\":\"ord-missing-parent-insert\",\"status\":\"pending\",\"totalAmount\":2.5}',
+                 'org-test', datetime('now'), 3, 60000, 1, 'orders',
+                 'server-wins', 1, 'conflict',
+                 'Deferred too many times (50× \"Waiting for parent order sync\"); escalated to conflict',
+                 '2026-05-20T18:05:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let recreated = requeue_missing_parent_order_insert_rows(&conn)
+            .expect("recreate missing parent insert");
+        let recreated_again = requeue_missing_parent_order_insert_rows(&conn)
+            .expect("do not duplicate parent insert");
+
+        assert_eq!(recreated, 1);
+        assert_eq!(recreated_again, 0);
+
+        let (parent_count, parent_operation, parent_status, parent_priority, payload_raw): (
+            i64,
+            String,
+            String,
+            i64,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT
+                    COUNT(*),
+                    COALESCE(MAX(operation), ''),
+                    COALESCE(MAX(status), ''),
+                    COALESCE(MAX(priority), 0),
+                    COALESCE(MAX(data), '{}')
+                 FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'ord-missing-parent-insert'
+                   AND operation = 'INSERT'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&payload_raw).expect("parse parent payload");
+
+        assert_eq!(parent_count, 1);
+        assert_eq!(parent_operation, "INSERT");
+        assert_eq!(parent_status, "pending");
+        assert_eq!(parent_priority, 10);
+        assert_eq!(
+            payload.get("syncRecoveryReason").and_then(Value::as_str),
+            Some("missing_parent_order_insert_recreated")
+        );
     }
 
     #[test]
@@ -25250,6 +26161,133 @@ mod tests {
         assert_eq!(module_type, "payment");
         assert_eq!(parsed["paymentId"], "pay-pr0");
         assert_eq!(parsed["orderId"], "ord-pr0-pay");
+    }
+
+    #[test]
+    fn payment_sync_body_forwards_table_service_metadata_and_cents() {
+        let db = test_db();
+        let now = "2026-05-21T07:26:26Z";
+        let payload = serde_json::json!({
+            "paymentId": "pay-table-sync",
+            "orderId": "ord-table-sync",
+            "method": "cash",
+            "amount": 11.0,
+            "amount_cents": 1100,
+            "tipAmount": 2.5,
+            "tip_amount_cents": 250,
+            "tableSessionId": "session-table-sync",
+            "table_session_id": "session-table-sync",
+            "seatNumber": 2,
+            "seat_number": 2
+        })
+        .to_string();
+
+        let queue_id = {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, order_number, items, total_amount, total_amount_cents,
+                     status, payment_status, sync_status, created_at, updated_at
+                 ) VALUES (
+                     'ord-table-sync', 'remote-ord-table-sync', 'ORD-TABLE-SYNC', '[]', 22.0, 2200,
+                     'pending', 'partially_paid', 'synced', ?1, ?1
+                 )",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (
+                     id, order_id, method, amount, amount_cents, status,
+                     sync_status, sync_state, created_at, updated_at
+                 ) VALUES (
+                     'pay-table-sync', 'ord-table-sync', 'cash', 11.0, 1100, 'completed',
+                     'pending', 'pending', ?1, ?1
+                 )",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (
+                     entity_type, entity_id, operation, payload, idempotency_key, status,
+                     created_at, updated_at
+                 ) VALUES (
+                     'payment', 'pay-table-sync', 'insert', ?1, 'payment:pay-table-sync', 'pending',
+                     ?2, ?2
+                 )",
+                params![payload, now],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+
+        let (mock_url, server_handle) = spawn_single_json_response_server(
+            r#"{"success":true,"payment_id":"remote-pay-table-sync"}"#.to_string(),
+            |request| {
+                assert!(request.starts_with("POST /api/pos/payments HTTP/1.1"));
+                assert!(request.contains(r#""amount_cents":1100"#));
+                assert!(request.contains(r#""tip_amount_cents":250"#));
+                assert!(request.contains(r#""table_session_id":"session-table-sync""#));
+                assert!(request.contains(r#""seat_number":2"#));
+            },
+        );
+        let item = load_sync_item(&db, queue_id);
+        let items = vec![&item];
+        let api_key = r#"{"key":"test-key","tid":"term-table-sync"}"#;
+        let synced = tauri::async_runtime::block_on(sync_payment_items(
+            &mock_url,
+            api_key,
+            "term-table-sync",
+            &db,
+            &items,
+        ));
+        assert_eq!(synced, 1);
+        server_handle.join().expect("join mock server");
+    }
+
+    #[test]
+    fn mark_local_payment_applied_recomputes_partial_order_status() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, payment_status,
+                 sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-applied-partial', '[]', 22.0, 2200, 'pending', 'paid',
+                 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'pay-applied-partial', 'ord-applied-partial', 'cash', 11.0, 1100, 'completed',
+                 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        mark_local_payment_applied(
+            &conn,
+            "pay-applied-partial",
+            "2026-05-21T07:27:05Z",
+            Some("remote-pay-applied-partial"),
+        )
+        .expect("mark payment applied");
+
+        let payment_status: String = conn
+            .query_row(
+                "SELECT payment_status FROM orders WHERE id = 'ord-applied-partial'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(payment_status, "partially_paid");
     }
 
     // Wave 5 Session 7 PR 2: the adjustment dual-queue test was

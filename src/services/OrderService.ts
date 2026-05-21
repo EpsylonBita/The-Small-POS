@@ -20,6 +20,7 @@ import {
   updateTerminalCredentialCache,
 } from '../renderer/services/terminal-credentials';
 import { getSyncQueueBridge } from '../renderer/services/SyncQueueBridge';
+import { buildOrderServiceTableMetadata } from '../renderer/utils/tableOrderFlow';
 import { resolvePersistedCustomerId } from '../renderer/utils/persisted-customer-id';
 
 // Utility functions - now using centralized debug logger
@@ -251,6 +252,7 @@ export class OrderService {
       (orderData.orderNumber as string | undefined) ||
       orderData.order_number ||
       generatedOrderNumber;
+    const tableMetadata = buildOrderServiceTableMetadata(orderData as any);
 
     return {
       ...(orderData as Order),
@@ -270,8 +272,11 @@ export class OrderService {
       updated_at: now,
       clientRequestId: requestId as any,
       client_request_id: requestId,
+      clientOrderId: requestId as any,
+      client_order_id: requestId,
       branch_id: branchId || (orderData as any).branch_id || undefined,
       organization_id: organizationId || (orderData as any).organization_id || undefined,
+      ...tableMetadata,
       sync_status: 'pending' as any,
       syncStatus: 'pending' as any,
       savedForRetry: true as any,
@@ -354,8 +359,12 @@ export class OrderService {
       if (created) {
         return {
           ...(created as Order),
+          clientRequestId: params.requestId as any,
+          client_request_id: params.requestId as any,
+          clientOrderId: params.requestId as any,
+          client_order_id: params.requestId as any,
           savedForRetry: true as any,
-        };
+        } as Order;
       }
     } catch (error) {
       debugLogger.warn('Retry save succeeded but follow-up local fetch failed', error, 'OrderService');
@@ -373,6 +382,10 @@ export class OrderService {
       createdAt: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      clientRequestId: params.requestId as any,
+      client_request_id: params.requestId,
+      clientOrderId: params.requestId as any,
+      client_order_id: params.requestId,
       savedForRetry: true as any,
     } as Order;
   }
@@ -844,6 +857,7 @@ export class OrderService {
         (orderData as any).customerId,
         orderData.customer_id,
       );
+      const tableMetadata = buildOrderServiceTableMetadata(orderData as any);
 
       const normalized: any = {
         // Include customerId for backend address fallback resolution
@@ -875,7 +889,7 @@ export class OrderService {
           (orderData as any).ghost_metadata ?? (orderData as any).ghostMetadata ?? null,
         status: orderData.status,
         orderType: (orderData.orderType ?? orderData.order_type) as any,
-        tableNumber: orderData.tableNumber ?? orderData.table_number,
+        ...tableMetadata,
         deliveryAddress: normalizedDeliveryAddress,
         deliveryCity: normalizedDeliveryCity,
         deliveryPostalCode: normalizedDeliveryPostalCode,
@@ -916,7 +930,13 @@ export class OrderService {
               const created = createdResult?.data ?? createdResult;
               if (created) {
                 debugLogger.info('Created order via bridge', { orderId }, 'OrderService');
-                return created as Order;
+                return {
+                  ...(created as Order),
+                  clientRequestId: requestId as any,
+                  client_request_id: requestId as any,
+                  clientOrderId: requestId as any,
+                  client_order_id: requestId as any,
+                } as Order;
               }
             } catch {
               // If fetch-by-id fails after a successful create, still return
@@ -925,6 +945,10 @@ export class OrderService {
             return {
               ...(resp?.order || {}),
               id: orderId,
+              clientRequestId: requestId as any,
+              client_request_id: requestId as any,
+              clientOrderId: requestId as any,
+              client_order_id: requestId as any,
             } as Order;
           }
           // Bridge returned a non-success response
@@ -976,6 +1000,10 @@ export class OrderService {
       ) {
         paymentStatus = 'pending';
       }
+      const normalizedPaymentMethod =
+        orderType === 'dine-in' && !normalizedInitialPayment
+          ? null
+          : (orderData.payment_method ?? orderDataAny.paymentMethod ?? 'cash');
 
       // Try to resolve active cashier shift to attribute revenue properly
       let activeCashierShiftId: string | null = null;
@@ -1082,13 +1110,14 @@ export class OrderService {
           };
         }),
         order_type: orderType,
-        payment_method: orderData.payment_method || orderDataAny.paymentMethod || 'cash',
+        payment_method: normalizedPaymentMethod,
         payment_status: paymentStatus,
         total_amount: orderData.total_amount || orderDataAny.totalAmount || 0,
         client_order_id: requestId,
         client_request_id: requestId,
         initialPayment: normalizedInitialPayment,
         initial_payment: normalizedInitialPayment,
+        ...tableMetadata,
 
         // Optional fields - use ?? for numbers to handle 0 values correctly
         customer_id:

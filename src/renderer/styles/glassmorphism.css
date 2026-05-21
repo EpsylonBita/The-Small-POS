@@ -847,7 +847,6 @@
 .liquid-glass-modal-shell {
   position: relative;
   z-index: 1;
-  max-width: 95vw;
   max-height: 92vh;
   width: 100%;
   padding: 0;
