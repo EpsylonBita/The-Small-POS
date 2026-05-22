@@ -2,7 +2,7 @@
  * useCallerIdNotifications — Combines local Tauri events + Supabase Realtime
  * to show caller ID popup notifications on all terminals.
  *
- * Gated by `isModuleEnabled('caller_id')`.
+ * Gated by `plugin_integrations`; caller_id itself is a plugin integration.
  */
 import { useEffect, useRef, useCallback } from 'react'
 import { onEvent, offEvent } from '../../lib'
@@ -19,7 +19,7 @@ interface CallerIdNotificationsOptions {
 
 export function useCallerIdNotifications(options?: CallerIdNotificationsOptions) {
   const { isModuleEnabled } = useModules()
-  const enabled = isModuleEnabled('caller_id' as any)
+  const enabled = isModuleEnabled('plugin_integrations' as any)
   const callEventsRef = useRef(new Map<string, CallerIdBroadcastEvent>())
   const cleanupTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const optionsRef = useRef(options)

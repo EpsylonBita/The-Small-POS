@@ -42,7 +42,7 @@ interface KitchenOrder {
   id: string;
   sourceOrderId?: string;
   order_number: string;
-  order_type: 'dine-in' | 'pickup' | 'takeaway' | 'delivery' | 'drive-through' | 'dine_in';
+  order_type: 'dine-in' | 'pickup' | 'takeaway' | 'delivery' | 'drive-through' | 'dine_in' | 'room_service';
   status: 'pending' | 'preparing';
   items: KitchenOrderItem[];
   created_at: string;
@@ -358,6 +358,7 @@ const KitchenDisplayPage: React.FC = () => {
       'takeaway': 'orderType.takeaway',
       'delivery': 'orderType.delivery',
       'drive-through': 'orderType.driveThrough',
+      'room_service': 'orderType.roomService',
     };
     const key = keyMap[type];
     return key ? t(key, type) : type;  // fallback to raw type if no translation
@@ -372,6 +373,7 @@ const KitchenDisplayPage: React.FC = () => {
       'takeaway': 'bg-green-500/20 text-green-500',
       'delivery': 'bg-purple-500/20 text-purple-500',
       'drive-through': 'bg-cyan-500/20 text-cyan-500',
+      'room_service': 'bg-indigo-500/20 text-indigo-500',
     };
     return colors[type] || 'bg-gray-500/20 text-gray-500';
   };

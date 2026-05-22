@@ -78,8 +78,6 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
   // Integrations
   'plugin_integrations', // Third-party plugin integrations (Wolt, Efood, etc.)
 
-  // Communication
-  'caller_id',          // VoIP caller ID recognition
 ]);
 
 /**

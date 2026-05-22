@@ -2,7 +2,7 @@
 // Shared between main and renderer processes
 
 export type OrderStatus = 'pending' | 'confirmed' | 'preparing' | 'ready' | 'out_for_delivery' | 'delivered' | 'completed' | 'cancelled';
-export type OrderType = 'dine-in' | 'pickup' | 'delivery';
+export type OrderType = 'dine-in' | 'pickup' | 'delivery' | 'room_service';
 export type PaymentStatus =
   | 'pending'
   | 'processing'
@@ -112,6 +112,10 @@ export interface Order {
   orderType: OrderType; // Required for renderer compatibility
   table_number?: string | null; // Allow null for compatibility
   tableNumber?: string; // For backward compatibility
+  room_id?: string | null;
+  roomId?: string | null;
+  room_number?: string | null;
+  roomNumber?: string | null;
   delivery_address?: string | null; // Allow null for compatibility
   deliveryAddress?: string | null; // For backward compatibility
   delivery_address_id?: string | null;
@@ -243,6 +247,8 @@ export interface OrderRow {
   cancellation_reason?: string;
   order_type?: OrderType;
   table_number?: string;
+  room_id?: string;
+  room_number?: string;
   delivery_address?: string;
   delivery_city?: string;
   delivery_postal_code?: string;
@@ -312,6 +318,8 @@ export interface OrderCreateParams {
   total_amount: number;
   order_type?: OrderType;
   table_number?: string;
+  room_id?: string;
+  room_number?: string;
   delivery_address?: string;
   delivery_city?: string;
   delivery_postal_code?: string;
@@ -344,6 +352,8 @@ export interface OrderUpdateParams {
   total_amount?: number;
   order_type?: OrderType;
   table_number?: string;
+  room_id?: string;
+  room_number?: string;
   delivery_address?: string;
   delivery_city?: string;
   delivery_postal_code?: string;

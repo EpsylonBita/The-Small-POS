@@ -1911,6 +1911,10 @@ fn build_order_insert_body(
         "delivery_address_fingerprint": delivery_address_fingerprint,
         "delivery_zone_id": delivery_zone_id,
         "name_on_ringer": name_on_ringer,
+        "fiscal_receipt_number": string_field_from_sources(
+            &sources,
+            &["fiscal_receipt_number", "fiscalReceiptNumber"],
+        ),
         "notes": string_field_from_sources(&sources, &["notes", "orderNotes", "order_notes"])
             .or_else(|| string_field_from_sources(&sources, &["special_instructions", "specialInstructions"])),
         "is_ghost": bool_field_from_sources(&sources, &["is_ghost", "isGhost"]).unwrap_or(false),
@@ -4031,6 +4035,13 @@ fn prepare_order_request(
         &["guestCount", "guest_count"],
         "guest_count",
         true,
+    );
+    copy_source_field(
+        &mut body,
+        &sources,
+        &["fiscalReceiptNumber", "fiscal_receipt_number"],
+        "fiscal_receipt_number",
+        false,
     );
     // Driver ids stored in local delivery rows are staff ids bound to the
     // driver's local shift lifecycle. Replaying them on a status PATCH after
@@ -6486,6 +6497,46 @@ mod tests {
             Some("pending")
         );
         assert_eq!(body.get("payment_method"), None);
+    }
+
+    #[test]
+    fn prepare_order_request_forwards_fiscal_receipt_number_updates() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-fiscal-receipt', 'remote-order-fiscal-receipt',
+                 '[]', 22.0, 2200, 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced fiscal order");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-fiscal-receipt",
+            json!({
+                "orderId": "order-fiscal-receipt",
+                "status": "completed",
+                "fiscalReceiptNumber": "FISC-000123",
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("fiscal_receipt_number").and_then(Value::as_str),
+            Some("FISC-000123")
+        );
     }
 
     #[test]

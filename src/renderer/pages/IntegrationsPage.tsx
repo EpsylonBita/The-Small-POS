@@ -40,6 +40,10 @@ import {
   Plane,
   Receipt,
   Lock,
+  CreditCard,
+  BarChart3,
+  ShoppingCart,
+  Phone,
 } from 'lucide-react';
 import { posApiGet, posApiPost } from '../utils/api-helpers';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
@@ -49,7 +53,7 @@ import { getOfflineActionState } from '../services/offline-page-capabilities';
 // TYPES
 // ============================================================
 
-type IntegrationCategory = 'food' | 'hotel' | 'government';
+type IntegrationCategory = 'delivery' | 'hotel' | 'government' | 'payment' | 'analytics' | 'ecommerce' | 'communications';
 
 interface Integration {
   id: string;
@@ -84,13 +88,13 @@ interface IntegrationStats {
 // ============================================================
 
 const ALL_INTEGRATIONS: Integration[] = [
-  // Food delivery plugins - require 'delivery' module
+  // Delivery plugins - require 'delivery' module
   {
     id: 'efood',
     name: 'e-food',
     description: 'Greece\'s leading food delivery platform',
     icon: <Pizza className="w-6 h-6" />,
-    category: 'food',
+    category: 'delivery',
     requiredModule: MODULE_IDS.DELIVERY,
   },
   {
@@ -98,7 +102,7 @@ const ALL_INTEGRATIONS: Integration[] = [
     name: 'Wolt',
     description: 'Food delivery and discovery platform',
     icon: <Bike className="w-6 h-6" />,
-    category: 'food',
+    category: 'delivery',
     requiredModule: MODULE_IDS.DELIVERY,
   },
   {
@@ -106,9 +110,17 @@ const ALL_INTEGRATIONS: Integration[] = [
     name: 'Box',
     description: 'Delivery platform for restaurants',
     icon: <Package className="w-6 h-6" />,
-    category: 'food',
+    category: 'delivery',
     requiredModule: MODULE_IDS.DELIVERY,
     requiresPartnerCredentials: true,
+  },
+  {
+    id: 'uber_eats',
+    name: 'Uber Eats',
+    description: 'Uber Eats ordering and menu integration',
+    icon: <Truck className="w-6 h-6" />,
+    category: 'delivery',
+    requiredModule: MODULE_IDS.DELIVERY,
   },
   // Hotel plugins - require 'rooms' module
   {
@@ -136,6 +148,58 @@ const ALL_INTEGRATIONS: Integration[] = [
     requiredModule: MODULE_IDS.ROOMS,
   },
   {
+    id: 'tripadvisor',
+    name: 'TripAdvisor',
+    description: 'Travel reviews and hotel booking',
+    icon: <Building2 className="w-6 h-6" />,
+    category: 'hotel',
+    requiredModule: MODULE_IDS.ROOMS,
+  },
+  {
+    id: 'stripe',
+    name: 'Stripe',
+    description: 'Online payment processing',
+    icon: <CreditCard className="w-6 h-6" />,
+    category: 'payment',
+  },
+  {
+    id: 'viva',
+    name: 'Viva Wallet',
+    description: 'European payment processing',
+    icon: <CreditCard className="w-6 h-6" />,
+    category: 'payment',
+  },
+  {
+    id: 'google_analytics',
+    name: 'Google Analytics',
+    description: 'Website and app analytics',
+    icon: <BarChart3 className="w-6 h-6" />,
+    category: 'analytics',
+  },
+  {
+    id: 'woocommerce',
+    name: 'WooCommerce',
+    description: 'WooCommerce product and order sync',
+    icon: <ShoppingCart className="w-6 h-6" />,
+    category: 'ecommerce',
+    requiredModule: MODULE_IDS.PRODUCT_CATALOG,
+  },
+  {
+    id: 'shopify',
+    name: 'Shopify',
+    description: 'Shopify product and order sync',
+    icon: <ShoppingCart className="w-6 h-6" />,
+    category: 'ecommerce',
+    requiredModule: MODULE_IDS.PRODUCT_CATALOG,
+  },
+  {
+    id: 'caller_id',
+    name: 'Caller ID (VoIP/SIP)',
+    description: 'Caller ID recognition and customer lookup',
+    icon: <Phone className="w-6 h-6" />,
+    category: 'communications',
+  },
+  {
     id: 'mydata',
     name: 'MyData',
     description: 'Greek AADE e-invoicing compliance',
@@ -153,9 +217,13 @@ const ALL_INTEGRATIONS: Integration[] = [
 ];
 
 const CATEGORY_CONFIG: Record<IntegrationCategory, { label: string; icon: typeof Plug }> = {
-  food: { label: 'Food Platforms', icon: Truck },
+  delivery: { label: 'Delivery Platforms', icon: Truck },
   hotel: { label: 'Hotel Platforms', icon: Building2 },
   government: { label: 'Government & Compliance', icon: FileText },
+  payment: { label: 'Payment Gateways', icon: CreditCard },
+  analytics: { label: 'Analytics', icon: BarChart3 },
+  ecommerce: { label: 'E-commerce', icon: ShoppingCart },
+  communications: { label: 'Communications', icon: Phone },
 };
 
 type PluginFieldKey = 'api_key' | 'api_secret' | 'merchant_id' | 'store_id' | 'store_url';
@@ -170,10 +238,11 @@ const PLUGIN_FORM_CONFIG: Record<string, { requiredFields: PluginFieldKey[]; sup
   tripadvisor: { requiredFields: ['api_key', 'api_secret'], supportsCommission: true },
   stripe: { requiredFields: ['api_key', 'api_secret'] },
   viva: { requiredFields: ['api_key', 'api_secret', 'merchant_id'] },
-  'google-analytics': { requiredFields: ['api_key'] },
+  google_analytics: { requiredFields: ['api_key'] },
   woocommerce: { requiredFields: ['store_url', 'api_key', 'api_secret'], supportsProductSync: true, supportsOrderSync: true, supportsInventorySync: true },
   shopify: { requiredFields: ['store_url', 'api_key', 'api_secret'], supportsProductSync: true, supportsOrderSync: true, supportsInventorySync: true },
   ergani_digital_schedule: { requiredFields: ['api_key', 'api_secret', 'merchant_id'] },
+  caller_id: { requiredFields: [] },
 };
 
 interface PluginFormState {
@@ -216,6 +285,9 @@ const calculateStats = (integrations: IntegrationWithStatus[]): IntegrationStats
   disconnected: integrations.filter(i => i.status === 'disconnected').length,
   pending: integrations.filter(i => i.status === 'pending').length,
 });
+
+const normalizeProviderId = (value: string) =>
+  value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 
 async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
   try {
@@ -630,11 +702,11 @@ export const IntegrationsPage: React.FC = () => {
 
         const integrationsResult = await posApiGet<{ integrations?: any[] }>('/pos/integrations');
         const remoteIntegrations = integrationsResult.success ? (integrationsResult.data?.integrations || []) : [];
-        const remoteMap = new Map(remoteIntegrations.map((item: any) => [item.provider, item]));
+        const remoteMap = new Map(remoteIntegrations.map((item: any) => [normalizeProviderId(item.provider), item]));
 
         // Map to IntegrationWithStatus
         const integrationsWithStatus: IntegrationWithStatus[] = filteredIntegrations.flatMap(integration => {
-          const remote = remoteMap.get(integration.id);
+          const remote = remoteMap.get(normalizeProviderId(integration.id));
           if (integration.id === 'ergani_digital_schedule' && !remote?.is_purchased) {
             return [];
           }
@@ -988,9 +1060,13 @@ export const IntegrationsPage: React.FC = () => {
   // Group integrations by category
   const groupedIntegrations = useMemo(() => {
     const groups: Record<IntegrationCategory, IntegrationWithStatus[]> = {
-      food: [],
+      delivery: [],
       hotel: [],
       government: [],
+      payment: [],
+      analytics: [],
+      ecommerce: [],
+      communications: [],
     };
 
     integrations.forEach(integration => {
@@ -1337,7 +1413,7 @@ export const IntegrationsPage: React.FC = () => {
                         type="password"
                         disabled={saveAction.disabled}
                       />
-                      {(isRequired('api_secret') || activePlugin.id !== 'google-analytics') && (
+                      {(isRequired('api_secret') || activePlugin.id !== 'google_analytics') && (
                         <POSGlassInput
                           label={`${t('integrations.fields.apiSecret', 'API Secret')}${isRequired('api_secret') ? ' *' : ''}`}
                           value={pluginForm.api_secret}

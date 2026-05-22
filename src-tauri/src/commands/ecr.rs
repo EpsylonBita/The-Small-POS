@@ -1,3 +1,4 @@
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
@@ -1013,6 +1014,60 @@ fn parse_required_order_id(arg0: Option<serde_json::Value>) -> Result<String, St
 
 fn parse_optional_order_id(arg0: Option<serde_json::Value>) -> Option<String> {
     payload_arg0_as_string(arg0, &["orderId", "order_id", "id"])
+}
+
+fn persist_fiscal_receipt_transaction_and_enqueue_backfill(
+    conn: &mut rusqlite::Connection,
+    insert_payload: &serde_json::Value,
+    order_id: &str,
+    fiscal_receipt_number: Option<&str>,
+) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin fiscal receipt transaction: {e}"))?;
+
+    db::ecr_insert_transaction(&tx, insert_payload)?;
+
+    if let Some(fiscal_receipt_number) = fiscal_receipt_number
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let status = tx
+            .query_row(
+                "SELECT COALESCE(NULLIF(TRIM(status), ''), 'completed')
+                 FROM orders
+                 WHERE id = ?1
+                 LIMIT 1",
+                rusqlite::params![order_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| format!("load fiscal receipt order status: {e}"))?
+            .unwrap_or_else(|| "completed".to_string());
+
+        let backfill_payload = serde_json::json!({
+            "orderId": order_id,
+            "status": status,
+            "fiscalReceiptNumber": fiscal_receipt_number,
+            "fiscal_receipt_number": fiscal_receipt_number,
+        });
+
+        crate::sync_queue::enqueue_payload_item(
+            &tx,
+            "orders",
+            order_id,
+            "UPDATE",
+            &backfill_payload,
+            Some(1),
+            Some("orders"),
+            Some("server-wins"),
+            Some(1),
+        )
+        .map_err(|e| format!("enqueue fiscal receipt order backfill: {e}"))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("commit fiscal receipt transaction: {e}"))
 }
 
 fn parse_discover_args(
@@ -2286,17 +2341,11 @@ pub async fn ecr_fiscal_print(
 
             let device_result = mgr.process_transaction(&device_id, &request);
 
-            // Phase 4 — persist result. Re-acquire DB lock; these writes are fast.
-            //
-            // TODO(F4c): fiscal_receipt_number currently lands only in the local
-            // `ecr_transactions` table and is never enqueued to sync_queue, so
-            // the admin-dashboard / AADE path never learns it. Needs team
-            // decision: if backend reconciliation requires the number, add a
-            // sync_queue enqueue here in the same SQLite transaction as the
-            // INSERT. See planning/claude/deep-dive-ecr-aade-fiscal.md.
+            // Phase 4 — persist result and enqueue remote fiscal receipt backfill.
+            // Re-acquire DB lock; these writes are fast.
             match device_result {
                 Ok(resp) => {
-                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
                     let insert_payload = serde_json::json!({
                         "id": resp.transaction_id,
                         "deviceId": device_id,
@@ -2310,7 +2359,12 @@ pub async fn ecr_fiscal_print(
                         "completedAt": resp.completed_at,
                         "rawResponse": resp.raw_response,
                     });
-                    if let Err(insert_err) = db::ecr_insert_transaction(&conn, &insert_payload) {
+                    if let Err(insert_err) = persist_fiscal_receipt_transaction_and_enqueue_backfill(
+                        &mut conn,
+                        &insert_payload,
+                        &order_id,
+                        resp.fiscal_receipt_number.as_deref(),
+                    ) {
                         // The device has ALREADY committed the fiscal receipt to its
                         // hardware fiscal memory. The local DB write failed — this is
                         // a reconciliation event. Log loudly so the diagnostics export
@@ -2723,6 +2777,93 @@ mod dto_tests {
         assert_eq!(
             parsed.get("deviceId").and_then(|v| v.as_str()),
             Some("device-11")
+        );
+    }
+
+    #[test]
+    fn fiscal_receipt_persistence_enqueues_remote_order_backfill() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        crate::sync_queue::create_tables(&conn).expect("create parity queue tables");
+        crate::db::set_setting(
+            &conn,
+            "terminal",
+            "organization_id",
+            "22222222-2222-2222-2222-222222222222",
+        )
+        .expect("seed organization");
+
+        conn.execute(
+            "INSERT INTO ecr_devices (
+                 id, name, device_type, brand, protocol, connection_type, connection_details
+             ) VALUES (
+                 'device-1', 'Fiscal Device', 'cash_register', 'generic', 'generic', 'serial_usb', '{}'
+             )",
+            [],
+        )
+        .expect("seed ecr device");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-fiscal-receipt', 'remote-order-fiscal-receipt',
+                 '[]', 22.0, 2200, 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced order");
+
+        let insert_payload = serde_json::json!({
+            "id": "tx-fiscal-1",
+            "deviceId": "device-1",
+            "orderId": "order-fiscal-receipt",
+            "transactionType": "fiscal_receipt",
+            "amount": 2200,
+            "currency": "EUR",
+            "status": "approved",
+            "fiscalReceiptNumber": "FISC-000123",
+            "startedAt": "2026-05-21T19:00:00Z",
+            "completedAt": "2026-05-21T19:00:01Z",
+            "rawResponse": { "receipt": "FISC-000123" }
+        });
+
+        persist_fiscal_receipt_transaction_and_enqueue_backfill(
+            &mut conn,
+            &insert_payload,
+            "order-fiscal-receipt",
+            Some("FISC-000123"),
+        )
+        .expect("persist fiscal transaction");
+
+        let local_receipt: String = conn
+            .query_row(
+                "SELECT fiscal_receipt_number FROM ecr_transactions WHERE id = 'tx-fiscal-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("local fiscal receipt number");
+        assert_eq!(local_receipt, "FISC-000123");
+
+        let queue_payload: String = conn
+            .query_row(
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'orders' AND record_id = 'order-fiscal-receipt'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("queued order backfill");
+        let queued = serde_json::from_str::<serde_json::Value>(&queue_payload)
+            .expect("parse queued payload");
+        assert_eq!(
+            queued
+                .get("fiscalReceiptNumber")
+                .and_then(serde_json::Value::as_str),
+            Some("FISC-000123")
+        );
+        assert_eq!(
+            queued.get("status").and_then(serde_json::Value::as_str),
+            Some("completed")
         );
     }
 }
