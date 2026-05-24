@@ -18,7 +18,10 @@ const source = readFileSync(modalPath, 'utf8');
 test('ConnectionSettingsModal uses a responsive settings workbench shell', () => {
   assert.match(source, /data-settings-workbench/);
   assert.match(source, /settings-workbench flex min-h-0 flex-1 flex-col gap-4 overflow-hidden/);
-  assert.match(source, /lg:grid-cols-\[230px_minmax\(0,1fr\)\]/);
+  assert.match(source, /md:grid-cols-\[minmax\(220px,248px\)_minmax\(0,1fr\)\]/);
+  assert.match(source, /w-56 shrink-0/);
+  assert.match(source, /md:w-full md:shrink/);
+  assert.match(source, /line-clamp-2 text-sm font-semibold leading-tight/);
   assert.match(source, /contentClassName="!overflow-hidden !p-4 sm:!p-5"/);
   assert.match(source, /scrollbar-hide/);
 });

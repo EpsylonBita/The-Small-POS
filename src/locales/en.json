@@ -4503,6 +4503,16 @@
       "selectDateTime": "Please select start and end date/time",
       "endAfterStart": "End time must be after start time"
     },
+    "ergani": {
+      "noBranch": "Branch is not configured for this terminal.",
+      "noShifts": "No shifts to publish for this week.",
+      "publish": "Publish to ERGANI",
+      "publishing": "Publishing...",
+      "publishBlocked": "Schedule queued but blocked until ERGANI setup is complete.",
+      "publishQueued": "Schedule publish queued for ERGANI.",
+      "publishFailed": "Failed to publish to ERGANI.",
+      "lastStatus": "ERGANI status"
+    },
     "errors": {
       "loadFailed": "Failed to load staff schedule"
     }

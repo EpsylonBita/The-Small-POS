@@ -63,7 +63,7 @@ interface ModuleContextType {
   /** Precomputed navigation-ready modules, filtered by showInNavigation and sorted by sortOrder */
   navigationModules: NavigationModule[];
   /** Sync modules from admin dashboard API */
-  syncModulesFromAdmin: () => Promise<void>;
+  syncModulesFromAdmin: (options?: SyncModulesOptions) => Promise<void>;
   /** API modules fetched from admin dashboard */
   apiModules: POSModuleInfo[];
   /** Whether sync is in progress */
@@ -100,6 +100,56 @@ interface ModuleCacheData {
 
 const CACHE_KEY = 'pos-modules-cache';
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+const MODULE_IDENTITY_SETTING_KEYS = new Set([
+  'admin_dashboard_url',
+  'admin_url',
+  'api_key',
+  'business_type',
+  'businessType',
+  'organization_id',
+  'organizationId',
+  'pos_api_key',
+  'terminal_id',
+  'terminalId',
+]);
+
+type ResolveModulesOptions = {
+  showLoading?: boolean;
+};
+
+type SyncModulesOptions = {
+  reportSyncing?: boolean;
+};
+
+function terminalSettingsUpdatedKeys(payload: unknown): string[] {
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+
+  const data = payload as Record<string, unknown>;
+  if (typeof data.key === 'string') {
+    return [data.key];
+  }
+  if (Array.isArray(data.updated)) {
+    return data.updated.filter((key): key is string => typeof key === 'string');
+  }
+  return [];
+}
+
+function normalizeTerminalSettingKey(key: string): string {
+  const trimmed = key.trim();
+  return trimmed.startsWith('terminal.') ? trimmed.slice('terminal.'.length) : trimmed;
+}
+
+export function shouldResolveModulesForTerminalSettingsEvent(payload: unknown): boolean {
+  const updatedKeys = terminalSettingsUpdatedKeys(payload);
+  if (updatedKeys.length === 0) {
+    return false;
+  }
+
+  return updatedKeys.some((key) => MODULE_IDENTITY_SETTING_KEYS.has(normalizeTerminalSettingKey(key)));
+}
 
 /**
  * Default core module metadata for fallback scenarios.
@@ -420,7 +470,8 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    * 
    * Requirements: 1.1, 1.2, 2.1, 3.4
    */
-  const syncModulesFromAdmin = useCallback(async (): Promise<void> => {
+  const syncModulesFromAdmin = useCallback(async (options: SyncModulesOptions = {}): Promise<void> => {
+    const reportSyncing = options.reportSyncing !== false;
     // Prevent concurrent syncs - if already syncing, skip (use ref to avoid re-renders)
     if (isSyncingRef.current) {
       console.log('[ModuleContext] Sync already in progress, skipping');
@@ -428,7 +479,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     }
 
     isSyncingRef.current = true;
-    setIsSyncing(true);
+    if (reportSyncing) {
+      setIsSyncing(true);
+    }
 
     try {
       // Fetch modules from admin dashboard via typed bridge
@@ -523,7 +576,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       }
     } finally {
       isSyncingRef.current = false;
-      setIsSyncing(false);
+      if (reportSyncing) {
+        setIsSyncing(false);
+      }
     }
     // Note: Using refs for apiModules comparison and sync guard to prevent infinite loops
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -667,8 +722,11 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   /**
    * Resolve modules from main process
    */
-  const resolveModules = useCallback(async () => {
-    setIsLoading(true);
+  const resolveModules = useCallback(async (options: ResolveModulesOptions = {}) => {
+    const showLoading = options.showLoading !== false;
+    if (showLoading) {
+      setIsLoading(true);
+    }
     setError(null);
 
     try {
@@ -690,7 +748,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         }
         
         setError('Organization ID not available');
-        setIsLoading(false);
+        if (showLoading) {
+          setIsLoading(false);
+        }
         return;
       }
 
@@ -709,7 +769,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         
         setOrganizationId(orgId);
         setError('Business type not available');
-        setIsLoading(false);
+        if (showLoading) {
+          setIsLoading(false);
+        }
         return;
       }
 
@@ -727,7 +789,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         
         setOrganizationId(orgId);
         setError(`Invalid business type: ${bType}`);
-        setIsLoading(false);
+        if (showLoading) {
+          setIsLoading(false);
+        }
         return;
       }
 
@@ -768,7 +832,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         setError('Module state unavailable');
       }
     } finally {
-      setIsLoading(false);
+      if (showLoading) {
+        setIsLoading(false);
+      }
     }
   }, [bridge.terminalConfig, loadFromCache, saveToCache]);
 
@@ -835,15 +901,16 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         if (!hasCachedData) {
           await resolveModules();
         } else {
-          // With cache, resolve in background without blocking
-          resolveModules().catch((err) => {
+          // With cache, resolve in background without putting navigation back
+          // into its loading skeleton on every routine sync.
+          resolveModules({ showLoading: false }).catch((err) => {
             console.warn('[ModuleContext] Background resolve failed:', err);
           });
         }
         
         // Step 4: Sync from admin in background - updates state reactively
         if (isMounted) {
-          syncModulesFromAdmin().catch((err) => {
+          syncModulesFromAdmin({ reportSyncing: !hasCachedData }).catch((err) => {
             console.warn('[ModuleContext] Background admin sync failed:', err);
           });
         }
@@ -863,10 +930,16 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
   // Listen for terminal settings updates (Requirement 3.3)
   useEffect(() => {
-    const handleSettingsUpdate = () => {
-      console.log('[ModuleContext] Terminal settings updated, refreshing modules');
-      refreshModules();
-      syncModulesFromAdmin();
+    const handleSettingsUpdate = (payload: unknown) => {
+      if (shouldResolveModulesForTerminalSettingsEvent(payload)) {
+        console.log('[ModuleContext] Terminal identity settings updated, refreshing modules');
+        refreshModules();
+        syncModulesFromAdmin();
+        return;
+      }
+
+      console.log('[ModuleContext] Terminal settings updated, syncing modules without navigation reload');
+      syncModulesFromAdmin({ reportSyncing: false });
     };
 
     onEvent('terminal-settings-updated', handleSettingsUpdate);
@@ -882,7 +955,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     const handleModuleRefresh = (data: { reason: string; timestamp: string }) => {
       console.log('[ModuleContext] Module refresh requested:', data.reason);
       // Only sync modules, don't do a full refresh to avoid redundant work
-      syncModulesFromAdmin();
+      syncModulesFromAdmin({ reportSyncing: false });
     };
 
     onEvent('modules:refresh-needed', handleModuleRefresh);

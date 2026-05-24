@@ -12687,6 +12687,7 @@ fn copy_order_update_payload_fields(payload_value: &Value, body: &mut Value) {
         ("tableSessionId", "table_session_id"),
         ("guestCount", "guest_count"),
         ("cancellationReason", "cancellation_reason"),
+        ("cancelledAt", "cancelled_at"),
     ] {
         let value = payload_value
             .get(camel)
@@ -12697,6 +12698,32 @@ fn copy_order_update_payload_fields(payload_value: &Value, body: &mut Value) {
                     .unwrap()
                     .insert(snake.to_string(), value.clone());
             }
+        }
+    }
+
+    let is_cancelled_update = payload_value
+        .get("status")
+        .and_then(Value::as_str)
+        .map(normalize_status_for_storage)
+        .as_deref()
+        == Some("cancelled");
+
+    if is_cancelled_update
+        && body
+            .get("cancellation_reason")
+            .filter(|value| !value.is_null())
+            .is_none()
+    {
+        if let Some(reason) = payload_value
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            body.as_object_mut().unwrap().insert(
+                "cancellation_reason".to_string(),
+                Value::String(reason.to_string()),
+            );
         }
     }
 }
@@ -21698,6 +21725,26 @@ mod tests {
         assert_eq!(
             body.get("cancellation_reason").and_then(Value::as_str),
             Some("Customer request")
+        );
+    }
+
+    #[test]
+    fn test_copy_order_update_payload_fields_forwards_decline_reason_alias() {
+        let payload = serde_json::json!({
+            "orderId": "ord-decline-reason",
+            "status": "cancelled",
+            "reason": "Customer changed mind"
+        });
+        let mut body = serde_json::json!({
+            "id": "remote-decline-reason",
+            "status": "cancelled"
+        });
+
+        copy_order_update_payload_fields(&payload, &mut body);
+
+        assert_eq!(
+            body.get("cancellation_reason").and_then(Value::as_str),
+            Some("Customer changed mind")
         );
     }
 

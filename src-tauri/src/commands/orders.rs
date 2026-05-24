@@ -1033,6 +1033,12 @@ fn resolve_stale_unsynced_overpay_payments_for_order(
     Ok(resolved_ids)
 }
 
+fn should_resolve_stale_overpay_payments_before_edit_action(
+    action: &EditSettlementActionPayload,
+) -> bool {
+    !matches!(action, EditSettlementActionPayload::Refund { .. })
+}
+
 fn refresh_order_payment_snapshot(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -2231,8 +2237,12 @@ pub async fn orders_apply_edit_settlement(
             &now,
         )?;
 
-        let stale_payment_ids =
-            resolve_stale_unsynced_overpay_payments_for_order(&conn, &actual_order_id, &now)?;
+        let stale_payment_ids = if should_resolve_stale_overpay_payments_before_edit_action(&action)
+        {
+            resolve_stale_unsynced_overpay_payments_for_order(&conn, &actual_order_id, &now)?
+        } else {
+            Vec::new()
+        };
         let paid_total_before = load_net_paid_for_order(&conn, &actual_order_id)?;
 
         match action {
@@ -3138,7 +3148,10 @@ pub async fn order_decline(
     let payload = serde_json::json!({
         "orderId": order_id,
         "status": "cancelled",
-        "reason": reason
+        "reason": reason.clone(),
+        "cancellationReason": reason.clone(),
+        "cancellation_reason": reason,
+        "cancelled_at": now
     });
     let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
     drop(conn);
@@ -4400,6 +4413,113 @@ mod transition_tests {
         assert_eq!(payment_status, "pending");
         assert_eq!(payment_method, "pending");
         assert!(total_paid.abs() < 0.001);
+    }
+
+    #[test]
+    fn edit_settlement_refund_action_skips_stale_overpay_auto_void() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-edit-refund-pending-payment",
+            r#"[
+                {"name":"Gianniotiki","quantity":2,"unit_price":6.9,"total_price":13.8},
+                {"name":"Crepe","quantity":1,"unit_price":5.9,"total_price":5.9},
+                {"name":"Crepe","quantity":1,"unit_price":5.6,"total_price":5.6}
+            ]"#,
+            25.3,
+            25.3,
+            "paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state,
+                 created_at, updated_at
+             ) VALUES (
+                 'payment-edit-refund-pending', 'order-edit-refund-pending-payment',
+                 'cash', 25.3, 2530, 'completed', 'pending', 'pending',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        update_order_items_in_connection(
+            &conn,
+            "order-edit-refund-pending-payment",
+            &[
+                serde_json::json!({
+                    "name": "Gianniotiki",
+                    "quantity": 1,
+                    "unit_price": 6.9,
+                    "total_price": 6.9
+                }),
+                serde_json::json!({
+                    "name": "Baguette",
+                    "quantity": 1,
+                    "unit_price": 5.9,
+                    "total_price": 5.9
+                }),
+                serde_json::json!({
+                    "name": "Crepe",
+                    "quantity": 1,
+                    "unit_price": 5.9,
+                    "total_price": 5.9
+                }),
+                serde_json::json!({
+                    "name": "Crepe",
+                    "quantity": 1,
+                    "unit_price": 5.6,
+                    "total_price": 5.6
+                }),
+            ],
+            None,
+            24.3,
+            24.3,
+            "2026-05-19T00:27:00Z",
+        )
+        .unwrap();
+
+        let action = EditSettlementActionPayload::Refund {
+            refunds: vec![EditSettlementRefundPayload {
+                payment_id: "payment-edit-refund-pending".to_string(),
+                amount: 1.0,
+                reason: "Edit settlement refund".to_string(),
+                refund_method: Some("cash".to_string()),
+                cash_handler: Some("cashier_drawer".to_string()),
+                staff_id: None,
+                staff_shift_id: None,
+            }],
+        };
+        let stale_payment_ids = if should_resolve_stale_overpay_payments_before_edit_action(&action)
+        {
+            resolve_stale_unsynced_overpay_payments_for_order(
+                &conn,
+                "order-edit-refund-pending-payment",
+                "2026-05-19T00:27:00Z",
+            )
+            .unwrap()
+        } else {
+            Vec::new()
+        };
+
+        assert!(
+            stale_payment_ids.is_empty(),
+            "refund settlement must preserve the parent payment so the refund can attach to it"
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM order_payments WHERE id = 'payment-edit-refund-pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+
+        let paid_total =
+            load_net_paid_for_order(&conn, "order-edit-refund-pending-payment").unwrap();
+        assert!((paid_total - 25.3).abs() < 0.001);
     }
 
     #[test]

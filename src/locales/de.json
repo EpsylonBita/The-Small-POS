@@ -4503,6 +4503,16 @@
       "selectDateTime": "Bitte Start- und Enddatum/-zeit auswählen",
       "endAfterStart": "Endzeit muss nach der Startzeit liegen"
     },
+    "ergani": {
+      "noBranch": "Für dieses Terminal ist keine Filiale konfiguriert.",
+      "noShifts": "Keine Schichten für diese Woche zum Veröffentlichen.",
+      "publish": "An ERGANI veröffentlichen",
+      "publishing": "Veröffentlichen...",
+      "publishBlocked": "Plan wurde eingereiht, ist aber blockiert, bis die ERGANI-Einrichtung abgeschlossen ist.",
+      "publishQueued": "Planveröffentlichung für ERGANI wurde eingereiht.",
+      "publishFailed": "Veröffentlichung an ERGANI fehlgeschlagen.",
+      "lastStatus": "ERGANI-Status"
+    },
     "errors": {
       "loadFailed": "Personalplan konnte nicht geladen werden"
     }

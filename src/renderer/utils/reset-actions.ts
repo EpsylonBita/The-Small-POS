@@ -5,6 +5,7 @@ import { withTimeout } from '../../shared/utils/error-handler';
 
 const RESET_START_TIMEOUT_MS = 4000;
 const RESET_STATUS_LOOKUP_TIMEOUT_MS = 1200;
+const RESET_STATUS_FRESH_GRACE_MS = 5000;
 
 type ResetStartResult = ResetStartResponse;
 
@@ -22,6 +23,42 @@ function buildResetStartedFromStatus(status: ResetStatus): ResetStartResponse {
     operationId: status.operationId,
     mode: status.mode,
   };
+}
+
+function isFreshResetStatus(
+  status: ResetStatus | null,
+  actionStartedAtMs: number,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!status) {
+    return false;
+  }
+
+  const updatedAtMs = Date.parse(status.updatedAt);
+  if (!Number.isFinite(updatedAtMs)) {
+    return false;
+  }
+
+  return (
+    updatedAtMs >= actionStartedAtMs - RESET_STATUS_FRESH_GRACE_MS &&
+    updatedAtMs <= nowMs + RESET_STATUS_FRESH_GRACE_MS
+  );
+}
+
+export function isResetStartFallbackStatus(
+  status: ResetStatus | null,
+  actionStartedAtMs: number,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!status || !isFreshResetStatus(status, actionStartedAtMs, nowMs)) {
+    return false;
+  }
+
+  return (
+    status.state === 'running' &&
+    status.phase !== 'completed' &&
+    status.phase !== 'failed'
+  );
 }
 
 function emitLateResetStarted(result: ResetStartResponse): void {
@@ -69,6 +106,7 @@ export async function startResetAction(
   t: TFunction,
 ): Promise<ResetStartResult> {
   const timeoutMessage = getResetStartTimeoutMessage(t);
+  const actionStartedAtMs = Date.now();
   const actionPromise = action();
 
   try {
@@ -83,13 +121,20 @@ export async function startResetAction(
     }
 
     const persistedStatus = await readPersistedResetStatus();
-    if (persistedStatus && persistedStatus.state !== 'failed') {
+    if (persistedStatus && isResetStartFallbackStatus(persistedStatus, actionStartedAtMs)) {
       return buildResetStartedFromStatus(persistedStatus);
+    }
+
+    if (
+      persistedStatus?.state === 'failed' &&
+      persistedStatus.errorMessage &&
+      isFreshResetStatus(persistedStatus, actionStartedAtMs)
+    ) {
+      throw new Error(persistedStatus.errorMessage);
     }
 
     throw new Error(
       result?.error ||
-        persistedStatus?.errorMessage ||
         t(
           'settings.database.resetLaunchFailed',
           'Failed to start the reset.',
@@ -97,6 +142,11 @@ export async function startResetAction(
     );
   } catch (error) {
     if (error instanceof Error && error.message === timeoutMessage) {
+      const persistedStatus = await readPersistedResetStatus();
+      if (persistedStatus && isResetStartFallbackStatus(persistedStatus, actionStartedAtMs)) {
+        return buildResetStartedFromStatus(persistedStatus);
+      }
+
       console.warn('[reset-actions] Reset start timed out; continuing to observe late completion');
       void actionPromise
         .then((lateResult) => {
@@ -119,19 +169,19 @@ export async function startResetAction(
     }
 
     const persistedStatus = await readPersistedResetStatus();
-    if (persistedStatus && persistedStatus.state !== 'failed') {
+    if (persistedStatus && isResetStartFallbackStatus(persistedStatus, actionStartedAtMs)) {
       return buildResetStartedFromStatus(persistedStatus);
     }
 
-    if (persistedStatus?.state === 'failed' && persistedStatus.errorMessage) {
+    if (
+      persistedStatus?.state === 'failed' &&
+      persistedStatus.errorMessage &&
+      isFreshResetStatus(persistedStatus, actionStartedAtMs)
+    ) {
       throw new Error(persistedStatus.errorMessage);
     }
 
-    throw new Error(
-      error instanceof Error
-        ? error.message
-        : getResetStartTimeoutMessage(t),
-    );
+    throw error;
   }
 }
 

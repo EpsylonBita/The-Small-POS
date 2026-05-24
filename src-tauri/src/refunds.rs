@@ -308,29 +308,31 @@ pub(crate) fn refund_payment_in_connection(
             .as_deref(),
     );
 
-    let (order_id, original_amount, pay_status, payment_method, payment_shift_id): (
-        String,
-        f64,
-        String,
-        String,
-        Option<String>,
-    ) = conn
+    let (
+        order_id,
+        original_amount,
+        pay_status,
+        payment_method,
+        payment_shift_id,
+        remote_payment_id,
+    ): (String, f64, String, String, Option<String>, Option<String>) = conn
         .query_row(
             // W4b: cents-with-real-fallback shim (removed in 4e).
             "SELECT order_id,
                     COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
-                    status, method, staff_shift_id
+                    status, method, staff_shift_id, remote_payment_id
              FROM order_payments
              WHERE id = ?1",
             params![payment_id],
             |row| {
                 Ok((
                     row.get(0)?,
-                    // W4b: cents column → f64 boundary conversion.
+                    // W4b: cents column -> f64 boundary conversion.
                     Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
@@ -604,6 +606,17 @@ pub(crate) fn refund_payment_in_connection(
         Some(1),
     )
     .map_err(|e| format!("enqueue adjustment parity sync: {e}"))?;
+
+    let parent_payment_missing_canonical_id = remote_payment_id
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty);
+    if adjustment_context == AdjustmentContext::EditSettlement
+        && (pay_sync_state != "applied" || parent_payment_missing_canonical_id)
+    {
+        payments::refresh_payment_sync_queue_entry(conn, &payment_id)
+            .map_err(|e| format!("refresh parent payment settlement proof sync: {e}"))?;
+    }
 
     Ok(serde_json::json!({
         "success": true,
@@ -1204,6 +1217,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sq_count, 1);
+    }
+
+    #[test]
+    fn edit_settlement_refund_refreshes_parent_payment_payload_with_proof() {
+        let db = test_db();
+        let pay_id = seed_order_and_payment(&db, "ord-edit-proof", 25.3);
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments
+                 SET sync_status = 'pending',
+                     sync_state = 'pending',
+                     remote_payment_id = NULL
+                 WHERE id = ?1",
+                params![pay_id],
+            )
+            .expect("mark parent payment pending");
+        }
+
+        let payload = serde_json::json!({
+            "paymentId": pay_id,
+            "amount": 1.0,
+            "reason": "Edit settlement refund",
+            "adjustmentContext": "edit_settlement",
+            "refundMethod": "cash",
+        });
+        refund_payment(&db, &payload).expect("record edit settlement refund");
+
+        let conn = db.conn.lock().unwrap();
+        let payment_payload: String = conn
+            .query_row(
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = ?1
+                 LIMIT 1",
+                params![pay_id],
+                |row| row.get(0),
+            )
+            .expect("parent payment queue row");
+        let parsed: Value =
+            serde_json::from_str(&payment_payload).expect("parse parent payment payload");
+        let settlement_adjustments = parsed
+            .get("settlement_adjustments")
+            .and_then(Value::as_array)
+            .expect("settlement adjustment proof");
+
+        assert_eq!(settlement_adjustments.len(), 1);
+        assert_eq!(
+            settlement_adjustments[0]
+                .get("amount_cents")
+                .and_then(Value::as_i64),
+            Some(100)
+        );
+        assert_eq!(
+            settlement_adjustments[0]
+                .get("adjustment_context")
+                .and_then(Value::as_str),
+            Some("edit_settlement")
+        );
     }
 
     #[test]

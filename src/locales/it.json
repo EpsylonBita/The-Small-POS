@@ -4503,6 +4503,16 @@
       "selectDateTime": "Seleziona data e ora di inizio e fine",
       "endAfterStart": "L'ora di fine deve essere successiva all'ora di inizio"
     },
+    "ergani": {
+      "noBranch": "Nessuna filiale configurata per questo terminale.",
+      "noShifts": "Nessun turno da pubblicare per questa settimana.",
+      "publish": "Pubblica su ERGANI",
+      "publishing": "Pubblicazione...",
+      "publishBlocked": "Programma messo in coda ma bloccato finché la configurazione ERGANI non è completa.",
+      "publishQueued": "Pubblicazione del programma messa in coda per ERGANI.",
+      "publishFailed": "Impossibile pubblicare su ERGANI.",
+      "lastStatus": "Stato ERGANI"
+    },
     "errors": {
       "loadFailed": "Impossibile caricare il programma del personale"
     }

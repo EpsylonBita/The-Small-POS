@@ -845,7 +845,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     defaultValue: runtimeSyncHealth,
   })
   const sectionButtonClass = (section: SettingsSectionId) =>
-    `w-full rounded-xl border px-3 py-3 text-left transition-all ${
+    `min-h-[4.75rem] w-56 shrink-0 rounded-xl border px-3 py-2.5 text-left transition-all xs:w-60 sm:w-64 md:min-h-[4.25rem] md:w-full md:shrink md:px-3 md:py-3 ${
       activeSettingsSection === section
         ? 'border-cyan-400/70 bg-cyan-500/15 text-cyan-950 shadow-[0_0_18px_rgba(34,211,238,0.16)] dark:text-cyan-100'
         : 'liquid-glass-modal-border bg-white/5 text-slate-700 hover:bg-white/10 dark:text-slate-200 dark:hover:bg-white/10'
@@ -1001,8 +1001,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </div>
         </div>
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[230px_minmax(0,1fr)]">
-          <aside className="flex gap-2 overflow-x-auto rounded-xl border liquid-glass-modal-border bg-white/5 p-2 scrollbar-hide lg:min-h-0 lg:flex-col lg:overflow-y-auto lg:overflow-x-hidden">
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(220px,248px)_minmax(0,1fr)]">
+          <aside className="flex min-w-0 gap-2 overflow-x-auto rounded-xl border liquid-glass-modal-border bg-white/5 p-2 scrollbar-hide touch-pan-x md:min-h-0 md:flex-col md:overflow-y-auto md:overflow-x-hidden md:touch-pan-y">
             {settingsSections.map((section) => (
               <button
                 key={section.id}
@@ -1011,13 +1011,13 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 className={sectionButtonClass(section.id)}
                 aria-current={activeSettingsSection === section.id ? 'page' : undefined}
               >
-                <span className="flex items-center gap-3">
+                <span className="flex min-w-0 items-center gap-3">
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-black/5 dark:bg-white/10">
                     {section.icon}
                   </span>
-                  <span className="min-w-[120px] lg:min-w-0">
-                    <span className="block text-sm font-semibold">{section.label}</span>
-                    <span className="block truncate text-xs opacity-70">{section.detail}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="line-clamp-2 text-sm font-semibold leading-tight">{section.label}</span>
+                    <span className="mt-0.5 block truncate text-xs leading-snug opacity-70">{section.detail}</span>
                   </span>
                 </span>
               </button>

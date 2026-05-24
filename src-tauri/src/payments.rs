@@ -1542,7 +1542,10 @@ pub(crate) fn build_payment_sync_payload_for_payment(
     .to_string())
 }
 
-fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Result<(), String> {
+pub(crate) fn refresh_payment_sync_queue_entry(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<(), String> {
     let (order_id, has_supabase_id): (String, i64) = conn
         .query_row(
             "SELECT op.order_id,

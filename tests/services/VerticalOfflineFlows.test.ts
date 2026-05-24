@@ -172,6 +172,7 @@ test('ReservationsService desktop create/update use bridge reservation transport
 
     assert.deepEqual(calls.create, [
       {
+        reservationType: 'table',
         customerName: 'Ada Lovelace',
         customerPhone: '123456',
         customerEmail: 'ada@example.com',

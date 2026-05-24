@@ -4503,6 +4503,16 @@
       "selectDateTime": "Veuillez sélectionner les dates et heures de début et de fin",
       "endAfterStart": "L'heure de fin doit être après l'heure de début"
     },
+    "ergani": {
+      "noBranch": "Aucune succursale n'est configurée pour ce terminal.",
+      "noShifts": "Aucun service à publier pour cette semaine.",
+      "publish": "Publier vers ERGANI",
+      "publishing": "Publication...",
+      "publishBlocked": "Planning mis en file, mais bloqué jusqu'à la fin de la configuration ERGANI.",
+      "publishQueued": "Publication du planning mise en file pour ERGANI.",
+      "publishFailed": "Impossible de publier vers ERGANI.",
+      "lastStatus": "Statut ERGANI"
+    },
     "errors": {
       "loadFailed": "Impossible de charger le planning du personnel"
     }

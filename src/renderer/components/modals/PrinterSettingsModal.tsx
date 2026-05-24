@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
-import { Activity, AlertTriangle, ChefHat, ChevronDown, Info, Pencil, Printer, Receipt, Tag, Trash2, Wine } from 'lucide-react'
+import { Activity, AlertTriangle, ChefHat, ChevronDown, CreditCard, FileText, Info, Package, Pencil, Printer, Receipt, Tag, Trash2, Truck, UserCheck, Wine, XCircle } from 'lucide-react'
 import { getBridge, offEvent, onEvent } from '../../../lib'
 import type { ReceiptSamplePreviewRequest, ReceiptSamplePreviewResponse } from '../../../lib'
 import PrinterSetupWizard from './PrinterSetupWizard'
@@ -314,6 +314,29 @@ const RECEIPT_ACTION_DEFAULTS: Record<ReceiptActionKey, boolean> = {
   on_complete: false, on_cancel: false,
 }
 const camelCase = (s: string) => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
+const getReceiptActionIcon = (key: ReceiptActionKey) => {
+  switch (key) {
+    case 'payment_receipt':
+      return CreditCard
+    case 'split_receipt':
+      return FileText
+    case 'shift_close':
+      return Activity
+    case 'driver_assigned':
+      return Truck
+    case 'z_report':
+      return Receipt
+    case 'kitchen_ticket':
+      return ChefHat
+    case 'on_complete':
+      return Package
+    case 'on_cancel':
+      return XCircle
+    case 'after_order':
+    default:
+      return UserCheck
+  }
+}
 
 const PrinterSettingsModal: React.FC<Props> = ({
   isOpen,
@@ -1358,6 +1381,81 @@ const PrinterSettingsModal: React.FC<Props> = ({
     </button>
   )
 
+  const renderReceiptActionSwitchRow = (key: ReceiptActionKey) => {
+    const enabled = receiptActions[key]
+    const Icon = getReceiptActionIcon(key)
+    const label = t(`settings.printer.receiptActions.${camelCase(key)}`, key)
+    const stateLabel = enabled ? t('common.active', 'Active') : t('common.inactive', 'Inactive')
+
+    return (
+      <button
+        key={key}
+        type="button"
+        onClick={() => handleReceiptActionToggle(key)}
+        className={`group flex min-h-[4.25rem] w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors ${
+          enabled
+            ? 'border-emerald-300/45 bg-white/[0.025] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] hover:bg-white/[0.04]'
+            : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.055]'
+        }`}
+        aria-checked={enabled}
+        aria-label={`${label}: ${stateLabel}`}
+        role="switch"
+      >
+        <span
+          className={`flex h-8 w-8 shrink-0 items-center justify-center ${
+            enabled ? 'text-emerald-200' : 'text-white/45'
+          }`}
+          aria-hidden="true"
+        >
+          <Icon className="h-5 w-5" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className={`block whitespace-normal break-words text-sm font-semibold leading-tight ${enabled ? 'text-emerald-50' : 'text-white/70'}`}>
+            {label}
+          </span>
+          <span className="mt-1 flex flex-wrap items-center gap-2">
+            <span
+              className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${
+                enabled ? 'text-emerald-100/90' : 'text-white/35'
+              }`}
+            >
+              {stateLabel}
+            </span>
+            <span
+              className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${
+                enabled ? 'border-emerald-300/30 bg-transparent text-emerald-100/80' : 'border-transparent bg-white/[0.06] text-white/35'
+              }`}
+            >
+              AUTO
+            </span>
+          </span>
+        </span>
+        <span
+          className={`relative flex h-6 w-12 shrink-0 items-center rounded-full border transition-colors ${
+            enabled
+              ? 'border-emerald-300 bg-emerald-500'
+              : 'border-white/12 bg-black/25 text-white/45'
+          }`}
+          aria-hidden="true"
+        >
+          <span
+            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full border border-white/70 bg-white shadow-sm transition-transform ${
+              enabled
+                ? 'translate-x-6'
+                : 'translate-x-0'
+            }`}
+          />
+        </span>
+      </button>
+    )
+  }
+
+  const renderReceiptActionGrid = (keys: readonly ReceiptActionKey[]) => (
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,23rem),1fr))] gap-2">
+      {keys.map(renderReceiptActionSwitchRow)}
+    </div>
+  )
+
   // Render printer list view
   const renderListView = () => (
     <div className="space-y-4">
@@ -1511,59 +1609,16 @@ const PrinterSettingsModal: React.FC<Props> = ({
       {/* Automatic Receipt Actions — global terminal setting */}
       {renderSectionHeader('receiptActions', 'settings.printer.receiptActions.sectionTitle', 'Automatic Receipt Actions')}
       {openSections.receiptActions && (
-        <div className="space-y-1 pl-1">
-          {RECEIPT_ACTION_KEYS.slice(0, 7).map(key => (
-            <div key={key} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/5">
-              <span className="text-xs text-white/80">
-                {t(`settings.printer.receiptActions.${camelCase(key)}`, key)}
-              </span>
-              <span className="flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/10 text-white/40">
-                  AUTO
-                </span>
-                <button
-                  type="button"
-                  onClick={() => handleReceiptActionToggle(key)}
-                  className={`relative w-9 h-5 rounded-full transition-colors ${
-                    receiptActions[key] ? 'bg-emerald-500/80' : 'bg-white/15'
-                  }`}
-                  aria-checked={receiptActions[key]}
-                  role="switch"
-                >
-                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                    receiptActions[key] ? 'translate-x-4' : 'translate-x-0.5'
-                  }`} />
-                </button>
-              </span>
-            </div>
-          ))}
-          <div className="flex items-center gap-2 py-1 px-2">
+        <div className="space-y-3 pl-1 pr-1">
+          {renderReceiptActionGrid(RECEIPT_ACTION_KEYS.slice(0, 7))}
+          <div className="flex items-center gap-2 py-1">
             <div className="flex-1 border-t border-white/10" />
             <span className="text-[10px] uppercase tracking-wider text-white/30">
               {t('settings.printer.receiptActions.newTriggersLabel', 'New triggers')}
             </span>
             <div className="flex-1 border-t border-white/10" />
           </div>
-          {RECEIPT_ACTION_KEYS.slice(7).map(key => (
-            <div key={key} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/5">
-              <span className="text-xs text-white/80">
-                {t(`settings.printer.receiptActions.${camelCase(key)}`, key)}
-              </span>
-              <button
-                type="button"
-                onClick={() => handleReceiptActionToggle(key)}
-                className={`relative w-9 h-5 rounded-full transition-colors ${
-                  receiptActions[key] ? 'bg-emerald-500/80' : 'bg-white/15'
-                }`}
-                aria-checked={receiptActions[key]}
-                role="switch"
-              >
-                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                  receiptActions[key] ? 'translate-x-4' : 'translate-x-0.5'
-                }`} />
-              </button>
-            </div>
-          ))}
+          {renderReceiptActionGrid(RECEIPT_ACTION_KEYS.slice(7))}
         </div>
       )}
     </div>

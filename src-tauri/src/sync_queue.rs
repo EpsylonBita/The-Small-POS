@@ -1858,7 +1858,7 @@ fn build_order_insert_body(
     // included; manual_discount_mode is a string so no cents needed.
     let tip_amount =
         number_field_from_sources(&sources, &["tip_amount", "tipAmount"]).unwrap_or(0.0);
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "client_order_id": string_field_from_sources(&sources, &["client_order_id", "clientOrderId"])
             .unwrap_or_else(|| record_id.to_string()),
         "branch_id": branch_id,
@@ -1921,6 +1921,15 @@ fn build_order_insert_body(
         "ghost_source": string_field_from_sources(&sources, &["ghost_source", "ghostSource"]),
         "ghost_metadata": ghost_metadata,
     });
+
+    if let Value::Object(object) = &mut body {
+        if object
+            .get("fiscal_receipt_number")
+            .is_some_and(Value::is_null)
+        {
+            object.remove("fiscal_receipt_number");
+        }
+    }
 
     Ok(body)
 }
@@ -6425,6 +6434,41 @@ mod tests {
             Some("cash"),
             "pending dine-in table saves keep payment_status pending but send a method for old admin validators"
         );
+    }
+
+    #[test]
+    fn prepare_order_request_omits_empty_fiscal_receipt_number_on_insert() {
+        let conn = test_connection();
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-no-fiscal-receipt",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentMethod": "cash",
+                "paymentStatus": "pending",
+                "fiscalReceiptNumber": Value::Null,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 8.5,
+                    "name": "Toast"
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(body.get("fiscal_receipt_number"), None);
     }
 
     #[test]

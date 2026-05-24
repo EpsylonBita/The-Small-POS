@@ -28,6 +28,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'orders-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'delivery-zones-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'staff-schedule-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'module-context-sync.test.ts'),
   path.join(testsRoot, 'renderer', 'suppliers-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'inventory-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'coupon-loyalty-scan-ui.test.ts'),
@@ -40,6 +41,7 @@ const entryPoints = [
   // validateSecureSessionUser AND the keyring entry must be cleared.
   path.join(testsRoot, 'renderer', 'secure-session-validation.test.ts'),
   path.join(testsRoot, 'renderer', 'privileged-actions.test.ts'),
+  path.join(testsRoot, 'renderer', 'reset-actions.test.ts'),
 ];
 
 await fs.mkdir(outDir, { recursive: true });
