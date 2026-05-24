@@ -17571,6 +17571,14 @@ pub(crate) struct ClearLegacyFinancialParityOrphanResult {
     pub legacy_row_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClearAllLegacyFinancialParityOrphansResult {
+    pub scanned: usize,
+    pub cleared: usize,
+    pub skipped: usize,
+    pub legacy_row_ids: Vec<String>,
+}
+
 fn legacy_financial_parity_table_name(entity_type: &str) -> Result<&'static str, String> {
     match entity_type.trim() {
         "payment" => Ok("payments"),
@@ -17721,6 +17729,119 @@ pub(crate) fn clear_legacy_financial_parity_orphan(
         cleared,
         legacy_row_ids,
     })
+}
+
+pub(crate) fn clear_all_legacy_financial_parity_orphans(
+    db: &DbState,
+) -> Result<ClearAllLegacyFinancialParityOrphansResult, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, table_name, record_id
+             FROM parity_sync_queue
+             WHERE table_name IN ('payments', 'payment_adjustments')
+             ORDER BY datetime(created_at) ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare legacy parity orphan bulk lookup: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query legacy parity orphan bulk lookup: {e}"))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    drop(stmt);
+
+    if rows.is_empty() {
+        return Ok(ClearAllLegacyFinancialParityOrphansResult {
+            scanned: 0,
+            cleared: 0,
+            skipped: 0,
+            legacy_row_ids: Vec::new(),
+        });
+    }
+
+    let mut grouped: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for (row_id, table_name, record_id) in rows {
+        let normalized_record_id = record_id.trim().to_string();
+        if normalized_record_id.is_empty() {
+            continue;
+        }
+        grouped
+            .entry((table_name, normalized_record_id))
+            .or_default()
+            .push(row_id);
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin legacy parity orphan bulk cleanup: {e}"))?;
+
+    let result = (|| -> Result<ClearAllLegacyFinancialParityOrphansResult, String> {
+        let mut cleared = 0usize;
+        let mut skipped = 0usize;
+        let mut cleared_row_ids = Vec::new();
+        let scanned = grouped.values().map(Vec::len).sum();
+
+        for ((table_name, record_id), row_ids) in grouped {
+            let entity_type = match table_name.as_str() {
+                "payments" => "payment",
+                "payment_adjustments" => "payment_adjustment",
+                other => {
+                    skipped += row_ids.len();
+                    warn!(
+                        table_name = %other,
+                        record_id = %record_id,
+                        "Skipping unsupported legacy financial parity table during bulk cleanup"
+                    );
+                    continue;
+                }
+            };
+
+            if local_financial_record_exists(&conn, entity_type, &record_id)? {
+                skipped += row_ids.len();
+                continue;
+            }
+
+            let removed = remove_legacy_financial_parity_rows(&conn, &table_name, &record_id)?;
+            if removed > 0 {
+                cleared += removed;
+                cleared_row_ids.extend(row_ids);
+            }
+        }
+
+        Ok(ClearAllLegacyFinancialParityOrphansResult {
+            scanned,
+            cleared,
+            skipped,
+            legacy_row_ids: cleared_row_ids,
+        })
+    })();
+
+    match result {
+        Ok(result) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit legacy parity orphan bulk cleanup: {e}"))?;
+            if result.cleared > 0 {
+                info!(
+                    scanned = result.scanned,
+                    cleared = result.cleared,
+                    skipped = result.skipped,
+                    legacy_row_ids = ?result.legacy_row_ids,
+                    "Cleared stale legacy financial parity orphan rows in bulk"
+                );
+            }
+            Ok(result)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 // Wave 5 Session 7 PR 2: `reconcile_legacy_financial_parity_rows`
@@ -22067,6 +22188,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn test_clear_all_legacy_financial_parity_orphans_only_removes_missing_records() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-bulk-live', '[]', 4.0, 400, 'completed', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-bulk-live', 'ord-bulk-live', 'cash', 4.0, 400, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        for (row_id, table_name, record_id) in [
+            ("legacy-bulk-pay-a", "payments", "pay-bulk-orphan-a"),
+            (
+                "legacy-bulk-adjustment-a",
+                "payment_adjustments",
+                "adj-bulk-orphan-a",
+            ),
+            ("legacy-bulk-pay-live", "payments", "pay-bulk-live"),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                    id, table_name, record_id, operation, data, organization_id,
+                    created_at, attempts, retry_delay_ms, priority, module_type,
+                    conflict_strategy, version, status, error_message
+                 ) VALUES (
+                    ?1, ?2, ?3, 'INSERT', '{}', 'org-1', datetime('now'), 1, 1000,
+                    1, 'financial', 'manual', 1, 'conflict', 'Waiting for parent order sync'
+                 )",
+                params![row_id, table_name, record_id],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let result = clear_all_legacy_financial_parity_orphans(&db).unwrap();
+        assert_eq!(result.scanned, 3);
+        assert_eq!(result.cleared, 2);
+        assert_eq!(result.skipped, 1);
+        let mut legacy_row_ids = result.legacy_row_ids;
+        legacy_row_ids.sort();
+        assert_eq!(
+            legacy_row_ids,
+            vec![
+                "legacy-bulk-adjustment-a".to_string(),
+                "legacy-bulk-pay-a".to_string(),
+            ]
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let remaining: Vec<String> = conn
+            .prepare("SELECT id FROM parity_sync_queue ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(remaining, vec!["legacy-bulk-pay-live"]);
     }
 
     #[test]

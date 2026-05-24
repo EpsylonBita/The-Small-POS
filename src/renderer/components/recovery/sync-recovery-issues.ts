@@ -90,6 +90,15 @@ const RECOVERY_RECIPES = {
     verificationKey: 'recovery.recipes.catalogAvailabilityRetry.verification',
     requiresSnapshot: false,
   },
+  legacyFinancialBulkClear: {
+    recipeId: 'legacy-financial-parity-orphans.bulk-clear',
+    version: 1,
+    actionId: 'clearAllLegacyFinancialOrphans',
+    labelKey: 'recovery.recipes.legacyFinancialBulkClear.label',
+    explanationKey: 'recovery.recipes.legacyFinancialBulkClear.explanation',
+    verificationKey: 'recovery.recipes.legacyFinancialBulkClear.verification',
+    requiresSnapshot: true,
+  },
 } as const satisfies Record<string, RecoveryRecipeDefinition>;
 
 const knownSolutionFromRecipe = (
@@ -297,6 +306,25 @@ const createClearLegacyFinancialOrphanAction = (): RecoveryActionDescriptor =>
       confirmMessageKey: 'recovery.actions.clearLegacyFinancialOrphan.confirmMessage',
       confirmCheckboxKey: 'recovery.actions.clearLegacyFinancialOrphan.confirmCheckbox',
     },
+  );
+
+const createClearAllLegacyFinancialOrphansAction = (): RecoveryActionDescriptor =>
+  withRecipe(
+    createAction(
+      'clearAllLegacyFinancialOrphans',
+      'recovery.actions.clearAllLegacyFinancialOrphans.label',
+      {
+        descriptionKey: 'recovery.actions.clearAllLegacyFinancialOrphans.description',
+        recommended: true,
+        safetyLevel: 'destructive_local',
+        requiresSnapshot: true,
+        confirmationRequired: true,
+        confirmTitleKey: 'recovery.actions.clearAllLegacyFinancialOrphans.confirmTitle',
+        confirmMessageKey: 'recovery.actions.clearAllLegacyFinancialOrphans.confirmMessage',
+        confirmCheckboxKey: 'recovery.actions.clearAllLegacyFinancialOrphans.confirmCheckbox',
+      },
+    ),
+    RECOVERY_RECIPES.legacyFinancialBulkClear,
   );
 
 const createRequeueFailedFinancialShiftRowsAction = (): RecoveryActionDescriptor =>
@@ -1311,6 +1339,33 @@ const buildIntegrityIssue = (
   }
 };
 
+const buildLegacyFinancialBulkIssue = (
+  issues: SyncFinancialIntegrityIssue[],
+): RecoveryIssue => {
+  const paymentCount = issues.filter((issue) => issue.entityType === 'payment').length;
+  const adjustmentCount = issues.filter((issue) => issue.entityType === 'payment_adjustment').length;
+  return withKnownSolution(
+    {
+      id: 'integrity-legacy-financial-orphans-bulk',
+      code: 'legacy_financial_parity_orphans_bulk',
+      severity: 'error',
+      status: 'blocking',
+      entityType: 'financial',
+      entityId: 'legacy_financial_parity_orphans',
+      titleKey: 'recovery.issues.legacyFinancialParityOrphansBulk.title',
+      summaryKey: 'recovery.issues.legacyFinancialParityOrphansBulk.summary',
+      guidanceKey: 'recovery.issues.legacyFinancialParityOrphansBulk.guidance',
+      actions: [createClearAllLegacyFinancialOrphansAction(), createContactDevAction()],
+      params: {
+        count: issues.length,
+        paymentCount,
+        adjustmentCount,
+      },
+    },
+    RECOVERY_RECIPES.legacyFinancialBulkClear,
+  );
+};
+
 const buildFinancialQueueIssues = (
   financialItems: SyncFinancialQueueItem[],
 ): RecoveryIssue[] => {
@@ -1543,7 +1598,19 @@ export function buildSyncRecoveryIssues({
   for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {
     pushIssue(issues, issue);
   }
+  const legacyFinancialOrphans = integrityIssues.filter(
+    (issue) => issue.reasonCode === 'legacy_financial_parity_orphan',
+  );
+  if (legacyFinancialOrphans.length > 1) {
+    pushIssue(issues, buildLegacyFinancialBulkIssue(legacyFinancialOrphans));
+  }
   for (const integrityIssue of integrityIssues) {
+    if (
+      legacyFinancialOrphans.length > 1 &&
+      integrityIssue.reasonCode === 'legacy_financial_parity_orphan'
+    ) {
+      continue;
+    }
     pushIssue(issues, buildIntegrityIssue(systemHealth, integrityIssue));
   }
   for (const issue of buildFinancialQueueIssues(financialItems)) {

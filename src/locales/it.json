@@ -5538,6 +5538,13 @@
         "confirmMessage": "Questa azione rimuove dal solo terminale corrente la riga di sincronizzazione finanziaria legacy obsoleta per {{entityId}}. Non ricrea il record di pagamento o rettifica mancante.",
         "confirmCheckbox": "Ho capito che questa azione rimuove solo la riga di sincronizzazione legacy obsoleta da questo terminale."
       },
+      "clearAllLegacyFinancialOrphans": {
+        "label": "Rimuovi tutte le righe legacy obsolete",
+        "description": "Rimuove ogni riga di sincronizzazione legacy pagamento/rettifica che non ha più un record finanziario locale corrispondente.",
+        "confirmTitle": "Rimuovere tutte le righe finanziarie legacy obsolete?",
+        "confirmMessage": "Questa azione controlla {{count}} righe di sincronizzazione finanziaria legacy obsolete e rimuove solo quelle il cui record locale di pagamento o rettifica manca ancora. Non elimina ordini, pagamenti, rettifiche o dati server.",
+        "confirmCheckbox": "Ho capito che questa azione rimuove solo righe di sincronizzazione legacy obsolete da questo terminale."
+      },
       "requeueFailedFinancialShiftRows": {
         "label": "Rimetti in coda le righe finanziarie legate al turno"
       },
@@ -5637,6 +5644,11 @@
         "label": "Retry noto disponibilità catalogo",
         "explanation": "Questa ricetta riprova solo i flag di disponibilità quando la rotta admin supporta l'aggiornamento.",
         "verification": "Le righe di disponibilità catalogo dovrebbero uscire dalla coda fallita dopo il retry."
+      },
+      "legacyFinancialBulkClear": {
+        "label": "Pulizia legacy massiva nota",
+        "explanation": "Questa ricetta rimuove tutte le righe di sincronizzazione finanziaria legacy obsolete in un unico passaggio controllato, dopo aver verificato che i record locali di pagamento o rettifica manchino ancora.",
+        "verification": "Aggiorna Recovery dopo la pulizia. Il blocco finanziario legacy dovrebbe sparire, poi esegui di nuovo la sincronizzazione."
       }
     },
     "issues": {
@@ -5724,6 +5736,11 @@
         "title": "Riga legacy di sincronizzazione finanziaria obsoleta",
         "summary": "Esiste ancora una riga legacy di sincronizzazione del pagamento, ma manca il record locale corrispondente del pagamento o della rettifica.",
         "guidance": "Se hai già verificato che questo storico pagamenti è completo, rimuovi la riga legacy obsoleta da questo terminale. Questo elimina solo il blocco; non ricrea il record mancante."
+      },
+      "legacyFinancialParityOrphansBulk": {
+        "title": "{{count}} righe di sincronizzazione finanziaria legacy obsolete",
+        "summary": "{{paymentCount}} righe pagamento e {{adjustmentCount}} righe rettifica sono righe di sincronizzazione legacy obsolete senza record finanziari locali corrispondenti.",
+        "guidance": "Usa la pulizia in un solo passaggio. Il POS ricontrolla ogni riga e rimuove solo quelle ancora orfane su questo terminale."
       },
       "financialQueueFailed": {
         "title": "Riga di sincronizzazione finanziaria fallita",

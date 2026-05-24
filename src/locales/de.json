@@ -5538,6 +5538,13 @@
         "confirmMessage": "Dadurch wird die veraltete Legacy-Finanz-Sync-Zeile für {{entityId}} nur von diesem Terminal entfernt. Der fehlende Zahlungs- oder Anpassungseintrag wird dadurch nicht neu erstellt.",
         "confirmCheckbox": "Ich verstehe, dass dadurch nur die veraltete Legacy-Sync-Zeile von diesem Terminal entfernt wird."
       },
+      "clearAllLegacyFinancialOrphans": {
+        "label": "Alle veralteten Legacy-Zeilen bereinigen",
+        "description": "Bereinigt jede veraltete Legacy-Zahlungs-/Anpassungs-Sync-Zeile, die keinen passenden lokalen Finanzeintrag mehr hat.",
+        "confirmTitle": "Alle veralteten Legacy-Finanzzeilen bereinigen?",
+        "confirmMessage": "Dies prüft {{count}} veraltete Legacy-Finanz-Sync-Zeilen und entfernt nur Zeilen, deren lokaler Zahlungs- oder Anpassungseintrag weiterhin fehlt. Es löscht keine Bestellungen, Zahlungen, Anpassungen oder Serverdaten.",
+        "confirmCheckbox": "Ich verstehe, dass dadurch nur veraltete Legacy-Sync-Zeilen von diesem Terminal entfernt werden."
+      },
       "requeueFailedFinancialShiftRows": {
         "label": "Schichtgebundene Finanzzeilen erneut einreihen"
       },
@@ -5637,6 +5644,11 @@
         "label": "Bekannter Retry für Katalogverfügbarkeit",
         "explanation": "Dieses Rezept wiederholt nur Verfügbarkeits-Flags, nachdem die Admin-Route diese Aktualisierung unterstützt.",
         "verification": "Katalogverfügbarkeitszeilen sollten nach dem Retry die Fehlerwarteschlange verlassen."
+      },
+      "legacyFinancialBulkClear": {
+        "label": "Bekannte Massenbereinigung für Legacy-Zeilen",
+        "explanation": "Dieses Rezept bereinigt alle veralteten Legacy-Finanz-Sync-Zeilen in einem geschützten Durchlauf, nachdem geprüft wurde, dass ihre lokalen Zahlungs- oder Anpassungseinträge weiterhin fehlen.",
+        "verification": "Aktualisieren Sie Recovery nach der Bereinigung. Der Legacy-Finanzblocker sollte verschwunden sein; führen Sie danach Sync erneut aus."
       }
     },
     "issues": {
@@ -5724,6 +5736,11 @@
         "title": "Veraltete Legacy-Finanz-Sync-Zeile",
         "summary": "Eine Legacy-Zahlungs-Sync-Zeile existiert noch, aber der passende lokale Zahlungs- oder Anpassungseintrag fehlt.",
         "guidance": "Wenn Sie bereits bestätigt haben, dass dieser Zahlungsverlauf vollständig ist, bereinigen Sie die veraltete Legacy-Zeile auf diesem Terminal. Dadurch wird nur der Blocker entfernt; der fehlende Eintrag wird nicht neu erstellt."
+      },
+      "legacyFinancialParityOrphansBulk": {
+        "title": "{{count}} veraltete Legacy-Finanz-Sync-Zeilen",
+        "summary": "{{paymentCount}} Zahlungszeilen und {{adjustmentCount}} Anpassungszeilen sind veraltete Legacy-Sync-Zeilen ohne passende lokale Finanzeinträge.",
+        "guidance": "Nutzen Sie die Ein-Klick-Bereinigung. Das POS prüft jede Zeile erneut und entfernt nur Zeilen, die auf diesem Terminal weiterhin verwaist sind."
       },
       "financialQueueFailed": {
         "title": "Fehlgeschlagene Finanz-Sync-Zeile",

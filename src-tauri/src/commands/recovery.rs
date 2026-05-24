@@ -740,6 +740,29 @@ pub async fn recovery_execute_action(
                 ),
             }))
         }
+        "clearAllLegacyFinancialOrphans" => {
+            info!("Running bulk local legacy financial parity orphan cleanup");
+
+            let result = sync::clear_all_legacy_financial_parity_orphans(&db)
+                .map_err(auth::GuardedCommandError::from)?;
+
+            info!(
+                scanned = result.scanned,
+                cleared = result.cleared,
+                skipped = result.skipped,
+                "Completed bulk local legacy financial parity orphan cleanup"
+            );
+
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "message": format!(
+                    "Cleared {} stale legacy financial parity row(s). Skipped {} row(s) that still have local records.",
+                    result.cleared,
+                    result.skipped,
+                ),
+            }))
+        }
         "openShiftRepair" | "forceCloseShift" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,

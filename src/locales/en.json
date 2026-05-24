@@ -5538,6 +5538,13 @@
         "confirmMessage": "This removes the stale legacy financial sync row for {{entityId}} from this terminal only. It does not recreate the missing payment or adjustment record.",
         "confirmCheckbox": "I understand this only clears the stale legacy sync row from this terminal."
       },
+      "clearAllLegacyFinancialOrphans": {
+        "label": "Clear all stale legacy rows",
+        "description": "Clears every stale legacy payment/adjustment sync row that no longer has a matching local financial record.",
+        "confirmTitle": "Clear all stale legacy financial rows?",
+        "confirmMessage": "This checks {{count}} stale legacy financial sync rows and removes only rows whose local payment or adjustment record is still missing. It does not delete orders, payments, adjustments, or server data.",
+        "confirmCheckbox": "I understand this clears only stale legacy sync rows from this terminal."
+      },
       "requeueFailedFinancialShiftRows": {
         "label": "Requeue shift-bound financial rows"
       },
@@ -5637,6 +5644,11 @@
         "label": "Known catalog availability retry",
         "explanation": "This recipe retries only availability flags after the admin route supports the update.",
         "verification": "Catalog availability rows should leave the failed queue after retry."
+      },
+      "legacyFinancialBulkClear": {
+        "label": "Known bulk legacy cleanup",
+        "explanation": "This recipe clears all stale legacy financial sync rows in one guarded pass after verifying their local payment or adjustment records are still missing.",
+        "verification": "Refresh recovery after the cleanup. The stale legacy financial blocker should be gone, then run sync again."
       }
     },
     "issues": {
@@ -5719,6 +5731,11 @@
         "title": "Stale legacy financial sync row",
         "summary": "A legacy payment sync row still exists, but the matching local payment or adjustment record is missing.",
         "guidance": "If you have already confirmed this payment history is complete, clear the stale legacy row from this terminal. This removes the blocker only; it does not recreate the missing record."
+      },
+      "legacyFinancialParityOrphansBulk": {
+        "title": "{{count}} stale legacy financial sync rows",
+        "summary": "{{paymentCount}} payment rows and {{adjustmentCount}} adjustment rows are stale legacy sync rows without matching local financial records.",
+        "guidance": "Use the one-shot cleanup. The POS checks every row again and only removes rows that are still orphaned on this terminal."
       },
       "financialIntegrity": {
         "title": "Financial integrity issue",

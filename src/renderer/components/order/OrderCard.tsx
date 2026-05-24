@@ -13,7 +13,7 @@ import {
   normalizeOrderTypeForDisplay,
   resolveOrderDisplayTitle,
 } from '../../utils/orderDisplay';
-import { getVisibleOrderNumber } from '../../utils/orderNumberUtils';
+import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../../utils/orderNumberUtils';
 import { openExternalUrl } from '../../utils/external-url';
 import {
   buildGoogleMapsDirectionsUrl,
@@ -83,6 +83,18 @@ export const OrderCard = memo<OrderCardProps>(({
   const formatOrderNumber = () => {
     const orderNum = getVisibleOrderNumber(order);
     if (orderNum) {
+      const trimmedOrderNum = orderNum.trim();
+      const isHashedFallbackNumber = /^#?[A-Za-z]+-\d{8}-[a-f0-9]{32}$/i.test(trimmedOrderNum);
+      if (isHashedFallbackNumber) {
+        const compactFallbackNumber = formatCompactOrderNumberForDisplay(
+          trimmedOrderNum,
+          order.created_at || order.createdAt,
+        );
+        return compactFallbackNumber.startsWith('#')
+          ? compactFallbackNumber
+          : `#${compactFallbackNumber}`;
+      }
+
       // If it's already formatted like "POS-20251212-0001", extract the last part
       if (orderNum.includes('-')) {
         const parts = orderNum.split('-');

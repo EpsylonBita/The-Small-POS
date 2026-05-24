@@ -5538,6 +5538,13 @@
         "confirmMessage": "Cela supprime uniquement de ce terminal la ligne de synchronisation financière legacy obsolète pour {{entityId}}. Cela ne recrée pas l'enregistrement de paiement ou d'ajustement manquant.",
         "confirmCheckbox": "Je comprends que cela supprime uniquement la ligne de synchronisation legacy obsolète de ce terminal."
       },
+      "clearAllLegacyFinancialOrphans": {
+        "label": "Supprimer toutes les lignes legacy obsolètes",
+        "description": "Supprime chaque ligne de synchronisation legacy paiement/ajustement qui n'a plus d'enregistrement financier local correspondant.",
+        "confirmTitle": "Supprimer toutes les lignes financières legacy obsolètes ?",
+        "confirmMessage": "Cela vérifie {{count}} lignes de synchronisation financière legacy obsolètes et supprime uniquement celles dont l'enregistrement local de paiement ou d'ajustement manque encore. Cela ne supprime ni commandes, ni paiements, ni ajustements, ni données serveur.",
+        "confirmCheckbox": "Je comprends que cela supprime uniquement les lignes de synchronisation legacy obsolètes de ce terminal."
+      },
       "requeueFailedFinancialShiftRows": {
         "label": "Réenfiler les lignes financières liées à la vacation"
       },
@@ -5637,6 +5644,11 @@
         "label": "Nouvelle tentative connue de disponibilité catalogue",
         "explanation": "Cette recette réessaie uniquement les flags de disponibilité lorsque la route admin prend en charge cette mise à jour.",
         "verification": "Les lignes de disponibilité catalogue doivent quitter la file en échec après la nouvelle tentative."
+      },
+      "legacyFinancialBulkClear": {
+        "label": "Nettoyage legacy groupé connu",
+        "explanation": "Cette recette supprime toutes les lignes de synchronisation financière legacy obsolètes en une passe contrôlée après avoir vérifié que leurs paiements ou ajustements locaux manquent encore.",
+        "verification": "Actualisez Recovery après le nettoyage. Le blocage financier legacy doit disparaître, puis relancez la synchronisation."
       }
     },
     "issues": {
@@ -5724,6 +5736,11 @@
         "title": "Ligne de synchronisation financière legacy obsolète",
         "summary": "Une ligne de synchronisation legacy pour le paiement existe encore, mais l'enregistrement local correspondant du paiement ou de l'ajustement manque.",
         "guidance": "Si vous avez déjà confirmé que cet historique de paiement est complet, supprimez la ligne legacy obsolète sur ce terminal. Cela enlève uniquement le blocage ; cela ne recrée pas l'enregistrement manquant."
+      },
+      "legacyFinancialParityOrphansBulk": {
+        "title": "{{count}} lignes de synchronisation financière legacy obsolètes",
+        "summary": "{{paymentCount}} lignes de paiement et {{adjustmentCount}} lignes d'ajustement sont des lignes de synchronisation legacy obsolètes sans enregistrements financiers locaux correspondants.",
+        "guidance": "Utilisez le nettoyage en une fois. Le POS revérifie chaque ligne et supprime uniquement celles qui sont encore orphelines sur ce terminal."
       },
       "financialQueueFailed": {
         "title": "Ligne de synchro financière en échec",
