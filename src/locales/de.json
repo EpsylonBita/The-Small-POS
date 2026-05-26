@@ -516,7 +516,20 @@
       "fixedDiscountHint": "Fester Rabatt wird auf Zwischensumme begrenzt",
       "percentMode": "%-Modus",
       "fixedMode": "Festbetrag",
-      "quickDiscounts": "Schnellrabatte"
+      "quickDiscounts": "Schnellrabatte",
+      "selectedCount": "{{count}} ausgewählt",
+      "exitSelection": "Auswahl verlassen",
+      "clearSelection": "Auswahl löschen",
+      "selectAll": "Alle auswählen",
+      "discountSelected": "Ausgewählte rabattieren",
+      "discountSelectedShort": "Rabatt",
+      "clearLineDiscount": "Ausgewählte Rabatte löschen",
+      "clearLineDiscountShort": "Löschen",
+      "lineDiscountApplied": "Rabatt auf ausgewählte Artikel angewendet",
+      "lineDiscountCleared": "Rabatte ausgewählter Artikel gelöscht",
+      "lineDiscountBadge": "Positionsrabatt",
+      "lineDiscountTitle": "Rabatt für ausgewählte Artikel",
+      "lineDiscountSelectionSummary": "{{count}} Artikel - {{amount}}"
     },
     "emptyState": {
       "title": "Keine Menüartikel",

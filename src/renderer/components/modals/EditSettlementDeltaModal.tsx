@@ -107,8 +107,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
       title={title}
       size="md"
       className="!max-w-md"
-      closeOnBackdrop={!submitting}
-      closeOnEscape={!submitting}
+      closeOnBackdrop={false}
+      closeOnEscape={false}
     >
       <div className="space-y-5 p-1">
         {/* Amount highlight */}

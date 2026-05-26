@@ -1,5 +1,8 @@
+use chrono::Utc;
 use serde::Deserialize;
+use tracing::warn;
 
+use crate::fiscal::close_day_guard::{ensure_no_queued_fiscal_for_day, CloseBlockedError};
 use crate::{db, payload_arg0_as_string, zreport};
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +100,55 @@ pub async fn zreport_generate(
         || payload.get("date").and_then(|v| v.as_str()).is_some();
 
     if has_shift_id && !has_branch_date {
+        // T24 (fiscalization-core): refuse the z-report close while any
+        // fiscal submission for the business day is still pending under a
+        // currently-active plugin (Req 4.7 + 4.7a). Best-effort only — if
+        // we can't determine a branch_id from the payload we let the close
+        // proceed and rely on the server-side z-report flow to surface any
+        // stale fiscal state via the admin health view (Req 7.8).
+        let payload_branch_id = payload
+            .get("branchId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        if let Some(branch_id) = payload_branch_id {
+            let business_day_iso = Utc::now().format("%Y-%m-%d").to_string();
+            let conn_guard = match db.conn.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    warn!("[zreports.fiscal-guard] DB mutex poisoned: {e}");
+                    return zreport::generate_z_report(&db, &payload);
+                }
+            };
+            match ensure_no_queued_fiscal_for_day(&conn_guard, &branch_id, &business_day_iso) {
+                Ok(()) => {}
+                Err(CloseBlockedError::FiscalQueueNotEmpty { source, count }) => {
+                    return Err(serde_json::json!({
+                        "code": "fiscal_close_blocked",
+                        "source": source,
+                        "count": count,
+                        "branchId": branch_id,
+                        "businessDay": business_day_iso,
+                        "message": format!(
+                            "Z-report close blocked: {count} fiscal submission(s) for this branch \
+                             are still pending (source: {source}). Wait for the dispatcher to drain \
+                             or have an administrator override via the fiscal health view."
+                        ),
+                    })
+                    .to_string());
+                }
+            }
+            drop(conn_guard);
+        } else {
+            warn!(
+                "[zreports.fiscal-guard] no branchId in z-report close payload; \
+                 skipping local fiscal-queue guard (Req 4.7 cross-terminal check still \
+                 happens server-side via /api/plugins/fiscal/health)."
+            );
+        }
+
         // Wave 1 C9: this branch used to call `discard_generated_z_report_by_id`
         // whenever `existing: false` — which is exactly the "freshly generated"
         // success case. The effect was that every newly-produced single-shift

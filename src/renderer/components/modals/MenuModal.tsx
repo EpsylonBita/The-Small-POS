@@ -1476,13 +1476,25 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         if (item.id !== itemId) return item;
         const originalUnitPrice = item.originalUnitPrice ?? item.unitPrice ?? item.price ?? 0;
         const isPriceOverridden = Math.abs(normalizedPrice - originalUnitPrice) > 0.0001;
+        const totalPrice = Number((normalizedPrice * item.quantity).toFixed(2));
         return {
           ...item,
           unitPrice: normalizedPrice,
+          unit_price: normalizedPrice,
           price: normalizedPrice,
-          totalPrice: normalizedPrice * item.quantity,
+          totalPrice,
+          total_price: totalPrice,
           originalUnitPrice,
+          original_unit_price: originalUnitPrice,
           isPriceOverridden,
+          is_price_overridden: isPriceOverridden,
+          discount: 0,
+          discountAmount: 0,
+          discount_amount: 0,
+          discountBaseUnitPrice: undefined,
+          discountBaseTotalPrice: undefined,
+          lineDiscountMode: undefined,
+          lineDiscountValue: undefined,
         };
       })
     );

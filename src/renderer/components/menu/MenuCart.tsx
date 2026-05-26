@@ -1,15 +1,23 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift } from 'lucide-react';
+import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw } from 'lucide-react';
 import { useI18n } from '../../contexts/i18n-context';
 import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
 import { formatCurrency } from '../../utils/format';
 import type { DeliveryFeeStatus } from '../../utils/delivery-fee';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import {
+  applyDiscountToCartLines,
+  clearDiscountFromCartLines,
+  getCartLineTotal,
+  roundMoney,
+  type CartLineDiscountMode,
+} from '../../utils/cart-line-discounts';
 import { getBridge } from '../../../lib';
 import toast from 'react-hot-toast';
 
+const BATCH_SELECT_HOLD_DURATION_MS = 650;
 const LINE_PRICE_HOLD_DURATION_MS = 5000;
 const LINE_PRICE_HOLD_TICK_MS = 100;
 
@@ -19,9 +27,20 @@ export interface CartItem {
   quantity: number;
   price: number;
   unitPrice?: number;
+  unit_price?: number;
   totalPrice: number;
+  total_price?: number;
   originalUnitPrice?: number | null;
+  original_unit_price?: number | null;
   isPriceOverridden?: boolean;
+  is_price_overridden?: boolean;
+  discount?: number;
+  discountAmount?: number;
+  discount_amount?: number;
+  discountBaseUnitPrice?: number;
+  discountBaseTotalPrice?: number;
+  lineDiscountMode?: CartLineDiscountMode;
+  lineDiscountValue?: number;
   categoryName?: string; // Main category (e.g., "Crepes", "Waffles")
   flavorType?: 'savory' | 'sweet' | null; // Flavor type for display
   customizations?: Array<{
@@ -165,6 +184,17 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const [linePriceDraft, setLinePriceDraft] = React.useState<string>('');
   const [holdingLineItemId, setHoldingLineItemId] = React.useState<string | number | null>(null);
   const [linePriceHoldProgress, setLinePriceHoldProgress] = React.useState<number>(0);
+  const [isSelectionMode, setIsSelectionMode] = React.useState(false);
+  const [selectedCartItemIds, setSelectedCartItemIds] = React.useState<Set<string | number>>(
+    () => new Set()
+  );
+  const [isLineDiscountModalOpen, setIsLineDiscountModalOpen] = React.useState(false);
+  const [lineDiscountModeDraft, setLineDiscountModeDraft] = React.useState<CartLineDiscountMode>('percentage');
+  const [lineDiscountDraft, setLineDiscountDraft] = React.useState<number>(0);
+  const [lineDiscountManualInput, setLineDiscountManualInput] = React.useState<string>('');
+  const selectionHoldPointerIdRef = React.useRef<number | null>(null);
+  const selectionHoldTriggeredRef = React.useRef(false);
+  const selectionHoldTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const holdStartAtRef = React.useRef<number | null>(null);
   const holdItemSnapshotRef = React.useRef<string | null>(null);
   const holdPointerIdRef = React.useRef<number | null>(null);
@@ -185,7 +215,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   }, [manualDiscountMode, manualDiscountValue, discountPercentage, onManualDiscountChange]);
 
   React.useEffect(() => {
-    if (!isDiscountModalOpen && !isCouponModalOpen) {
+    if (!isDiscountModalOpen && !isCouponModalOpen && !isLineDiscountModalOpen) {
       return;
     }
 
@@ -193,6 +223,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       if (event.key === 'Escape') {
         setIsDiscountModalOpen(false);
         setIsCouponModalOpen(false);
+        setIsLineDiscountModalOpen(false);
       }
     };
 
@@ -200,7 +231,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     return () => {
       window.removeEventListener('keydown', onEscape);
     };
-  }, [isDiscountModalOpen, isCouponModalOpen]);
+  }, [isDiscountModalOpen, isCouponModalOpen, isLineDiscountModalOpen]);
 
   React.useEffect(() => {
     if (!isCouponModalOpen) {
@@ -280,6 +311,79 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
   const { start: startLoyaltyReader } = useLoyaltyReader(isCouponModalOpen, handleLoyaltyCardScanned);
 
+  const clearSelectionHoldTimer = React.useCallback(() => {
+    if (selectionHoldTimeoutRef.current) {
+      clearTimeout(selectionHoldTimeoutRef.current);
+      selectionHoldTimeoutRef.current = null;
+    }
+    selectionHoldPointerIdRef.current = null;
+  }, []);
+
+  const exitSelectionMode = React.useCallback(() => {
+    clearSelectionHoldTimer();
+    selectionHoldTriggeredRef.current = false;
+    setIsSelectionMode(false);
+    setSelectedCartItemIds(new Set());
+    setIsLineDiscountModalOpen(false);
+  }, [clearSelectionHoldTimer]);
+
+  const enterSelectionMode = React.useCallback((itemId: string | number) => {
+    selectionHoldTriggeredRef.current = true;
+    setIsSelectionMode(true);
+    setSelectedCartItemIds(new Set([itemId]));
+  }, []);
+
+  const startSelectionHold = React.useCallback(
+    (event: React.PointerEvent<HTMLDivElement>, itemId: string | number) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) {
+        return;
+      }
+
+      clearSelectionHoldTimer();
+      selectionHoldTriggeredRef.current = false;
+      selectionHoldPointerIdRef.current = event.pointerId;
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {}
+
+      selectionHoldTimeoutRef.current = setTimeout(() => {
+        enterSelectionMode(itemId);
+        clearSelectionHoldTimer();
+      }, BATCH_SELECT_HOLD_DURATION_MS);
+    },
+    [clearSelectionHoldTimer, enterSelectionMode]
+  );
+
+  const handleSelectionPointerEnd = React.useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (
+        selectionHoldPointerIdRef.current !== null &&
+        event.pointerId !== selectionHoldPointerIdRef.current
+      ) {
+        return;
+      }
+      clearSelectionHoldTimer();
+      if (selectionHoldTriggeredRef.current) {
+        window.setTimeout(() => {
+          selectionHoldTriggeredRef.current = false;
+        }, 0);
+      }
+    },
+    [clearSelectionHoldTimer]
+  );
+
+  const toggleSelectedCartItem = React.useCallback((itemId: string | number) => {
+    setSelectedCartItemIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(itemId)) {
+        next.delete(itemId);
+      } else {
+        next.add(itemId);
+      }
+      return next;
+    });
+  }, []);
+
   const clearHoldTimers = React.useCallback(() => {
     if (holdTimeoutRef.current) {
       clearTimeout(holdTimeoutRef.current);
@@ -338,11 +442,24 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         ci.id === editingLineItemId
           ? {
               ...ci,
+              price: next,
               unitPrice: next,
-              totalPrice: next * ci.quantity,
+              unit_price: next,
+              totalPrice: roundMoney(next * ci.quantity),
+              total_price: roundMoney(next * ci.quantity),
               originalUnitPrice: ci.originalUnitPrice ?? baselinePrice,
+              original_unit_price: ci.originalUnitPrice ?? baselinePrice,
               isPriceOverridden:
                 Math.abs(next - (ci.originalUnitPrice ?? baselinePrice)) > 0.0001,
+              is_price_overridden:
+                Math.abs(next - (ci.originalUnitPrice ?? baselinePrice)) > 0.0001,
+              discount: 0,
+              discountAmount: 0,
+              discount_amount: 0,
+              discountBaseUnitPrice: undefined,
+              discountBaseTotalPrice: undefined,
+              lineDiscountMode: undefined,
+              lineDiscountValue: undefined,
             }
           : ci
       );
@@ -442,6 +559,29 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   }, [holdingLineItemId, cartItems, cancelLinePriceHold]);
 
   React.useEffect(() => {
+    setSelectedCartItemIds((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+
+      const validIds = new Set(
+        cartItems
+          .filter((item) => item.is_offer_reward !== true)
+          .map((item) => item.id)
+      );
+      const next = new Set([...prev].filter((id) => validIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [cartItems]);
+
+  React.useEffect(() => {
+    if (isSelectionMode && selectedCartItemIds.size === 0) {
+      setIsSelectionMode(false);
+      setIsLineDiscountModalOpen(false);
+    }
+  }, [isSelectionMode, selectedCartItemIds]);
+
+  React.useEffect(() => {
     if (holdingLineItemId === null || holdItemSnapshotRef.current === null) {
       return;
     }
@@ -472,8 +612,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   React.useEffect(() => {
     return () => {
       clearHoldTimers();
+      clearSelectionHoldTimer();
     };
-  }, [clearHoldTimers]);
+  }, [clearHoldTimers, clearSelectionHoldTimer]);
 
   const parseDiscountInput = (value: string, mode: 'percentage' | 'fixed'): number => {
     const normalized = value.replace(',', '.').trim();
@@ -603,6 +744,81 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     : cartItems.find(item => item.id === editingLineItemId) ?? null;
   const parsedLinePriceDraft = Number.parseFloat(linePriceDraft.replace(',', '.').trim());
   const isLinePriceDraftValid = Number.isFinite(parsedLinePriceDraft) && parsedLinePriceDraft >= 0;
+  const selectedCartItemIdsArray = React.useMemo(
+    () => Array.from(selectedCartItemIds),
+    [selectedCartItemIds]
+  );
+  const selectableCartItemIds = React.useMemo(
+    () => uniqueCartItems
+      .filter((item) => item.is_offer_reward !== true)
+      .map((item) => item.id),
+    [uniqueCartItems]
+  );
+  const selectedLineSubtotal = uniqueCartItems.reduce(
+    (sum, item) => selectedCartItemIds.has(item.id) ? sum + getCartLineTotal(item) : sum,
+    0
+  );
+  const allSelectableSelected =
+    selectableCartItemIds.length > 0 &&
+    selectableCartItemIds.every((id) => selectedCartItemIds.has(id));
+  const isLineDiscountDraftOverMax =
+    lineDiscountModeDraft === 'percentage' && lineDiscountDraft > maxDiscountPercentage;
+  const canApplyLineDiscount =
+    selectedCartItemIdsArray.length > 0 &&
+    lineDiscountDraft > 0 &&
+    !isLineDiscountDraftOverMax &&
+    selectedLineSubtotal > 0;
+
+  const toggleSelectAllCartItems = () => {
+    if (allSelectableSelected) {
+      setSelectedCartItemIds(new Set());
+      return;
+    }
+    setIsSelectionMode(true);
+    setSelectedCartItemIds(new Set(selectableCartItemIds));
+  };
+
+  const openLineDiscountModal = () => {
+    if (selectedCartItemIdsArray.length === 0) {
+      return;
+    }
+    setLineDiscountModeDraft('percentage');
+    setLineDiscountDraft(0);
+    setLineDiscountManualInput('');
+    setIsLineDiscountModalOpen(true);
+  };
+
+  const applySelectedLineDiscount = () => {
+    if (!canApplyLineDiscount) {
+      return;
+    }
+
+    const discountValue =
+      lineDiscountModeDraft === 'percentage'
+        ? Math.max(0, Math.min(lineDiscountDraft, maxDiscountPercentage))
+        : Math.max(0, Math.min(lineDiscountDraft, selectedLineSubtotal));
+
+    onUpdateCart(
+      applyDiscountToCartLines(
+        cartItems,
+        selectedCartItemIdsArray,
+        lineDiscountModeDraft,
+        discountValue
+      )
+    );
+    toast.success(t('menu.cart.lineDiscountApplied', 'Discount applied to selected items'));
+    exitSelectionMode();
+  };
+
+  const clearSelectedLineDiscount = () => {
+    if (selectedCartItemIdsArray.length === 0) {
+      return;
+    }
+
+    onUpdateCart(clearDiscountFromCartLines(cartItems, selectedCartItemIdsArray));
+    toast.success(t('menu.cart.lineDiscountCleared', 'Selected item discounts cleared'));
+    exitSelectionMode();
+  };
 
   // Minimum order validation for delivery orders
   const isDeliveryOrder = orderType === 'delivery';
@@ -645,20 +861,82 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           <h3 className="text-lg font-semibold liquid-glass-modal-title !text-base">
             {t('menu.cart.header', { count: uniqueCartItems.length })}
           </h3>
-          {onAddManualItem && !editMode && (
-            <button
-              onClick={() => setShowManualInput((prev) => !prev)}
-              className={`p-1.5 rounded-lg transition-colors ${
-                showManualInput
-                  ? 'bg-blue-500 text-white'
-                  : 'liquid-glass-modal-text-muted hover:bg-black/5 dark:hover:bg-white/10'
-              }`}
-              title={t('menu.cart.addManualItem', 'Manual Item')}
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {isSelectionMode && (
+              <>
+                <span className="rounded-full bg-blue-500/15 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:text-blue-300">
+                  {t('menu.cart.selectedCount', '{{count}} selected', {
+                    count: selectedCartItemIdsArray.length,
+                  })}
+                </span>
+                <button
+                  type="button"
+                  onClick={exitSelectionMode}
+                  className="p-1.5 rounded-lg transition-colors liquid-glass-modal-text-muted hover:bg-black/5 dark:hover:bg-white/10"
+                  title={t('menu.cart.exitSelection', 'Exit selection')}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </>
+            )}
+            {onAddManualItem && !editMode && !isSelectionMode && (
+              <button
+                onClick={() => setShowManualInput((prev) => !prev)}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  showManualInput
+                    ? 'bg-blue-500 text-white'
+                    : 'liquid-glass-modal-text-muted hover:bg-black/5 dark:hover:bg-white/10'
+                }`}
+                title={t('menu.cart.addManualItem', 'Manual Item')}
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
+        {isSelectionMode && (
+          <div className="px-4 pb-3">
+            <div className="grid grid-cols-[2.75rem_1fr_1fr] gap-2">
+              <button
+                type="button"
+                onClick={toggleSelectAllCartItems}
+                disabled={selectableCartItemIds.length === 0}
+                className="h-10 rounded-lg border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center"
+                title={
+                  allSelectableSelected
+                    ? t('menu.cart.clearSelection', 'Clear selection')
+                    : t('menu.cart.selectAll', 'Select all')
+                }
+              >
+                {allSelectableSelected ? (
+                  <CheckSquare className="w-4 h-4" />
+                ) : (
+                  <Square className="w-4 h-4" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={openLineDiscountModal}
+                disabled={selectedCartItemIdsArray.length === 0}
+                className="h-10 px-3 rounded-lg border text-sm font-semibold bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-2"
+                title={t('menu.cart.discountSelected', 'Discount selected')}
+              >
+                <Percent className="w-4 h-4" />
+                <span>{t('menu.cart.discountSelectedShort', 'Discount')}</span>
+              </button>
+              <button
+                type="button"
+                onClick={clearSelectedLineDiscount}
+                disabled={selectedCartItemIdsArray.length === 0}
+                className="h-10 px-3 rounded-lg border text-sm font-semibold bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-2"
+                title={t('menu.cart.clearLineDiscount', 'Clear selected discounts')}
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>{t('menu.cart.clearLineDiscountShort', 'Clear')}</span>
+              </button>
+            </div>
+          </div>
+        )}
         {ghostModeArmed && (
           <div className="px-4 pb-3">
             <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-700 dark:text-amber-200">
@@ -670,7 +948,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           </div>
         )}
         {/* Manual item inline form */}
-        {showManualInput && onAddManualItem && (
+        {showManualInput && onAddManualItem && !isSelectionMode && (
           <div className={`px-4 pb-3 space-y-2`}>
             {ghostModeFeatureEnabled && !ghostModeArmed && (
               <p className="text-[11px] liquid-glass-modal-text-muted">
@@ -741,19 +1019,69 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               const isPriceOverridden =
                 item.isPriceOverridden || ((item.originalUnitPrice ?? itemUnitPrice) !== itemUnitPrice);
               const isRewardLine = item.is_offer_reward === true;
+              const canSelectLine = !isRewardLine;
+              const isSelectedLine = selectedCartItemIds.has(item.id);
+              const lineDiscountAmount = Math.max(
+                0,
+                Number(item.discountAmount ?? item.discount_amount ?? item.discount ?? 0)
+              );
 
               return (
               <div
                 key={item.id}
-                className={`p-3 rounded-xl border transition-all duration-200 bg-black/[0.03] dark:bg-white/[0.06] border-black/8 dark:border-white/10 hover:border-blue-400/50 dark:hover:border-blue-400/40 hover:bg-black/[0.05] dark:hover:bg-white/[0.09] ${onEditItem ? 'cursor-pointer' : ''}`}
+                aria-selected={isSelectionMode ? isSelectedLine : undefined}
+                className={`p-3 rounded-xl border transition-all duration-200 ${
+                  isSelectionMode && isSelectedLine
+                    ? 'bg-blue-500/10 border-blue-500/60 shadow-[0_0_0_1px_rgba(59,130,246,0.25)]'
+                    : 'bg-black/[0.03] dark:bg-white/[0.06] border-black/8 dark:border-white/10 hover:border-blue-400/50 dark:hover:border-blue-400/40 hover:bg-black/[0.05] dark:hover:bg-white/[0.09]'
+                } ${isSelectionMode && canSelectLine ? 'cursor-pointer' : onEditItem && !isRewardLine ? 'cursor-pointer' : ''}`}
+                onPointerDown={(event) => {
+                  if (!isSelectionMode && canSelectLine) {
+                    startSelectionHold(event, item.id);
+                  }
+                }}
+                onPointerUp={handleSelectionPointerEnd}
+                onPointerCancel={handleSelectionPointerEnd}
+                onLostPointerCapture={handleSelectionPointerEnd}
+                onContextMenu={(event) => {
+                  if (canSelectLine) {
+                    event.preventDefault();
+                  }
+                }}
                 onClick={() => {
+                  if (selectionHoldTriggeredRef.current) {
+                    selectionHoldTriggeredRef.current = false;
+                    return;
+                  }
+                  if (isSelectionMode) {
+                    if (canSelectLine) {
+                      toggleSelectedCartItem(item.id);
+                    }
+                    return;
+                  }
                   if (!isRewardLine) {
                     onEditItem?.(item);
                   }
                 }}
               >
                 <div className="flex justify-between items-start mb-2">
-                  <div className="flex-1">
+                  <div className="flex min-w-0 flex-1 items-start gap-2">
+                    {isSelectionMode && canSelectLine && (
+                      <span
+                        className={`mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border ${
+                          isSelectedLine
+                            ? 'border-blue-400 bg-blue-500 text-white'
+                            : 'border-black/15 bg-black/5 text-black/45 dark:border-white/20 dark:bg-white/10 dark:text-white/55'
+                        }`}
+                      >
+                        {isSelectedLine ? (
+                          <CheckSquare className="h-4 w-4" />
+                        ) : (
+                          <Square className="h-4 w-4" />
+                        )}
+                      </span>
+                    )}
+                    <div className="min-w-0 flex-1">
                     {/* Category label */}
                     {item.categoryName && (
                       <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 antialiased liquid-glass-modal-text-muted">
@@ -777,14 +1105,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         )}
                       </div>
                     )}
+                    </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="font-semibold antialiased text-emerald-600 dark:text-emerald-400">
-                      {formatCurrency(item.totalPrice || 0)}
-                    </span>
+                    <div className="text-right">
+                      <span className="font-semibold antialiased text-emerald-600 dark:text-emerald-400">
+                        {formatCurrency(item.totalPrice || 0)}
+                      </span>
+                      {lineDiscountAmount > 0 && (
+                        <div className="text-[11px] font-semibold text-green-600 dark:text-green-400">
+                          -{formatCurrency(lineDiscountAmount)}
+                        </div>
+                      )}
+                    </div>
                     {/* Delete button - positioned away from main click area */}
                     {onRemoveItem && !isRewardLine && (
                       <button
+                        onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation();
                           onRemoveItem(item.id);
@@ -800,6 +1137,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 {/* Quantity controls */}
                 <div
                   className="flex items-center justify-between mt-2 antialiased liquid-glass-modal-text-muted"
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center gap-2">
@@ -814,13 +1152,32 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         } else {
                           const updatedItems = cartItems.map(ci =>
                             ci.id === item.id
-                              ? {
-                                  ...ci,
-                                  quantity: ci.quantity - 1,
-                                  totalPrice:
-                                    (ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity)) *
-                                    (ci.quantity - 1),
-                                }
+                              ? (() => {
+                                  const nextQuantity = ci.quantity - 1;
+                                  const unitPrice =
+                                    ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity);
+                                  const nextTotal = roundMoney(unitPrice * nextQuantity);
+                                  const discountBaseUnitPrice = ci.discountBaseUnitPrice;
+                                  const nextDiscountAmount =
+                                    discountBaseUnitPrice !== undefined
+                                      ? roundMoney(Math.max(0, (discountBaseUnitPrice - unitPrice) * nextQuantity))
+                                      : ci.discountAmount;
+
+                                  return {
+                                    ...ci,
+                                    quantity: nextQuantity,
+                                    totalPrice: nextTotal,
+                                    total_price: nextTotal,
+                                    discount:
+                                      nextDiscountAmount !== undefined ? nextDiscountAmount : ci.discount,
+                                    discountAmount: nextDiscountAmount,
+                                    discount_amount: nextDiscountAmount,
+                                    discountBaseTotalPrice:
+                                      discountBaseUnitPrice !== undefined
+                                        ? roundMoney(discountBaseUnitPrice * nextQuantity)
+                                        : ci.discountBaseTotalPrice,
+                                  };
+                                })()
                               : ci
                           );
                           onUpdateCart(updatedItems);
@@ -840,13 +1197,32 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         }
                         const updatedItems = cartItems.map(ci =>
                           ci.id === item.id
-                            ? {
-                                ...ci,
-                                quantity: ci.quantity + 1,
-                                totalPrice:
-                                  (ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity)) *
-                                  (ci.quantity + 1),
-                              }
+                            ? (() => {
+                                const nextQuantity = ci.quantity + 1;
+                                const unitPrice =
+                                  ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity);
+                                const nextTotal = roundMoney(unitPrice * nextQuantity);
+                                const discountBaseUnitPrice = ci.discountBaseUnitPrice;
+                                const nextDiscountAmount =
+                                  discountBaseUnitPrice !== undefined
+                                    ? roundMoney(Math.max(0, (discountBaseUnitPrice - unitPrice) * nextQuantity))
+                                    : ci.discountAmount;
+
+                                return {
+                                  ...ci,
+                                  quantity: nextQuantity,
+                                  totalPrice: nextTotal,
+                                  total_price: nextTotal,
+                                  discount:
+                                    nextDiscountAmount !== undefined ? nextDiscountAmount : ci.discount,
+                                  discountAmount: nextDiscountAmount,
+                                  discount_amount: nextDiscountAmount,
+                                  discountBaseTotalPrice:
+                                    discountBaseUnitPrice !== undefined
+                                      ? roundMoney(discountBaseUnitPrice * nextQuantity)
+                                      : ci.discountBaseTotalPrice,
+                                };
+                              })()
                             : ci
                         );
                         onUpdateCart(updatedItems);
@@ -893,11 +1269,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     </button>
                   )}
                 </div>
-                {isPriceOverridden && (
-                  <div className="mt-2 flex items-center justify-end" onClick={(e) => e.stopPropagation()}>
-                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-300">
-                      {t('menu.cart.priceOverridden', 'Overridden')}
-                    </span>
+                {(lineDiscountAmount > 0 || isPriceOverridden) && (
+                  <div className="mt-2 flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                    {lineDiscountAmount > 0 && (
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-green-500/15 text-green-600 dark:text-green-300">
+                        {t('menu.cart.lineDiscountBadge', 'Line discount')}
+                      </span>
+                    )}
+                    {isPriceOverridden && (
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-300">
+                        {t('menu.cart.priceOverridden', 'Overridden')}
+                      </span>
+                    )}
                   </div>
                 )}
                 {item.customizations && item.customizations.length > 0 && (
@@ -1198,6 +1581,184 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           )}
         </button>
       </div>
+
+      {isLineDiscountModalOpen && (
+        <div className="fixed inset-0 z-[1198] flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label={t('common.close', 'Close')}
+            onClick={() => setIsLineDiscountModalOpen(false)}
+            className="absolute inset-0 bg-black/50 backdrop-blur-md"
+          />
+          <div className="relative w-full max-w-xl liquid-glass-modal-shell !fixed !top-1/2 !left-1/2 !-translate-x-1/2 !-translate-y-1/2 !max-w-xl !max-h-fit !animate-none">
+            <div className="liquid-glass-modal-header">
+              <div>
+                <h4 className="liquid-glass-modal-title !text-xl">
+                  {t('menu.cart.lineDiscountTitle', 'Selected Item Discount')}
+                </h4>
+                <p className="text-sm antialiased liquid-glass-modal-text-muted">
+                  {t('menu.cart.lineDiscountSelectionSummary', '{{count}} items - {{amount}}', {
+                    count: selectedCartItemIdsArray.length,
+                    amount: formatCurrency(selectedLineSubtotal),
+                  })}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsLineDiscountModalOpen(false)}
+                className="liquid-glass-modal-close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-5">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLineDiscountModeDraft('percentage');
+                    setLineDiscountDraft(parseDiscountInput(lineDiscountManualInput, 'percentage'));
+                  }}
+                  className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                    lineDiscountModeDraft === 'percentage'
+                      ? 'bg-blue-500 border-blue-400 text-white'
+                      : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15'
+                  }`}
+                >
+                  {t('menu.cart.percentMode', '% Mode')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLineDiscountModeDraft('fixed');
+                    setLineDiscountDraft(parseDiscountInput(lineDiscountManualInput, 'fixed'));
+                  }}
+                  className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                    lineDiscountModeDraft === 'fixed'
+                      ? 'bg-blue-500 border-blue-400 text-white'
+                      : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15'
+                  }`}
+                >
+                  {t('menu.cart.fixedMode', 'Fixed')}
+                </button>
+              </div>
+
+              <div>
+                <p className="text-sm font-semibold mb-3 antialiased liquid-glass-modal-text">
+                  {t('menu.cart.quickDiscounts', 'Quick discounts')}
+                </p>
+                <div className="grid grid-cols-5 gap-2">
+                  {discountPresetValues.map((value) => {
+                    const disabled =
+                      lineDiscountModeDraft === 'percentage'
+                        ? value > maxDiscountPercentage
+                        : selectedLineSubtotal <= 0;
+                    const selected = Math.abs(lineDiscountDraft - value) < 0.001;
+
+                    return (
+                      <button
+                        key={`line-${value}`}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => {
+                          if (disabled) {
+                            return;
+                          }
+                          const nextValue =
+                            lineDiscountModeDraft === 'fixed'
+                              ? Math.min(value, selectedLineSubtotal)
+                              : value;
+                          setLineDiscountDraft(nextValue);
+                          setLineDiscountManualInput(String(nextValue));
+                        }}
+                        className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                          disabled
+                            ? 'opacity-45 cursor-not-allowed'
+                            : selected
+                              ? 'bg-blue-500 border-blue-400 text-white'
+                              : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15'
+                        }`}
+                      >
+                        {lineDiscountModeDraft === 'percentage' ? `${value}%` : formatCurrency(value)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-sm font-semibold mb-2 block antialiased liquid-glass-modal-text">
+                  {t('menu.cart.manualDiscount', 'Manual discount')}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={lineDiscountManualInput}
+                    onChange={(e) => {
+                      const rawValue = e.target.value;
+                      setLineDiscountManualInput(rawValue);
+                      setLineDiscountDraft(parseDiscountInput(rawValue, lineDiscountModeDraft));
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && canApplyLineDiscount) {
+                        applySelectedLineDiscount();
+                      }
+                    }}
+                    placeholder={
+                      lineDiscountModeDraft === 'percentage'
+                        ? t('menu.cart.discountLabel')
+                        : t('menu.cart.discountAmount', 'Discount amount')
+                    }
+                    className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    autoFocus
+                  />
+                  <span className="text-base font-semibold liquid-glass-modal-text">
+                    {lineDiscountModeDraft === 'percentage' ? '%' : '€'}
+                  </span>
+                </div>
+                {isLineDiscountDraftOverMax && (
+                  <p className="text-xs text-red-500 mt-2 font-medium antialiased">
+                    {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-black/10 dark:border-white/10">
+              <button
+                type="button"
+                onClick={clearSelectedLineDiscount}
+                className="liquid-glass-modal-button px-4 py-2 text-sm font-semibold"
+              >
+                {t('menu.cart.clearLineDiscountShort', 'Clear')}
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsLineDiscountModalOpen(false)}
+                  className="liquid-glass-modal-button px-4 py-2 text-sm font-semibold"
+                >
+                  {t('common.cancel', 'Cancel')}
+                </button>
+                <button
+                  type="button"
+                  onClick={applySelectedLineDiscount}
+                  disabled={!canApplyLineDiscount}
+                  className={`px-5 py-2 rounded-lg text-sm font-semibold ${
+                    canApplyLineDiscount
+                      ? 'bg-blue-600 text-white hover:bg-blue-700'
+                      : 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
+                  }`}
+                >
+                  {t('menu.cart.applyDiscount', 'Apply discount')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editingLineItem && (
         <div className="fixed inset-0 z-[1190] flex items-center justify-center p-4">

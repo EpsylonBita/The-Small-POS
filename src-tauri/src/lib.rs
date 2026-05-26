@@ -44,6 +44,7 @@ mod diagnostics;
 mod drawer;
 mod ecr;
 mod escpos;
+pub mod fiscal; // pub so integration tests (tests/*.rs) can exercise enqueue_for_order, active_cache, etc.
 mod hardware_manager;
 mod idempotency;
 mod loyalty;
@@ -65,7 +66,7 @@ mod serial;
 mod shifts;
 mod storage;
 mod sync;
-mod sync_queue;
+pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
 mod terminal_helpers;
 mod zreport;
 

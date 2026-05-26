@@ -516,7 +516,20 @@
       "fixedDiscountHint": "Η σταθερή έκπτωση περιορίζεται στο υποσύνολο",
       "percentMode": "% Λειτουργία",
       "fixedMode": "Σταθερή",
-      "quickDiscounts": "Γρήγορες εκπτώσεις"
+      "quickDiscounts": "Γρήγορες εκπτώσεις",
+      "selectedCount": "{{count}} επιλεγμένα",
+      "exitSelection": "Έξοδος επιλογής",
+      "clearSelection": "Καθαρισμός επιλογής",
+      "selectAll": "Επιλογή όλων",
+      "discountSelected": "Έκπτωση στα επιλεγμένα",
+      "discountSelectedShort": "Έκπτωση",
+      "clearLineDiscount": "Καθαρισμός εκπτώσεων επιλεγμένων",
+      "clearLineDiscountShort": "Καθαρισμός",
+      "lineDiscountApplied": "Η έκπτωση εφαρμόστηκε στα επιλεγμένα είδη",
+      "lineDiscountCleared": "Οι εκπτώσεις επιλεγμένων ειδών καθαρίστηκαν",
+      "lineDiscountBadge": "Έκπτωση είδους",
+      "lineDiscountTitle": "Έκπτωση Επιλεγμένων Ειδών",
+      "lineDiscountSelectionSummary": "{{count}} είδη - {{amount}}"
     },
     "emptyState": {
       "title": "Δεν Υπάρχουν Προϊόντα Μενού",

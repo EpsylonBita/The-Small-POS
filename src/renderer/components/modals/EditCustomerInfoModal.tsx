@@ -26,6 +26,8 @@ export interface EditCustomerInfoFormData {
   phone: string;
   address: string;
   postal_code?: string;
+  delivery_floor?: string;
+  name_on_ringer?: string;
   notes?: string;
   coordinates?: { lat: number; lng: number } | null;
   latitude?: number | null;
@@ -431,6 +433,8 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         phone: customerInfo.phone.trim(),
         address: customerInfo.address.trim(),
         postal_code: customerInfo.postal_code?.trim() || undefined,
+        delivery_floor: customerInfo.delivery_floor?.trim() || undefined,
+        name_on_ringer: customerInfo.name_on_ringer?.trim() || undefined,
         notes: customerInfo.notes?.trim() || undefined,
         coordinates: savedCoordinates,
         latitude: savedCoordinates?.lat ?? null,
@@ -649,6 +653,34 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               placeholder={t('modals.editCustomer.postalCodePlaceholder')}
               className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+                {t('modals.addCustomer.floorLabel')}
+              </label>
+              <input
+                type="text"
+                value={customerInfo.delivery_floor || ''}
+                onChange={(e) => handleInputChange('delivery_floor', e.target.value)}
+                placeholder={t('modals.addCustomer.floorPlaceholder')}
+                className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+                {t('modals.addCustomer.nameOnRingerLabel')}
+              </label>
+              <input
+                type="text"
+                value={customerInfo.name_on_ringer || ''}
+                onChange={(e) => handleInputChange('name_on_ringer', e.target.value)}
+                placeholder={t('modals.addCustomer.nameOnRingerPlaceholder')}
+                className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
           </div>
 
           <div>

@@ -760,7 +760,9 @@ export interface OrderCustomerInfoUpdateParams {
   deliveryAddress: string;
   deliveryAddressId?: string | null;
   deliveryPostalCode?: string | null;
+  deliveryFloor?: string | null;
   deliveryNotes?: string | null;
+  nameOnRinger?: string | null;
   deliveryLatitude?: number | null;
   deliveryLongitude?: number | null;
   deliveryAddressFingerprint?: string | null;

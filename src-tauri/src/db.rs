@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 63;
+const CURRENT_SCHEMA_VERSION: i32 = 65;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -433,6 +433,12 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 63 {
         run_migration_tx(conn, 63, migrate_v63)?;
+    }
+    if current < 64 {
+        run_migration_tx(conn, 64, migrate_v64)?;
+    }
+    if current < 65 {
+        run_migration_tx(conn, 65, migrate_v65)?;
     }
 
     Ok(())
@@ -4175,6 +4181,61 @@ fn migrate_v63(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("v63 record schema_version: {e}"))?;
 
     info!("Applied migration v63 (local table-service order references)");
+    Ok(())
+}
+
+/// Migration v64 (Fiscalization core — THE-194 / Phase 4 of the
+/// `.claude/specs/fiscalization-core/tasks.md` plan).
+///
+/// This is a DOCUMENTATION-ONLY migration. The `parity_sync_queue.module_type`
+/// column was created at v44 as `TEXT NOT NULL DEFAULT 'orders'` with no
+/// CHECK constraint, so the literal value `'fiscal'` (used by the new
+/// fiscal dispatcher in `crate::fiscal::dispatcher`) is already a legal
+/// `module_type` and no DDL change is required.
+///
+/// The version bump exists so future deploys can prove the local DB was
+/// installed under a build that knows about the `'fiscal'` discriminator.
+/// It also gives the recovery snapshot system a clean checkpoint before
+/// fiscal traffic starts flowing on this device.
+///
+/// Per `feedback_fiscalization_optional.md`: if no fiscal plugin is
+/// configured for the branch, the local dispatcher MUST not enqueue
+/// anything — see `crate::fiscal::active_cache`. This migration must NOT
+/// add behavior that breaks POS for un-configured deployments.
+fn migrate_v64(_conn: &Connection) -> Result<(), String> {
+    info!("Applied migration v64 (fiscalization-core: module_type='fiscal' is now a recognized parity_sync_queue discriminator)");
+    Ok(())
+}
+
+/// Migration v65: per-(branch, business-day) monotonic sequence counter for
+/// fiscal receipts.
+///
+/// Audit finding #1 (P0) follow-up (2026-05-25): the HR adapter validator
+/// requires `metadata.sequenceNumber` as a positive integer per receipt;
+/// before this migration there was no local counter so the payload was
+/// emitted with an empty `metadata` map and the validator terminal-failed.
+/// The counter table is keyed by `(branch_id, business_day_iso)` so two
+/// branches sharing a terminal device don't share a sequence — matching
+/// the audit #7 isolation posture for the close-day guard. UPSERT logic
+/// lives in `pos-tauri/src-tauri/src/fiscal/sequence_counter.rs`.
+fn migrate_v65(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS fiscal_sequence_counters (
+            branch_id        TEXT NOT NULL,
+            business_day_iso TEXT NOT NULL,
+            last_seq         INTEGER NOT NULL DEFAULT 0,
+            updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (branch_id, business_day_iso)
+        );
+        ",
+    )
+    .map_err(|e| format!("v65 create fiscal_sequence_counters: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (65)", [])
+        .map_err(|e| format!("v65 record schema_version: {e}"))?;
+
+    info!("Applied migration v65 (fiscal_sequence_counters for audit #1 payload-builder metadata.sequenceNumber)");
     Ok(())
 }
 

@@ -108,6 +108,7 @@ import type {
   PickupToDeliveryConversionParams,
 } from "../../lib/ipc-adapter";
 import { buildSplitPaymentItems } from "../utils/splitPaymentItems";
+import { deriveEditSettlementFinancials } from "../utils/editSettlementFinancials";
 import {
   calculatePickupToDeliveryTotal,
   getPickupToDeliveryValidationAmount,
@@ -3248,7 +3249,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         order: Order | undefined,
         nextItems: OrderItem[],
         targetOrderType: EditableOrderType,
-        nextTotal?: number,
       ): {
         financials?: Partial<OrderFinancialsUpdateParams>;
         orderUpdates?: Partial<EditSettlementOrderUpdates>;
@@ -3257,67 +3257,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return {};
         }
 
-        const itemsSubtotal = Number(
-          nextItems
-            .reduce((sum, item) => {
-              const quantity = Number(item.quantity || 0);
-              const explicitTotal = Number(
-                (item as any).total_price ??
-                (item as any).totalPrice ??
-                NaN,
-              );
-              if (Number.isFinite(explicitTotal)) {
-                return sum + explicitTotal;
-              }
-              return sum + Number(item.unit_price ?? item.price ?? 0) * quantity;
-            }, 0)
-            .toFixed(2),
+        const financials = deriveEditSettlementFinancials(
+          order,
+          nextItems,
+          targetOrderType,
         );
-        const discountAmount = Number(
-          Number((order as any).discount_amount ?? (order as any).discountAmount ?? 0).toFixed(2),
-        );
-        const discountPercentage = Number(
-          (order as any).discount_percentage ?? (order as any).discountPercentage ?? 0,
-        );
-        const tipAmount = Number((order as any).tip_amount ?? (order as any).tipAmount ?? 0);
-        const taxRate = Number((order as any).tax_rate ?? (order as any).taxRate ?? 0);
-        const deliveryFee =
-          targetOrderType === "delivery"
-            ? Number((order as any).delivery_fee ?? order.deliveryFee ?? 0)
-            : 0;
-        const taxableSubtotal = Math.max(0, itemsSubtotal - discountAmount);
-        const explicitTotal = Number(nextTotal);
-        const hasExplicitTotal =
-          Number.isFinite(explicitTotal) && explicitTotal >= 0;
-        const totalAmount = hasExplicitTotal
-          ? Number(explicitTotal.toFixed(2))
-          : Number(
-              (taxableSubtotal +
-                (Number.isFinite(taxRate) && taxRate > 0
-                  ? taxableSubtotal * (taxRate / 100)
-                  : Number(
-                      (order as any).tax_amount ??
-                        (order as any).taxAmount ??
-                        0,
-                    )) +
-                deliveryFee +
-                tipAmount).toFixed(2),
-            );
-        const taxAmount = hasExplicitTotal
-          ? Math.max(
-              0,
-              Number(
-                (
-                  totalAmount -
-                  taxableSubtotal -
-                  deliveryFee -
-                  tipAmount
-                ).toFixed(2),
-              ),
-            )
-          : Number.isFinite(taxRate) && taxRate > 0
-            ? Number((taxableSubtotal * (taxRate / 100)).toFixed(2))
-            : Number((order as any).tax_amount ?? (order as any).taxAmount ?? 0);
 
         const orderUpdates: Partial<EditSettlementOrderUpdates> = {
           orderType: targetOrderType,
@@ -3411,15 +3355,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         }
 
         return {
-          financials: {
-            totalAmount,
-            subtotal: taxableSubtotal,
-            taxAmount,
-            deliveryFee,
-            discountAmount,
-            discountPercentage,
-            tipAmount,
-          },
+          financials,
           orderUpdates,
         };
       },
@@ -3493,69 +3429,36 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           previews[0]?.requiredAction === "collect"
         ) {
           const request = normalizedRequests[0];
-          await bridge.orders.applyEditSettlement({
-            orderId: request.orderId,
-            items: request.items,
-            orderNotes: request.orderNotes,
-            financials: request.financials,
-            orderUpdates: request.orderUpdates,
-            action: { type: "mark_partial" },
-          });
-          const refreshedPreview = await bridge.orders.previewEditSettlement({
-            orderId: request.orderId,
-            items: request.items,
-            orderNotes: request.orderNotes,
-            financials: request.financials,
-            orderUpdates: request.orderUpdates,
-          });
           resetEditOrderState();
           clearBulkSelection();
           setPendingEditRefundSettlement(null);
-          if (refreshedPreview?.requiredAction === "refund") {
-            const refundAmount = Math.max(
-              0,
-              Number(refreshedPreview.paidTotal || 0) -
-                Number(refreshedPreview.nextTotal || 0),
-            );
-            setEditSettlementDeltaPrompt({
-              mode: "refund",
-              amount: refundAmount,
-              orderNumber: request.orderNumber ?? null,
-              preview: refreshedPreview,
-              request,
+
+          if (isTableEditRequest(request)) {
+            await bridge.orders.applyEditSettlement({
+              orderId: request.orderId,
+              items: request.items,
+              orderNotes: request.orderNotes,
+              financials: request.financials,
+              orderUpdates: request.orderUpdates,
+              action: { type: "mark_partial" },
             });
-            return;
-          }
-
-          if (refreshedPreview?.requiredAction === "collect") {
-            if (isTableEditRequest(request)) {
-              toast.success(
-                t("orderDashboard.tableOrderUpdated", {
-                  defaultValue: "Table check updated. Balance stays open until the customer pays.",
-                }),
-              );
-              await silentRefresh().catch(() => {});
-              void refetchTables();
-              return;
-            }
-
-            openEditSettlementCollectionPrompt(refreshedPreview, request);
             toast.success(
-              t("orderDashboard.orderEditAwaitingPayment", {
-                defaultValue:
-                  "Order changes saved. Collect the remaining balance to finish settlement.",
+              t("orderDashboard.tableOrderUpdated", {
+                defaultValue: "Table check updated. Balance stays open until the customer pays.",
               }),
             );
             await silentRefresh().catch(() => {});
+            void refetchTables();
             return;
           }
 
-          toast.success(
-            t("orderDashboard.orderItemsUpdated", {
-              count: 1,
+          openEditSettlementCollectionPrompt(previews[0], request);
+          toast(
+            t("orderDashboard.orderEditPaymentRequiredToSave", {
+              defaultValue:
+                "Choose how to collect the extra payment. The order edit will be saved after payment is recorded.",
             }),
           );
-          await loadOrders();
           return;
         }
 
@@ -4494,10 +4397,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // the local state is still updated, and the server-side update will
     // retry through the normal sync queue on the next save.
     //
-    // Known gap: `deliveryCity` and `deliveryFloor` are not currently in
-    // the `bridge.orders.updateCustomerInfo` payload shape; those fields
-    // remain in the server record until the next full order edit. Local
-    // state clearance below keeps the UI consistent in the meantime.
     const clearDeliveryFieldsForOrder = async (orderId: string) => {
       try {
         const order = orders.find((o) => o.id === orderId);
@@ -4739,6 +4638,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           customerPhone: customerInfo.phone.trim(),
           deliveryAddress: customerInfo.address.trim(),
           deliveryPostalCode: customerInfo.postal_code?.trim() || null,
+          deliveryFloor: customerInfo.delivery_floor?.trim() || null,
+          nameOnRinger: customerInfo.name_on_ringer?.trim() || null,
           deliveryNotes: customerInfo.notes?.trim() || null,
           deliveryLatitude: customerInfo.latitude ?? customerInfo.coordinates?.lat ?? null,
           deliveryLongitude: customerInfo.longitude ?? customerInfo.coordinates?.lng ?? null,
@@ -4843,7 +4744,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           targetOrder,
           normalizeEditOrderItems(orderData.items),
           targetOrderType,
-          orderData.total,
         );
 
         await applySettlementAwareOrderEdit([
@@ -4870,10 +4770,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Get customer info for the first selected order (for editing)
     const getSelectedOrderCustomerInfo = (): EditCustomerInfoFormData => {
       if (pendingEditOrders.length === 0 && !editingSingleOrder)
-        return { name: "", phone: "", address: "", notes: "" };
+        return { name: "", phone: "", address: "", delivery_floor: "", name_on_ringer: "", notes: "" };
 
       const targetId = pendingEditOrders[0] || editingSingleOrder;
       const firstOrder = orders.find((order) => order.id === targetId) as any;
+      const rawAddress = firstOrder?.address && typeof firstOrder.address === "object"
+        ? firstOrder.address
+        : null;
       return {
         name: firstOrder?.customerName || firstOrder?.customer_name || "",
         phone: firstOrder?.customerPhone || firstOrder?.customer_phone || "",
@@ -4887,6 +4790,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           firstOrder?.delivery_postal_code ||
           firstOrder?.postalCode ||
           firstOrder?.postal_code ||
+          "",
+        delivery_floor:
+          firstOrder?.deliveryFloor ||
+          firstOrder?.delivery_floor ||
+          rawAddress?.floor_number ||
+          rawAddress?.floor ||
+          "",
+        name_on_ringer:
+          firstOrder?.nameOnRinger ||
+          firstOrder?.name_on_ringer ||
+          rawAddress?.name_on_ringer ||
+          rawAddress?.nameOnRinger ||
           "",
         notes:
           firstOrder?.deliveryNotes ||

@@ -111,9 +111,13 @@ struct OrderUpdateCustomerInfoPayload {
     #[serde(alias = "postal_code")]
     #[serde(alias = "postalCode")]
     delivery_postal_code: Option<String>,
+    #[serde(default, alias = "delivery_floor")]
+    delivery_floor: Option<String>,
     #[serde(default, alias = "delivery_notes")]
     #[serde(alias = "notes")]
     delivery_notes: Option<String>,
+    #[serde(default, alias = "name_on_ringer")]
+    name_on_ringer: Option<String>,
     #[serde(default, alias = "delivery_latitude")]
     delivery_latitude: Option<f64>,
     #[serde(default, alias = "delivery_longitude")]
@@ -1457,7 +1461,9 @@ fn parse_order_update_customer_info_payload(
     parsed.delivery_address_id = normalize_optional_text(parsed.delivery_address_id);
     parsed.customer_email = normalize_optional_text(parsed.customer_email);
     parsed.delivery_postal_code = normalize_optional_text(parsed.delivery_postal_code);
+    parsed.delivery_floor = normalize_optional_text(parsed.delivery_floor);
     parsed.delivery_notes = normalize_optional_text(parsed.delivery_notes);
+    parsed.name_on_ringer = normalize_optional_text(parsed.name_on_ringer);
     parsed.delivery_address_fingerprint =
         normalize_optional_text(parsed.delivery_address_fingerprint);
 
@@ -1930,7 +1936,9 @@ pub async fn order_update_customer_info(
         delivery_address,
         delivery_address_id,
         delivery_postal_code,
+        delivery_floor,
         delivery_notes,
+        name_on_ringer,
         delivery_latitude,
         delivery_longitude,
         delivery_address_fingerprint,
@@ -1952,13 +1960,15 @@ pub async fn order_update_customer_info(
                   delivery_address = ?5,
                   delivery_address_id = COALESCE(?6, delivery_address_id),
                   delivery_postal_code = COALESCE(?7, delivery_postal_code),
-                  delivery_notes = COALESCE(?8, delivery_notes),
-                  delivery_latitude = COALESCE(?9, delivery_latitude),
-                  delivery_longitude = COALESCE(?10, delivery_longitude),
-                  delivery_address_fingerprint = COALESCE(?11, delivery_address_fingerprint),
+                  delivery_floor = COALESCE(?8, delivery_floor),
+                  name_on_ringer = COALESCE(?9, name_on_ringer),
+                  delivery_notes = COALESCE(?10, delivery_notes),
+                  delivery_latitude = COALESCE(?11, delivery_latitude),
+                  delivery_longitude = COALESCE(?12, delivery_longitude),
+                  delivery_address_fingerprint = COALESCE(?13, delivery_address_fingerprint),
                   sync_status = 'pending',
-                  updated_at = ?12
-              WHERE id = ?13",
+                  updated_at = ?14
+              WHERE id = ?15",
             rusqlite::params![
                 &customer_name,
                 &customer_phone,
@@ -1967,6 +1977,8 @@ pub async fn order_update_customer_info(
                 &delivery_address,
                 delivery_address_id.as_deref(),
                 delivery_postal_code.as_deref(),
+                delivery_floor.as_deref(),
+                name_on_ringer.as_deref(),
                 delivery_notes.as_deref(),
                 delivery_latitude,
                 delivery_longitude,
@@ -1988,6 +2000,10 @@ pub async fn order_update_customer_info(
             "deliveryAddressId": delivery_address_id,
             "delivery_address_id": delivery_address_id,
             "deliveryPostalCode": delivery_postal_code,
+            "deliveryFloor": delivery_floor,
+            "delivery_floor": delivery_floor,
+            "nameOnRinger": name_on_ringer,
+            "name_on_ringer": name_on_ringer,
             "deliveryNotes": delivery_notes,
             "deliveryLatitude": delivery_latitude,
             "delivery_latitude": delivery_latitude,
@@ -2995,6 +3011,24 @@ pub async fn order_create(
             obj.entry("data".to_string())
                 .or_insert_with(|| serde_json::json!({ "orderId": order_id.clone() }));
         }
+
+        // T22 (fiscalization-core / Req 4.2 + Req 12): best-effort fire-and-forget
+        // handoff to the fiscal dispatcher. The order itself is already persisted;
+        // a fiscal enqueue failure here MUST NOT fail the order_create command —
+        // the cashier always gets a successful response.
+        if let Ok(conn_guard) = db.conn.lock() {
+            if let Err(fiscal_err) =
+                crate::fiscal::dispatcher::enqueue_for_order(&conn_guard, &order_id)
+            {
+                tracing::warn!(
+                    "[order_create] fiscal enqueue best-effort failed for order {order_id}: {fiscal_err}"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "[order_create] could not lock db for fiscal enqueue (order {order_id}); skipping handoff"
+            );
+        }
     }
 
     // NOTE: We intentionally do NOT emit order_created/order_realtime_update here.
@@ -3780,7 +3814,9 @@ mod dto_tests {
             "customerEmail": "   ",
             "deliveryAddress": "  Main St 42  ",
             "deliveryPostalCode": "  10558  ",
+            "deliveryFloor": "  4  ",
             "deliveryNotes": "  Ring once  ",
+            "nameOnRinger": "  Papadopoulos  ",
         })))
         .expect("customer info payload should parse");
 
@@ -3790,7 +3826,9 @@ mod dto_tests {
         assert_eq!(parsed.customer_email, None);
         assert_eq!(parsed.delivery_address, "Main St 42");
         assert_eq!(parsed.delivery_postal_code.as_deref(), Some("10558"));
+        assert_eq!(parsed.delivery_floor.as_deref(), Some("4"));
         assert_eq!(parsed.delivery_notes.as_deref(), Some("Ring once"));
+        assert_eq!(parsed.name_on_ringer.as_deref(), Some("Papadopoulos"));
     }
 
     #[test]

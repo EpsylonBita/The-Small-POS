@@ -5196,6 +5196,13 @@ fn resolve_endpoint(item: &SyncQueueItem) -> String {
         "financial" => "/api/pos/financial/sync".to_string(),
         "z_report" => "/api/pos/z-report/submit".to_string(),
         "loyalty" => "/api/pos/loyalty/sync".to_string(),
+        // T21 (fiscalization-core THE-194): rows enqueued by
+        // `fiscal::dispatcher::enqueue_for_order` go to the generic admin
+        // submit endpoint, where the server-side FiscalReceiptDispatcher
+        // (Req 12 — fiscalization is optional) returns HTTP 200 +
+        // status='skipped' when no plugin is configured for the branch,
+        // so an unset deployment cannot block the queue.
+        "fiscal" => "/api/plugins/fiscal/submit".to_string(),
         _ => resolve_generic_endpoint(item),
     }
 }

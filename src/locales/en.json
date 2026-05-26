@@ -516,7 +516,20 @@
       "fixedDiscountHint": "Fixed discount is clamped to subtotal",
       "percentMode": "% Mode",
       "fixedMode": "Fixed",
-      "quickDiscounts": "Quick discounts"
+      "quickDiscounts": "Quick discounts",
+      "selectedCount": "{{count}} selected",
+      "exitSelection": "Exit selection",
+      "clearSelection": "Clear selection",
+      "selectAll": "Select all",
+      "discountSelected": "Discount selected",
+      "discountSelectedShort": "Discount",
+      "clearLineDiscount": "Clear selected discounts",
+      "clearLineDiscountShort": "Clear",
+      "lineDiscountApplied": "Discount applied to selected items",
+      "lineDiscountCleared": "Selected item discounts cleared",
+      "lineDiscountBadge": "Line discount",
+      "lineDiscountTitle": "Selected Item Discount",
+      "lineDiscountSelectionSummary": "{{count}} items - {{amount}}"
     },
     "emptyState": {
       "title": "No Menu Items",
