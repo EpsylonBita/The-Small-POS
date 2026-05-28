@@ -868,7 +868,9 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             let reconciled_expenses: f64 = conn
                 .query_row(
                     "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
-                 FROM shift_expenses WHERE staff_shift_id = ?1",
+                 FROM shift_expenses
+                 WHERE staff_shift_id = ?1
+                   AND (expense_type IS NULL OR expense_type != 'staff_payment')",
                     params![shift_id],
                     |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
                 )
@@ -2514,7 +2516,8 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         .query_row(
             "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
              FROM shift_expenses
-             WHERE staff_shift_id = ?1",
+             WHERE staff_shift_id = ?1
+               AND (expense_type IS NULL OR expense_type != 'staff_payment')",
             params![shift_id],
             |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
@@ -4952,6 +4955,101 @@ mod tests {
             "cashier close should no longer persist a standalone cashier payout"
         );
         assert!((total_staff_payments - 23.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cash_drawer_formula_ignores_legacy_staff_payment_expense_rows() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cashier-legacy-staff-expense', 'cashier-1', 'cashier', 'branch-1', 'term-1',
+                    '2026-03-18T08:00:00Z', 100.0, 10000, 'active', 2, 'pending',
+                    '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opening_amount_cents,
+                    opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-legacy-staff-expense', 'cashier-legacy-staff-expense', 'cashier-1', 'branch-1', 'term-1',
+                    100.0, 10000, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO shift_expenses (
+                    id, staff_shift_id, staff_id, branch_id, expense_type,
+                    amount, amount_cents, description, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'legacy-staff-payment-expense', 'cashier-legacy-staff-expense', 'cashier-1', 'branch-1',
+                    'staff_payment', 23.0, 2300, 'legacy staff payout mirror', 'pending',
+                    '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA ignore_check_constraints = OFF;")
+                .unwrap();
+            ensure_staff_payments_table(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO staff_payments (
+                    id, cashier_shift_id, paid_to_staff_id, amount, payment_type, created_at, updated_at
+                 ) VALUES (
+                    'canonical-staff-payment', 'cashier-legacy-staff-expense', 'kitchen-1',
+                    23.0, 'wage', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "cashier-legacy-staff-expense",
+                "closingCash": 77.0,
+                "closedBy": TEST_MANAGER_UUID,
+            }),
+        )
+        .expect("cashier close should ignore legacy staff_payment expense rows");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let (expected_cash_amount, cash_variance, drawer_expenses, drawer_staff_payments): (
+            f64,
+            f64,
+            f64,
+            f64,
+        ) = conn
+            .query_row(
+                "SELECT ss.expected_cash_amount, ss.cash_variance, cds.total_expenses, cds.total_staff_payments
+                 FROM staff_shifts ss
+                 LEFT JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
+                 WHERE ss.id = 'cashier-legacy-staff-expense'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert!((expected_cash_amount - 77.0).abs() < f64::EPSILON);
+        assert!(cash_variance.abs() < f64::EPSILON);
+        assert!(drawer_expenses.abs() < f64::EPSILON);
+        assert!((drawer_staff_payments - 23.0).abs() < f64::EPSILON);
     }
 
     #[test]

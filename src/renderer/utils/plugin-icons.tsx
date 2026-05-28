@@ -28,7 +28,13 @@ const KNOWN_EXTERNAL_PLUGINS: readonly string[] = [
   'wolt',
   'efood',
   'box',
+  'glovo',
+  'bolt_food',
   'uber_eats',
+  'just_eat_takeaway',
+  'deliveroo',
+  'foodora',
+  'smood',
   'booking',
   'tripadvisor',
   'airbnb',
@@ -49,7 +55,13 @@ const PLUGIN_COLORS: Record<OrderPlugin, string> = {
   wolt: '#00C2E8',      // Wolt cyan
   efood: '#FF6B00',     // Efood orange
   box: '#0066FF',       // Box blue
+  glovo: '#FFC244',     // Glovo yellow
+  bolt_food: '#34D186',  // Bolt green
   uber_eats: '#06C167', // Uber Eats green
+  just_eat_takeaway: '#FF8000', // Just Eat orange
+  deliveroo: '#00CCBC', // Deliveroo teal
+  foodora: '#D70F64',   // foodora pink
+  smood: '#E30613',     // Smood red
   booking: '#003580',   // Booking.com blue
   tripadvisor: '#00AF87', // TripAdvisor green
   airbnb: '#FF5A5F',    // Airbnb pink/red
@@ -64,7 +76,13 @@ const PLUGIN_NAMES: Record<OrderPlugin, string> = {
   wolt: 'Wolt',
   efood: 'Efood',
   box: 'Box',
+  glovo: 'Glovo',
+  bolt_food: 'Bolt Food',
   uber_eats: 'Uber Eats',
+  just_eat_takeaway: 'Just Eat / Takeaway.com',
+  deliveroo: 'Deliveroo',
+  foodora: 'foodora',
+  smood: 'Smood',
   booking: 'Booking.com',
   tripadvisor: 'TripAdvisor',
   airbnb: 'Airbnb',
@@ -79,7 +97,13 @@ const PLUGIN_ABBREV: Record<OrderPlugin, string> = {
   wolt: 'W',
   efood: 'E',
   box: 'B',
+  glovo: 'G',
+  bolt_food: 'BF',
   uber_eats: 'UE',
+  just_eat_takeaway: 'JET',
+  deliveroo: 'D',
+  foodora: 'F',
+  smood: 'S',
   booking: 'B.com',
   tripadvisor: 'TA',
   airbnb: 'A',
@@ -168,6 +192,12 @@ const PLUGIN_LOGO_ALIASES: Record<string, string> = {
   googleanalytics: 'google_analytics',
   viva_wallet: 'viva',
   ubereats: 'uber_eats',
+  bolt: 'bolt_food',
+  boltfood: 'bolt_food',
+  justeat: 'just_eat_takeaway',
+  just_eat: 'just_eat_takeaway',
+  takeaway: 'just_eat_takeaway',
+  takeawaycom: 'just_eat_takeaway',
   e_food: 'efood',
   box_gr: 'box',
   boxgr: 'box',

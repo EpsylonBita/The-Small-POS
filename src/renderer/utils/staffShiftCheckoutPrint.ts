@@ -44,6 +44,58 @@ const DUMMY_SNAPSHOT_TIME = '1970-01-01T00:00:00.000Z';
 
 const hasManualCashInput = (value?: string) => Boolean(value?.trim().length);
 
+type CheckoutExpenseRow = {
+  shiftId?: string | null;
+  staffShiftId?: string | null;
+  staff_shift_id?: string | null;
+  amount?: number | string | null;
+};
+
+const finiteNumberOrNull = (value: unknown): number | null => {
+  const number = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number(value.trim())
+      : NaN;
+
+  return Number.isFinite(number) ? number : null;
+};
+
+export function resolveCashierCheckoutExpenseTotal(
+  summary: any,
+  expenses?: CheckoutExpenseRow[] | null,
+  shiftId?: string | null,
+): number {
+  const summaryTotal = finiteNumberOrNull(
+    summary?.totalExpenses ??
+      summary?.total_expenses ??
+      summary?.cashDrawer?.total_expenses ??
+      summary?.cashDrawer?.totalExpenses,
+  );
+
+  if (summaryTotal !== null) {
+    return summaryTotal;
+  }
+
+  if (!Array.isArray(expenses)) {
+    return 0;
+  }
+
+  const normalizedShiftId = typeof shiftId === 'string' ? shiftId.trim() : '';
+
+  return expenses.reduce((sum, expense) => {
+    const rowShiftId = String(
+      expense?.shiftId ?? expense?.staffShiftId ?? expense?.staff_shift_id ?? '',
+    ).trim();
+
+    if (normalizedShiftId && rowShiftId !== normalizedShiftId) {
+      return sum;
+    }
+
+    return sum + (finiteNumberOrNull(expense?.amount) ?? 0);
+  }, 0);
+}
+
 const getEffectiveOpeningAmount = (shift: BuildShiftCheckoutPrintSnapshotParams['shift'], summary?: any) =>
   Number(shift?.opening_cash_amount ?? summary?.shift?.opening_cash_amount ?? 0);
 
@@ -141,7 +193,7 @@ function buildSnapshotValues(
       shiftSummary,
       shift,
       opening,
-      shiftSummary?.totalExpenses || 0,
+      resolveCashierCheckoutExpenseTotal(shiftSummary),
     ).expected;
     if (!hasManualCashInput(params.closingCash)) {
       return { expectedAmount };

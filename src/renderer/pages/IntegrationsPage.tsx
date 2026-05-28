@@ -115,9 +115,57 @@ const ALL_INTEGRATIONS: Integration[] = [
     requiresPartnerCredentials: true,
   },
   {
+    id: 'glovo',
+    name: 'Glovo',
+    description: 'Glovo ordering and menu integration',
+    icon: <Truck className="w-6 h-6" />,
+    category: 'delivery',
+    requiredModule: MODULE_IDS.DELIVERY,
+  },
+  {
+    id: 'bolt_food',
+    name: 'Bolt Food',
+    description: 'Bolt Food ordering and status integration',
+    icon: <Bike className="w-6 h-6" />,
+    category: 'delivery',
+    requiredModule: MODULE_IDS.DELIVERY,
+  },
+  {
     id: 'uber_eats',
     name: 'Uber Eats',
     description: 'Uber Eats ordering and menu integration',
+    icon: <Truck className="w-6 h-6" />,
+    category: 'delivery',
+    requiredModule: MODULE_IDS.DELIVERY,
+  },
+  {
+    id: 'just_eat_takeaway',
+    name: 'Just Eat / Takeaway.com',
+    description: 'Just Eat and Takeaway.com ordering integration',
+    icon: <Package className="w-6 h-6" />,
+    category: 'delivery',
+    requiredModule: MODULE_IDS.DELIVERY,
+  },
+  {
+    id: 'deliveroo',
+    name: 'Deliveroo',
+    description: 'Deliveroo order and menu integration',
+    icon: <Bike className="w-6 h-6" />,
+    category: 'delivery',
+    requiredModule: MODULE_IDS.DELIVERY,
+  },
+  {
+    id: 'foodora',
+    name: 'foodora',
+    description: 'foodora order and menu integration',
+    icon: <Pizza className="w-6 h-6" />,
+    category: 'delivery',
+    requiredModule: MODULE_IDS.DELIVERY,
+  },
+  {
+    id: 'smood',
+    name: 'Smood',
+    description: 'Swiss Smood food delivery integration',
     icon: <Truck className="w-6 h-6" />,
     category: 'delivery',
     requiredModule: MODULE_IDS.DELIVERY,
@@ -226,12 +274,19 @@ const CATEGORY_CONFIG: Record<IntegrationCategory, { label: string; icon: typeof
   communications: { label: 'Communications', icon: Phone },
 };
 
-type PluginFieldKey = 'api_key' | 'api_secret' | 'merchant_id' | 'store_id' | 'store_url';
+type PluginFieldKey = 'api_key' | 'api_secret' | 'merchant_id' | 'store_id' | 'store_url' | 'chain_id' | 'webhook_secret';
 
 const PLUGIN_FORM_CONFIG: Record<string, { requiredFields: PluginFieldKey[]; supportsCommission?: boolean; supportsAutoAccept?: boolean; supportsPrepMinutes?: boolean; supportsMenuSync?: boolean; supportsAvailabilitySync?: boolean; supportsProductSync?: boolean; supportsOrderSync?: boolean; supportsInventorySync?: boolean; }> = {
-  efood: { requiredFields: ['api_key', 'api_secret', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  efood: { requiredFields: ['api_key', 'api_secret', 'store_id', 'chain_id', 'webhook_secret'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
   wolt: { requiredFields: ['api_key', 'api_secret', 'merchant_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
   box: { requiredFields: ['api_key', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  glovo: { requiredFields: ['api_key', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  bolt_food: { requiredFields: ['api_key', 'api_secret', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  uber_eats: { requiredFields: ['api_key', 'api_secret', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  just_eat_takeaway: { requiredFields: ['api_key', 'api_secret', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  deliveroo: { requiredFields: ['api_key', 'api_secret', 'merchant_id', 'store_id', 'webhook_secret'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  foodora: { requiredFields: ['api_key', 'api_secret', 'store_id', 'chain_id', 'webhook_secret'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  smood: { requiredFields: ['api_key', 'api_secret', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
   booking: { requiredFields: ['api_key', 'api_secret', 'merchant_id'], supportsCommission: true },
   airbnb: { requiredFields: ['api_key', 'api_secret'], supportsCommission: true },
   expedia: { requiredFields: ['api_key', 'api_secret', 'merchant_id'], supportsCommission: true },
@@ -245,12 +300,51 @@ const PLUGIN_FORM_CONFIG: Record<string, { requiredFields: PluginFieldKey[]; sup
   caller_id: { requiredFields: [] },
 };
 
+const PLUGIN_FIELD_LABELS: Record<string, Partial<Record<PluginFieldKey, string>>> = {
+  bolt_food: {
+    api_key: 'Bolt Food Integrator ID',
+    api_secret: 'Bolt Food Secret Key',
+    store_id: 'Bolt Food Provider ID',
+  },
+  uber_eats: {
+    api_key: 'Uber Eats OAuth Client ID',
+    api_secret: 'Uber Eats OAuth Client Secret',
+    store_id: 'Uber Eats Store ID',
+  },
+  just_eat_takeaway: {
+    api_key: 'JET Connect API Key',
+    api_secret: 'JET Webhook Secret',
+    store_id: 'JET Restaurant Reference',
+  },
+  deliveroo: {
+    api_key: 'Deliveroo OAuth Client ID',
+    api_secret: 'Deliveroo OAuth Client Secret',
+    merchant_id: 'Deliveroo Brand ID',
+    store_id: 'Deliveroo Site ID',
+    webhook_secret: 'Deliveroo Webhook Secret',
+  },
+  foodora: {
+    api_key: 'Foodora OAuth Client ID',
+    api_secret: 'Foodora OAuth Client Secret',
+    store_id: 'Foodora Vendor ID',
+    chain_id: 'Foodora Chain ID',
+    webhook_secret: 'Foodora Webhook Secret',
+  },
+  smood: {
+    api_key: 'Smood API Key',
+    api_secret: 'Smood API/Webhook Secret',
+    store_id: 'Smood Store ID',
+  },
+};
+
 interface PluginFormState {
   api_key: string;
   api_secret: string;
   merchant_id: string;
   store_id: string;
   store_url: string;
+  chain_id: string;
+  webhook_secret: string;
   commission_pct: number;
   auto_accept_orders: boolean;
   auto_accept_prep_minutes: number;
@@ -618,6 +712,8 @@ export const IntegrationsPage: React.FC = () => {
     merchant_id: '',
     store_id: '',
     store_url: '',
+    chain_id: '',
+    webhook_secret: '',
     commission_pct: 20,
     auto_accept_orders: false,
     auto_accept_prep_minutes: 20,
@@ -864,6 +960,8 @@ export const IntegrationsPage: React.FC = () => {
         merchant_id: '',
         store_id: '',
         store_url: '',
+        chain_id: '',
+        webhook_secret: '',
         commission_pct: 20,
         auto_accept_orders: integration.settings?.auto_accept_orders ?? false,
         auto_accept_prep_minutes: integration.settings?.auto_accept_prep_minutes ?? 20,
@@ -898,6 +996,8 @@ export const IntegrationsPage: React.FC = () => {
       merchant_id: '',
       store_id: '',
       store_url: '',
+      chain_id: '',
+      webhook_secret: '',
       commission_pct: 20,
       auto_accept_orders: integration.settings?.auto_accept_orders ?? false,
       auto_accept_prep_minutes: integration.settings?.auto_accept_prep_minutes ?? 20,
@@ -996,6 +1096,8 @@ export const IntegrationsPage: React.FC = () => {
       if (pluginForm.merchant_id.trim()) credentials.merchant_id = pluginForm.merchant_id.trim();
       if (pluginForm.store_id.trim()) credentials.store_id = pluginForm.store_id.trim();
       if (pluginForm.store_url.trim()) credentials.store_url = pluginForm.store_url.trim();
+      if (pluginForm.chain_id.trim()) credentials.chain_id = pluginForm.chain_id.trim();
+      if (pluginForm.webhook_secret.trim()) credentials.webhook_secret = pluginForm.webhook_secret.trim();
 
       if (config.supportsCommission) {
         credentials.commission_pct = pluginForm.commission_pct;
@@ -1394,6 +1496,8 @@ export const IntegrationsPage: React.FC = () => {
                 {(() => {
                   const config = PLUGIN_FORM_CONFIG[activePlugin.id] || { requiredFields: [] };
                   const isRequired = (field: PluginFieldKey) => config.requiredFields.includes(field);
+                  const fieldLabel = (field: PluginFieldKey, key: string, fallback: string) =>
+                    PLUGIN_FIELD_LABELS[activePlugin.id]?.[field] ?? t(key, fallback);
                   return (
                     <>
                       {(isRequired('store_url') || activePlugin.id === 'woocommerce' || activePlugin.id === 'shopify') && (
@@ -1406,7 +1510,7 @@ export const IntegrationsPage: React.FC = () => {
                         />
                       )}
                       <POSGlassInput
-                        label={`${t('integrations.fields.apiKey', 'API Key')}${isRequired('api_key') ? ' *' : ''}`}
+                        label={`${fieldLabel('api_key', 'integrations.fields.apiKey', 'API Key')}${isRequired('api_key') ? ' *' : ''}`}
                         value={pluginForm.api_key}
                         onChange={(event) => setPluginForm(prev => ({ ...prev, api_key: event.target.value }))}
                         placeholder={t('integrations.placeholders.apiKey', 'Enter API key')}
@@ -1415,7 +1519,7 @@ export const IntegrationsPage: React.FC = () => {
                       />
                       {(isRequired('api_secret') || activePlugin.id !== 'google_analytics') && (
                         <POSGlassInput
-                          label={`${t('integrations.fields.apiSecret', 'API Secret')}${isRequired('api_secret') ? ' *' : ''}`}
+                          label={`${fieldLabel('api_secret', 'integrations.fields.apiSecret', 'API Secret')}${isRequired('api_secret') ? ' *' : ''}`}
                           value={pluginForm.api_secret}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, api_secret: event.target.value }))}
                           placeholder={t('integrations.placeholders.apiSecret', 'Enter API secret')}
@@ -1425,7 +1529,7 @@ export const IntegrationsPage: React.FC = () => {
                       )}
                       {(isRequired('merchant_id') || ['wolt', 'booking', 'expedia', 'viva'].includes(activePlugin.id)) && (
                         <POSGlassInput
-                          label={`${t('integrations.fields.merchantId', 'Merchant ID')}${isRequired('merchant_id') ? ' *' : ''}`}
+                          label={`${fieldLabel('merchant_id', 'integrations.fields.merchantId', 'Merchant ID')}${isRequired('merchant_id') ? ' *' : ''}`}
                           value={pluginForm.merchant_id}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, merchant_id: event.target.value }))}
                           placeholder={t('integrations.placeholders.merchantId', 'Merchant ID')}
@@ -1434,12 +1538,36 @@ export const IntegrationsPage: React.FC = () => {
                       )}
                       {(isRequired('store_id') || ['efood', 'box'].includes(activePlugin.id)) && (
                         <POSGlassInput
-                          label={`${t('integrations.fields.storeId', 'Store ID')}${isRequired('store_id') ? ' *' : ''}`}
+                          label={`${fieldLabel('store_id', 'integrations.fields.storeId', 'Store ID')}${isRequired('store_id') ? ' *' : ''}`}
                           value={pluginForm.store_id}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, store_id: event.target.value }))}
                           placeholder={t('integrations.placeholders.storeId', 'Store ID')}
                           disabled={saveAction.disabled}
                         />
+                      )}
+
+                      {(isRequired('chain_id') || isRequired('webhook_secret')) && (
+                        <>
+                          {isRequired('chain_id') && (
+                            <POSGlassInput
+                              label={`${fieldLabel('chain_id', 'integrations.fields.chainId', 'Chain ID')}${isRequired('chain_id') ? ' *' : ''}`}
+                              value={pluginForm.chain_id}
+                              onChange={(event) => setPluginForm(prev => ({ ...prev, chain_id: event.target.value }))}
+                              placeholder={t('integrations.placeholders.chainId', 'Chain ID')}
+                              disabled={saveAction.disabled}
+                            />
+                          )}
+                          {isRequired('webhook_secret') && (
+                            <POSGlassInput
+                              label={`${fieldLabel('webhook_secret', 'integrations.fields.webhookSecret', 'Webhook Secret')}${isRequired('webhook_secret') ? ' *' : ''}`}
+                              value={pluginForm.webhook_secret}
+                              onChange={(event) => setPluginForm(prev => ({ ...prev, webhook_secret: event.target.value }))}
+                              placeholder={t('integrations.placeholders.webhookSecret', 'Webhook secret')}
+                              type="password"
+                              disabled={saveAction.disabled}
+                            />
+                          )}
+                        </>
                       )}
 
                       {config.supportsCommission && (

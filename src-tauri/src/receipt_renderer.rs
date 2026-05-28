@@ -600,6 +600,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "- Expenses" => "- Έξοδα",
             "= To Return" => "= Προς Επιστροφή",
             "Amount to be Returned" => "Ποσό προς Επιστροφή",
+            "Actual Returned" => "Πραγματική Επιστροφή",
             "Canceled/Refunded" => "Ακυρωμένα/Επιστροφές",
             "SALES" => "ΠΩΛΗΣΕΙΣ",
             "PAYMENTS" => "ΠΛΗΡΩΜΕΣ",
@@ -715,6 +716,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "- Expenses" => "- Ausgaben",
             "= To Return" => "= Rueckgabe",
             "Amount to be Returned" => "Zurueckzugebender Betrag",
+            "Actual Returned" => "Tatsaechlich retour",
             "Canceled/Refunded" => "Storniert/Erstattet",
             "SALES" => "UMSATZ",
             "PAYMENTS" => "ZAHLUNGEN",
@@ -830,6 +832,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "- Expenses" => "- Depenses",
             "= To Return" => "= A rendre",
             "Amount to be Returned" => "Montant a rendre",
+            "Actual Returned" => "Rendu effectif",
             "Canceled/Refunded" => "Annule/Rembourse",
             "SALES" => "VENTES",
             "PAYMENTS" => "PAIEMENTS",
@@ -945,6 +948,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "- Expenses" => "- Spese",
             "= To Return" => "= Da restituire",
             "Amount to be Returned" => "Importo da restituire",
+            "Actual Returned" => "Reso effettivo",
             "Canceled/Refunded" => "Annullato/Rimborsato",
             "SALES" => "VENDITE",
             "PAYMENTS" => "PAGAMENTI",
@@ -1457,6 +1461,22 @@ fn driver_shift_checkout_summary_rows(
         amount: doc.amount_to_return,
         emphasize: true,
     });
+
+    if let Some(closing) = doc.closing_amount {
+        rows.push(DriverShiftCheckoutSummaryRow {
+            label_key: "Actual Returned",
+            amount: closing,
+            emphasize: false,
+        });
+    }
+
+    if let Some(variance) = doc.variance_amount {
+        rows.push(DriverShiftCheckoutSummaryRow {
+            label_key: "Variance",
+            amount: variance,
+            emphasize: false,
+        });
+    }
 
     rows
 }
@@ -9828,10 +9848,13 @@ mod tests {
         assert!(text.contains("Canceled/Refunded"));
         assert!(text.contains("30.50") || text.contains("30,50"));
         assert!(text.contains("40.00") || text.contains("40,00"));
+        assert!(text.contains("Actual Returned"));
+        assert!(text.contains("38.00") || text.contains("38,00"));
+        assert!(text.contains("Variance"));
+        assert!(text.contains("-2.00") || text.contains("-2,00"));
         assert!(!text.contains("DRIVER SUMMARY"));
         assert!(!text.contains("Expected"));
         assert!(!text.contains("Closing"));
-        assert!(!text.contains("Variance"));
         assert!(!text.contains("42.50"));
         assert!(!text.contains("DRIVER DELIVERIES"));
     }
@@ -9898,10 +9921,13 @@ mod tests {
         assert!(html.contains("Amount to be Returned"));
         assert!(html.contains("Canceled/Refunded"));
         assert!(html.contains("30.50"));
+        assert!(html.contains("Actual Returned"));
+        assert!(html.contains("38.00"));
+        assert!(html.contains("Variance"));
+        assert!(html.contains("-2.00"));
         assert!(!html.contains("DRIVER SUMMARY"));
         assert!(!html.contains("Expected"));
         assert!(!html.contains("Closing"));
-        assert!(!html.contains("Variance"));
         assert!(!html.contains("42.50"));
         assert!(!html.contains("DRIVER DELIVERIES"));
     }

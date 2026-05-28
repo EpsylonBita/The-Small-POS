@@ -1453,6 +1453,7 @@ fn load_drawer_rows_for_period(
     period_start: &str,
     cutoff_at: Option<&str>,
     lower_bound_mode: LowerBoundMode,
+    branch_id: &str,
 ) -> Result<Vec<Value>, String> {
     let opened_at_predicate = lower_bound_mode.sql_predicate("cds.opened_at", "?1");
     let expected_expr = drawer_expected_cents_expr(Some("cds"));
@@ -1475,12 +1476,13 @@ fn load_drawer_rows_for_period(
              LEFT JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
              WHERE {opened_at_predicate}
                AND (?2 IS NULL OR cds.opened_at <= ?2)
-             ORDER BY cds.opened_at ASC"
+               AND (?3 = '' OR cds.branch_id = ?3 OR cds.branch_id IS NULL)
+              ORDER BY cds.opened_at ASC"
         ))
         .map_err(|e| format!("prepare drawer rows for period: {e}"))?;
 
     let rows = stmt
-        .query_map(params![period_start, cutoff_at], |row| {
+        .query_map(params![period_start, cutoff_at, branch_id], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "staffShiftId": row.get::<_, String>(1)?,
@@ -3779,12 +3781,15 @@ fn build_z_report_for_date(
     let staff_payments_total: f64 = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(amount), 0) FROM staff_payments
-             WHERE {}
-               AND (?2 IS NULL OR created_at <= ?2)",
-                lower_bound_mode.sql_predicate("created_at", "?1")
+                "SELECT COALESCE(SUM(sp.amount), 0)
+                 FROM staff_payments sp
+                 LEFT JOIN staff_shifts ss ON ss.id = sp.cashier_shift_id
+                 WHERE {}
+                   AND (?2 IS NULL OR sp.created_at <= ?2)
+                   AND (?3 = '' OR ss.branch_id = ?3 OR ss.branch_id IS NULL)",
+                lower_bound_mode.sql_predicate("sp.created_at", "?1")
             ),
-            params![period_start, cutoff_param],
+            params![period_start, cutoff_param, branch_id],
             |row| row.get(0),
         )
         .unwrap_or(0.0);
@@ -3795,11 +3800,12 @@ fn build_z_report_for_date(
              FROM shift_expenses
              WHERE {}
                AND (?2 IS NULL OR created_at <= ?2)
+               AND (?3 = '' OR branch_id = ?3 OR branch_id IS NULL)
                AND status = 'pending'
                AND (expense_type IS NULL OR expense_type != 'staff_payment')",
                 lower_bound_mode.sql_predicate("created_at", "?1")
             ),
-            params![period_start, cutoff_param],
+            params![period_start, cutoff_param, branch_id],
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -3858,8 +3864,13 @@ fn build_z_report_for_date(
         cutoff_param,
         lower_bound_mode,
     )?;
-    let drawer_rows =
-        load_drawer_rows_for_period(&conn, &period_start, cutoff_param, lower_bound_mode)?;
+    let drawer_rows = load_drawer_rows_for_period(
+        &conn,
+        &period_start,
+        cutoff_param,
+        lower_bound_mode,
+        branch_id.as_str(),
+    )?;
     let cash_breakdown_lookup = driver_cash_breakdown
         .iter()
         .chain(waiter_cash_breakdown.iter())
@@ -5762,6 +5773,119 @@ mod tests {
         assert_eq!(report_json_str["expenses"]["staffPaymentsTotal"], 0.0);
         assert_eq!(report_json_str["expenses"]["pendingCount"], 1);
         assert_eq!(report_json_str["drawers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cash_drawer_formula_z_report_period_staff_payments_are_branch_scoped() {
+        let db = test_db();
+        seed_closed_shift(&db);
+
+        {
+            let conn = db.conn.lock().unwrap();
+            ensure_staff_payments_table(&conn);
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                    opening_cash_amount, opening_cash_amount_cents,
+                    closing_cash_amount, closing_cash_amount_cents,
+                    expected_cash_amount, expected_cash_amount_cents,
+                    cash_variance, cash_variance_cents,
+                    check_in_time, check_out_time, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'branch-2-cashier', 'staff-branch-2', 'Other Branch', 'branch-2', 'term-2', 'cashier',
+                    100.0, 10000, 100.0, 10000, 100.0, 10000, 0.0, 0,
+                    '2026-02-16T09:00:00Z', '2026-02-16T18:00:00Z', 'closed', 2,
+                    'pending', '2026-02-16T09:00:00Z', '2026-02-16T18:00:00Z'
+                 )",
+                [],
+            )
+            .expect("insert branch 2 shift");
+            conn.execute(
+                "INSERT INTO staff_payments (
+                    id, cashier_shift_id, paid_to_staff_id, amount, payment_type, created_at, updated_at
+                 ) VALUES
+                    ('branch-1-staff-payment', 'shift-zr-1', 'staff-paid-1', 12.0, 'wage', '2026-02-16T10:00:00Z', '2026-02-16T10:00:00Z'),
+                    ('branch-2-staff-payment', 'branch-2-cashier', 'staff-paid-2', 40.0, 'wage', '2026-02-16T10:00:00Z', '2026-02-16T10:00:00Z')",
+                [],
+            )
+            .expect("insert branch-scoped staff payments");
+        }
+
+        let result = generate_z_report_for_date(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+                "date": "2026-02-16",
+            }),
+        )
+        .expect("generate branch 1 z-report");
+
+        let report_json = result["report"]["reportJson"]
+            .as_object()
+            .expect("reportJson object");
+        assert_eq!(report_json["expenses"]["staffPaymentsTotal"], 12.0);
+        assert_eq!(report_json["staffPayments"]["total"], 12.0);
+    }
+
+    #[test]
+    fn cash_drawer_formula_z_report_drawer_rows_are_branch_scoped() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                    opening_cash_amount, opening_cash_amount_cents,
+                    closing_cash_amount, closing_cash_amount_cents,
+                    expected_cash_amount, expected_cash_amount_cents,
+                    cash_variance, cash_variance_cents,
+                    check_in_time, check_out_time, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES
+                    ('shift-branch-1', 'cashier-1', 'Cashier One', 'branch-1', 'term-1', 'cashier',
+                     10.0, 1000, 10.0, 1000, 10.0, 1000, 0.0, 0,
+                     '2026-02-16T09:00:00Z', '2026-02-16T10:00:00Z', 'closed', 2,
+                     'pending', '2026-02-16T09:00:00Z', '2026-02-16T10:00:00Z'),
+                    ('shift-branch-2', 'cashier-2', 'Cashier Two', 'branch-2', 'term-2', 'cashier',
+                     20.0, 2000, 20.0, 2000, 20.0, 2000, 0.0, 0,
+                     '2026-02-16T09:00:00Z', '2026-02-16T10:00:00Z', 'closed', 2,
+                     'pending', '2026-02-16T09:00:00Z', '2026-02-16T10:00:00Z')",
+                [],
+            )
+            .expect("insert drawer staff shifts");
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opening_amount_cents,
+                    expected_amount, expected_amount_cents,
+                    closing_amount, closing_amount_cents,
+                    variance_amount, variance_amount_cents,
+                    opened_at, closed_at, reconciled, created_at, updated_at
+                 ) VALUES
+                    ('drawer-branch-1', 'shift-branch-1', 'cashier-1', 'branch-1', 'term-1',
+                     10.0, 1000, 10.0, 1000, 10.0, 1000, 0.0, 0,
+                     '2026-02-16T09:00:00Z', '2026-02-16T10:00:00Z', 1, '2026-02-16T09:00:00Z', '2026-02-16T10:00:00Z'),
+                    ('drawer-branch-2', 'shift-branch-2', 'cashier-2', 'branch-2', 'term-2',
+                     20.0, 2000, 20.0, 2000, 20.0, 2000, 0.0, 0,
+                     '2026-02-16T09:00:00Z', '2026-02-16T10:00:00Z', 1, '2026-02-16T09:00:00Z', '2026-02-16T10:00:00Z')",
+                [],
+            )
+            .expect("insert branch drawer rows");
+
+            let rows = load_drawer_rows_for_period(
+                &conn,
+                "2026-02-16T00:00:00Z",
+                None,
+                LowerBoundMode::Inclusive,
+                "branch-1",
+            )
+            .expect("load drawer rows for branch");
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["id"], "drawer-branch-1");
+        }
     }
 
     #[test]

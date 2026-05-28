@@ -291,6 +291,8 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   const printFinalOrderDocuments = useCallback(async () => {
     try { await bridge.payments.printReceipt(orderId); } catch (error) { console.warn('[SplitPaymentModal] Final receipt print failed:', error); toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' })); }
     if (isGhostOrder) return;
+    const fiscalEnabled = await bridge.settings.get('terminal', 'fiscal_print_enabled').catch(() => true);
+    if (fiscalEnabled === false || fiscalEnabled === 'false' || fiscalEnabled === '0') return;
     try { const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId); if (fiscalResult?.skipped) return; } catch (error) { console.warn('[SplitPaymentModal] Fiscal print failed:', error); toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' })); }
   }, [bridge, isGhostOrder, orderId, t]);
   const recordPortionPayment = useCallback(async (portion: SplitPortion, paymentOrigin: PaymentOrigin, transactionRef?: string, terminalDeviceId?: string) => {

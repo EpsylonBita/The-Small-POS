@@ -23,7 +23,13 @@ export type OrderPlugin =
   | 'wolt'          // Wolt delivery plugin
   | 'efood'         // E-food delivery plugin
   | 'box'           // Box delivery plugin
+  | 'glovo'         // Glovo
+  | 'bolt_food'     // Bolt Food
   | 'uber_eats'     // Uber Eats
+  | 'just_eat_takeaway' // Just Eat / Takeaway.com
+  | 'deliveroo'     // Deliveroo
+  | 'foodora'       // foodora
+  | 'smood'         // Smood
   | 'booking'       // Booking.com
   | 'tripadvisor'   // TripAdvisor
   | 'airbnb';       // Airbnb
