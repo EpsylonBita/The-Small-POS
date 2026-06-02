@@ -10,6 +10,7 @@ import {
 
 const projectRoot = process.cwd();
 const menuCartPath = path.join(projectRoot, 'src', 'renderer', 'components', 'menu', 'MenuCart.tsx');
+const menuModalPath = path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'MenuModal.tsx');
 const source = (filePath: string) => readFileSync(filePath, 'utf8');
 
 test('applyDiscountToCartLines discounts only the selected cart lines', () => {
@@ -101,5 +102,22 @@ test('MenuCart keeps manual item entry available while editing an order', () => 
     manualButtonMatch.groups.condition,
     /!isSelectionMode/,
     'selection mode should still hide the manual item add button',
+  );
+});
+
+test('MenuModal passes manual item entry into the cart while editing an order', () => {
+  const menuModal = source(menuModalPath);
+  const menuCartMatch = menuModal.match(/<MenuCart[\s\S]*?\/>/);
+
+  assert.ok(menuCartMatch, 'MenuModal should render MenuCart');
+  assert.doesNotMatch(
+    menuCartMatch[0],
+    /onAddManualItem=\{editMode\s*\?\s*undefined\s*:\s*handleAddManualItem\}/,
+    'edit mode must not strip the manual item handler before MenuCart renders',
+  );
+  assert.match(
+    menuCartMatch[0],
+    /onAddManualItem=\{handleAddManualItem\}/,
+    'MenuCart should receive the manual item handler in create and edit modes',
   );
 });
