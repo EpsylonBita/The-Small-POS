@@ -139,9 +139,10 @@ function orderMatchesId(order: OrderLike, targetId: string | null): boolean {
   ].some((value) => normalizeComparableId(value) === targetId);
 }
 
-export function findOpenTableOrderForTable<T extends OrderLike>(
+function findTableOrderForTableCandidate<T extends OrderLike>(
   orders: T[],
   table: TableLike | null | undefined,
+  options: { requireUnsettledPayment: boolean },
 ): T | null {
   if (!table || !Array.isArray(orders) || orders.length === 0) {
     return null;
@@ -163,7 +164,7 @@ export function findOpenTableOrderForTable<T extends OrderLike>(
       continue;
     }
 
-    if (!isUnsettledOrderPaymentStatus(order)) {
+    if (options.requireUnsettledPayment && !isUnsettledOrderPaymentStatus(order)) {
       continue;
     }
 
@@ -209,6 +210,20 @@ export function findOpenTableOrderForTable<T extends OrderLike>(
   }
 
   return best?.order || null;
+}
+
+export function findTableOrderForTable<T extends OrderLike>(
+  orders: T[],
+  table: TableLike | null | undefined,
+): T | null {
+  return findTableOrderForTableCandidate(orders, table, { requireUnsettledPayment: false });
+}
+
+export function findOpenTableOrderForTable<T extends OrderLike>(
+  orders: T[],
+  table: TableLike | null | undefined,
+): T | null {
+  return findTableOrderForTableCandidate(orders, table, { requireUnsettledPayment: true });
 }
 
 export function shouldBypassPaymentForTableOrder(input: {

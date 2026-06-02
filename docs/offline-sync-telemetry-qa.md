@@ -4,6 +4,8 @@ Last reviewed: 2026-05-12
 
 Linear: THE-99
 
+Project closeout: `docs/architecture/pos-runtime-offline-sync-closeout.md`
+
 ## Purpose
 
 Use this checklist to verify that offline POS replay is observable without

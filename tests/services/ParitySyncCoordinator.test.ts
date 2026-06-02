@@ -10,6 +10,11 @@ import {
   PARITY_QUEUE_STATUS_EVENT,
   runParitySyncCycle,
 } from '../../src/renderer/services/ParitySyncCoordinator';
+import {
+  POS_MODULE_CACHE_ENTRIES,
+  getPosModuleCachePrefixes,
+  getPosModuleWarmPaths,
+} from '../../src/renderer/services/pos-module-cache-registry';
 import { setSyncQueueBridgeInstanceForTests } from '../../src/renderer/services/SyncQueueBridge';
 import {
   clearTerminalCredentialCache,
@@ -263,6 +268,29 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
       '/api/pos/sync/inventory_items?limit=2000',
       '/api/pos/suppliers',
       '/api/pos/coupons',
+      '/api/pos/appointments?include_services=true',
+      '/api/pos/services?is_active=true',
+      '/api/pos/service-categories?is_active=true',
+      '/api/pos/resources?is_active=true',
+      '/api/pos/rooms',
+      '/api/pos/housekeeping?status=all',
+      '/api/pos/guest-billing?status=all',
+      '/api/pos/products?is_active=true&limit=500&offset=0',
+      '/api/pos/product-categories',
+      '/api/pos/products/low-stock',
+      '/api/pos/sync/appointments?limit=2000',
+      '/api/pos/sync/appointment_services?limit=2000',
+      '/api/pos/sync/appointment_resources?limit=2000',
+      '/api/pos/sync/services?limit=2000',
+      '/api/pos/sync/service_categories?limit=2000',
+      '/api/pos/sync/resources?limit=2000',
+      '/api/pos/sync/rooms?limit=2000',
+      '/api/pos/sync/housekeeping_tasks?limit=2000',
+      '/api/pos/sync/guest_folios?limit=2000',
+      '/api/pos/sync/folio_charges?limit=2000',
+      '/api/pos/sync/retail_products?limit=2000',
+      '/api/pos/sync/retail_product_variants?limit=2000',
+      '/api/pos/sync/retail_product_categories?limit=2000',
     ]);
     assert.deepEqual(calls.invoke, [
       {
@@ -277,6 +305,23 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
             '/api/pos/guest-billing',
             '/api/pos/products',
             '/api/pos/product-categories',
+            '/api/pos/services',
+            '/api/pos/service-categories',
+            '/api/pos/resources',
+            '/api/pos/products/low-stock',
+            '/api/pos/sync/appointments',
+            '/api/pos/sync/appointment_services',
+            '/api/pos/sync/appointment_resources',
+            '/api/pos/sync/services',
+            '/api/pos/sync/service_categories',
+            '/api/pos/sync/resources',
+            '/api/pos/sync/rooms',
+            '/api/pos/sync/housekeeping_tasks',
+            '/api/pos/sync/guest_folios',
+            '/api/pos/sync/folio_charges',
+            '/api/pos/sync/retail_products',
+            '/api/pos/sync/retail_product_variants',
+            '/api/pos/sync/retail_product_categories',
           ],
         },
       },
@@ -312,6 +357,30 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
     clearTerminalCredentialCache();
     resetBridge();
   }
+});
+
+test('POS module cache registry covers every scoped parity vertical', () => {
+  const modules = new Set(POS_MODULE_CACHE_ENTRIES.map((entry) => entry.moduleId));
+
+  for (const expected of [
+    'appointments',
+    'services',
+    'rooms',
+    'housekeeping',
+    'guest_billing',
+    'retail_products',
+  ]) {
+    assert.ok(modules.has(expected), `missing cache entry for ${expected}`);
+  }
+
+  const warmPaths = getPosModuleWarmPaths();
+  assert.ok(warmPaths.includes('/api/pos/services?is_active=true'));
+  assert.ok(warmPaths.includes('/api/pos/sync/retail_product_categories?limit=2000'));
+  assert.equal(warmPaths.length, new Set(warmPaths).size, 'warm paths must be unique');
+
+  const prefixes = getPosModuleCachePrefixes();
+  assert.ok(prefixes.includes('/api/pos/sync/guest_folios'));
+  assert.equal(prefixes.length, new Set(prefixes).size, 'cache prefixes must be unique');
 });
 
 test('runParitySyncCycle deduplicates concurrent sync requests', async () => {

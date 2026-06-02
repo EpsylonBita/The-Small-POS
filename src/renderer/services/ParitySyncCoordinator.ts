@@ -1,6 +1,10 @@
 import { environment } from '../../config/environment';
 import { emitCompatEvent, getBridge } from '../../lib';
 import { getSyncQueueBridge } from './SyncQueueBridge';
+import {
+  getPosModuleCachePrefixes,
+  getPosModuleWarmPaths,
+} from './pos-module-cache-registry';
 import type {
   QueueStatus,
   SyncResult,
@@ -119,20 +123,12 @@ function getAdvisoryCachePaths(config: RuntimeConfigLike): string[] {
     '/api/pos/sync/inventory_items?limit=2000',
     '/api/pos/suppliers',
     '/api/pos/coupons',
+    ...getPosModuleWarmPaths(),
   ];
 }
 
 function getVerticalCachePrefixes(): string[] {
-  return [
-    '/api/pos/reservations',
-    '/api/pos/appointments',
-    '/api/pos/drive-through',
-    '/api/pos/rooms',
-    '/api/pos/housekeeping',
-    '/api/pos/guest-billing',
-    '/api/pos/products',
-    '/api/pos/product-categories',
-  ];
+  return getPosModuleCachePrefixes();
 }
 
 function currentWeekRange(): { start_date: string; end_date: string } {

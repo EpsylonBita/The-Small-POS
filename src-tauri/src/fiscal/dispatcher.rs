@@ -24,7 +24,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 

@@ -2554,7 +2554,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     } catch (err) {
       const paymentIntegrityPayload = extractPaymentIntegrityPayload(err);
       setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
-      setError(err instanceof Error ? err.message : t('modals.staffShift.closeShiftFailed'));
+      setError(extractErrorMessage(err, t('modals.staffShift.closeShiftFailed')));
     } finally {
       setLoading(false);
     }

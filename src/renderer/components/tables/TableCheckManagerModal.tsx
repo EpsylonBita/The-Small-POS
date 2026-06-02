@@ -29,6 +29,7 @@ import { posApiGet, posApiPatch, posApiPost } from '../../utils/api-helpers';
 import {
   buildTableSessionPaymentPayload,
   findOpenTableOrderForTable,
+  findTableOrderForTable,
   normalizeGuestCount,
 } from '../../utils/tableOrderFlow';
 import {
@@ -41,6 +42,7 @@ import {
 import {
   enqueueTableItemTransfer,
   enqueueTablePayment,
+  enqueueTableSessionOpen,
   enqueueTableSessionUpdate,
   isRetryableTableServiceError,
 } from '../../utils/tableSessionOfflineQueue';
@@ -852,11 +854,14 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       setItemPayQuantity('1');
     };
 
-    const localOrderFromState = findOpenTableOrderForTable(localOrders as any[], table);
+    const localOrderFromState =
+      findOpenTableOrderForTable(localOrders as any[], table) ||
+      (table.currentOrderId ? findTableOrderForTable(localOrders as any[], table) : null);
     const bridgeOrders = await fetchBridgeOrders();
     const localOrder =
       findOpenTableOrderForTable(bridgeOrders as any[], table) ||
-      localOrderFromState;
+      localOrderFromState ||
+      (table.currentOrderId ? findTableOrderForTable(bridgeOrders as any[], table) : null);
     const localFallback = localOrder ? buildLocalSessionFromOrder(table, localOrder, translatedItemFallback) : null;
     const localPaymentSnapshot = await fetchLocalPaymentSnapshot(localOrder?.id);
     setPaymentHistory(localPaymentSnapshot.payments);
@@ -883,19 +888,20 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       }
 
       if (!sessionId && table.currentOrderId) {
+        const repairPayload = {
+          action: 'open',
+          table_id: table.id,
+          table_number: table.tableNumber,
+          active_order_id: table.currentOrderId,
+          guest_count: normalizeGuestCount(table.guestCount || 1),
+          customer_name: tr('labels.tableNumber', 'Table {{number}}', { number: table.tableNumber }),
+          client_event_id: `pos-tauri-table-session-repair-${table.currentOrderId}`,
+        };
+
         try {
           const openResult = await posApiPost<{ success?: boolean; session?: TableSessionDetails; error?: string }>(
             '/api/pos/table-sessions',
-            {
-              action: 'open',
-              table_id: table.id,
-              table_number: table.tableNumber,
-              active_order_id: table.currentOrderId,
-              active_order_client_id: table.currentOrderId,
-              guest_count: normalizeGuestCount(table.guestCount || 1),
-              customer_name: tr('labels.tableNumber', 'Table {{number}}', { number: table.tableNumber }),
-              client_event_id: `pos-tauri-table-session-repair-${table.currentOrderId}`,
-            },
+            repairPayload,
           );
           if (!openResult.success || openResult.data?.success === false || !openResult.data?.session) {
             throw new Error(openResult.error || openResult.data?.error || tr('errors.reopenFailed', 'Failed to reopen table check'));
@@ -904,6 +910,23 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           sessionId = openResult.data.session.id;
           await Promise.resolve(onRefreshTables());
         } catch (openError) {
+          if (isRetryableTableServiceError(openError)) {
+            try {
+              await enqueueTableSessionOpen({
+                organizationId: table.organizationId,
+                branchId: table.branchId,
+                payload: repairPayload,
+              });
+            } catch (queueError) {
+              console.warn('[TableCheckManagerModal] Failed to queue table session repair:', queueError);
+            }
+
+            if (localFallback) {
+              applySession(localFallback);
+            }
+            return;
+          }
+
           if (localFallback) {
             applySession(localFallback);
             return;

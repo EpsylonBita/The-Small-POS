@@ -4,6 +4,7 @@ import {
   buildOrderServiceTableMetadata,
   buildOptimisticOccupiedTable,
   findOpenTableOrderForTable,
+  findTableOrderForTable,
   getTableNumberForTableServiceOrder,
   isTableServiceOrder,
   isUnsettledOrderPaymentStatus,
@@ -174,6 +175,26 @@ describe('table order flow helpers', () => {
       }),
       pendingTableOrder,
     )
+  })
+
+  it('can recover the current settled table check for the check modal fallback', () => {
+    const paidOrder = {
+      id: 'order-paid',
+      status: 'pending',
+      orderType: 'dine-in',
+      paymentStatus: 'paid',
+      tableNumber: 'T1',
+      createdAt: '2026-05-20T11:00:00.000Z',
+    }
+
+    const table = {
+      id: 'table-1',
+      tableNumber: 'T1',
+      currentOrderId: 'order-paid',
+    }
+
+    assert.equal(findOpenTableOrderForTable([paidOrder], table), null)
+    assert.equal(findTableOrderForTable([paidOrder], table), paidOrder)
   })
 
   it('recognizes orphaned table customer labels as table-service checks', () => {

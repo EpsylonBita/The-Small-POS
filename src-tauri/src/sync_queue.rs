@@ -1250,17 +1250,6 @@ fn normalize_order_update_items_for_request(items: &Value) -> Option<Value> {
     Some(Value::Array(normalized))
 }
 
-fn has_unpatchable_order_update_items(items: &Value) -> bool {
-    let normalized = normalize_order_insert_items(items);
-    !normalized.is_empty()
-        && normalized.iter().any(|item| {
-            item.get("menu_item_id")
-                .and_then(Value::as_str)
-                .filter(|candidate| Uuid::parse_str(candidate).is_ok())
-                .is_none()
-        })
-}
-
 fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
     let mut normalized = Vec::new();
 
@@ -3831,23 +3820,9 @@ fn prepare_order_request(
         });
     }
 
-    let has_legacy_unpatchable_items = payload
-        .get("items")
-        .filter(|items| !items.is_null())
-        .is_some_and(has_unpatchable_order_update_items);
-
     let mut body = Map::new();
     body.insert("id".to_string(), Value::String(remote_id));
     body.insert("status".to_string(), Value::String(status));
-
-    if has_legacy_unpatchable_items {
-        return Ok(RequestPreparation::Ready(RequestSpec {
-            endpoint: "/api/pos/orders".to_string(),
-            method: Method::PATCH,
-            body: Some(Value::Object(body).to_string()),
-            terminal_id: terminal_id.to_string(),
-        }));
-    }
 
     fn copy_payload_field(
         body: &mut Map<String, Value>,
@@ -6595,10 +6570,11 @@ mod tests {
         let conn = test_connection();
         conn.execute(
             "INSERT INTO orders (
-                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+                 id, supabase_id, items, total_amount, total_amount_cents,
+                 subtotal, subtotal_cents, status, sync_status, created_at, updated_at
              ) VALUES (
                  'order-table-manual-update', 'remote-order-table-manual-update',
-                 '[]', 22.0, 2200, 'pending', 'synced', datetime('now'), datetime('now')
+                 '[]', 22.0, 2200, 22.0, 2200, 'pending', 'synced', datetime('now'), datetime('now')
              )",
             [],
         )
@@ -6639,9 +6615,20 @@ mod tests {
         let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
             .expect("parse request body");
         assert_eq!(body.get("items"), None);
-        assert_eq!(body.get("total_amount"), None);
-        assert_eq!(body.get("total_amount_cents"), None);
-        assert_eq!(body.get("payment_status"), None);
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(22.0));
+        assert_eq!(
+            body.get("total_amount_cents").and_then(Value::as_i64),
+            Some(2200)
+        );
+        assert_eq!(body.get("subtotal").and_then(Value::as_f64), Some(22.0));
+        assert_eq!(
+            body.get("subtotal_cents").and_then(Value::as_i64),
+            Some(2200)
+        );
+        assert_eq!(
+            body.get("payment_status").and_then(Value::as_str),
+            Some("pending")
+        );
         assert_eq!(body.get("status").and_then(Value::as_str), Some("pending"));
     }
 

@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   applyDiscountToCartLines,
   clearDiscountFromCartLines,
   type DiscountableCartLine,
 } from '../../src/renderer/utils/cart-line-discounts';
+
+const projectRoot = process.cwd();
+const menuCartPath = path.join(projectRoot, 'src', 'renderer', 'components', 'menu', 'MenuCart.tsx');
+const source = (filePath: string) => readFileSync(filePath, 'utf8');
 
 test('applyDiscountToCartLines discounts only the selected cart lines', () => {
   const items: DiscountableCartLine[] = [
@@ -77,4 +83,23 @@ test('applyDiscountToCartLines replaces an existing selected line discount', () 
   assert.equal(twentyPercent[0].discountAmount, 1.2);
   assert.equal(twentyPercent[0].discountBaseUnitPrice, 6);
   assert.equal(twentyPercent[0].discountBaseTotalPrice, 6);
+});
+
+test('MenuCart keeps manual item entry available while editing an order', () => {
+  const menuCart = source(menuCartPath);
+  const manualButtonMatch = menuCart.match(
+    /\{(?<condition>[^\n{}]+)\s*&&\s*\(\s*<button[\s\S]*?title=\{t\('menu\.cart\.addManualItem'/,
+  );
+
+  assert.ok(manualButtonMatch?.groups?.condition, 'manual item button condition should be present');
+  assert.doesNotMatch(
+    manualButtonMatch.groups.condition,
+    /!editMode/,
+    'edit mode must not hide the manual item add button',
+  );
+  assert.match(
+    manualButtonMatch.groups.condition,
+    /!isSelectionMode/,
+    'selection mode should still hide the manual item add button',
+  );
 });

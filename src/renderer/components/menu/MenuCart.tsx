@@ -879,7 +879,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 </button>
               </>
             )}
-            {onAddManualItem && !editMode && !isSelectionMode && (
+            {onAddManualItem && !isSelectionMode && (
               <button
                 onClick={() => setShowManualInput((prev) => !prev)}
                 className={`p-1.5 rounded-lg transition-colors ${

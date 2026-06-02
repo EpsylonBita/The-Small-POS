@@ -47,6 +47,94 @@ struct SyncUpdateDriveThruOrderStatusPayload {
     status: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RoomAvailabilityMetrics {
+    available: i64,
+    total: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppointmentTodayMetrics {
+    scheduled: i64,
+    completed: i64,
+    canceled: i64,
+}
+
+fn response_array<'a>(
+    response: &'a serde_json::Value,
+    keys: &[&str],
+) -> Vec<&'a serde_json::Value> {
+    for key in keys {
+        if let Some(items) = response.get(*key).and_then(|value| value.as_array()) {
+            return items.iter().collect();
+        }
+        if let Some(items) = response
+            .get("data")
+            .and_then(|value| value.get(*key))
+            .and_then(|value| value.as_array())
+        {
+            return items.iter().collect();
+        }
+    }
+    Vec::new()
+}
+
+fn calculate_room_availability(response: &serde_json::Value) -> RoomAvailabilityMetrics {
+    let rooms = response_array(response, &["rooms"]);
+    let total = rooms.len() as i64;
+    let available = rooms
+        .iter()
+        .filter(|room| {
+            room.get("status")
+                .and_then(|value| value.as_str())
+                .map(|status| status.eq_ignore_ascii_case("available"))
+                .unwrap_or(false)
+        })
+        .count() as i64;
+
+    RoomAvailabilityMetrics { available, total }
+}
+
+fn calculate_appointment_metrics(
+    response: &serde_json::Value,
+    local_date: &str,
+) -> AppointmentTodayMetrics {
+    let mut metrics = AppointmentTodayMetrics {
+        scheduled: 0,
+        completed: 0,
+        canceled: 0,
+    };
+
+    for appointment in response_array(response, &["appointments"]) {
+        let starts_today = [
+            "start_time",
+            "starts_at",
+            "scheduled_at",
+            "appointment_time",
+        ]
+        .iter()
+        .filter_map(|key| appointment.get(*key).and_then(|value| value.as_str()))
+        .any(|value| value.starts_with(local_date));
+        if !starts_today {
+            continue;
+        }
+
+        match appointment
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "completed" | "complete" => metrics.completed += 1,
+            "cancelled" | "canceled" => metrics.canceled += 1,
+            _ => metrics.scheduled += 1,
+        }
+    }
+
+    metrics
+}
+
 fn parse_remove_invalid_orders_payload(
     arg0: Option<serde_json::Value>,
 ) -> Result<Vec<String>, String> {
@@ -1392,48 +1480,92 @@ pub async fn rooms_get_availability(
 ) -> Result<serde_json::Value, String> {
     match crate::admin_fetch(Some(&db), "/api/pos/rooms", "GET", None).await {
         Ok(resp) => {
-            let rooms = resp
-                .get("rooms")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let total = rooms.len() as i64;
-            let available = rooms
-                .iter()
-                .filter(|r| {
-                    r.get("status")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.eq_ignore_ascii_case("available"))
-                        .unwrap_or(false)
-                })
-                .count() as i64;
+            let metrics = calculate_room_availability(&resp);
 
             Ok(serde_json::json!({
                 "success": true,
-                "available": available,
-                "total": total
+                "available": metrics.available,
+                "total": metrics.total
             }))
         }
-        Err(e) => Ok(serde_json::json!({
-            "success": false,
-            "notImplemented": true,
-            "message": e,
-            "available": 0,
-            "total": 0
-        })),
+        Err(e) => {
+            if let Some((cached_data, cached_at)) =
+                super::api_bridge::read_cached_admin_get_response(&db, "/api/pos/rooms")
+            {
+                let metrics = calculate_room_availability(&cached_data);
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "available": metrics.available,
+                    "total": metrics.total,
+                    "meta": {
+                        "source": "cache",
+                        "cachedAt": cached_at,
+                        "offlineFallback": true
+                    }
+                }));
+            }
+
+            Ok(serde_json::json!({
+                "success": false,
+                "message": format!("{e}. No cached local rooms copy is available yet."),
+                "available": 0,
+                "total": 0
+            }))
+        }
     }
 }
 
 #[tauri::command]
-pub async fn appointments_get_today_metrics() -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({
-        "success": false,
-        "notImplemented": true,
-        "message": "Appointments service not yet implemented. Metrics derived from orders.",
-        "scheduled": 0,
-        "completed": 0,
-        "canceled": 0
-    }))
+pub async fn appointments_get_today_metrics(
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let today = Local::now().date_naive().to_string();
+    let path = format!("/api/pos/appointments?date={today}&include_services=true");
+
+    match crate::admin_fetch(Some(&db), &path, "GET", None).await {
+        Ok(resp) => {
+            let metrics = calculate_appointment_metrics(&resp, &today);
+            Ok(serde_json::json!({
+                "success": true,
+                "scheduled": metrics.scheduled,
+                "completed": metrics.completed,
+                "canceled": metrics.canceled
+            }))
+        }
+        Err(e) => {
+            for cached_path in [
+                path.as_str(),
+                "/api/pos/appointments?include_services=true",
+                "/api/pos/appointments",
+            ] {
+                if let Some((cached_data, cached_at)) =
+                    super::api_bridge::read_cached_admin_get_response(&db, cached_path)
+                {
+                    let metrics = calculate_appointment_metrics(&cached_data, &today);
+                    return Ok(serde_json::json!({
+                        "success": true,
+                        "scheduled": metrics.scheduled,
+                        "completed": metrics.completed,
+                        "canceled": metrics.canceled,
+                        "meta": {
+                            "source": "cache",
+                            "cachedAt": cached_at,
+                            "offlineFallback": true,
+                            "path": cached_path
+                        }
+                    }));
+                }
+            }
+
+            Ok(serde_json::json!({
+                "success": false,
+                "message": format!("{e}. No cached local appointments copy is available yet."),
+                "scheduled": 0,
+                "completed": 0,
+                "canceled": 0
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1893,6 +2025,39 @@ mod dto_tests {
         .expect("alias payload should parse");
         assert_eq!(parsed.drive_thru_order_id, "dt-1");
         assert_eq!(parsed.status, "ready");
+    }
+
+    #[test]
+    fn calculate_room_availability_counts_available_rooms() {
+        let metrics = calculate_room_availability(&serde_json::json!({
+            "rooms": [
+                { "id": "room-1", "status": "available" },
+                { "id": "room-2", "status": "occupied" },
+                { "id": "room-3", "status": "Available" }
+            ]
+        }));
+
+        assert_eq!(metrics.available, 2);
+        assert_eq!(metrics.total, 3);
+    }
+
+    #[test]
+    fn calculate_appointment_metrics_counts_today_statuses() {
+        let metrics = calculate_appointment_metrics(
+            &serde_json::json!({
+                "appointments": [
+                    { "id": "a1", "start_time": "2026-05-30T09:00:00Z", "status": "scheduled" },
+                    { "id": "a2", "start_time": "2026-05-30T10:00:00Z", "status": "completed" },
+                    { "id": "a3", "start_time": "2026-05-30T11:00:00Z", "status": "cancelled" },
+                    { "id": "a4", "start_time": "2026-05-31T11:00:00Z", "status": "scheduled" }
+                ]
+            }),
+            "2026-05-30",
+        );
+
+        assert_eq!(metrics.scheduled, 1);
+        assert_eq!(metrics.completed, 1);
+        assert_eq!(metrics.canceled, 1);
     }
 
     // =======================================================================

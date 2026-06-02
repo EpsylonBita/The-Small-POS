@@ -1,7 +1,7 @@
 {
   "name": "the-small-pos-tauri",
   "private": true,
-  "version": "1.4.12",
+  "version": "1.4.13",
   "description": "The Small POS - Tauri v2 desktop application",
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "type-check": "tsc --noEmit",
+    "test": "node scripts/run-parity-tests.mjs",
     "locale:parity": "node scripts/check-locale-parity.mjs",
     "test:desktop-parity": "node scripts/run-parity-tests.mjs",
     "test:support-layer": "node scripts/run-support-tests.mjs",

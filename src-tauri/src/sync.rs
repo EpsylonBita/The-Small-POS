@@ -4298,6 +4298,45 @@ fn minimize_manual_order_update_replay_blockers(conn: &Connection) -> Result<usi
                     WHERE orders.id = parity_sync_queue.record_id
                     LIMIT 1),
                    'pending'
+                 ),
+                 'totalAmount', COALESCE(
+                   json_extract(data, '$.totalAmount'),
+                   json_extract(data, '$.total_amount'),
+                   (SELECT orders.total_amount
+                    FROM orders
+                    WHERE orders.id = parity_sync_queue.record_id
+                    LIMIT 1)
+                 ),
+                 'totalAmountCents', COALESCE(
+                   json_extract(data, '$.totalAmountCents'),
+                   json_extract(data, '$.total_amount_cents'),
+                   (SELECT orders.total_amount_cents
+                    FROM orders
+                    WHERE orders.id = parity_sync_queue.record_id
+                    LIMIT 1)
+                 ),
+                 'subtotal', COALESCE(
+                   json_extract(data, '$.subtotal'),
+                   (SELECT COALESCE(orders.subtotal, orders.total_amount)
+                    FROM orders
+                    WHERE orders.id = parity_sync_queue.record_id
+                    LIMIT 1)
+                 ),
+                 'subtotalCents', COALESCE(
+                   json_extract(data, '$.subtotalCents'),
+                   json_extract(data, '$.subtotal_cents'),
+                   (SELECT COALESCE(orders.subtotal_cents, orders.total_amount_cents)
+                    FROM orders
+                    WHERE orders.id = parity_sync_queue.record_id
+                    LIMIT 1)
+                 ),
+                 'paymentStatus', COALESCE(
+                   NULLIF(TRIM(COALESCE(json_extract(data, '$.paymentStatus'), '')), ''),
+                   NULLIF(TRIM(COALESCE(json_extract(data, '$.payment_status'), '')), ''),
+                   (SELECT NULLIF(TRIM(COALESCE(orders.payment_status, '')), '')
+                    FROM orders
+                    WHERE orders.id = parity_sync_queue.record_id
+                    LIMIT 1)
                  )
              ),
              status = 'pending',
@@ -8320,8 +8359,15 @@ fn defer_payment_total_conflict_while_parent_order_lags_with_conn(
     let partial_payment_waits_for_item_backed_parent = local_total_is_backed_by_items
         && server_existing_matches_local_base
         && payment_fits_local_outstanding;
+    let cumulative_local_payments_wait_for_item_backed_parent = local_total_is_backed_by_items
+        && server_existing_cents <= other_completed_cents + 1
+        && other_completed_cents + payment_amount_cents <= local_total_cents + 1
+        && payment_fits_local_outstanding;
 
-    if !(full_delta_payment_waits_for_parent || partial_payment_waits_for_item_backed_parent) {
+    if !(full_delta_payment_waits_for_parent
+        || partial_payment_waits_for_item_backed_parent
+        || cumulative_local_payments_wait_for_item_backed_parent)
+    {
         return Ok(None);
     }
 
@@ -20419,6 +20465,99 @@ mod tests {
     }
 
     #[test]
+    fn test_payment_total_conflict_defers_cumulative_item_backed_table_payments() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let items = serde_json::json!([
+            {
+                "id": "manual-table-item",
+                "name": "Manual Item",
+                "quantity": 2,
+                "unit_price": 11.0,
+                "total_price": 22.0
+            }
+        ])
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, order_number, items, total_amount, total_amount_cents,
+                subtotal, subtotal_cents, tax_amount, tax_amount_cents,
+                status, payment_status, order_type, sync_status, created_at, updated_at
+            ) VALUES (
+                'ord-table-lagged-cumulative', 'remote-table-lagged-cumulative', 'ORD-TABLE-LAG-CUM',
+                ?1, 22.0, 2200, 22.0, 2200, 0.0, 0,
+                'completed', 'partially_paid', 'dine-in', 'synced', datetime('now'), datetime('now')
+            )",
+            params![items],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-table-cumulative-base', 'ord-table-lagged-cumulative', 'cash', 11.0, 1100, 'EUR', 'completed',
+                'remote-pay-table-cumulative-base', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                sync_status, sync_state, sync_last_error, created_at, updated_at
+            ) VALUES (
+                'pay-table-cumulative-two', 'ord-table-lagged-cumulative', 'cash', 2.0, 200, 'EUR', 'completed',
+                'pending', 'waiting_parent', 'Deferred payment because admin order total is stale', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                sync_status, sync_state, sync_last_error, created_at, updated_at
+            ) VALUES (
+                'pay-table-cumulative-nine', 'ord-table-lagged-cumulative', 'cash', 9.0, 900, 'EUR', 'completed',
+                'failed', 'failed', 'Payment exceeds order total', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+
+        let resolution = resolve_payment_total_conflict_with_server_hint_with_conn(
+            &conn,
+            "pay-table-cumulative-nine",
+            "HTTP 422: {\"success\":false,\"error\":\"Payment exceeds order total\",\"details\":\"Order total: 11, tip: 0, existing completed: 11, payment: 9\"}",
+            "2026-05-30T21:45:00Z",
+        )
+        .expect("server hint conflict resolver should not fail");
+
+        assert!(
+            resolution.is_none(),
+            "cumulative local payments should wait for the item-backed order total to reach admin"
+        );
+
+        let (payment_status, sync_status, sync_state): (String, String, String) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = 'pay-table-cumulative-nine'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_status, "completed");
+        assert_eq!(sync_status, "pending");
+        assert_eq!(sync_state, "waiting_parent");
+        assert!(has_outstanding_local_order_queue(
+            &conn,
+            "ord-table-lagged-cumulative"
+        ));
+    }
+
+    #[test]
     fn test_payment_total_conflict_defers_when_remote_order_total_lags_local_delivery_delta() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -25101,11 +25240,11 @@ mod tests {
         conn.execute(
             "INSERT INTO orders (
                  id, order_number, items, total_amount, total_amount_cents,
-                 status, sync_status, created_at, updated_at
+                 status, payment_status, sync_status, created_at, updated_at
              ) VALUES (
                  'ord-manual-replay', 'ORD-MANUAL-REPLAY',
                  '[{\"menu_item_id\":null,\"name\":\"Manual item\",\"quantity\":2,\"unit_price\":11,\"total_price\":22}]',
-                 22.0, 2200, 'pending', 'synced', datetime('now'), datetime('now')
+                 22.0, 2200, 'pending', 'pending', 'synced', datetime('now'), datetime('now')
              )",
             [],
         )
@@ -25146,7 +25285,12 @@ mod tests {
             payload,
             serde_json::json!({
                 "orderId": "ord-manual-replay",
-                "status": "pending"
+                "paymentStatus": "pending",
+                "status": "pending",
+                "subtotal": 22,
+                "subtotalCents": 2200,
+                "totalAmount": 22,
+                "totalAmountCents": 2200
             })
         );
     }
