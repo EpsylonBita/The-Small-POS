@@ -4000,12 +4000,10 @@ mod transition_tests {
         insert_order(&db, "order-delivered", "delivered");
         let conn = db.conn.lock().unwrap();
 
-        let previous_status = ensure_order_status_transition_allowed(
-            &conn,
-            "order-delivered",
-            "cancelled",
-        )
-        .expect("delivered -> cancelled should be allowed for returned delivery corrections");
+        let previous_status =
+            ensure_order_status_transition_allowed(&conn, "order-delivered", "cancelled").expect(
+                "delivered -> cancelled should be allowed for returned delivery corrections",
+            );
         assert_eq!(previous_status, "delivered");
     }
 
