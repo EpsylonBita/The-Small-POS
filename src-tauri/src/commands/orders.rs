@@ -1707,6 +1707,7 @@ pub async fn order_update_status(
         }
         let was_cancelled = previous_status == "cancelled";
         let next_is_cancelled = status == "cancelled";
+        let is_cancellation_reactivation = was_cancelled && status == "pending";
 
         if !was_cancelled && next_is_cancelled {
             order_ownership::reverse_order_drawer_attribution(&conn, &actual_order_id, &now)?;
@@ -1721,6 +1722,17 @@ pub async fn order_update_status(
                      updated_at = ?3
                  WHERE id = ?4",
                 rusqlite::params![status, reason, now, actual_order_id],
+            )
+            .map_err(|e| format!("update order status: {e}"))?;
+        } else if is_cancellation_reactivation {
+            conn.execute(
+                "UPDATE orders
+                 SET status = ?1,
+                     cancellation_reason = NULL,
+                     sync_status = 'pending',
+                     updated_at = ?2
+                 WHERE id = ?3",
+                rusqlite::params![status, now, actual_order_id],
             )
             .map_err(|e| format!("update order status: {e}"))?;
         } else {
@@ -1760,6 +1772,13 @@ pub async fn order_update_status(
                     serde_json::Value::String(now.clone()),
                 );
             }
+        } else if is_cancellation_reactivation {
+            if let Some(obj) = sync_payload.as_object_mut() {
+                obj.insert("cancellation_reason".to_string(), serde_json::Value::Null);
+                obj.insert("cancellationReason".to_string(), serde_json::Value::Null);
+                obj.insert("cancelled_at".to_string(), serde_json::Value::Null);
+                obj.insert("cancelledAt".to_string(), serde_json::Value::Null);
+            }
         }
         let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
     }
@@ -1775,6 +1794,10 @@ pub async fn order_update_status(
                 "cancellationReason".to_string(),
                 serde_json::Value::String(reason.clone()),
             );
+        }
+    } else if status == "pending" {
+        if let Some(obj) = event_payload.as_object_mut() {
+            obj.insert("cancellationReason".to_string(), serde_json::Value::Null);
         }
     }
     let _ = app.emit("order_status_updated", event_payload.clone());
@@ -3972,14 +3995,18 @@ mod transition_tests {
     }
 
     #[test]
-    fn local_transition_validation_rejects_delivered_to_cancelled() {
+    fn local_transition_validation_allows_delivered_to_cancelled() {
         let db = test_db();
         insert_order(&db, "order-delivered", "delivered");
         let conn = db.conn.lock().unwrap();
 
-        let err = ensure_order_status_transition_allowed(&conn, "order-delivered", "cancelled")
-            .expect_err("delivered -> cancelled should fail");
-        assert!(is_invalid_status_transition_failure_message(&err));
+        let previous_status = ensure_order_status_transition_allowed(
+            &conn,
+            "order-delivered",
+            "cancelled",
+        )
+        .expect("delivered -> cancelled should be allowed for returned delivery corrections");
+        assert_eq!(previous_status, "delivered");
     }
 
     #[test]

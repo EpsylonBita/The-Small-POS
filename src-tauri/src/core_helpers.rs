@@ -229,7 +229,7 @@ pub(crate) fn can_transition_locally(from_status: &str, to_status: &str) -> bool
             "out_for_delivery" | "delivered" | "completed" | "cancelled"
         ),
         "out_for_delivery" => matches!(to.as_str(), "delivered" | "completed" | "cancelled"),
-        "delivered" => matches!(to.as_str(), "completed" | "refunded"),
+        "delivered" => matches!(to.as_str(), "completed" | "cancelled" | "refunded"),
         "completed" => to == "refunded",
         "cancelled" => to == "pending",
         _ => false,

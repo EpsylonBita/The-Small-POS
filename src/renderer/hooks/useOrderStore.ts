@@ -871,6 +871,15 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                 ...(cancelledAt ? { cancelled_at: cancelledAt, cancelledAt } : {}),
               }
             : {};
+        const cancellationClearPatch =
+          mappedLocalStatus === 'pending'
+            ? {
+                cancellation_reason: undefined,
+                cancellationReason: undefined,
+                cancelled_at: undefined,
+                cancelledAt: undefined,
+              }
+            : {};
         set((state) => {
           const combined = [...state.orders, ...state.pendingExternalOrders];
           const updatedOrders = combined.map(order =>
@@ -878,6 +887,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
               ? {
                   ...order,
                   status: mappedLocalStatus,
+                  ...cancellationClearPatch,
                   ...cancellationReasonPatch,
                   updatedAt: new Date().toISOString(),
                   sync_status: 'pending' as const,
