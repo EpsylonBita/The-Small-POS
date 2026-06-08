@@ -2373,6 +2373,17 @@ fn non_empty_field(value: String) -> Option<String> {
     }
 }
 
+fn kiosk_context_label_from_metadata(raw: &str) -> Option<String> {
+    let metadata = serde_json::from_str::<Value>(raw).ok()?;
+    let kiosk = metadata.get("kiosk")?;
+    let label = kiosk.get("contextLabel").and_then(Value::as_str)?;
+    non_empty_text(label)
+}
+
+fn kiosk_context_note_from_metadata(raw: &str) -> Option<String> {
+    kiosk_context_label_from_metadata(raw).map(|label| format!("Kiosk context: {label}"))
+}
+
 pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     // W6: `orders.payment_method` was dropped in v55. Derive the method
@@ -2397,7 +2408,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     COALESCE(driver_id, ''), COALESCE(driver_name, ''), COALESCE(staff_id, ''),
                     COALESCE(delivery_notes, ''), COALESCE(special_instructions, ''),
                     COALESCE(payment_status, ''),
-                    COALESCE(payment_transaction_id, '')
+                    COALESCE(payment_transaction_id, ''),
+                    COALESCE(ghost_metadata, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -2429,6 +2441,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     row.get::<_, String>(24)?,
                     row.get::<_, String>(25)?,
                     row.get::<_, String>(26)?,
+                    row.get::<_, String>(27)?,
                 ))
             },
         )
@@ -2461,6 +2474,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         special_instructions,
         payment_status,
         payment_transaction_id,
+        ghost_metadata,
     ) = order;
     let payment_method = derived_payment_method;
     let menu_lookup = build_menu_category_lookup(&conn);
@@ -2493,6 +2507,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         .collect();
 
     let mut order_notes: Vec<String> = Vec::new();
+    let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
+    push_unique_trimmed_note(&mut order_notes, kiosk_context_note.as_deref());
     push_unique_trimmed_note(&mut order_notes, Some(&delivery_notes));
     push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
 
@@ -2961,6 +2977,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
         driver_name,
         customer_name,
         customer_phone,
+        ghost_metadata,
     ) = conn
         .query_row(
             "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(created_at, ''),
@@ -2969,7 +2986,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
                     COALESCE(delivery_city, ''), COALESCE(delivery_postal_code, ''),
                     COALESCE(delivery_floor, ''), COALESCE(name_on_ringer, ''),
                     COALESCE(driver_name, ''), COALESCE(customer_name, ''),
-                    COALESCE(customer_phone, '')
+                    COALESCE(customer_phone, ''), COALESCE(ghost_metadata, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -2989,6 +3006,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
                     row.get::<_, String>(12)?,
                     row.get::<_, String>(13)?,
                     row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
                 ))
             },
         )
@@ -3046,10 +3064,16 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
         } else {
             Some(delivery_notes)
         },
-        special_instructions: if special_instructions.is_empty() {
-            None
-        } else {
-            Some(special_instructions)
+        special_instructions: {
+            let mut notes = Vec::new();
+            push_unique_trimmed_note(&mut notes, Some(&special_instructions));
+            let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
+            push_unique_trimmed_note(&mut notes, kiosk_context_note.as_deref());
+            if notes.is_empty() {
+                None
+            } else {
+                Some(notes.join("\n"))
+            }
         },
         delivery_city: if delivery_city.is_empty() {
             None
