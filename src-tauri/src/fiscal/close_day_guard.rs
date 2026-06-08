@@ -70,11 +70,11 @@ pub fn ensure_no_queued_fiscal_for_day(
 /// `data` JSON via `json_extract`. Both POS fiscal-payload writers already
 /// emit `branchId` into the data JSON (pos-tauri `payload_builder.rs:79`
 /// + mobile `buildFiscalReceiptInput.ts:96`), so new rows match this
-/// filter. Legacy rows whose data JSON lacks `branchId` produce a NULL
-/// from `json_extract` and are excluded by the equality — a deliberate
-/// trade-off: they won't block close-day, but they would have been
-/// excluded by Req 4.7a (server marks them blocked anyway). No schema
-/// migration is needed for this fix.
+///   filter. Legacy rows whose data JSON lacks `branchId` produce a NULL
+///   from `json_extract` and are excluded by the equality — a deliberate
+///   trade-off: they won't block close-day, but they would have been
+///   excluded by Req 4.7a (server marks them blocked anyway). No schema
+///   migration is needed for this fix.
 fn count_pending_fiscal_for_day(
     conn: &Connection,
     branch_id: &str,

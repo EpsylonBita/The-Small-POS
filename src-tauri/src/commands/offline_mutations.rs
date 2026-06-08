@@ -928,6 +928,8 @@ pub async fn offline_staff_shift_create(
         "staff_id": read_string(&payload, &["staff_id", "staffId"]).ok_or_else(|| "Missing staff_id".to_string())?,
         "start_time": read_string(&payload, &["start_time", "startTime"]).ok_or_else(|| "Missing start_time".to_string())?,
         "end_time": read_string(&payload, &["end_time", "endTime"]).ok_or_else(|| "Missing end_time".to_string())?,
+        "break_start": read_string(&payload, &["break_start", "breakStart"]),
+        "break_end": read_string(&payload, &["break_end", "breakEnd"]),
         "notes": read_string(&payload, &["notes"]),
         "status": read_string(&payload, &["status"]).unwrap_or_else(|| "scheduled".to_string()),
         "branch_id": branch,

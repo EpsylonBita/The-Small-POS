@@ -4440,6 +4440,7 @@
     "scheduleTitle": "Piano settimanale",
     "scheduleHint": "Tocca un giorno o il pulsante più per aggiungere un turno.",
     "today": "Oggi",
+    "dayOff": "Riposo",
     "stats": {
       "totalStaff": "Personale totale",
       "roles": "Ruoli",

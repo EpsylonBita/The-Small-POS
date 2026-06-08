@@ -155,8 +155,8 @@ pub(crate) use data_helpers::{
     read_local_json_array, resolve_order_id, validate_external_url, write_local_json,
 };
 pub(crate) use terminal_helpers::{
-    cache_terminal_settings_snapshot, credential_key_for_terminal_setting,
-    extract_branch_id_from_terminal_settings_response,
+    cache_terminal_settings_snapshot, clear_derived_terminal_context,
+    credential_key_for_terminal_setting, extract_branch_id_from_terminal_settings_response,
     extract_ghost_mode_feature_from_terminal_settings_response,
     extract_org_id_from_terminal_settings_response, handle_invalid_terminal_credentials,
     hydrate_terminal_credentials_from_local_settings, is_sensitive_terminal_setting,

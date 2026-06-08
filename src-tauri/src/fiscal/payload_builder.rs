@@ -16,19 +16,19 @@
 //! This revision populates every field by reading from local SQLite:
 //!
 //!   * **lines**       — parsed from `orders.items` JSON (its existing
-//!                       on-disk shape: `[{menu_item_id, name, quantity,
-//!                       total_price}, ...]`).
+//!     on-disk shape: `[{menu_item_id, name, quantity,
+//!     total_price}, ...]`).
 //!   * **payments**    — `order_payments WHERE order_id=? AND status='completed'`.
 //!   * **vatBreakdown** — single aggregated entry derived from
-//!                       `orders.tax_amount` + payments-sum (defensive
-//!                       grossCents source — payments are the authoritative
-//!                       "what the cashier rang up" figure).
+//!     `orders.tax_amount` + payments-sum (defensive
+//!     grossCents source — payments are the authoritative
+//!     "what the cashier rang up" figure).
 //!   * **metadata**    — country-agnostic `kind` + HR/GR-friendly
-//!                       `operatorOib` (looked up via local_settings),
-//!                       `sequenceNumber` (allocated atomically via
-//!                       [`super::sequence_counter::next_sequence`]),
-//!                       `paymentMethodCode` (mapped from
-//!                       `orders.payment_method` to CIS codes G/K/C/T/O).
+//!     `operatorOib` (looked up via local_settings),
+//!     `sequenceNumber` (allocated atomically via
+//!     [`super::sequence_counter::next_sequence`]),
+//!     `paymentMethodCode` (mapped from
+//!     `orders.payment_method` to CIS codes G/K/C/T/O).
 //!
 //! ## Documented limitations (audit #1 partial coverage)
 //!

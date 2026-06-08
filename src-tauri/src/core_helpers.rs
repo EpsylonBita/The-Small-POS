@@ -274,6 +274,9 @@ pub(crate) fn clear_operational_data_inner(db: &db::DbState) -> Result<serde_jso
         DELETE FROM staff_shifts;
         DELETE FROM print_jobs;
         DELETE FROM z_reports;
+        DELETE FROM recovery_action_log;
+        DELETE FROM conflict_audit_log;
+        DELETE FROM parity_sync_queue;
         DELETE FROM sync_queue;
         DELETE FROM orders;
         COMMIT;
@@ -455,6 +458,62 @@ pub(crate) fn stats_for_modules(modules: &[serde_json::Value]) -> serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_operational_data_removes_parity_and_recovery_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id, status, error_message
+             ) VALUES (
+                'queue-old', 'orders', 'order-old', 'UPDATE', '{}', 'org-old', 'failed',
+                'Waiting for parent order sync'
+             )",
+            [],
+        )
+        .expect("seed parity queue");
+        conn.execute(
+            "INSERT INTO conflict_audit_log (
+                id, operation_type, entity_id, entity_type, local_version, server_version,
+                discarded_payload, resolution
+             ) VALUES (
+                'conflict-old', 'UPDATE', 'order-old', 'orders', 1, 2, '{}', 'server-wins'
+             )",
+            [],
+        )
+        .expect("seed conflict audit");
+        conn.execute(
+            "INSERT INTO recovery_action_log (
+                id, action_id, issue_code, success
+             ) VALUES (
+                'recovery-old', 'repair_order_replay', 'stale_order_update_parent_wait', 1
+             )",
+            [],
+        )
+        .expect("seed recovery log");
+        let db = crate::db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        clear_operational_data_inner(&db).expect("clear operational data");
+
+        let conn = db.conn.lock().expect("lock db");
+        for table in [
+            "parity_sync_queue",
+            "conflict_audit_log",
+            "recovery_action_log",
+            "sync_queue",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count table");
+            assert_eq!(count, 0, "{table} should be empty");
+        }
+    }
 
     #[test]
     fn validate_terminal_id_accepts_canonical_uuid() {

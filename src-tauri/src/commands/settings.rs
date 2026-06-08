@@ -55,6 +55,74 @@ fn value_to_bool_string(value: &Value) -> Option<String> {
     None
 }
 
+fn normalize_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+fn normalized_admin_url_for_switch(value: Option<String>) -> Option<String> {
+    normalize_non_empty(value)
+        .map(|item| api::normalize_admin_url(&item))
+        .filter(|item| !item.is_empty())
+}
+
+fn current_terminal_id_for_switch(db: &db::DbState) -> Option<String> {
+    normalize_non_empty(
+        storage::get_credential("terminal_id")
+            .or_else(|| read_runtime_setting(db, "terminal", "terminal_id")),
+    )
+}
+
+fn current_admin_url_for_switch(db: &db::DbState) -> Option<String> {
+    normalized_admin_url_for_switch(
+        storage::get_credential("admin_dashboard_url")
+            .or_else(|| read_runtime_setting(db, "terminal", "admin_dashboard_url"))
+            .or_else(|| read_runtime_setting(db, "terminal", "admin_url")),
+    )
+}
+
+fn payload_api_key_for_switch(payload: &Value) -> Option<String> {
+    crate::value_str(payload, &["apiKey", "pos_api_key", "api_key"])
+}
+
+fn payload_terminal_id_for_switch(payload: &Value) -> Option<String> {
+    payload_api_key_for_switch(payload)
+        .and_then(|raw| api::extract_terminal_id_from_connection_string(raw.trim()))
+        .or_else(|| crate::value_str(payload, &["terminalId", "terminal_id"]))
+        .and_then(|value| normalize_non_empty(Some(value)))
+}
+
+fn payload_admin_url_for_switch(payload: &Value) -> Option<String> {
+    payload_api_key_for_switch(payload)
+        .and_then(|raw| api::extract_admin_url_from_connection_string(raw.trim()))
+        .or_else(|| {
+            crate::value_str(
+                payload,
+                &["adminDashboardUrl", "adminUrl", "admin_dashboard_url"],
+            )
+        })
+        .and_then(|value| normalized_admin_url_for_switch(Some(value)))
+}
+
+fn terminal_connection_changed(
+    previous_terminal_id: Option<&str>,
+    next_terminal_id: Option<&str>,
+    previous_admin_url: Option<&str>,
+    next_admin_url: Option<&str>,
+) -> bool {
+    let terminal_changed = matches!(
+        (previous_terminal_id, next_terminal_id),
+        (Some(previous), Some(next)) if previous != next
+    );
+    let admin_url_changed = matches!(
+        (previous_admin_url, next_admin_url),
+        (Some(previous), Some(next)) if previous != next
+    );
+
+    terminal_changed || admin_url_changed
+}
+
 fn restart_required_reason_for_setting(full_key: &str) -> Option<&'static str> {
     let normalized = full_key.trim().to_ascii_lowercase();
     if normalized.starts_with("printer.")
@@ -857,7 +925,43 @@ pub async fn settings_update_terminal_credentials(
     sync_state: tauri::State<'_, std::sync::Arc<crate::sync::SyncState>>,
 ) -> Result<Value, String> {
     let payload = arg0.ok_or("Missing credentials payload")?;
+    let previous_terminal_id = current_terminal_id_for_switch(&db);
+    let previous_admin_url = current_admin_url_for_switch(&db);
+    let next_terminal_id = payload_terminal_id_for_switch(&payload);
+    let next_admin_url = payload_admin_url_for_switch(&payload);
+    let connection_changed = terminal_connection_changed(
+        previous_terminal_id.as_deref(),
+        next_terminal_id.as_deref(),
+        previous_admin_url.as_deref(),
+        next_admin_url.as_deref(),
+    );
+
+    if connection_changed {
+        crate::clear_derived_terminal_context(&db);
+    }
+
     let result = storage::update_terminal_credentials(&payload)?;
+
+    if connection_changed {
+        tracing::warn!(
+            previous_terminal_id = previous_terminal_id
+                .as_deref()
+                .map(crate::mask_terminal_id)
+                .unwrap_or_else(|| "none".to_string()),
+            next_terminal_id = next_terminal_id
+                .as_deref()
+                .map(crate::mask_terminal_id)
+                .unwrap_or_else(|| "none".to_string()),
+            previous_admin_url = previous_admin_url.as_deref().unwrap_or("none"),
+            next_admin_url = next_admin_url.as_deref().unwrap_or("none"),
+            "Terminal connection changed; clearing old operational data before bootstrap"
+        );
+        crate::recovery::snapshot_before_destructive_action(
+            &db,
+            crate::recovery::RecoveryPointKind::PreClearOperationalData,
+        )?;
+        crate::clear_operational_data_inner(&db)?;
+    }
 
     // Mirror non-sensitive terminal metadata into local_settings for
     // compatibility paths. Sensitive credentials stay in OS keyring only.
@@ -910,15 +1014,21 @@ pub async fn settings_update_terminal_credentials(
             sync_state.clear_remote_auth_pause();
         }
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to fetch terminal config from admin (non-fatal)");
+            tracing::warn!(error = %e, "Failed to fetch terminal config from admin");
             if crate::is_terminal_auth_failure(&e) {
-                let _ = build_terminal_auth_failure_response(
+                let failure = build_terminal_auth_failure_response(
                     &db,
                     sync_state.inner().as_ref(),
                     &app,
                     "settings_update_terminal_credentials",
                     &e,
                 );
+                let message = failure
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or(e.as_str())
+                    .to_string();
+                return Err(message);
             }
         }
     }
@@ -1533,9 +1643,64 @@ pub async fn terminal_config_refresh(
 mod dto_tests {
     use super::{
         parse_settings_set_payload, parse_settings_update_local_payload,
-        parse_terminal_config_get_setting_payload, terminal_runtime_emit_signature,
-        SettingsSetPayload,
+        parse_terminal_config_get_setting_payload, payload_admin_url_for_switch,
+        payload_terminal_id_for_switch, terminal_connection_changed,
+        terminal_runtime_emit_signature, SettingsSetPayload,
     };
+
+    #[test]
+    fn terminal_connection_changed_ignores_same_terminal_key_rotation() {
+        assert!(!terminal_connection_changed(
+            Some("terminal-1"),
+            Some("terminal-1"),
+            Some("https://admin.example.com"),
+            Some("https://admin.example.com"),
+        ));
+    }
+
+    #[test]
+    fn terminal_connection_changed_detects_terminal_or_admin_switch() {
+        assert!(terminal_connection_changed(
+            Some("terminal-1"),
+            Some("terminal-2"),
+            Some("https://admin.example.com"),
+            Some("https://admin.example.com"),
+        ));
+        assert!(terminal_connection_changed(
+            Some("terminal-1"),
+            Some("terminal-1"),
+            Some("https://preview.example.com"),
+            Some("https://admin.example.com"),
+        ));
+    }
+
+    #[test]
+    fn terminal_connection_changed_does_not_wipe_first_install() {
+        assert!(!terminal_connection_changed(
+            None,
+            Some("terminal-1"),
+            None,
+            Some("https://admin.example.com"),
+        ));
+    }
+
+    #[test]
+    fn switch_identity_helpers_decode_connection_code_payload() {
+        let payload = serde_json::json!({
+            "terminalId": "stale-terminal",
+            "adminUrl": "https://stale.example.com",
+            "apiKey": "{\"key\":\"decoded-key\",\"tid\":\"terminal-new\",\"url\":\"admin.example.com/api\"}"
+        });
+
+        assert_eq!(
+            payload_terminal_id_for_switch(&payload).as_deref(),
+            Some("terminal-new")
+        );
+        assert_eq!(
+            payload_admin_url_for_switch(&payload).as_deref(),
+            Some("https://admin.example.com")
+        );
+    }
 
     #[test]
     fn parse_settings_set_payload_supports_object_and_flat_key() {

@@ -5206,7 +5206,7 @@ fn resolve_special_entity_endpoint(item: &SyncQueueItem) -> Option<String> {
             _ => format!("/api/pos/table-sessions/{}", item.record_id),
         }),
         "restaurant_table_session_item_transfers" => {
-            let payload = serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Null);
+            let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
             let session_id = string_field(
                 &payload,
                 &[

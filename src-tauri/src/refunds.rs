@@ -610,7 +610,7 @@ pub(crate) fn refund_payment_in_connection(
     let parent_payment_missing_canonical_id = remote_payment_id
         .as_deref()
         .map(str::trim)
-        .is_none_or(str::is_empty);
+        .map_or(true, str::is_empty);
     if adjustment_context == AdjustmentContext::EditSettlement
         && (pay_sync_state != "applied" || parent_payment_missing_canonical_id)
     {

@@ -1,4 +1,4 @@
-import React, { memo, useState, useMemo, useEffect, useCallback } from 'react';
+import React, { memo, useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../../contexts/theme-context';
 import {
@@ -8,9 +8,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Eye,
   FileText,
   Plus,
   RefreshCw,
+  Upload,
   UserCheck,
   Users,
   X,
@@ -20,6 +22,11 @@ import { getBridge, isBrowser } from '../../../../lib';
 import { posApiGet, posApiPost } from '../../../utils/api-helpers';
 import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
 import { offlineCreateStaffShift } from '../../../services/offline-mutations';
+import {
+  importStaffScheduleFile,
+  STAFF_SCHEDULE_IMPORT_ACCEPT,
+  type ImportedScheduleShift,
+} from '../../../utils/staff-schedule-import';
 
 interface StaffMember {
   id: string;
@@ -29,6 +36,8 @@ interface StaffMember {
   email: string;
   phone: string | null;
   avatarUrl: string | null;
+  staffCode?: string | null;
+  staff_code?: string | null;
   department: string;
   role: {
     id: string;
@@ -53,6 +62,10 @@ interface ScheduleShift {
   end_time?: string;
   scheduled_end?: string;
   check_out_time?: string;
+  breakStart?: string | null;
+  break_start?: string | null;
+  breakEnd?: string | null;
+  break_end?: string | null;
   status?: string;
   role_type?: string;
   notes?: string;
@@ -83,6 +96,13 @@ interface WeeklyShift {
   start: Date;
   end: Date | null;
   status: string;
+}
+
+interface ImportRunningShift {
+  staffId: string;
+  startTime: string;
+  endTime: string;
+  status?: string;
 }
 
 const ROLE_COLORS: Record<string, string> = {
@@ -169,6 +189,12 @@ const getShiftStart = (shift: ScheduleShift): Date | null =>
 const getShiftEnd = (shift: ScheduleShift): Date | null =>
   parseDate(shift.endTime || shift.end_time || shift.scheduled_end || shift.check_out_time);
 
+const getShiftStartValue = (shift: ScheduleShift): string | undefined =>
+  shift.startTime || shift.start_time || shift.scheduled_start || shift.check_in_time;
+
+const getShiftEndValue = (shift: ScheduleShift): string | undefined =>
+  shift.endTime || shift.end_time || shift.scheduled_end || shift.check_out_time;
+
 const normalizeStatus = (status?: string): string => {
   const normalized = (status || 'scheduled').trim().toLowerCase().replace(/\s+/g, '_');
   return SHIFT_STATUS_KEYS.has(normalized) ? normalized : 'scheduled';
@@ -201,6 +227,9 @@ export const StaffScheduleView: React.FC = memo(() => {
   const [creatingShift, setCreatingShift] = useState(false);
   const [publishingErgani, setPublishingErgani] = useState(false);
   const [erganiPublishStatus, setErganiPublishStatus] = useState<string | null>(null);
+  const [importingSchedule, setImportingSchedule] = useState(false);
+  const [previewWeekOpen, setPreviewWeekOpen] = useState(false);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const isDark = resolvedTheme === 'dark';
   const bridge = getBridge();
@@ -379,6 +408,19 @@ export const StaffScheduleView: React.FC = memo(() => {
   const scheduledStaffCount = useMemo(() => new Set(weeklyShifts.map(shift => shift.staffId)).size, [weeklyShifts]);
   const scheduledStaffSet = useMemo(() => new Set(weeklyShifts.map(shift => shift.staffId)), [weeklyShifts]);
   const unscheduledStaff = useMemo(() => filteredStaff.filter(member => !scheduledStaffSet.has(member.id)), [filteredStaff, scheduledStaffSet]);
+  const weeklyPreviewRows = useMemo(() => {
+    return filteredStaff
+      .map(member => ({
+        staff: member,
+        shiftsByDay: Object.fromEntries(
+          weekDays.map(day => [
+            localDateKey(day),
+            weeklyShifts.filter(shift => shift.staffId === member.id && localDateKey(shift.start) === localDateKey(day)),
+          ]),
+        ) as Record<string, WeeklyShift[]>,
+      }))
+      .filter(row => weekDays.some(day => row.shiftsByDay[localDateKey(day)]?.length > 0));
+  }, [filteredStaff, weekDays, weeklyShifts]);
   const defaultCreateDate = useMemo(
     () => (weekDateSet.has(todayKey) ? new Date() : new Date(currentWeekStart)),
     [currentWeekStart, todayKey, weekDateSet],
@@ -389,10 +431,6 @@ export const StaffScheduleView: React.FC = memo(() => {
     const key = DAY_KEYS[day.getDay()];
     return t(`staffSchedule.days.short.${key}`, day.toLocaleDateString([], { weekday: 'short' }));
   }, [t]);
-
-  const getStatusLabel = useCallback((status: string) => (
-    t(`staffSchedule.status.${status}`, status.replace(/_/g, ' '))
-  ), [t]);
 
   const navigateWeek = (direction: 'prev' | 'next') => {
     setCurrentWeekStart(prev => {
@@ -503,6 +541,155 @@ export const StaffScheduleView: React.FC = memo(() => {
     }
   };
 
+  const importOverlaps = useCallback((candidate: ImportedScheduleShift, running: ImportRunningShift[]) => {
+    const candidateStart = parseDate(candidate.startTime);
+    const candidateEnd = parseDate(candidate.endTime);
+    if (!candidateStart || !candidateEnd) {
+      return true;
+    }
+
+    return running.some(shift => {
+      if (shift.staffId !== candidate.staffId || normalizeStatus(shift.status) === 'cancelled') {
+        return false;
+      }
+      const start = parseDate(shift.startTime);
+      const end = parseDate(shift.endTime);
+      if (!start || !end) {
+        return false;
+      }
+      return start.getTime() < candidateEnd.getTime() && end.getTime() > candidateStart.getTime();
+    });
+  }, []);
+
+  const handleImportScheduleFile = async (file: File) => {
+    setImportingSchedule(true);
+    try {
+      const result = await importStaffScheduleFile(file, {
+        staffList: staff.map(member => ({
+          id: member.id,
+          firstName: member.firstName,
+          lastName: member.lastName,
+          staffCode: member.staffCode || member.staff_code || null,
+          name: member.name,
+        })),
+      });
+
+      if (result.shifts.length === 0) {
+        if (result.unmatchedStaffLabels?.length) {
+          toast.error(
+            t(
+              'staffSchedule.import.unmatchedStaff',
+              'No matching staff for: {{names}}. Add or rename the staff rows and import again.',
+              { names: result.unmatchedStaffLabels.join(', ') },
+            ),
+          );
+        } else {
+          toast.error(t('staffSchedule.import.invalidFile', 'File does not look like a staff schedule.'));
+        }
+        return;
+      }
+
+      const seenKeys = new Set<string>();
+      const uniqueRows = result.shifts.filter(row => {
+        const key = `${row.staffId}|${row.startTime}|${row.endTime}`;
+        if (seenKeys.has(key)) {
+          return false;
+        }
+        seenKeys.add(key);
+        return true;
+      });
+      const duplicateCount = result.shifts.length - uniqueRows.length;
+      const running = shifts.reduce<ImportRunningShift[]>((acc, shift) => {
+        const staffId = shift.staffId || shift.staff_id;
+        const startTime = getShiftStartValue(shift);
+        const endTime = getShiftEndValue(shift);
+        if (!staffId || !startTime || !endTime) {
+          return acc;
+        }
+        acc.push({ staffId, startTime, endTime, status: shift.status });
+        return acc;
+      }, []);
+
+      let imported = 0;
+      let overlapped = 0;
+      let failed = 0;
+
+      for (const row of uniqueRows) {
+        if (importOverlaps(row, running)) {
+          overlapped += 1;
+          continue;
+        }
+
+        const payload = {
+          staff_id: row.staffId,
+          start_time: row.startTime,
+          end_time: row.endTime,
+          break_start: row.breakStart,
+          break_end: row.breakEnd,
+          notes: row.notes ?? null,
+          status: row.status ?? 'scheduled',
+          branch_id: branchId || undefined,
+        };
+
+        try {
+          if (isBrowser()) {
+            const response = await posApiPost<{ success?: boolean; error?: string }>('/pos/staff-schedule', payload);
+            const failedResponse = !response.success || response.data?.success === false;
+            if (failedResponse) {
+              throw new Error(response.error || response.data?.error || 'Failed to create imported shift');
+            }
+          } else {
+            await offlineCreateStaffShift(payload);
+          }
+
+          imported += 1;
+          running.push({
+            staffId: row.staffId,
+            startTime: row.startTime,
+            endTime: row.endTime,
+            status: row.status ?? 'scheduled',
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message.toLowerCase() : '';
+          if (message.includes('overlap') || message.includes('conflict')) {
+            overlapped += 1;
+          } else {
+            failed += 1;
+          }
+        }
+      }
+
+      if (imported > 0) {
+        const skipped = duplicateCount + overlapped + failed;
+        const suffix = result.unmatchedStaffLabels?.length
+          ? ` (${t('staffSchedule.import.unmatchedSuffix', 'no match')}: ${result.unmatchedStaffLabels.join(', ')})`
+          : '';
+        toast.success(
+          t(
+            'staffSchedule.import.success',
+            'Imported {{imported}} shift(s) from {{format}}. Skipped {{skipped}}.',
+            { imported, skipped, format: result.format?.toUpperCase() || 'file' },
+          ) + suffix,
+        );
+        await fetchStaffData();
+      } else {
+        toast.error(t('staffSchedule.import.nothingImported', 'No valid shifts were imported.'));
+      }
+    } catch (error) {
+      console.error('[StaffScheduleView] Import schedule error:', error);
+      toast.error(
+        t('staffSchedule.import.failed', 'Import failed: {{message}}', {
+          message: error instanceof Error ? error.message : 'unknown error',
+        }),
+      );
+    } finally {
+      setImportingSchedule(false);
+      if (importFileInputRef.current) {
+        importFileInputRef.current.value = '';
+      }
+    }
+  };
+
   const handlePublishToErgani = async () => {
     if (!branchId) {
       toast.error(t('staffSchedule.ergani.noBranch', 'Branch is not configured for this terminal.'));
@@ -589,6 +776,11 @@ export const StaffScheduleView: React.FC = memo(() => {
       : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
   }`;
   const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500 disabled:bg-blue-500/60';
+  const secondaryButtonClass = `inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold transition-colors disabled:opacity-60 ${
+    isDark
+      ? 'bg-zinc-900 border-zinc-700 text-zinc-100 hover:bg-zinc-800'
+      : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
+  }`;
 
   if (loading) {
     return (
@@ -625,6 +817,18 @@ export const StaffScheduleView: React.FC = memo(() => {
 
   return (
     <div className={`h-full min-h-0 overflow-hidden ${isDark ? 'bg-black text-zinc-100' : 'bg-slate-50 text-slate-950'}`}>
+      <input
+        ref={importFileInputRef}
+        type="file"
+        accept={STAFF_SCHEDULE_IMPORT_ACCEPT}
+        className="hidden"
+        onChange={event => {
+          const file = event.target.files?.[0];
+          if (file) {
+            void handleImportScheduleFile(file);
+          }
+        }}
+      />
       <div className="mx-auto flex h-full w-full max-w-screen-2xl flex-col gap-4 p-4 md:p-5 xl:p-6">
         <section className={`rounded-2xl border p-4 md:p-5 ${panelClass}`}>
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
@@ -678,6 +882,25 @@ export const StaffScheduleView: React.FC = memo(() => {
               >
                 <Plus className="h-4 w-4" />
                 {t('staffSchedule.actions.addShift', 'Add shift')}
+              </button>
+              <button
+                type="button"
+                onClick={() => importFileInputRef.current?.click()}
+                disabled={importingSchedule}
+                className={secondaryButtonClass}
+              >
+                <Upload className="h-4 w-4" />
+                {importingSchedule
+                  ? t('staffSchedule.import.importing', 'Importing...')
+                  : t('staffSchedule.import.action', 'Import')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreviewWeekOpen(true)}
+                className={secondaryButtonClass}
+              >
+                <Eye className="h-4 w-4" />
+                {t('staffSchedule.previewWeek.action', 'Preview week')}
               </button>
               <button
                 type="button"
@@ -857,24 +1080,13 @@ export const StaffScheduleView: React.FC = memo(() => {
                               }`}
                               style={{ borderLeftColor: shift.roleColor }}
                             >
-                              <div className="flex items-start justify-between gap-2">
-                                <p className="text-sm font-semibold leading-tight">{shift.staffName}</p>
-                                <span className={`rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                                  shift.status === 'active'
-                                    ? isDark ? 'bg-emerald-900/50 text-emerald-300' : 'bg-emerald-100 text-emerald-700'
-                                    : shift.status === 'cancelled'
-                                      ? isDark ? 'bg-red-900/40 text-red-300' : 'bg-red-100 text-red-700'
-                                      : isDark ? 'bg-blue-900/40 text-blue-300' : 'bg-blue-100 text-blue-700'
-                                }`}>
-                                  {getStatusLabel(shift.status)}
-                                </span>
-                              </div>
+                              <p className="text-sm font-semibold leading-tight">{shift.staffName}</p>
                               <p className={`mt-1 inline-flex items-center gap-1 text-xs capitalize ${mutedTextClass}`}>
                                 <Briefcase className="h-3 w-3" />
                                 {shift.roleLabel}
                               </p>
-                              <p className={`mt-1 inline-flex items-center gap-1 text-xs ${isDark ? 'text-zinc-300' : 'text-slate-700'}`}>
-                                <Clock className="h-3 w-3" />
+                              <p className={`mt-1 inline-flex items-center gap-1 text-base font-bold ${isDark ? 'text-zinc-100' : 'text-slate-950'}`}>
+                                <Clock className="h-4 w-4" />
                                 {formatTimeRange(shift.start, shift.end)}
                               </p>
                             </div>
@@ -920,6 +1132,122 @@ export const StaffScheduleView: React.FC = memo(() => {
           </div>
         </div>
       </div>
+
+      {previewWeekOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label={t('staffSchedule.actions.close', 'Close')}
+            className="absolute inset-0 bg-black/60"
+            onClick={() => setPreviewWeekOpen(false)}
+          />
+          <div className={`relative flex max-h-[calc(100vh-2rem)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border ${panelClass}`}>
+            <div className={`flex items-start justify-between gap-3 border-b p-4 md:p-5 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}>
+              <div className="min-w-0">
+                <h3 className="text-xl font-semibold md:text-2xl">
+                  {t('staffSchedule.previewWeek.title', 'Week preview')}
+                </h3>
+                <p className={`mt-1 text-sm ${mutedTextClass}`}>
+                  {weekLabel} - {t('staffSchedule.previewWeek.activeStaffCount', '{{count}} active staff scheduled', { count: weeklyPreviewRows.length })}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewWeekOpen(false)}
+                aria-label={t('staffSchedule.actions.close', 'Close')}
+                className={iconButtonClass}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="min-h-0 overflow-auto p-4 md:p-5">
+              {weeklyPreviewRows.length === 0 ? (
+                <div className={`flex min-h-48 items-center justify-center rounded-xl border border-dashed text-center text-sm ${isDark ? 'border-zinc-700 text-zinc-400' : 'border-slate-300 text-slate-500'}`}>
+                  {t('staffSchedule.previewWeek.empty', 'No active staff are scheduled for this week.')}
+                </div>
+              ) : (
+                <div className="min-w-[920px] overflow-hidden rounded-xl border border-inherit">
+                  <div className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] border-b text-xs font-semibold uppercase ${isDark ? 'bg-zinc-900 border-zinc-800 text-zinc-400' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
+                    <div className={`border-r p-3 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}>
+                      {t('staffSchedule.fields.staff', 'Staff')}
+                    </div>
+                    {weekDays.map(day => {
+                      const dayKey = localDateKey(day);
+                      const isToday = dayKey === todayKey;
+                      return (
+                        <div
+                          key={`preview-header-${dayKey}`}
+                          className={`border-r p-3 last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${isToday ? (isDark ? 'text-blue-300' : 'text-blue-700') : ''}`}
+                        >
+                          <div>{getDayLabel(day)}</div>
+                          <div className="mt-0.5 font-normal normal-case">
+                            {day.toLocaleDateString([], { day: '2-digit', month: 'short' })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {weeklyPreviewRows.map(row => (
+                    <div
+                      key={row.staff.id}
+                      className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] border-b last:border-b-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}
+                    >
+                      <div className={`border-r p-3 ${isDark ? 'border-zinc-800 bg-zinc-950/60' : 'border-slate-200 bg-white'}`}>
+                        <p className="truncate text-sm font-semibold">{row.staff.name}</p>
+                        <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
+                          {row.staff.role?.displayName || row.staff.role?.name || t('staffSchedule.roles.staff', 'Staff')}
+                        </p>
+                        {(row.staff.staffCode || row.staff.staff_code) ? (
+                          <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
+                            {row.staff.staffCode || row.staff.staff_code}
+                          </p>
+                        ) : null}
+                      </div>
+
+                      {weekDays.map(day => {
+                        const dayKey = localDateKey(day);
+                        const dayShifts = row.shiftsByDay[dayKey] || [];
+                        return (
+                          <div
+                            key={`${row.staff.id}-${dayKey}`}
+                            className={`min-h-24 border-r last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${
+                              dayShifts.length === 0
+                                ? isDark ? 'bg-amber-950/40' : 'bg-amber-50'
+                                : isDark ? 'bg-zinc-950/30' : 'bg-white'
+                            }`}
+                          >
+                            {dayShifts.length === 0 ? (
+                              <div className={`flex h-full min-h-24 w-full items-center justify-center px-2 text-center text-sm font-bold uppercase tracking-wide ${
+                                isDark ? 'text-amber-200' : 'text-amber-800'
+                              }`}>
+                                {t('staffSchedule.dayOff', 'Day Off')}
+                              </div>
+                            ) : (
+                              <div className="space-y-1.5 p-2">
+                                {dayShifts.map(shift => (
+                                  <div
+                                    key={`preview-${shift.id}`}
+                                    className={`rounded-lg border-l-4 px-2 py-2 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'}`}
+                                    style={{ borderLeftColor: shift.roleColor }}
+                                  >
+                                    <p className="text-base font-bold leading-tight">{formatTimeRange(shift.start, shift.end)}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {createModalOpen && createModalDate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">

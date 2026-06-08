@@ -191,7 +191,7 @@ pub async fn display_open_window(
     let label = display_window_label(&content_type);
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
     let monitor_index =
-        read_display_index(arg0.as_ref()).unwrap_or_else(|| if monitors.len() > 1 { 1 } else { 0 });
+        read_display_index(arg0.as_ref()).unwrap_or(if monitors.len() > 1 { 1 } else { 0 });
     let monitor = monitors
         .get(monitor_index)
         .or_else(|| monitors.first())

@@ -4440,6 +4440,7 @@
     "scheduleTitle": "Weekly plan",
     "scheduleHint": "Tap a day or the plus button to add a shift.",
     "today": "Today",
+    "dayOff": "Day Off",
     "stats": {
       "totalStaff": "Total Staff",
       "roles": "Roles",

@@ -4440,6 +4440,7 @@
     "scheduleTitle": "Wochenplan",
     "scheduleHint": "Tag oder Plus-Schaltfläche antippen, um eine Schicht hinzuzufügen.",
     "today": "Heute",
+    "dayOff": "Frei",
     "stats": {
       "totalStaff": "Personal gesamt",
       "roles": "Rollen",

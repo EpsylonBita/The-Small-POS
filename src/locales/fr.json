@@ -4440,6 +4440,7 @@
     "scheduleTitle": "Planning de la semaine",
     "scheduleHint": "Touchez un jour ou le bouton plus pour ajouter un service.",
     "today": "Aujourd'hui",
+    "dayOff": "Repos",
     "stats": {
       "totalStaff": "Total du personnel",
       "roles": "Rôles",

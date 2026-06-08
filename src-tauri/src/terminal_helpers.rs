@@ -664,6 +664,47 @@ pub(crate) fn scrub_sensitive_local_settings(db: &db::DbState) {
     }
 }
 
+/// Clear terminal metadata that is derived from a successful admin settings
+/// sync. When the operator saves a new connection code, stale values from the
+/// previous org must not participate in terminal identity reconciliation.
+pub(crate) fn clear_derived_terminal_context(db: &db::DbState) {
+    const DERIVED_CREDENTIAL_KEYS: &[&str] = &[
+        "branch_id",
+        "organization_id",
+        "business_type",
+        "supabase_url",
+        "supabase_anon_key",
+        "ghost_mode_feature_enabled",
+    ];
+    const DERIVED_LOCAL_SETTING_KEYS: &[&str] = &[
+        "branch_id",
+        "organization_id",
+        "business_type",
+        "supabase_url",
+        "supabase_anon_key",
+        "ghost_mode_feature_enabled",
+        "terminal_type",
+        "parent_terminal_id",
+        "parent_terminal_db_id",
+        "owner_terminal_id",
+        "owner_terminal_db_id",
+        "source_terminal_id",
+        "source_terminal_db_id",
+        "pos_operating_mode",
+        "enabled_features",
+    ];
+
+    for key in DERIVED_CREDENTIAL_KEYS {
+        let _ = storage::delete_credential(key);
+    }
+
+    if let Ok(conn) = db.conn.lock() {
+        for key in DERIVED_LOCAL_SETTING_KEYS {
+            let _ = db::delete_setting(&conn, "terminal", key);
+        }
+    }
+}
+
 pub(crate) fn read_local_setting(db: &db::DbState, category: &str, key: &str) -> Option<String> {
     let conn = db.conn.lock().ok()?;
     db::get_setting(&conn, category, key)
@@ -1638,6 +1679,43 @@ mod tests {
         assert_eq!(
             db::get_setting(&conn, "terminal", "terminal_id").as_deref(),
             Some("terminal-efe99d27")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn clear_derived_terminal_context_removes_stale_managed_identity() {
+        let _guard = credential_guard();
+        let db = test_db();
+
+        set_terminal_setting(&db, "terminal_type", "main");
+        set_terminal_setting(&db, "pos_operating_mode", "main_isolated");
+        set_terminal_setting(&db, "owner_terminal_id", "terminal-old");
+        set_terminal_setting(&db, "source_terminal_id", "terminal-old");
+        set_terminal_setting(&db, "terminal_id", "terminal-new");
+        set_terminal_setting(&db, "branch_id", "branch-old");
+        storage::set_credential("terminal_id", "terminal-new").expect("seed new terminal id");
+        storage::set_credential("branch_id", "branch-old").expect("seed old branch id");
+
+        clear_derived_terminal_context(&db);
+        let reconciled = reconcile_terminal_identity_from_local_sources(&db);
+
+        assert_eq!(reconciled.as_deref(), Some("terminal-new"));
+        assert_eq!(
+            storage::get_credential("terminal_id").as_deref(),
+            Some("terminal-new")
+        );
+        assert!(storage::get_credential("branch_id").is_none());
+
+        let conn = db.conn.lock().expect("lock db");
+        assert!(db::get_setting(&conn, "terminal", "owner_terminal_id").is_none());
+        assert!(db::get_setting(&conn, "terminal", "source_terminal_id").is_none());
+        assert!(db::get_setting(&conn, "terminal", "terminal_type").is_none());
+        assert!(db::get_setting(&conn, "terminal", "pos_operating_mode").is_none());
+        assert!(db::get_setting(&conn, "terminal", "branch_id").is_none());
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "terminal_id").as_deref(),
+            Some("terminal-new")
         );
     }
 }
