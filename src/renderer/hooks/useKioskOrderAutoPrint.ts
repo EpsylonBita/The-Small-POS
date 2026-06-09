@@ -155,6 +155,20 @@ function extractProfileEndpoint(profile: unknown): { host: string; port: number 
  * Checks source first, then legacy plugin / platform fields for 'kiosk'.
  */
 function isKioskOrder(order: Partial<Order>): boolean {
+  const metadata =
+    order.ghost_metadata ||
+    (order as Partial<Order> & { ghostMetadata?: unknown }).ghostMetadata ||
+    null;
+  if (
+    metadata &&
+    typeof metadata === 'object' &&
+    !Array.isArray(metadata) &&
+    typeof (metadata as Record<string, unknown>).kiosk === 'object' &&
+    (metadata as Record<string, unknown>).kiosk !== null
+  ) {
+    return true;
+  }
+
   if (order.source === 'kiosk') {
     return true;
   }
