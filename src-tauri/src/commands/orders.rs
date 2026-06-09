@@ -2,6 +2,7 @@ use chrono::Utc;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::Value;
+use std::time::Duration;
 use tauri::Emitter;
 
 use crate::money::Cents;
@@ -576,6 +577,212 @@ fn enqueue_order_sync_payload(
         Some(1),
     )
     .map(|_| ())
+}
+
+fn resolve_order_id_with_remote(
+    conn: &rusqlite::Connection,
+    order_id_raw: &str,
+) -> Result<(String, Option<String>), String> {
+    conn.query_row(
+        "SELECT id, NULLIF(TRIM(COALESCE(supabase_id, '')), '')
+         FROM orders
+         WHERE id = ?1 OR supabase_id = ?1
+         LIMIT 1",
+        rusqlite::params![order_id_raw],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    )
+    .map_err(|_| "Order not found".to_string())
+}
+
+fn build_order_status_patch_body(
+    remote_order_id: &str,
+    status: &str,
+    estimated_time: Option<i64>,
+    cancellation_reason: Option<&str>,
+    cancelled_at: Option<&str>,
+) -> Value {
+    let mut body = serde_json::json!({
+        "id": remote_order_id,
+        "status": status,
+    });
+
+    if let Some(estimated_time) = estimated_time.filter(|value| *value > 0) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("estimated_time".to_string(), Value::from(estimated_time));
+            obj.insert("estimatedTime".to_string(), Value::from(estimated_time));
+        }
+    }
+
+    if status == "cancelled" {
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(reason) = cancellation_reason
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+            {
+                obj.insert(
+                    "cancellation_reason".to_string(),
+                    Value::String(reason.to_string()),
+                );
+                obj.insert(
+                    "cancellationReason".to_string(),
+                    Value::String(reason.to_string()),
+                );
+            }
+            if let Some(cancelled_at) = cancelled_at
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                obj.insert(
+                    "cancelled_at".to_string(),
+                    Value::String(cancelled_at.to_string()),
+                );
+                obj.insert(
+                    "cancelledAt".to_string(),
+                    Value::String(cancelled_at.to_string()),
+                );
+            }
+        }
+    }
+
+    body
+}
+
+#[derive(Clone)]
+struct ImmediateOrderStatusSyncContext {
+    admin_url: String,
+    api_key: String,
+    terminal_id: String,
+}
+
+fn normalize_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_immediate_order_status_sync_context(
+    db: &db::DbState,
+) -> Option<ImmediateOrderStatusSyncContext> {
+    crate::hydrate_terminal_credentials_from_local_settings(db);
+
+    let (db_admin_url, db_api_key, db_terminal_id) = match db.conn.lock() {
+        Ok(conn) => (
+            db::get_setting(&conn, "terminal", "admin_dashboard_url")
+                .or_else(|| db::get_setting(&conn, "terminal", "admin_url")),
+            db::get_setting(&conn, "terminal", "pos_api_key")
+                .or_else(|| db::get_setting(&conn, "terminal", "api_key")),
+            db::get_setting(&conn, "terminal", "terminal_id"),
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "Skipping immediate kiosk status sync because terminal settings could not be read"
+            );
+            (None, None, None)
+        }
+    };
+
+    let raw_api_key = normalize_non_empty(
+        storage::get_credential("pos_api_key")
+            .or_else(|| storage::get_credential("api_key"))
+            .or(db_api_key),
+    )?;
+    let api_key = crate::api::extract_api_key_from_connection_string(&raw_api_key)
+        .unwrap_or_else(|| raw_api_key.clone());
+    let admin_url = normalize_non_empty(
+        storage::get_credential("admin_dashboard_url")
+            .or_else(|| storage::get_credential("admin_url"))
+            .or(db_admin_url)
+            .or_else(|| crate::api::extract_admin_url_from_connection_string(&raw_api_key)),
+    )?;
+    let terminal_id = normalize_non_empty(
+        storage::get_credential("terminal_id")
+            .or(db_terminal_id)
+            .or_else(|| crate::api::extract_terminal_id_from_connection_string(&raw_api_key)),
+    )?;
+
+    Some(ImmediateOrderStatusSyncContext {
+        admin_url,
+        api_key,
+        terminal_id,
+    })
+}
+
+fn spawn_immediate_order_status_patch(db: &db::DbState, body: Value) {
+    let Some(context) = resolve_immediate_order_status_sync_context(db) else {
+        tracing::debug!(
+            "Skipping immediate kiosk status sync because terminal credentials are unavailable"
+        );
+        return;
+    };
+
+    let status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let order_id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+
+    tauri::async_runtime::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Immediate kiosk status sync could not build HTTP client"
+                );
+                return;
+            }
+        };
+        let url = format!(
+            "{}/api/pos/orders",
+            crate::api::normalize_admin_url(&context.admin_url)
+        );
+        let response = client
+            .patch(url)
+            .header("x-pos-api-key", context.api_key)
+            .header("x-terminal-id", context.terminal_id)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await;
+
+        match response {
+            Ok(response) if response.status().is_success() => {
+                tracing::info!(
+                    order_id = %order_id,
+                    status = %status,
+                    "Immediate kiosk status sync succeeded"
+                );
+            }
+            Ok(response) => {
+                let http_status = response.status().as_u16();
+                let body = response.text().await.unwrap_or_default();
+                tracing::warn!(
+                    order_id = %order_id,
+                    status = %status,
+                    http_status,
+                    response = %body.chars().take(500).collect::<String>(),
+                    "Immediate kiosk status sync failed; queued retry remains pending"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    order_id = %order_id,
+                    status = %status,
+                    error = %error,
+                    "Immediate kiosk status sync failed; queued retry remains pending"
+                );
+            }
+        }
+    });
 }
 
 fn merge_order_update_items_payload(
@@ -1715,14 +1922,9 @@ pub async fn order_update_status(
     };
     let now = Utc::now().to_rfc3339();
 
-    let actual_order_id = {
+    let (actual_order_id, remote_order_id) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT id FROM orders WHERE id = ?1 OR supabase_id = ?1 LIMIT 1",
-            rusqlite::params![order_id_raw],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(|_| "Order not found")?
+        resolve_order_id_with_remote(&conn, &order_id_raw)?
     };
 
     {
@@ -1840,6 +2042,23 @@ pub async fn order_update_status(
     }
     let _ = app.emit("order_status_updated", event_payload.clone());
     let _ = app.emit("order_realtime_update", event_payload);
+
+    if let Some(remote_order_id) = remote_order_id.as_deref() {
+        spawn_immediate_order_status_patch(
+            &db,
+            build_order_status_patch_body(
+                remote_order_id,
+                &status,
+                estimated_time,
+                cancellation_reason.as_deref(),
+                if status == "cancelled" {
+                    Some(now.as_str())
+                } else {
+                    None
+                },
+            ),
+        );
+    }
 
     Ok(serde_json::json!({
         "success": true,
@@ -3224,7 +3443,7 @@ pub async fn order_approve(
     let estimated_time = arg1;
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, &order_id_raw)?;
     ensure_order_status_transition_allowed(&conn, &order_id, "confirmed")?;
     conn.execute(
         "UPDATE orders
@@ -3247,6 +3466,12 @@ pub async fn order_approve(
 
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload.clone());
+    if let Some(remote_order_id) = remote_order_id.as_deref() {
+        spawn_immediate_order_status_patch(
+            &db,
+            build_order_status_patch_body(remote_order_id, "confirmed", estimated_time, None, None),
+        );
+    }
     Ok(
         serde_json::json!({ "success": true, "orderId": order_id_raw, "estimatedTime": estimated_time }),
     )
@@ -3263,7 +3488,7 @@ pub async fn order_decline(
     let reason = arg1.unwrap_or_else(|| "Declined".to_string());
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, &order_id_raw)?;
     let previous_status = ensure_order_status_transition_allowed(&conn, &order_id, "cancelled")?;
     if previous_status != "cancelled" {
         order_ownership::reverse_order_drawer_attribution(&conn, &order_id, &now)?;
@@ -3284,7 +3509,7 @@ pub async fn order_decline(
         "status": "cancelled",
         "reason": reason.clone(),
         "cancellationReason": reason.clone(),
-        "cancellation_reason": reason,
+        "cancellation_reason": reason.clone(),
         "cancelled_at": now
     });
     let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
@@ -3292,6 +3517,18 @@ pub async fn order_decline(
 
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload);
+    if let Some(remote_order_id) = remote_order_id.as_deref() {
+        spawn_immediate_order_status_patch(
+            &db,
+            build_order_status_patch_body(
+                remote_order_id,
+                "cancelled",
+                None,
+                Some(reason.as_str()),
+                Some(now.as_str()),
+            ),
+        );
+    }
     Ok(serde_json::json!({ "success": true, "orderId": order_id_raw }))
 }
 
@@ -3868,6 +4105,59 @@ mod dto_tests {
         )
         .expect("snake_case cancellation reason payload should parse");
         assert_eq!(parsed.cancellation_reason.as_deref(), Some("Out of stock"));
+    }
+
+    #[test]
+    fn status_patch_payload_forwards_remote_id_and_eta() {
+        let body =
+            build_order_status_patch_body("remote-order-1", "confirmed", Some(20), None, None);
+
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some("remote-order-1")
+        );
+        assert_eq!(
+            body.get("status").and_then(Value::as_str),
+            Some("confirmed")
+        );
+        assert_eq!(body.get("estimated_time").and_then(Value::as_i64), Some(20));
+        assert_eq!(body.get("estimatedTime").and_then(Value::as_i64), Some(20));
+    }
+
+    #[test]
+    fn status_patch_payload_forwards_cancellation_reason() {
+        let body = build_order_status_patch_body(
+            "remote-order-2",
+            "cancelled",
+            None,
+            Some("  Sold out  "),
+            Some("2026-06-09T10:30:00Z"),
+        );
+
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some("remote-order-2")
+        );
+        assert_eq!(
+            body.get("status").and_then(Value::as_str),
+            Some("cancelled")
+        );
+        assert_eq!(
+            body.get("cancellation_reason").and_then(Value::as_str),
+            Some("Sold out")
+        );
+        assert_eq!(
+            body.get("cancellationReason").and_then(Value::as_str),
+            Some("Sold out")
+        );
+        assert_eq!(
+            body.get("cancelled_at").and_then(Value::as_str),
+            Some("2026-06-09T10:30:00Z")
+        );
+        assert_eq!(
+            body.get("cancelledAt").and_then(Value::as_str),
+            Some("2026-06-09T10:30:00Z")
+        );
     }
 
     #[test]
