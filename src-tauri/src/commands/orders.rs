@@ -372,6 +372,44 @@ fn parse_order_update_status_payload(
     Ok(parsed)
 }
 
+fn attach_kiosk_payment_method_to_metadata(
+    raw_metadata: Option<&Value>,
+    payment_method: Option<&str>,
+) -> Option<String> {
+    let mut metadata = match raw_metadata? {
+        Value::Null => return None,
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(parsed) => parsed,
+                Err(_) => return Some(trimmed.to_string()),
+            }
+        }
+        value => value.clone(),
+    };
+
+    if let Some(method) = payment_method
+        .map(str::trim)
+        .filter(|method| matches!(*method, "cash" | "card"))
+    {
+        if let Some(kiosk) = metadata.get_mut("kiosk").and_then(Value::as_object_mut) {
+            kiosk.insert(
+                "paymentMethod".to_string(),
+                Value::String(method.to_string()),
+            );
+            kiosk.insert(
+                "payment_method".to_string(),
+                Value::String(method.to_string()),
+            );
+        }
+    }
+
+    Some(metadata.to_string())
+}
+
 fn load_canonical_order_status(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -2642,6 +2680,8 @@ pub async fn order_save_from_remote(
     let now = Utc::now().to_rfc3339();
     let items = order_data
         .get("items")
+        .or_else(|| order_data.get("order_items"))
+        .or_else(|| order_data.get("orderItems"))
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
     let items_json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
@@ -2737,22 +2777,12 @@ pub async fn order_save_from_remote(
         })
         .unwrap_or(false);
     let ghost_source = value_str(&order_data, &["ghost_source", "ghostSource"]);
-    let ghost_metadata = order_data
-        .get("ghost_metadata")
-        .or_else(|| order_data.get("ghostMetadata"))
-        .and_then(|value| {
-            if value.is_null() {
-                return None;
-            }
-            if let Some(raw) = value.as_str() {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    return None;
-                }
-                return Some(trimmed.to_string());
-            }
-            Some(value.to_string())
-        });
+    let ghost_metadata = attach_kiosk_payment_method_to_metadata(
+        order_data
+            .get("ghost_metadata")
+            .or_else(|| order_data.get("ghostMetadata")),
+        payment_method.as_deref(),
+    );
     let created_at = value_str(&order_data, &["created_at", "createdAt"]).unwrap_or(now.clone());
     let updated_at = value_str(&order_data, &["updated_at", "updatedAt"]).unwrap_or(now.clone());
 
@@ -2930,22 +2960,60 @@ pub async fn order_fetch_items_from_supabase(
 
             let mut names: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
+            let mut category_ids_by_item: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut category_names_by_id: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
             if !ids.is_empty() {
-                if let Ok(subcats) = fetch_supabase_rows(
-                    "subcategories",
+                if let Ok(menu_items) = fetch_supabase_rows(
+                    "menu_items",
                     &[
-                        ("select", "id,name,name_en,name_el".to_string()),
+                        ("select", "id,name,name_en,name_el,category_id".to_string()),
                         ("id", format!("in.({})", ids.join(","))),
                     ],
                 )
                 .await
                 {
-                    if let Some(arr) = subcats.as_array() {
+                    if let Some(arr) = menu_items.as_array() {
                         for row in arr {
                             if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
                                 let name = value_str(row, &["name", "name_en", "name_el"])
                                     .unwrap_or_else(|| "Item".to_string());
                                 names.insert(id.to_string(), name);
+                                if let Some(category_id) =
+                                    row.get("category_id").and_then(|v| v.as_str())
+                                {
+                                    category_ids_by_item
+                                        .insert(id.to_string(), category_id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let category_ids: Vec<String> = category_ids_by_item
+                    .values()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                if !category_ids.is_empty() {
+                    if let Ok(categories) = fetch_supabase_rows(
+                        "categories",
+                        &[
+                            ("select", "id,name,name_en,name_el".to_string()),
+                            ("id", format!("in.({})", category_ids.join(","))),
+                        ],
+                    )
+                    .await
+                    {
+                        if let Some(arr) = categories.as_array() {
+                            for row in arr {
+                                if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+                                    let name = value_str(row, &["name", "name_en", "name_el"])
+                                        .unwrap_or_else(|| "Category".to_string());
+                                    category_names_by_id.insert(id.to_string(), name);
+                                }
                             }
                         }
                     }
@@ -2971,16 +3039,25 @@ pub async fn order_fetch_items_from_supabase(
                         .filter(|value| !value.is_empty())
                         .or_else(|| names.get(menu_item_id).cloned())
                         .unwrap_or(default_name);
+                    let category_name = category_ids_by_item
+                        .get(menu_item_id)
+                        .and_then(|category_id| category_names_by_id.get(category_id))
+                        .cloned();
                     serde_json::json!({
                         "id": row.get("id").cloned().unwrap_or(serde_json::Value::Null),
                         "menu_item_id": menu_item_id,
-                        "name": item_name,
+                        "name": item_name.clone(),
+                        "menu_item_name": item_name,
                         "quantity": quantity,
                         "price": unit_price,
                         "unit_price": unit_price,
                         "total_price": total_price,
                         "notes": row.get("notes").cloned().unwrap_or(serde_json::Value::Null),
                         "customizations": row.get("customizations").cloned().unwrap_or(serde_json::Value::Null),
+                        "categoryName": category_name.clone(),
+                        "category_name": category_name.clone(),
+                        "categoryPath": category_name.clone(),
+                        "category_path": category_name,
                     })
                 })
                 .collect();

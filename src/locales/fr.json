@@ -3908,8 +3908,15 @@
     "printFailed": "Échec de l'impression du reçu",
     "guestCustomer": "Client de passage",
     "loadingItems": "Chargement des articles...",
+    "loadItemsFailed": "Échec du chargement des articles",
     "retryLoadItems": "Réessayer",
     "paymentMethod": "Paiement",
+    "paymentCash": "Espèces",
+    "paymentCard": "Carte",
+    "paymentPending": "En attente",
+    "paymentCashDescription": "Le client a choisi le paiement en espèces sur le terminal lié.",
+    "paymentCardDescription": "Le client a choisi le paiement par carte sur le terminal lié.",
+    "paymentPendingDescription": "Le mode de paiement n'est pas encore disponible.",
     "addressRoad": "Rue",
     "postalCode": "Code postal",
     "city": "Ville",
@@ -3917,6 +3924,10 @@
     "nameOnRinger": "Nom sur l'interphone",
     "deliveryNotes": "Notes de livraison",
     "noAddress": "Aucune adresse"
+  },
+  "kioskAutoPrint": {
+    "sourceFallback": "Kiosque",
+    "newOrderToast": "Nouvelle commande kiosque #{{orderNumber}} reçue de {{sourceLabel}}."
   },
   "shiftManager": {
     "noActiveShift": "Aucun service actif à clôturer",

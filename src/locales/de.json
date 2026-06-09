@@ -3908,8 +3908,15 @@
     "printFailed": "Kassenbon konnte nicht gedruckt werden",
     "guestCustomer": "Gast",
     "loadingItems": "Artikel werden geladen...",
+    "loadItemsFailed": "Artikel konnten nicht geladen werden",
     "retryLoadItems": "Erneut versuchen",
     "paymentMethod": "Zahlung",
+    "paymentCash": "Bar",
+    "paymentCard": "Karte",
+    "paymentPending": "Ausstehend",
+    "paymentCashDescription": "Der Kunde hat Barzahlung am verknüpften Terminal gewählt.",
+    "paymentCardDescription": "Der Kunde hat Kartenzahlung am verknüpften Terminal gewählt.",
+    "paymentPendingDescription": "Die Zahlungsart ist noch nicht verfügbar.",
     "addressRoad": "Straße",
     "postalCode": "PLZ",
     "city": "Stadt",
@@ -3917,6 +3924,10 @@
     "nameOnRinger": "Name an der Klingel",
     "deliveryNotes": "Lieferhinweise",
     "noAddress": "Keine Adresse"
+  },
+  "kioskAutoPrint": {
+    "sourceFallback": "Kiosk",
+    "newOrderToast": "Neue Kiosk-Bestellung #{{orderNumber}} von {{sourceLabel}} erhalten."
   },
   "shiftManager": {
     "noActiveShift": "Keine aktive Schicht zum Schließen",

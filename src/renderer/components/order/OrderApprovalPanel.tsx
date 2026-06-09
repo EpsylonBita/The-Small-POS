@@ -1,8 +1,7 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import toast from 'react-hot-toast';
-import type { Order, OrderItem } from '../../types/orders';
+import type { Order } from '../../types/orders';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { normalizeOrderTypeForDisplay, resolveOrderDisplayTitle } from '../../utils/orderDisplay';
 import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote, Tag, Ban } from 'lucide-react';
@@ -50,6 +49,85 @@ function parseItemsFromJson(items: any): any[] {
   return [];
 }
 
+function getOrderItemsCandidate(order: Order | any): any {
+  return order?.items ?? order?.order_items ?? order?.orderItems;
+}
+
+function flattenCustomizationInput(customizations: any): any[] {
+  if (!customizations) return [];
+  if (Array.isArray(customizations)) return customizations;
+  if (typeof customizations !== 'object') return [];
+
+  const groupedCandidates = [
+    customizations.added,
+    customizations.selected,
+    customizations.ingredients,
+    customizations.items,
+  ].filter(Array.isArray);
+
+  const added = groupedCandidates.flat();
+  const removed = Array.isArray(customizations.removed)
+    ? customizations.removed.map((entry: any) => {
+        if (typeof entry === 'string') {
+          return { name: entry, isWithout: true };
+        }
+        return { ...entry, isWithout: true };
+      })
+    : [];
+
+  if (added.length > 0 || removed.length > 0) {
+    return [...added, ...removed];
+  }
+
+  return Object.values(customizations).flatMap((value: any) => (
+    Array.isArray(value) ? value : [value]
+  ));
+}
+
+function parseMetadataCandidate(value: unknown): Record<string, any> | null {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, any>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : null;
+}
+
+function resolveKioskMetadata(order: Order | any): Record<string, any> | null {
+  const metadata = parseMetadataCandidate(order?.ghost_metadata ?? order?.ghostMetadata);
+  const kiosk = metadata?.kiosk;
+  return kiosk && typeof kiosk === 'object' && !Array.isArray(kiosk)
+    ? kiosk as Record<string, any>
+    : null;
+}
+
+function resolveRequestedPaymentMethod(order: Order | any): 'cash' | 'card' | null {
+  const kioskMetadata = resolveKioskMetadata(order);
+  const candidates = [
+    order?.payment_method,
+    order?.paymentMethod,
+    kioskMetadata?.payment_method,
+    kioskMetadata?.paymentMethod,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = String(candidate ?? '').trim().toLowerCase();
+    if (normalized === 'cash' || normalized === 'card') {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
 /**
  * Fetches order items with a clear fallback chain:
  * 1. Try local order items first
@@ -63,7 +141,7 @@ function parseItemsFromJson(items: any): any[] {
  */
 async function fetchOrderItems(order: Order): Promise<any[]> {
   // 1. Check local order first - handle JSON string format
-  const localItems = order.items;
+  const localItems = getOrderItemsCandidate(order);
   const parsedLocalItems = parseItemsFromJson(localItems);
 
   if (parsedLocalItems.length > 0) {
@@ -86,7 +164,7 @@ async function fetchOrderItems(order: Order): Promise<any[]> {
     const fetchedOrder = response?.data || response;
 
     if (fetchedOrder) {
-      const dbItems = parseItemsFromJson(fetchedOrder.items);
+      const dbItems = parseItemsFromJson(getOrderItemsCandidate(fetchedOrder));
       if (dbItems.length > 0) {
         console.log('[OrderApprovalPanel] Fetched items from local DB:', dbItems.length);
         return dbItems;
@@ -98,7 +176,7 @@ async function fetchOrderItems(order: Order): Promise<any[]> {
 
   // 3. Fetch from Supabase using supabase_id
   try {
-    const supabaseId = order.supabase_id || order.id;
+    const supabaseId = order.supabase_id || order.supabaseId || order.id;
     console.log('[OrderApprovalPanel] Fetching from Supabase for order:', supabaseId);
 
     const response: any = await bridge.orders.fetchItemsFromSupabase(supabaseId);
@@ -125,7 +203,6 @@ export function OrderApprovalPanel({
 }: OrderApprovalPanelProps) {
   const bridge = getBridge();
   const { t } = useI18n();
-  const { resolvedTheme } = useTheme();
   const [estimatedTime, setEstimatedTime] = useState(20);
   const [isApproving, setIsApproving] = useState(false);
   const [isDeclining, setIsDeclining] = useState(false);
@@ -160,6 +237,17 @@ export function OrderApprovalPanel({
   const deliveryFloor = order.delivery_floor || '';
   const deliveryNotes = order.delivery_notes || '';
   const nameOnRinger = order.name_on_ringer || '';
+  const requestedPaymentMethod = resolveRequestedPaymentMethod(fullOrder || order);
+  const paymentMethodLabel = requestedPaymentMethod === 'cash'
+    ? t('orderApprovalPanel.paymentCash', { defaultValue: 'Cash' })
+    : requestedPaymentMethod === 'card'
+      ? t('orderApprovalPanel.paymentCard', { defaultValue: 'Card' })
+      : t('orderApprovalPanel.paymentPending', { defaultValue: 'Pending' });
+  const paymentMethodDescription = requestedPaymentMethod === 'cash'
+    ? t('orderApprovalPanel.paymentCashDescription', { defaultValue: 'Customer selected cash payment at the linked terminal.' })
+    : requestedPaymentMethod === 'card'
+      ? t('orderApprovalPanel.paymentCardDescription', { defaultValue: 'Customer selected card payment at the linked terminal.' })
+      : t('orderApprovalPanel.paymentPendingDescription', { defaultValue: 'Payment method is not available yet.' });
 
   // Log payment method for debugging
   console.log('[OrderApprovalPanel] order.payment_method:', order.payment_method);
@@ -171,7 +259,7 @@ export function OrderApprovalPanel({
   React.useEffect(() => {
     const loadOrderItems = async () => {
       // Check if items are missing or empty using the parse function
-      const currentItems = parseItemsFromJson(order.items);
+      const currentItems = parseItemsFromJson(getOrderItemsCandidate(order));
 
       if (currentItems.length > 0) {
         // Items already present, update fullOrder
@@ -188,18 +276,18 @@ export function OrderApprovalPanel({
         if (items.length > 0) {
           setFullOrder({ ...order, items });
         } else {
-          setItemsLoadError('No items found');
+          setItemsLoadError(t('orderApprovalPanel.noItems', { defaultValue: 'No items found' }));
         }
       } catch (e) {
         console.error('[OrderApprovalPanel] Failed to load order items:', e);
-        setItemsLoadError('Failed to load items');
+        setItemsLoadError(t('orderApprovalPanel.loadItemsFailed', { defaultValue: 'Failed to load items' }));
       } finally {
         setIsLoadingItems(false);
       }
     };
 
     loadOrderItems();
-  }, [order.id]);
+  }, [order.id, t]);
 
   React.useEffect(() => {
     if (deliveryAddressRaw) { setDeliveryAddress(deliveryAddressRaw); return; }
@@ -237,15 +325,15 @@ export function OrderApprovalPanel({
       if (items.length > 0) {
         setFullOrder({ ...order, items });
       } else {
-        setItemsLoadError('No items found');
+        setItemsLoadError(t('orderApprovalPanel.noItems', { defaultValue: 'No items found' }));
       }
     } catch (e) {
       console.error('[OrderApprovalPanel] Retry failed:', e);
-      setItemsLoadError('Failed to load items');
+      setItemsLoadError(t('orderApprovalPanel.loadItemsFailed', { defaultValue: 'Failed to load items' }));
     } finally {
       setIsLoadingItems(false);
     }
-  }, [order]);
+  }, [order, t]);
 
   /**
    * Normalizes order items for display.
@@ -257,7 +345,7 @@ export function OrderApprovalPanel({
     const orderToUse = fullOrder || order;
 
     // Parse items using the helper function
-    const items = parseItemsFromJson(orderToUse.items);
+    const items = parseItemsFromJson(getOrderItemsCandidate(orderToUse));
 
     console.log('[OrderApprovalPanel] Normalizing items:', items.length);
 
@@ -336,7 +424,7 @@ export function OrderApprovalPanel({
 
       // Helper to extract category name from customization
       const extractCategoryName = (c: any): string | undefined => {
-        return c.ingredient?.category_name || c.category_name || c.categoryName || undefined;
+        return c.ingredient?.category_name || c.category_name || c.categoryName || c.group_name || c.groupName || undefined;
       };
 
       // Helper to check if item is "without" (removed)
@@ -380,30 +468,16 @@ export function OrderApprovalPanel({
         return normalizedSubcategory || null;
       };
 
-      if (rawCustomizations) {
-        if (Array.isArray(rawCustomizations)) {
-          customizationsList = rawCustomizations
-            .filter((c: any) => c && (c.ingredient || c.name || c.name_en || c.customizationId))
-            .map((c: any) => ({
-              name: extractName(c),
-              price: extractPrice(c),
-              isWithout: isWithoutItem(c),
-              isLittle: isLittleItem(c),
-              categoryName: extractCategoryName(c)
-            }));
-        } else if (typeof rawCustomizations === 'object' && rawCustomizations !== null) {
-          const values = Object.values(rawCustomizations);
-          customizationsList = values
-            .filter((c: any) => c && (c.ingredient || c.name || c.name_en || c.customizationId))
-            .map((c: any) => ({
-              name: extractName(c),
-              price: extractPrice(c),
-              isWithout: isWithoutItem(c),
-              isLittle: isLittleItem(c),
-              categoryName: extractCategoryName(c)
-            }));
-        }
-      }
+      const customizationEntries = flattenCustomizationInput(rawCustomizations);
+      customizationsList = customizationEntries
+        .filter((c: any) => c && (c.ingredient || c.name || c.name_en || c.name_el || c.customizationId))
+        .map((c: any) => ({
+          name: extractName(c),
+          price: extractPrice(c),
+          isWithout: isWithoutItem(c),
+          isLittle: isLittleItem(c),
+          categoryName: extractCategoryName(c)
+        }));
 
       // Get item price - prefer unit_price, then price
       const unitPrice = typeof item.unit_price === 'number' ? item.unit_price :
@@ -536,7 +610,7 @@ export function OrderApprovalPanel({
 
       {/* Modal Container */}
       <div
-        className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[90vh] z-[1050] flex flex-col"
+        className="liquid-glass-modal-shell fixed top-1/2 left-1/2 z-[1050] flex max-h-[92vh] w-[calc(100vw-2rem)] max-w-5xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby={`order-approval-title-${order.id}`}
@@ -544,7 +618,7 @@ export function OrderApprovalPanel({
       >
 
         {/* Header */}
-        <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
+        <div className="flex-shrink-0 border-b liquid-glass-modal-border bg-white/5 px-6 py-5 dark:bg-black/20">
           <div className="flex justify-between items-start gap-4">
             <div className="flex-1">
               <h2
@@ -575,31 +649,65 @@ export function OrderApprovalPanel({
         </div>
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0 scrollbar-hide">
-          <div className="space-y-6">
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-5 scrollbar-hide">
+          <div className="space-y-5">
 
             {/* Order Type Banner */}
-            <div className="liquid-glass-modal-card">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-blue-500/20 rounded-lg text-blue-600 dark:text-blue-400">
-                    <Clock className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold liquid-glass-modal-text">
-                      {getOrderTypeLabel(orderType)}
-                    </h3>
-                    <p className="text-sm liquid-glass-modal-text-muted">
-                      {t(`orders.status.${order.status}`, { defaultValue: order.status || 'Pending' })}
-                    </p>
-                  </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="liquid-glass-modal-card flex items-center gap-3">
+                <div className="rounded-lg bg-blue-500/20 p-2 text-blue-600 dark:text-blue-400">
+                  <Clock className="h-5 w-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                    {t('orderApprovalPanel.orderType', { defaultValue: 'Order type' })}
+                  </p>
+                  <p className="truncate font-semibold liquid-glass-modal-text">
+                    {getOrderTypeLabel(orderType)}
+                  </p>
+                </div>
+              </div>
+              <div className="liquid-glass-modal-card flex items-center gap-3">
+                <div className="rounded-lg bg-amber-500/20 p-2 text-amber-600 dark:text-amber-400">
+                  <Clock className="h-5 w-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                    {t('orderApprovalPanel.status', { defaultValue: 'Status' })}
+                  </p>
+                  <p className="truncate font-semibold liquid-glass-modal-text">
+                    {t(`orders.status.${order.status}`, { defaultValue: order.status || 'Pending' })}
+                  </p>
+                </div>
+              </div>
+              <div className="liquid-glass-modal-card flex items-center gap-3">
+                <div className={`rounded-lg p-2 ${
+                  requestedPaymentMethod === 'cash'
+                    ? 'bg-green-500/20 text-green-600 dark:text-green-400'
+                    : requestedPaymentMethod === 'card'
+                      ? 'bg-blue-500/20 text-blue-600 dark:text-blue-400'
+                      : 'bg-gray-500/20 text-gray-600 dark:text-gray-400'
+                }`}>
+                  {requestedPaymentMethod === 'cash' ? (
+                    <Banknote className="h-5 w-5" />
+                  ) : (
+                    <CreditCard className="h-5 w-5" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                    {t('orderApprovalPanel.paymentMethod', { defaultValue: 'Payment' })}
+                  </p>
+                  <p className="truncate font-semibold liquid-glass-modal-text">
+                    {paymentMethodLabel}
+                  </p>
                 </div>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
               {/* Left Column: Customer Info */}
-              <div className="space-y-6">
+              <div className="space-y-5">
                 {/* Customer Card */}
                 <div className="liquid-glass-modal-card">
                   <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
@@ -709,53 +817,42 @@ export function OrderApprovalPanel({
                 {/* Payment Method Card */}
                 <div className="liquid-glass-modal-card">
                   <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
-                    <CreditCard className="w-4 h-4" />
+                    {requestedPaymentMethod === 'cash' ? (
+                      <Banknote className="h-4 w-4" />
+                    ) : (
+                      <CreditCard className="h-4 w-4" />
+                    )}
                     {t('orderApprovalPanel.paymentMethod', { defaultValue: 'Payment' })}
                   </h4>
-                  <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5">
-                    <div className="flex items-center justify-between">
-                      {(() => {
-                        const paymentMethod = order.payment_method || order.paymentMethod;
-                        if (paymentMethod === 'card') {
-                          return (
-                            <>
-                              <p className="font-medium liquid-glass-modal-text">
-                                {t('modals.orderDetails.card', { defaultValue: 'Card' })}
-                              </p>
-                              <CreditCard className="w-5 h-5 text-blue-500" />
-                            </>
-                          );
-                        } else if (paymentMethod === 'cash') {
-                          return (
-                            <>
-                              <p className="font-medium liquid-glass-modal-text">
-                                {t('modals.orderDetails.cash', { defaultValue: 'Cash' })}
-                              </p>
-                              <Banknote className="w-5 h-5 text-green-500" />
-                            </>
-                          );
-                        } else if (paymentMethod) {
-                          return (
-                            <p className="font-medium liquid-glass-modal-text">
-                              {paymentMethod.charAt(0).toUpperCase() + paymentMethod.slice(1)}
-                            </p>
-                          );
-                        } else {
-                          return (
-                            <p className="font-medium liquid-glass-modal-text">
-                              {t('modals.orderDetails.pending', { defaultValue: 'Pending' })}
-                            </p>
-                          );
-                        }
-                      })()}
+                  <div className={`rounded-xl border p-4 ${
+                    requestedPaymentMethod === 'cash'
+                      ? 'border-green-500/25 bg-green-500/10'
+                      : requestedPaymentMethod === 'card'
+                        ? 'border-blue-500/25 bg-blue-500/10'
+                        : 'border-white/10 bg-white/5 dark:bg-black/20'
+                  }`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-lg font-semibold liquid-glass-modal-text">
+                          {paymentMethodLabel}
+                        </p>
+                        <p className="mt-1 text-sm leading-5 liquid-glass-modal-text-muted">
+                          {paymentMethodDescription}
+                        </p>
+                      </div>
+                      {requestedPaymentMethod === 'cash' ? (
+                        <Banknote className="h-6 w-6 flex-shrink-0 text-green-500" />
+                      ) : (
+                        <CreditCard className="h-6 w-6 flex-shrink-0 text-blue-500" />
+                      )}
                     </div>
                   </div>
                 </div>
               </div>
 
               {/* Right Column: Order Items */}
-              <div>
-                <div className="liquid-glass-modal-card h-full flex flex-col">
+              <div className="min-h-[360px]">
+                <div className="liquid-glass-modal-card flex h-full min-h-[360px] flex-col">
                   <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
                     <Package className="w-4 h-4" />
                     {t('orderApprovalPanel.orderItems', { defaultValue: 'Order Items' })}
@@ -763,20 +860,20 @@ export function OrderApprovalPanel({
 
                   {isLoadingItems ? (
                     <div className="flex items-center justify-center py-12">
-                      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+                      <div className="h-12 w-12 animate-spin rounded-full border-b-2 border-blue-500"></div>
                     </div>
                   ) : normalizedItems.length > 0 ? (
-                    <div className="flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
+                    <div className="max-h-[42vh] flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
                       {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[]; categoryName?: string | null; categoryPath?: string | null }, idx: number) => (
                         <div
                           key={idx}
-                          className="flex items-start justify-between p-3 bg-white/5 dark:bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-colors"
+                          className="flex items-start justify-between rounded-xl border border-white/10 bg-white/5 p-3 transition-colors hover:bg-white/10 dark:bg-white/5"
                         >
                           <div className="flex items-start gap-3 flex-1">
-                            <div className="w-8 h-8 rounded-md bg-orange-500/20 text-orange-400 flex items-center justify-center font-bold text-sm border border-orange-500/20 flex-shrink-0">
+                            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-orange-500/20 bg-orange-500/20 text-sm font-bold text-orange-400">
                               {item.quantity}x
                             </div>
-                            <div className="flex-1">
+                            <div className="min-w-0 flex-1">
                               {/* Category label */}
                               {(item.categoryPath || item.categoryName) && (
                                 <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 liquid-glass-modal-text-muted">
@@ -784,12 +881,12 @@ export function OrderApprovalPanel({
                                 </div>
                               )}
                               {/* Item name (subcategory) */}
-                              <div className="font-medium liquid-glass-modal-text">
+                              <div className="break-words font-medium liquid-glass-modal-text">
                                 {item.name}
                               </div>
                               {item.special_instructions && (
                                 <div className="text-xs liquid-glass-modal-text-muted mt-1 italic">
-                                  📝 {item.special_instructions}
+                                  {item.special_instructions}
                                 </div>
                               )}
                               {item.customizations && item.customizations.length > 0 && (
@@ -843,7 +940,7 @@ export function OrderApprovalPanel({
                   )}
 
                   {/* Totals Section */}
-                  <div className="mt-6 pt-6 border-t border-gray-200/50 dark:border-gray-700/50 space-y-2">
+                  <div className="mt-5 space-y-2 border-t border-gray-200/50 pt-5 dark:border-gray-700/50">
                     <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                       <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
                       <span>{formatCurrency(subtotal)}</span>
@@ -889,12 +986,12 @@ export function OrderApprovalPanel({
                   <Clock className="w-4 h-4" />
                   {t('orderApprovalPanel.estimatedTime', { defaultValue: 'Estimated prep time' })}
                 </h4>
-                <div className="grid grid-cols-6 gap-2">
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
                   {ESTIMATED_TIME_OPTIONS.map((time) => (
                     <button
                       key={time}
                       onClick={() => setEstimatedTime(time)}
-                      className={`py-2 px-3 rounded-lg font-medium transition ${
+                      className={`rounded-lg px-3 py-3 font-medium transition ${
                         estimatedTime === time
                           ? 'bg-blue-500 text-white'
                           : 'liquid-glass-modal-button'

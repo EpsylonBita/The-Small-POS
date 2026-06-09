@@ -190,6 +190,7 @@ export interface Order {
 
   // Sync information
   supabase_id?: string;
+  supabaseId?: string;
   sync_status?: SyncStatus;
   syncStatus?: SyncStatus; // For backward compatibility
   savedForRetry?: boolean;

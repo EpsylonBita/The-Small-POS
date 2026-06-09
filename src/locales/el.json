@@ -3908,8 +3908,15 @@
     "printFailed": "Αποτυχία εκτύπωσης απόδειξης",
     "guestCustomer": "Επισκέπτης",
     "loadingItems": "Φόρτωση προϊόντων...",
+    "loadItemsFailed": "Αποτυχία φόρτωσης προϊόντων",
     "retryLoadItems": "Προσπάθεια ξανά",
     "paymentMethod": "Πληρωμή",
+    "paymentCash": "Μετρητά",
+    "paymentCard": "Κάρτα",
+    "paymentPending": "Εκκρεμεί",
+    "paymentCashDescription": "Ο πελάτης επέλεξε πληρωμή με μετρητά στο συνδεδεμένο τερματικό.",
+    "paymentCardDescription": "Ο πελάτης επέλεξε πληρωμή με κάρτα στο συνδεδεμένο τερματικό.",
+    "paymentPendingDescription": "Ο τρόπος πληρωμής δεν είναι ακόμη διαθέσιμος.",
     "addressRoad": "Οδός",
     "postalCode": "Τ.Κ.",
     "city": "Πόλη",
@@ -3917,6 +3924,10 @@
     "nameOnRinger": "Όνομα στο κουδούνι",
     "deliveryNotes": "Σημειώσεις παράδοσης",
     "noAddress": "Χωρίς διεύθυνση"
+  },
+  "kioskAutoPrint": {
+    "sourceFallback": "Kiosk",
+    "newOrderToast": "Νέα παραγγελία kiosk #{{orderNumber}} από {{sourceLabel}}."
   },
   "shiftManager": {
     "noActiveShift": "Δεν υπάρχει ενεργή βάρδια για κλείσιμο",

@@ -3908,8 +3908,15 @@
     "printFailed": "Impossibile stampare lo scontrino",
     "guestCustomer": "Ospite",
     "loadingItems": "Caricamento articoli...",
+    "loadItemsFailed": "Impossibile caricare gli articoli",
     "retryLoadItems": "Riprova",
     "paymentMethod": "Pagamento",
+    "paymentCash": "Contanti",
+    "paymentCard": "Carta",
+    "paymentPending": "In attesa",
+    "paymentCashDescription": "Il cliente ha scelto il pagamento in contanti sul terminale collegato.",
+    "paymentCardDescription": "Il cliente ha scelto il pagamento con carta sul terminale collegato.",
+    "paymentPendingDescription": "Il metodo di pagamento non è ancora disponibile.",
     "addressRoad": "Via",
     "postalCode": "Codice postale",
     "city": "Città",
@@ -3917,6 +3924,10 @@
     "nameOnRinger": "Nome sul citofono",
     "deliveryNotes": "Note di consegna",
     "noAddress": "Nessun indirizzo"
+  },
+  "kioskAutoPrint": {
+    "sourceFallback": "Chiosco",
+    "newOrderToast": "Nuovo ordine chiosco #{{orderNumber}} ricevuto da {{sourceLabel}}."
   },
   "shiftManager": {
     "noActiveShift": "Nessun turno attivo da chiudere",

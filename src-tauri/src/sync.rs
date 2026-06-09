@@ -2027,6 +2027,7 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "updatedAt": row.get::<_, Option<String>>(20)?,
                 "estimatedTime": row.get::<_, Option<i64>>(21)?,
                 "supabaseId": row.get::<_, Option<String>>(22)?,
+                "supabase_id": row.get::<_, Option<String>>(22)?,
                 "syncStatus": row.get::<_, String>(23)?,
                 "paymentStatus": row.get::<_, Option<String>>(24)?,
                 "paymentMethod": row.get::<_, Option<String>>(25)?,
@@ -6644,6 +6645,44 @@ fn resolve_local_order_id(conn: &rusqlite::Connection, remote_order: &Value) -> 
     None
 }
 
+fn attach_kiosk_payment_method_to_metadata(
+    raw_metadata: Option<&Value>,
+    payment_method: Option<&str>,
+) -> Option<String> {
+    let mut metadata = match raw_metadata? {
+        Value::Null => return None,
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(parsed) => parsed,
+                Err(_) => return Some(trimmed.to_string()),
+            }
+        }
+        value => value.clone(),
+    };
+
+    if let Some(method) = payment_method
+        .map(str::trim)
+        .filter(|method| matches!(*method, "cash" | "card"))
+    {
+        if let Some(kiosk) = metadata.get_mut("kiosk").and_then(Value::as_object_mut) {
+            kiosk.insert(
+                "paymentMethod".to_string(),
+                Value::String(method.to_string()),
+            );
+            kiosk.insert(
+                "payment_method".to_string(),
+                Value::String(method.to_string()),
+            );
+        }
+    }
+
+    Some(metadata.to_string())
+}
+
 fn materialize_remote_order(
     conn: &rusqlite::Connection,
     remote_order: &Value,
@@ -6684,7 +6723,11 @@ fn materialize_remote_order(
         .map(ToString::to_string);
     let local_id = client_order_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let items_json = match remote_order.get("items") {
+    let items_json = match remote_order
+        .get("items")
+        .or_else(|| remote_order.get("order_items"))
+        .or_else(|| remote_order.get("orderItems"))
+    {
         Some(Value::String(raw)) => raw.clone(),
         Some(value) => serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string()),
         None => "[]".to_string(),
@@ -6772,22 +6815,12 @@ fn materialize_remote_order(
     let delivery_fee = num_any(remote_order, &["delivery_fee", "deliveryFee"]).unwrap_or(0.0);
     let is_ghost = bool_any(remote_order, &["is_ghost", "isGhost"]).unwrap_or(false);
     let ghost_source = str_any(remote_order, &["ghost_source", "ghostSource"]);
-    let ghost_metadata = remote_order
-        .get("ghost_metadata")
-        .or_else(|| remote_order.get("ghostMetadata"))
-        .and_then(|value| {
-            if value.is_null() {
-                return None;
-            }
-            if let Some(raw) = value.as_str() {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    return None;
-                }
-                return Some(trimmed.to_string());
-            }
-            Some(value.to_string())
-        });
+    let ghost_metadata = attach_kiosk_payment_method_to_metadata(
+        remote_order
+            .get("ghost_metadata")
+            .or_else(|| remote_order.get("ghostMetadata")),
+        payment_method.as_deref(),
+    );
 
     // W6: `orders.payment_method` was dropped in v55; the remote
     // materializer preserves the inbound `payment_method` only in the
@@ -10304,10 +10337,14 @@ fn sync_remote_order_snapshot_into_local(
         return Ok(0);
     }
     let order_number = str_any(remote_order, &["order_number", "orderNumber"]);
-    let items_json = remote_order.get("items").map(|items| match items {
-        Value::String(raw) => raw.clone(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| "[]".to_string()),
-    });
+    let items_json = remote_order
+        .get("items")
+        .or_else(|| remote_order.get("order_items"))
+        .or_else(|| remote_order.get("orderItems"))
+        .map(|items| match items {
+            Value::String(raw) => raw.clone(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| "[]".to_string()),
+        });
     let total_amount = num_any(remote_order, &["total_amount", "totalAmount"]);
     let tax_amount = num_any(remote_order, &["tax_amount", "taxAmount"]);
     let subtotal = num_any(remote_order, &["subtotal"]);
@@ -10413,22 +10450,12 @@ fn sync_remote_order_snapshot_into_local(
     let delivery_fee = num_any(remote_order, &["delivery_fee", "deliveryFee"]);
     let is_ghost = bool_any(remote_order, &["is_ghost", "isGhost"]).map(i64::from);
     let ghost_source = str_any(remote_order, &["ghost_source", "ghostSource"]);
-    let ghost_metadata = remote_order
-        .get("ghost_metadata")
-        .or_else(|| remote_order.get("ghostMetadata"))
-        .and_then(|value| {
-            if value.is_null() {
-                return None;
-            }
-            if let Some(raw) = value.as_str() {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    return None;
-                }
-                return Some(trimmed.to_string());
-            }
-            Some(value.to_string())
-        });
+    let ghost_metadata = attach_kiosk_payment_method_to_metadata(
+        remote_order
+            .get("ghost_metadata")
+            .or_else(|| remote_order.get("ghostMetadata")),
+        payment_method.as_deref(),
+    );
 
     // W4c dual-write contract: when this UPDATE writes a REAL monetary
     // column (?4=total_amount, ?5=tax_amount, ?6=subtotal, ?25=discount_amount,

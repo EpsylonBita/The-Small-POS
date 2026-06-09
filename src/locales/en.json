@@ -3908,8 +3908,15 @@
     "printFailed": "Failed to print receipt",
     "guestCustomer": "Guest",
     "loadingItems": "Loading items...",
+    "loadItemsFailed": "Failed to load items",
     "retryLoadItems": "Retry",
     "paymentMethod": "Payment",
+    "paymentCash": "Cash",
+    "paymentCard": "Card",
+    "paymentPending": "Pending",
+    "paymentCashDescription": "Customer selected cash payment at the linked terminal.",
+    "paymentCardDescription": "Customer selected card payment at the linked terminal.",
+    "paymentPendingDescription": "Payment method is not available yet.",
     "addressRoad": "Street",
     "postalCode": "Postal Code",
     "city": "City",
@@ -3917,6 +3924,10 @@
     "nameOnRinger": "Name on ringer",
     "deliveryNotes": "Delivery notes",
     "noAddress": "No address"
+  },
+  "kioskAutoPrint": {
+    "sourceFallback": "Kiosk",
+    "newOrderToast": "New kiosk order #{{orderNumber}} received from {{sourceLabel}}."
   },
   "shiftManager": {
     "noActiveShift": "No active shift to close",

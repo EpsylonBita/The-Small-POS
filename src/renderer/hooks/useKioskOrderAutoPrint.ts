@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getBridge, onEvent, offEvent } from '../../lib';
 import type { Order } from '../../shared/types/orders';
 import toast from 'react-hot-toast';
+import { useI18n } from '../contexts/i18n-context';
 
 /** TTL in milliseconds for the deduplication set (5 minutes). */
 const DEDUP_TTL_MS = 5 * 60 * 1000;
@@ -39,6 +40,56 @@ function normalizeHost(value: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function playKioskNotificationSound(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const AudioContextCtor =
+    window.AudioContext ||
+    (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+  if (!AudioContextCtor) {
+    return;
+  }
+
+  try {
+    const context = new AudioContextCtor();
+    const masterGain = context.createGain();
+    masterGain.gain.setValueAtTime(0.16, context.currentTime);
+    masterGain.connect(context.destination);
+
+    const notes = [
+      { frequency: 440.0, start: 0, duration: 0.16 },
+      { frequency: 554.37, start: 0.12, duration: 0.18 },
+      { frequency: 659.25, start: 0.27, duration: 0.22 },
+    ];
+
+    for (const note of notes) {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const startsAt = context.currentTime + note.start;
+      const endsAt = startsAt + note.duration;
+
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(note.frequency, startsAt);
+      gain.gain.setValueAtTime(0.0001, startsAt);
+      gain.gain.exponentialRampToValueAtTime(0.24, startsAt + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, endsAt);
+      oscillator.connect(gain);
+      gain.connect(masterGain);
+      oscillator.start(startsAt);
+      oscillator.stop(endsAt + 0.02);
+    }
+
+    window.setTimeout(() => {
+      void context.close().catch(() => undefined);
+    }, 900);
+  } catch {
+    // Audio is supplemental; browsers may block it until the operator has interacted.
+  }
 }
 
 function parseConnectionJson(value: unknown): Record<string, unknown> | null {
@@ -193,6 +244,7 @@ export function useKioskOrderAutoPrint(
   currentTerminalId: string | null | undefined,
 ): KioskAutoPrintResult {
   const [kioskOrderCount, setKioskOrderCount] = useState(0);
+  const { t } = useI18n();
 
   // Dedup map: orderId -> timestamp when it was auto-printed
   const printedOrdersRef = useRef(new Map<string, number>());
@@ -402,12 +454,16 @@ export function useKioskOrderAutoPrint(
       const sourceLabel =
         orderData.customerName ||
         orderData.customer_name ||
-        'Kiosk';
+        t('kioskAutoPrint.sourceFallback', { defaultValue: 'Kiosk' });
 
       // Show toast notification for the new kiosk order
-      toast.success(`New kiosk order #${orderNumber} received from ${sourceLabel}.`, {
+      playKioskNotificationSound();
+      toast.success(t('kioskAutoPrint.newOrderToast', {
+        defaultValue: 'New kiosk order #{{orderNumber}} received from {{sourceLabel}}.',
+        orderNumber,
+        sourceLabel,
+      }), {
         duration: 5000,
-        icon: '🖥️',
       });
 
       // Fire-and-forget print job enqueue
@@ -447,7 +503,7 @@ export function useKioskOrderAutoPrint(
       offEvent('order-realtime-update', handleOrderRealtimeUpdate);
       clearInterval(pruneInterval);
     };
-  }, [currentTerminalId, enqueuePrintJobs]);
+  }, [currentTerminalId, enqueuePrintJobs, t]);
 
   return { kioskOrderCount };
 }
