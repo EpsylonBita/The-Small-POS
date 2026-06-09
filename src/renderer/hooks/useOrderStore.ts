@@ -190,14 +190,31 @@ const getExternalPluginOrderId = (order: Order): string | null => {
   );
 };
 
+const hasCustomerOrderMetadata = (order: Order): boolean => {
+  const metadata = order.ghost_metadata;
+  if (!metadata || typeof metadata !== 'object') return false;
+  return Boolean(
+    (metadata as Record<string, unknown>).kiosk ||
+      (metadata as Record<string, unknown>).customer ||
+      (metadata as Record<string, unknown>).entry_mode
+  );
+};
+
 const isPendingExternalOrder = (order: Order): boolean => {
-  const plugin = getOrderPlugin(order);
+  const plugin = getOrderPlugin(order)?.toLowerCase() || null;
   const externalId = getExternalPluginOrderId(order);
+  const source = String(order.source || '').toLowerCase();
+  const isExternalPluginOrder = !!externalId && !!plugin && !INTERNAL_PLUGINS.has(plugin);
+  const isCustomerOriginOrder =
+    source === 'webapp-customer' ||
+    source === 'customer-web' ||
+    source === 'customer-mobile' ||
+    hasCustomerOrderMetadata(order) ||
+    ((plugin === 'kiosk' || plugin === 'web') && !!externalId);
+
   return (
     order?.status === 'pending' &&
-    !!externalId &&
-    !!plugin &&
-    !INTERNAL_PLUGINS.has(plugin)
+    (isExternalPluginOrder || isCustomerOriginOrder)
   );
 };
 
