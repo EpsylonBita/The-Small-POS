@@ -135,6 +135,12 @@ import {
   isRetryableTableServiceError,
 } from "../utils/tableSessionOfflineQueue";
 
+const INCOMING_ORDER_ALERT_SOUND_URL = new URL(
+  "../assets/sounds/incoming-order.mp3",
+  import.meta.url,
+).href;
+const INCOMING_ORDER_ALERT_REPEAT_MS = 30_000;
+
 interface OrderDashboardProps {
   className?: string;
   orderFilter?: (order: Order) => boolean;
@@ -905,6 +911,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const orderGridRef = useRef<HTMLDivElement>(null);
     const alertTimeoutRef = useRef<number | null>(null);
     const alertingOrderIdRef = useRef<string | null>(null);
+    const activeAlertAudioRef = useRef<HTMLAudioElement | null>(null);
     const shiftRefreshArmedRef = useRef(false);
     const splitPaymentCompletedRef = useRef(false);
     const singlePaymentReasonCodes = useMemo(
@@ -1164,7 +1171,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     }, []);
 
     // Auto-open approval panel for external pending orders (queue)
-    const playExternalOrderAlert = useCallback(() => {
+    const playFallbackExternalOrderAlert = useCallback(() => {
       try {
         const AudioCtx =
           window.AudioContext ||
@@ -1195,6 +1202,44 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
     }, []);
 
+    const playExternalOrderAlert = useCallback(() => {
+      try {
+        activeAlertAudioRef.current?.pause();
+        activeAlertAudioRef.current = null;
+
+        const audio = new Audio(INCOMING_ORDER_ALERT_SOUND_URL);
+        audio.preload = "auto";
+        audio.volume = 0.9;
+        activeAlertAudioRef.current = audio;
+        audio.addEventListener(
+          "ended",
+          () => {
+            if (activeAlertAudioRef.current === audio) {
+              activeAlertAudioRef.current = null;
+            }
+          },
+          { once: true },
+        );
+
+        void audio.play().catch((error) => {
+          if (activeAlertAudioRef.current === audio) {
+            activeAlertAudioRef.current = null;
+          }
+          console.warn(
+            "[OrderDashboard] Failed to play incoming order MP3, using fallback beep:",
+            error,
+          );
+          playFallbackExternalOrderAlert();
+        });
+      } catch (error) {
+        console.warn(
+          "[OrderDashboard] Failed to prepare incoming order MP3, using fallback beep:",
+          error,
+        );
+        playFallbackExternalOrderAlert();
+      }
+    }, [playFallbackExternalOrderAlert]);
+
     const startAlertLoop = useCallback(
       (orderId: string) => {
         if (alertTimeoutRef.current) {
@@ -1209,7 +1254,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             return;
           }
           playExternalOrderAlert();
-          alertTimeoutRef.current = window.setTimeout(tick, 2500);
+          alertTimeoutRef.current = window.setTimeout(
+            tick,
+            INCOMING_ORDER_ALERT_REPEAT_MS,
+          );
         };
 
         tick();
@@ -1223,6 +1271,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         alertTimeoutRef.current = null;
       }
       alertingOrderIdRef.current = null;
+      activeAlertAudioRef.current?.pause();
+      activeAlertAudioRef.current = null;
     }, []);
 
     useEffect(() => {

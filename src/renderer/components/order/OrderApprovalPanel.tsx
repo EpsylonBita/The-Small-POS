@@ -593,13 +593,13 @@ export function OrderApprovalPanel({
     }
   };
 
-  const getStatusColor = (status: string) => {
+  const getStatusTextColor = (status: string) => {
     switch (status?.toLowerCase()) {
-      case 'pending': return 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400 border-yellow-500/30';
-      case 'processing': return 'bg-blue-500/20 text-blue-600 dark:text-blue-400 border-blue-500/30';
-      case 'completed': return 'bg-green-500/20 text-green-600 dark:text-green-400 border-green-500/30';
-      case 'cancelled': return 'bg-red-500/20 text-red-600 dark:text-red-400 border-red-500/30';
-      default: return 'bg-gray-500/20 text-gray-600 dark:text-gray-400 border-gray-500/30';
+      case 'pending': return 'text-yellow-600 dark:text-yellow-400';
+      case 'processing': return 'text-blue-600 dark:text-blue-400';
+      case 'completed': return 'text-green-600 dark:text-green-400';
+      case 'cancelled': return 'text-red-600 dark:text-red-400';
+      default: return 'text-gray-600 dark:text-gray-400';
     }
   };
 
@@ -618,14 +618,14 @@ export function OrderApprovalPanel({
           <div className="flex-shrink-0 border-b liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className={`rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-wide ${getStatusColor(order.status)}`}>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className={`text-xs font-bold uppercase tracking-wide ${getStatusTextColor(order.status)}`}>
                     {t(`orders.status.${order.status}`, { defaultValue: order.status || 'Pending' })}
                   </span>
-                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
+                  <span className="text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
                     {getOrderTypeLabel(orderType)}
                   </span>
-                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
+                  <span className="text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
                     {paymentMethodLabel}
                   </span>
                 </div>
@@ -681,7 +681,7 @@ export function OrderApprovalPanel({
                         onClick={() => setEstimatedTime(time)}
                         className={`min-h-[2.75rem] rounded-lg px-2 text-sm font-bold transition ${
                           estimatedTime === time
-                            ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/25'
+                            ? 'border border-white bg-white text-black shadow-lg shadow-white/15'
                             : 'liquid-glass-modal-button'
                         }`}
                         aria-pressed={estimatedTime === time}
@@ -739,9 +739,7 @@ export function OrderApprovalPanel({
           <div className="grid gap-3 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <section className="liquid-glass-modal-card p-4">
               <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-purple-500/15 text-purple-400">
-                  <User className="h-5 w-5" />
-                </div>
+                <User className="h-5 w-5 flex-shrink-0 text-purple-400" />
                 <div className="min-w-0">
                   <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
                     {t('orderApprovalPanel.name', { defaultValue: 'Customer' })}
@@ -766,19 +764,15 @@ export function OrderApprovalPanel({
                   : ''
             }`}>
               <div className="flex items-center gap-3">
-                <div className={`flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl ${
-                  requestedPaymentMethod === 'cash'
-                    ? 'bg-green-500/15 text-green-400'
-                    : requestedPaymentMethod === 'card'
-                      ? 'bg-blue-500/15 text-blue-400'
-                      : 'bg-white/10 liquid-glass-modal-text-muted'
-                }`}>
-                  {requestedPaymentMethod === 'cash' ? (
-                    <Banknote className="h-5 w-5" />
-                  ) : (
-                    <CreditCard className="h-5 w-5" />
-                  )}
-                </div>
+                {requestedPaymentMethod === 'cash' ? (
+                  <Banknote className="h-5 w-5 flex-shrink-0 text-green-400" />
+                ) : (
+                  <CreditCard className={`h-5 w-5 flex-shrink-0 ${
+                    requestedPaymentMethod === 'card'
+                      ? 'text-blue-400'
+                      : 'liquid-glass-modal-text-muted'
+                  }`} />
+                )}
                 <div className="min-w-0">
                   <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
                     {t('orderApprovalPanel.paymentMethod', { defaultValue: 'Payment' })}
@@ -844,7 +838,7 @@ export function OrderApprovalPanel({
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex min-w-0 flex-1 items-start gap-3">
-                        <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-orange-500/20 bg-orange-500/15 text-sm font-bold text-orange-400">
+                        <div className="flex-shrink-0 text-sm font-bold text-orange-400">
                           {item.quantity}x
                         </div>
                         <div className="min-w-0 flex-1">
@@ -900,7 +894,7 @@ export function OrderApprovalPanel({
               </div>
             )}
 
-            <div className="space-y-2 border-t liquid-glass-modal-border bg-white/5 px-4 py-3 dark:bg-black/20">
+            <div className="space-y-2 border-t liquid-glass-modal-border px-4 py-3">
               <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                 <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
                 <span>{formatCurrency(subtotal)}</span>
