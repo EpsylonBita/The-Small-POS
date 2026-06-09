@@ -7,6 +7,7 @@ import { normalizeOrderTypeForDisplay, resolveOrderDisplayTitle } from '../../ut
 import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote, Tag, Ban } from 'lucide-react';
 import { getBridge } from '../../../lib';
 import { calculateSubtotalFromItems } from './order-math';
+import { LiquidGlassModal } from '../ui/pos-glass-components';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -17,6 +18,7 @@ interface OrderApprovalPanelProps {
 }
 
 const ESTIMATED_TIME_OPTIONS = [15, 20, 25, 30, 45, 60];
+const DECLINE_REASON_MAX_LENGTH = 500;
 
 /**
  * Safely parses items from JSON string format.
@@ -543,13 +545,14 @@ export function OrderApprovalPanel({
   }, [order.id, estimatedTime, onApprove, onClose, t]);
 
   const handleDecline = useCallback(async () => {
-    if (!declineReason.trim()) {
+    const trimmedReason = declineReason.trim();
+    if (!trimmedReason) {
       toast.error(t('orderApprovalPanel.reasonRequired'));
       return;
     }
     setIsDeclining(true);
     try {
-      await onDecline(order.id, declineReason);
+      await onDecline(order.id, trimmedReason);
       toast.success(t('orderApprovalPanel.declined'));
       onClose();
     } catch (error) {
@@ -602,91 +605,173 @@ export function OrderApprovalPanel({
 
   return (
     <>
-      {/* Backdrop */}
-      <div
-        className="liquid-glass-modal-backdrop fixed inset-0 z-[1000]"
-        onClick={canClose ? onClose : undefined}
-      />
-
-      {/* Modal Container */}
-      <div
-        className="liquid-glass-modal-shell fixed top-1/2 left-1/2 z-[1050] flex max-h-[92vh] w-[calc(100vw-2rem)] max-w-5xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={`order-approval-title-${order.id}`}
-        tabIndex={-1}
-      >
-
-        {/* Header */}
-        <div className="flex-shrink-0 border-b liquid-glass-modal-border bg-white/5 px-6 py-5 dark:bg-black/20">
-          <div className="flex justify-between items-start gap-4">
-            <div className="flex-1">
-              <h2
-                id={`order-approval-title-${order.id}`}
-                className="text-2xl font-bold liquid-glass-modal-text"
-              >
-                {t('orderApprovalPanel.orderNumber', { number: orderNumber, defaultValue: `Order #${orderNumber}` })}
-              </h2>
-              <div className="flex items-center gap-3 mt-2 flex-wrap">
-                <span className="text-sm liquid-glass-modal-text-muted">
-                  {createdAt ? `${formatDate(createdAt)} ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}` : ''}
-                </span>
-                <span className={`text-xs px-3 py-1 rounded-full border ${getStatusColor(order.status)}`}>
-                  {t(`orders.status.${order.status}`, { defaultValue: (order.status || 'Pending') }).toUpperCase()}
-                </span>
+      <LiquidGlassModal
+        isOpen
+        onClose={canClose ? onClose : () => undefined}
+        closeOnBackdrop={canClose}
+        closeOnEscape={canClose}
+        size="lg"
+        className="!max-h-[88vh] !max-w-3xl"
+        contentClassName="px-5 py-4 sm:px-6"
+        ariaLabel={t('orderApprovalPanel.reviewOrder', { defaultValue: 'Review incoming order' })}
+        header={(
+          <div className="flex-shrink-0 border-b liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-wide ${getStatusColor(order.status)}`}>
+                    {t(`orders.status.${order.status}`, { defaultValue: order.status || 'Pending' })}
+                  </span>
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
+                    {getOrderTypeLabel(orderType)}
+                  </span>
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
+                    {paymentMethodLabel}
+                  </span>
+                </div>
+                <h2
+                  id={`order-approval-title-${order.id}`}
+                  className="mt-3 truncate text-2xl font-bold liquid-glass-modal-text"
+                >
+                  {t('orderApprovalPanel.orderNumber', { number: orderNumber, defaultValue: `Order #${orderNumber}` })}
+                </h2>
+                {createdAt && (
+                  <p className="mt-1 text-sm liquid-glass-modal-text-muted">
+                    {t('orderApprovalPanel.receivedAt', {
+                      defaultValue: 'Received {{time}}',
+                      time: `${formatDate(createdAt)} ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}`,
+                    })}
+                  </p>
+                )}
               </div>
-            </div>
+              <div className="text-right">
+                <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                  {t('orderApprovalPanel.total', { defaultValue: 'Total' })}
+                </p>
+                <p className="text-3xl font-black text-blue-500 dark:text-blue-400">
+                  {formatCurrency(totalAmount)}
+                </p>
+              </div>
               {canClose ? (
                 <button
                   onClick={onClose}
-                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
+                  className="liquid-glass-modal-button min-h-0 min-w-0 shrink-0 p-2"
                   aria-label={t('common.actions.close')}
                 >
-                  <X className="w-6 h-6" />
+                  <X className="h-5 w-5" />
                 </button>
               ) : null}
+            </div>
           </div>
-        </div>
-
-        {/* Scrollable Content */}
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-5 scrollbar-hide">
-          <div className="space-y-5">
-
-            {/* Order Type Banner */}
-            <div className="grid gap-3 sm:grid-cols-3">
-              <div className="liquid-glass-modal-card flex items-center gap-3">
-                <div className="rounded-lg bg-blue-500/20 p-2 text-blue-600 dark:text-blue-400">
-                  <Clock className="h-5 w-5" />
+        )}
+        footer={(
+          <div className="flex-shrink-0 space-y-3 border-t liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6">
+            {!viewOnly ? (
+              <>
+                <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+                  <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted lg:w-48">
+                    <Clock className="h-4 w-4" />
+                    {t('orderApprovalPanel.estimatedTimeShort', { defaultValue: 'Prep time' })}
+                  </div>
+                  <div className="grid flex-1 grid-cols-6 gap-2">
+                    {ESTIMATED_TIME_OPTIONS.map((time) => (
+                      <button
+                        key={time}
+                        type="button"
+                        onClick={() => setEstimatedTime(time)}
+                        className={`min-h-[2.75rem] rounded-lg px-2 text-sm font-bold transition ${
+                          estimatedTime === time
+                            ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/25'
+                            : 'liquid-glass-modal-button'
+                        }`}
+                        aria-pressed={estimatedTime === time}
+                      >
+                        {time}{t('common.units.minutesShort', { defaultValue: 'm' })}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid grid-cols-[minmax(0,1fr)_minmax(8rem,0.45fr)] gap-3">
+                  <button
+                    type="button"
+                    onClick={handleApprove}
+                    disabled={isApproving || isDeclining}
+                    className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-green-500/30 bg-green-600/20 text-green-400 hover:bg-green-600/30"
+                  >
+                    <Check className="h-4 w-4" />
+                    {isApproving ? t('orderApprovalPanel.approving', { defaultValue: 'Approving...' }) : t('orderApprovalPanel.approveButton', { defaultValue: 'Approve' })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowDeclineModal(true)}
+                    disabled={isApproving || isDeclining}
+                    className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 hover:bg-red-600/30"
+                  >
+                    <XCircle className="h-4 w-4" />
+                    {t('orderApprovalPanel.declineButton', { defaultValue: 'Decline' })}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={handlePrint}
+                  disabled={isPrinting}
+                  className="liquid-glass-modal-button w-full gap-2"
+                >
+                  <Printer className="h-4 w-4" />
+                  {isPrinting ? t('orderApprovalPanel.printing', { defaultValue: 'Printing...' }) : t('orderApprovalPanel.printReceipt', { defaultValue: 'Print receipt' })}
+                </button>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="liquid-glass-modal-button w-full gap-2 border-blue-500/30 bg-blue-600/20 text-blue-400 hover:bg-blue-600/30"
+                >
+                  {t('common.actions.close', { defaultValue: 'Close' })}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      >
+        <div className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+            <section className="liquid-glass-modal-card p-4">
+              <div className="flex items-center gap-3">
+                <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-purple-500/15 text-purple-400">
+                  <User className="h-5 w-5" />
                 </div>
                 <div className="min-w-0">
                   <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-                    {t('orderApprovalPanel.orderType', { defaultValue: 'Order type' })}
+                    {t('orderApprovalPanel.name', { defaultValue: 'Customer' })}
                   </p>
-                  <p className="truncate font-semibold liquid-glass-modal-text">
-                    {getOrderTypeLabel(orderType)}
+                  <p className="truncate text-base font-bold liquid-glass-modal-text">
+                    {customerName}
                   </p>
+                  {customerPhone && (
+                    <p className="truncate text-sm liquid-glass-modal-text-muted">
+                      {customerPhone}
+                    </p>
+                  )}
                 </div>
               </div>
-              <div className="liquid-glass-modal-card flex items-center gap-3">
-                <div className="rounded-lg bg-amber-500/20 p-2 text-amber-600 dark:text-amber-400">
-                  <Clock className="h-5 w-5" />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-                    {t('orderApprovalPanel.status', { defaultValue: 'Status' })}
-                  </p>
-                  <p className="truncate font-semibold liquid-glass-modal-text">
-                    {t(`orders.status.${order.status}`, { defaultValue: order.status || 'Pending' })}
-                  </p>
-                </div>
-              </div>
-              <div className="liquid-glass-modal-card flex items-center gap-3">
-                <div className={`rounded-lg p-2 ${
+            </section>
+
+            <section className={`liquid-glass-modal-card p-4 ${
+              requestedPaymentMethod === 'cash'
+                ? 'border-green-500/25 bg-green-500/10'
+                : requestedPaymentMethod === 'card'
+                  ? 'border-blue-500/25 bg-blue-500/10'
+                  : ''
+            }`}>
+              <div className="flex items-center gap-3">
+                <div className={`flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl ${
                   requestedPaymentMethod === 'cash'
-                    ? 'bg-green-500/20 text-green-600 dark:text-green-400'
+                    ? 'bg-green-500/15 text-green-400'
                     : requestedPaymentMethod === 'card'
-                      ? 'bg-blue-500/20 text-blue-600 dark:text-blue-400'
-                      : 'bg-gray-500/20 text-gray-600 dark:text-gray-400'
+                      ? 'bg-blue-500/15 text-blue-400'
+                      : 'bg-white/10 liquid-glass-modal-text-muted'
                 }`}>
                   {requestedPaymentMethod === 'cash' ? (
                     <Banknote className="h-5 w-5" />
@@ -698,392 +783,211 @@ export function OrderApprovalPanel({
                   <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
                     {t('orderApprovalPanel.paymentMethod', { defaultValue: 'Payment' })}
                   </p>
-                  <p className="truncate font-semibold liquid-glass-modal-text">
+                  <p className="truncate text-base font-bold liquid-glass-modal-text">
                     {paymentMethodLabel}
+                  </p>
+                  <p className="line-clamp-2 text-sm liquid-glass-modal-text-muted">
+                    {paymentMethodDescription}
                   </p>
                 </div>
               </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
-              {/* Left Column: Customer Info */}
-              <div className="space-y-5">
-                {/* Customer Card */}
-                <div className="liquid-glass-modal-card">
-                  <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
-                    <User className="w-4 h-4" />
-                    {t('orderApprovalPanel.name', { defaultValue: 'Customer' })}
-                  </h4>
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-3">
-                      <User className="w-10 h-10 text-purple-500" />
-                      <div>
-                        <div className="font-semibold liquid-glass-modal-text">
-                          {customerName}
-                        </div>
-                        {customerPhone && (
-                          <div className="text-sm liquid-glass-modal-text-muted">
-                            {customerPhone}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Delivery Address Card - Show only for delivery orders */}
-                {orderType === 'delivery' && (deliveryAddress || deliveryCity) && (
-                  <div className="liquid-glass-modal-card">
-                    <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
-                      <MapPin className="w-4 h-4" />
-                      {t('orderApprovalPanel.address', { defaultValue: 'Address' })}
-                    </h4>
-                    <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5 space-y-3">
-                      {/* Address Road */}
-                      {deliveryAddress && (
-                        <div className="flex flex-col">
-                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.addressRoad', { defaultValue: 'Street' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">
-                            {deliveryAddress}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Postal Code */}
-                      {deliveryPostalCode && (
-                        <div className="flex flex-col">
-                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.postalCode', { defaultValue: 'Postal Code' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">
-                            {deliveryPostalCode}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* City */}
-                      {deliveryCity && (
-                        <div className="flex flex-col">
-                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.city', { defaultValue: 'City' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">
-                            {deliveryCity}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Floor */}
-                      {deliveryFloor && (
-                        <div className="flex flex-col">
-                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.floor', { defaultValue: 'Floor' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">
-                            {deliveryFloor}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Name on Ringer */}
-                      {nameOnRinger && (
-                        <div className="flex flex-col">
-                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.nameOnRinger', { defaultValue: 'Name on bell' })}
-                          </span>
-                          <span className="font-medium liquid-glass-modal-text">
-                            {nameOnRinger}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Delivery Notes */}
-                      {deliveryNotes && (
-                        <div className="flex flex-col pt-2 border-t border-white/10">
-                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.deliveryNotes', { defaultValue: 'Notes' })}
-                          </span>
-                          <span className="liquid-glass-modal-text italic">
-                            {deliveryNotes}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Payment Method Card */}
-                <div className="liquid-glass-modal-card">
-                  <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
-                    {requestedPaymentMethod === 'cash' ? (
-                      <Banknote className="h-4 w-4" />
-                    ) : (
-                      <CreditCard className="h-4 w-4" />
-                    )}
-                    {t('orderApprovalPanel.paymentMethod', { defaultValue: 'Payment' })}
-                  </h4>
-                  <div className={`rounded-xl border p-4 ${
-                    requestedPaymentMethod === 'cash'
-                      ? 'border-green-500/25 bg-green-500/10'
-                      : requestedPaymentMethod === 'card'
-                        ? 'border-blue-500/25 bg-blue-500/10'
-                        : 'border-white/10 bg-white/5 dark:bg-black/20'
-                  }`}>
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-lg font-semibold liquid-glass-modal-text">
-                          {paymentMethodLabel}
-                        </p>
-                        <p className="mt-1 text-sm leading-5 liquid-glass-modal-text-muted">
-                          {paymentMethodDescription}
-                        </p>
-                      </div>
-                      {requestedPaymentMethod === 'cash' ? (
-                        <Banknote className="h-6 w-6 flex-shrink-0 text-green-500" />
-                      ) : (
-                        <CreditCard className="h-6 w-6 flex-shrink-0 text-blue-500" />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Right Column: Order Items */}
-              <div className="min-h-[360px]">
-                <div className="liquid-glass-modal-card flex h-full min-h-[360px] flex-col">
-                  <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
-                    <Package className="w-4 h-4" />
-                    {t('orderApprovalPanel.orderItems', { defaultValue: 'Order Items' })}
-                  </h4>
-
-                  {isLoadingItems ? (
-                    <div className="flex items-center justify-center py-12">
-                      <div className="h-12 w-12 animate-spin rounded-full border-b-2 border-blue-500"></div>
-                    </div>
-                  ) : normalizedItems.length > 0 ? (
-                    <div className="max-h-[42vh] flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
-                      {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[]; categoryName?: string | null; categoryPath?: string | null }, idx: number) => (
-                        <div
-                          key={idx}
-                          className="flex items-start justify-between rounded-xl border border-white/10 bg-white/5 p-3 transition-colors hover:bg-white/10 dark:bg-white/5"
-                        >
-                          <div className="flex items-start gap-3 flex-1">
-                            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-orange-500/20 bg-orange-500/20 text-sm font-bold text-orange-400">
-                              {item.quantity}x
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              {/* Category label */}
-                              {(item.categoryPath || item.categoryName) && (
-                                <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 liquid-glass-modal-text-muted">
-                                  {item.categoryPath || item.categoryName}
-                                </div>
-                              )}
-                              {/* Item name (subcategory) */}
-                              <div className="break-words font-medium liquid-glass-modal-text">
-                                {item.name}
-                              </div>
-                              {item.special_instructions && (
-                                <div className="text-xs liquid-glass-modal-text-muted mt-1 italic">
-                                  {item.special_instructions}
-                                </div>
-                              )}
-                              {item.customizations && item.customizations.length > 0 && (
-                                <div className="mt-2 space-y-1">
-                                  {/* Added ingredients */}
-                                  {item.customizations.filter((c: any) => !c.isWithout).map((c: { name: string; price: number; isLittle?: boolean }, i: number) => (
-                                    <div key={`add-${i}`} className="flex justify-between text-xs liquid-glass-modal-text-muted">
-                                      <span>+ {c.name}{c.isLittle ? ` (${t('menu.itemModal.little', { defaultValue: 'Little' })})` : ''}</span>
-                                      {c.price > 0 && (
-                                        <span>{formatCurrency(c.price)}</span>
-                                      )}
-                                    </div>
-                                  ))}
-                                  {/* Without ingredients */}
-                                  {item.customizations.filter((c: any) => c.isWithout).length > 0 && (
-                                    <div className="mt-1 pt-1 border-t border-red-500/20">
-                                      <div className="text-[11px] text-red-300 mb-1">
-                                        {t('menu.itemModal.without', { defaultValue: 'Without' })}
-                                      </div>
-                                      {item.customizations.filter((c: any) => c.isWithout).map((c: { name: string }, i: number) => (
-                                        <div key={`without-${i}`} className="flex justify-between text-xs text-red-400">
-                                          <span className="line-through inline-flex items-center gap-1">
-                                            <Ban className="w-3 h-3" />
-                                            {c.name}
-                                          </span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                          <div className="font-semibold liquid-glass-modal-text ml-3 flex-shrink-0">
-                            {formatCurrency(item.total_price)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 liquid-glass-modal-text-muted">
-                      <p className="mb-3">{itemsLoadError || t('orderApprovalPanel.noItems', { defaultValue: 'No items found' })}</p>
-                      <button
-                        onClick={handleRetryLoadItems}
-                        disabled={isLoadingItems}
-                        className="liquid-glass-modal-button"
-                      >
-                        {t('orderApprovalPanel.retryLoadItems', { defaultValue: 'Try again' })}
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Totals Section */}
-                  <div className="mt-5 space-y-2 border-t border-gray-200/50 pt-5 dark:border-gray-700/50">
-                    <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
-                      <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
-                      <span>{formatCurrency(subtotal)}</span>
-                    </div>
-                    {taxAmount > 0 && (
-                      <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
-                        <span>{t('orderApprovalPanel.tax', { defaultValue: 'Tax' })}</span>
-                        <span>{formatCurrency(taxAmount)}</span>
-                      </div>
-                    )}
-                    {deliveryFee > 0 && (
-                      <div className="flex justify-between text-sm liquid-glass-modal-text-muted pb-2">
-                        <span>{t('orderApprovalPanel.deliveryFee', { defaultValue: 'Delivery fee' })}</span>
-                        <span>{formatCurrency(deliveryFee)}</span>
-                      </div>
-                    )}
-                    {discountAmount > 0 && (
-                      <div className="flex justify-between text-sm text-green-500 font-medium">
-                        <span>
-                          <span className="inline-flex items-center gap-2"><Tag className="w-4 h-4" aria-hidden="true" />{t('orderApprovalPanel.discount', { defaultValue: 'Discount' })}</span>
-                          {discountPercentage > 0 && ` (${discountPercentage}%)`}
-                        </span>
-                        <span>-{formatCurrency(discountAmount)}</span>
-                      </div>
-                    )}
-                    <div className="flex justify-between items-end pt-2 border-t border-dashed border-gray-300 dark:border-gray-600">
-                      <span className="font-bold text-lg liquid-glass-modal-text">
-                        {t('orderApprovalPanel.totalAmount', { defaultValue: 'Total' })}
-                      </span>
-                      <span className="font-bold text-2xl text-blue-600 dark:text-blue-400">
-                        {formatCurrency(totalAmount)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Estimated Time - Only for approval mode */}
-            {!viewOnly && (
-              <div className="liquid-glass-modal-card">
-                <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
-                  <Clock className="w-4 h-4" />
-                  {t('orderApprovalPanel.estimatedTime', { defaultValue: 'Estimated prep time' })}
-                </h4>
-                <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-                  {ESTIMATED_TIME_OPTIONS.map((time) => (
-                    <button
-                      key={time}
-                      onClick={() => setEstimatedTime(time)}
-                      className={`rounded-lg px-3 py-3 font-medium transition ${
-                        estimatedTime === time
-                          ? 'bg-blue-500 text-white'
-                          : 'liquid-glass-modal-button'
-                      }`}
-                    >
-                      {time}{t('common.units.minutesShort', { defaultValue: 'm' })}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Decline Reason - Only shown when declining */}
-            {!viewOnly && showDeclineModal && (
-              <div className="liquid-glass-modal-card bg-red-500/10 border-red-500/30">
-                <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider text-red-600 dark:text-red-400 mb-4">
-                  <XCircle className="w-4 h-4" />
-                  {t('orderApprovalPanel.declineReason', { defaultValue: 'Decline reason' })}
-                </h4>
-                <textarea
-                  value={declineReason}
-                  onChange={(e) => setDeclineReason(e.target.value)}
-                  placeholder={t('orderApprovalPanel.declinePlaceholder', { defaultValue: 'Enter a reason...' })}
-                  className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-red-500 transition-all resize-none text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
-                  rows={3}
-                />
-              </div>
-            )}
+            </section>
           </div>
-        </div>
 
-        {/* Footer with Actions */}
-        <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
-          {!viewOnly ? (
-            <div className="flex gap-3">
-              {!showDeclineModal ? (
-                <>
-                  <button
-                    onClick={handleApprove}
-                    disabled={isApproving}
-                    className="flex-1 liquid-glass-modal-button bg-green-600/20 hover:bg-green-600/30 text-green-400 border-green-500/30 gap-2"
+          {orderType === 'delivery' && (deliveryAddress || deliveryCity || deliveryPostalCode || deliveryFloor || nameOnRinger || deliveryNotes) && (
+            <section className="liquid-glass-modal-card p-4">
+              <div className="flex items-start gap-3">
+                <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
+                  <MapPin className="h-5 w-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                    {t('orderApprovalPanel.address', { defaultValue: 'Address' })}
+                  </p>
+                  <p className="mt-1 font-semibold liquid-glass-modal-text">
+                    {[deliveryAddress, deliveryCity, deliveryPostalCode].filter(Boolean).join(', ')}
+                  </p>
+                  {(deliveryFloor || nameOnRinger || deliveryNotes) && (
+                    <p className="mt-1 text-sm liquid-glass-modal-text-muted">
+                      {[deliveryFloor && `${t('orderApprovalPanel.floor', { defaultValue: 'Floor' })}: ${deliveryFloor}`, nameOnRinger && `${t('orderApprovalPanel.nameOnRinger', { defaultValue: 'Name on ringer' })}: ${nameOnRinger}`, deliveryNotes].filter(Boolean).join(' | ')}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+
+          <section className="liquid-glass-modal-card overflow-hidden p-0">
+            <div className="flex items-center justify-between gap-3 border-b liquid-glass-modal-border px-4 py-3">
+              <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                <Package className="h-4 w-4" />
+                {t('orderApprovalPanel.orderItems', { defaultValue: 'Order Items' })}
+              </h4>
+              <span className="text-sm font-semibold liquid-glass-modal-text-muted">
+                {t('orderApprovalPanel.itemsCount', {
+                  defaultValue: '{{count}} items',
+                  count: normalizedItems.length,
+                })}
+              </span>
+            </div>
+
+            {isLoadingItems ? (
+              <div className="flex items-center justify-center py-10">
+                <div className="h-9 w-9 animate-spin rounded-full border-b-2 border-blue-500" />
+              </div>
+            ) : normalizedItems.length > 0 ? (
+              <div className="max-h-[34vh] overflow-y-auto custom-scrollbar">
+                {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[]; categoryName?: string | null; categoryPath?: string | null }, idx: number) => (
+                  <div
+                    key={idx}
+                    className="border-b border-white/10 px-4 py-3 last:border-b-0"
                   >
-                    <Check className="w-4 h-4" />
-                    {isApproving ? (t('orderApprovalPanel.approving', { defaultValue: 'Approving...' })) : (t('orderApprovalPanel.approveButton', { defaultValue: 'Approve' }))}
-                  </button>
-                  <button
-                    onClick={() => setShowDeclineModal(true)}
-                    className="flex-1 liquid-glass-modal-button bg-red-600/20 hover:bg-red-600/30 text-red-400 border-red-500/30 gap-2"
-                  >
-                    <XCircle className="w-4 h-4" />
-                    {t('orderApprovalPanel.declineButton', { defaultValue: 'Decline' })}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={handleDecline}
-                    disabled={isDeclining}
-                    className="flex-1 liquid-glass-modal-button bg-red-600/20 hover:bg-red-600/30 text-red-400 border-red-500/30"
-                  >
-                    {isDeclining ? (t('orderApprovalPanel.declining', { defaultValue: 'Declining...' })) : (t('orderApprovalPanel.confirmDecline', { defaultValue: 'Confirm' }))}
-                  </button>
-                  <button
-                    onClick={() => setShowDeclineModal(false)}
-                    className="liquid-glass-modal-button"
-                  >
-                    {t('common.actions.cancel', { defaultValue: 'Cancel' })}
-                  </button>
-                </>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 flex-1 items-start gap-3">
+                        <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-orange-500/20 bg-orange-500/15 text-sm font-bold text-orange-400">
+                          {item.quantity}x
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          {(item.categoryPath || item.categoryName) && (
+                            <div className="mb-0.5 text-[10px] font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                              {item.categoryPath || item.categoryName}
+                            </div>
+                          )}
+                          <div className="break-words text-sm font-bold liquid-glass-modal-text">
+                            {item.name}
+                          </div>
+                          {item.special_instructions && (
+                            <div className="mt-1 text-xs italic liquid-glass-modal-text-muted">
+                              {item.special_instructions}
+                            </div>
+                          )}
+                          {item.customizations && item.customizations.length > 0 && (
+                            <div className="mt-2 grid gap-1 text-xs liquid-glass-modal-text-muted sm:grid-cols-2">
+                              {item.customizations.filter((c: any) => !c.isWithout).map((c: { name: string; price: number; isLittle?: boolean }, i: number) => (
+                                <div key={`add-${i}`} className="flex justify-between gap-2">
+                                  <span className="truncate">+ {c.name}{c.isLittle ? ` (${t('menu.itemModal.little', { defaultValue: 'Little' })})` : ''}</span>
+                                  {c.price > 0 && <span>{formatCurrency(c.price)}</span>}
+                                </div>
+                              ))}
+                              {item.customizations.filter((c: any) => c.isWithout).map((c: { name: string }, i: number) => (
+                                <div key={`without-${i}`} className="flex items-center gap-1 text-red-400">
+                                  <Ban className="h-3 w-3" />
+                                  <span className="truncate line-through">{c.name}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex-shrink-0 text-sm font-bold liquid-glass-modal-text">
+                        {formatCurrency(item.total_price)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="py-8 text-center liquid-glass-modal-text-muted">
+                <p className="mb-3">{itemsLoadError || t('orderApprovalPanel.noItems', { defaultValue: 'No items found' })}</p>
+                <button
+                  type="button"
+                  onClick={handleRetryLoadItems}
+                  disabled={isLoadingItems}
+                  className="liquid-glass-modal-button"
+                >
+                  {t('orderApprovalPanel.retryLoadItems', { defaultValue: 'Try again' })}
+                </button>
+              </div>
+            )}
+
+            <div className="space-y-2 border-t liquid-glass-modal-border bg-white/5 px-4 py-3 dark:bg-black/20">
+              <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
+                <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
+                <span>{formatCurrency(subtotal)}</span>
+              </div>
+              {taxAmount > 0 && (
+                <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
+                  <span>{t('orderApprovalPanel.tax', { defaultValue: 'Tax' })}</span>
+                  <span>{formatCurrency(taxAmount)}</span>
+                </div>
+              )}
+              {deliveryFee > 0 && (
+                <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
+                  <span>{t('orderApprovalPanel.deliveryFee', { defaultValue: 'Delivery fee' })}</span>
+                  <span>{formatCurrency(deliveryFee)}</span>
+                </div>
+              )}
+              {discountAmount > 0 && (
+                <div className="flex justify-between text-sm font-medium text-green-500">
+                  <span className="inline-flex items-center gap-2">
+                    <Tag className="h-4 w-4" aria-hidden="true" />
+                    {t('orderApprovalPanel.discount', { defaultValue: 'Discount' })}
+                    {discountPercentage > 0 && ` (${discountPercentage}%)`}
+                  </span>
+                  <span>-{formatCurrency(discountAmount)}</span>
+                </div>
               )}
             </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={handlePrint}
-                disabled={isPrinting}
-                className="liquid-glass-modal-button w-full gap-2"
-              >
-                <Printer className="w-4 h-4" />
-                {isPrinting ? (t('orderApprovalPanel.printing', { defaultValue: 'Printing...' })) : (t('orderApprovalPanel.printReceipt', { defaultValue: 'Print receipt' }))}
-              </button>
-              <button
-                onClick={onClose}
-                className="liquid-glass-modal-button w-full gap-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30"
-              >
-                {t('common.actions.close', { defaultValue: 'Close' })}
-              </button>
-            </div>
-          )}
+          </section>
         </div>
+      </LiquidGlassModal>
 
-      </div>
+      <LiquidGlassModal
+        isOpen={showDeclineModal}
+        onClose={() => {
+          if (!isDeclining) {
+            setShowDeclineModal(false);
+          }
+        }}
+        title={t('orderApprovalPanel.declineReason', { defaultValue: 'Decline reason' })}
+        size="sm"
+        className="!max-w-md"
+        closeOnBackdrop={!isDeclining}
+        closeOnEscape={!isDeclining}
+        footer={(
+          <div className="flex gap-3 border-t liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20">
+            <button
+              type="button"
+              onClick={() => setShowDeclineModal(false)}
+              disabled={isDeclining}
+              className="liquid-glass-modal-button flex-1"
+            >
+              {t('common.actions.cancel', { defaultValue: 'Cancel' })}
+            </button>
+            <button
+              type="button"
+              onClick={handleDecline}
+              disabled={isDeclining || !declineReason.trim()}
+              className="liquid-glass-modal-button flex-1 border-red-500/30 bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50"
+            >
+              {isDeclining ? t('orderApprovalPanel.declining', { defaultValue: 'Declining...' }) : t('orderApprovalPanel.confirmDecline', { defaultValue: 'Confirm' })}
+            </button>
+          </div>
+        )}
+      >
+        <div className="space-y-4">
+          <p className="text-sm liquid-glass-modal-text-muted">
+            {t('orderApprovalPanel.declinePromptDescription', {
+              defaultValue: 'Add the reason the customer will see when this order is denied.',
+            })}
+          </p>
+          <textarea
+            value={declineReason}
+            onChange={(e) => setDeclineReason(e.target.value)}
+            placeholder={t('orderApprovalPanel.declinePlaceholder', { defaultValue: 'Enter a reason...' })}
+            className="liquid-glass-modal-input min-h-[8rem] w-full resize-none"
+            maxLength={DECLINE_REASON_MAX_LENGTH}
+            disabled={isDeclining}
+          />
+          <div className="text-right text-xs liquid-glass-modal-text-muted">
+            {t('orderApprovalPanel.characterCount', {
+              defaultValue: '{{current}}/{{max}}',
+              current: declineReason.length,
+              max: DECLINE_REASON_MAX_LENGTH,
+            })}
+          </div>
+        </div>
+      </LiquidGlassModal>
     </>
   );
 }
