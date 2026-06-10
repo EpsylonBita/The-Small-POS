@@ -441,7 +441,7 @@ const CustomerDisplayPage: React.FC = () => {
   return (
     <div
       className={`h-full min-h-0 overflow-hidden ${
-        isDark ? 'bg-black text-white' : 'bg-slate-50 text-slate-950'
+        isDark ? 'text-white' : 'text-slate-950'
       } ${externalWindow ? 'p-0' : 'p-4 md:p-6'}`}
     >
       <div

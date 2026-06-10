@@ -36,6 +36,7 @@ import { getBridge, offEvent, onEvent } from '../../lib';
 import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
+import { resolveOrderCompletionOutcome } from '../utils/orderCompletionOutcome';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
 import {
@@ -623,9 +624,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setSelectedTable(null);
   }, []);
 
-  // Handle order completion from menu
-  const handleOrderComplete = useCallback(async (orderData: any) => {
+  // Handle order completion from menu. Resolves false on failure so
+  // MenuModal/PaymentModal keep the cart and skip their success toasts.
+  const handleOrderComplete = useCallback(async (orderData: any): Promise<boolean> => {
     setIsProcessingOrder(true);
+    let orderPersisted = false;
     const isSplitPayment = orderData.paymentData?.method === 'pending';
     const isGhostOrder = orderData.is_ghost === true;
     const ghostSource = isGhostOrder
@@ -715,7 +718,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           )
         );
         setIsProcessingOrder(false);
-        return;
+        return false;
       }
 
       const clientRequestId =
@@ -810,18 +813,19 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         if (!activeCashier) {
           toast.error(t('orderFlow.noActiveCashierShift') || 'Cannot create orders until a cashier opens the day.');
           setIsProcessingOrder(false);
-          return;
+          return false;
         }
       } catch (err) {
         console.error('Failed to verify active cashier shift', err);
         toast.error(t('orderFlow.noActiveCashierShift') || 'Cannot create orders until a cashier opens the day.');
         setIsProcessingOrder(false);
-        return;
+        return false;
       }
 
       const result = await createOrder(orderToCreate);
 
       if (result.success) {
+        orderPersisted = true;
         const displayOrderNumber = result.orderNumber || result.orderId || '';
         toast.success(t('orderFlow.orderCreated', { orderNumber: displayOrderNumber }));
 
@@ -854,7 +858,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           });
           setIsMenuModalOpen(false);
           await silentRefresh().catch(() => {});
-          return;
+          return true;
         }
 
         if (initialPayment) {
@@ -885,15 +889,21 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         }
 
         resetFlow();
+        return true;
       } else {
         toast.error(t('orderFlow.orderFailed'));
         if ('error' in result) {
           console.error('Order creation failed:', result.error);
         }
+        return false;
       }
     } catch (error) {
       console.error('Error creating order:', error);
       toast.error(t('orderFlow.orderFailed'));
+      // If the order persisted before the throw, the cart must still clear —
+      // retrying from a stale cart would duplicate the order.
+      return resolveOrderCompletionOutcome({ succeeded: false, orderPersisted })
+        .completionResult;
     } finally {
       setIsProcessingOrder(false);
     }

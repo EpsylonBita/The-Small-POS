@@ -62,6 +62,9 @@ const EVENT_MAP: Record<string, string> = {
 
   // --- Sync events ---
   'sync_status': 'sync:status',
+  // Parity-queue capacity early warning (~80% of the fail-closed enqueue
+  // cap); payload is the backend `QueueCapacityWarning` struct.
+  'sync:queue-capacity-warning': 'sync:queue-capacity-warning',
   'network_status': 'network:status',
   'settings_update': 'settings:update',
   'staff_permission_update': 'staff:permission-update',

@@ -5,6 +5,7 @@ import { Banknote, BadgePercent, Check, ChevronDown, CreditCard, Loader2, Plus, 
 import toast from 'react-hot-toast';
 
 import { getBridge } from '../../../lib';
+import { settleDraftPortions, settleTerminalPortion, type SplitOrderFinancials, type TerminalSettlementResult } from '../../utils/splitPaymentSettlement';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 
 export interface CartItem { name: string; quantity: number; totalPrice: number; price?: number; itemIndex?: number; isSynthetic?: boolean; [key: string]: any }
@@ -40,10 +41,7 @@ interface SplitPaymentModalProps {
   allowDiscounts?: boolean;
 }
 
-interface OrderFinancialState {
-  totalAmount: number; subtotal: number; discountAmount: number; discountPercentage: number;
-  taxAmount: number; deliveryFee: number; tipAmount: number;
-}
+type OrderFinancialState = SplitOrderFinancials;
 
 interface SplitStateSnapshot {
   payments: any[];
@@ -278,14 +276,10 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     setPortions((current) => current.map((currentPortion) => currentPortion.id === portion.id ? { ...currentPortion, status: 'paid', paymentId, paymentOrigin, transactionRef, terminalDeviceId, paidAt: createdAt } : currentPortion));
   }, [orderId]);
 
-  const persistAdditionalDiscount = useCallback(async (discountDelta: number) => {
-    const delta = round2(discountDelta);
-    if (delta <= 0.009) return orderFinancials;
-    const next = { ...orderFinancials, totalAmount: round2(Math.max(0, orderFinancials.totalAmount - delta)), discountAmount: round2(orderFinancials.discountAmount + delta) };
+  const persistFinancials = useCallback(async (next: OrderFinancialState) => {
     await bridge.orders.updateFinancials({ orderId, totalAmount: next.totalAmount, subtotal: next.subtotal, discountAmount: next.discountAmount, discountPercentage: next.discountPercentage, taxAmount: next.taxAmount, deliveryFee: next.deliveryFee, tipAmount: next.tipAmount });
     setOrderFinancials(next);
-    return next;
-  }, [bridge, orderFinancials, orderId]);
+  }, [bridge, orderId]);
 
   const safePrintSplitReceipt = useCallback(async (paymentId: string) => { try { await bridge.payments.printSplitReceipt(paymentId); } catch (error) { console.warn('[SplitPaymentModal] Failed to print split receipt:', error); toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' })); } }, [bridge, t]);
   const printFinalOrderDocuments = useCallback(async () => {
@@ -320,21 +314,35 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     let terminal: { deviceId: string; name: string } | null = null; try { terminal = await resolveReadyTerminal(); } catch (error) { console.warn('[SplitPaymentModal] Failed to resolve terminal:', error); }
     if (!terminal) { toast(t('splitPayment.manualCardFallback', { defaultValue: 'No ready payment terminal. This portion will be recorded as a manual card payment on confirm.' })); return; }
     updatePortion(portionId, (current) => ({ ...current, method: 'card', status: 'processing', paymentOrigin: 'terminal', terminalDeviceId: terminal!.deviceId }));
+    let settlement: TerminalSettlementResult;
     try {
-      const updatedFinancials = await persistAdditionalDiscount(portion.discountAmount);
-      const rawPayment: any = await bridge.ecr.processPayment(portion.amount, { deviceId: terminal.deviceId, orderId, reference: `${orderId}:${portion.id}` });
-      const tx = extractTransactionDetails(rawPayment); if (!tx.success || tx.status !== 'approved' || !tx.transactionId) throw new Error(tx.errorMessage || 'Card payment was not approved');
-      const paymentId = await recordPortionPayment(portion, 'terminal', tx.transactionId, terminal.deviceId);
-      if (receiptMode === 'individual') await safePrintSplitReceipt(paymentId);
-      const nextRemaining = round2(Math.max(0, updatedFinancials.totalAmount - (alreadyPaidAmount + portion.amount)));
-      if (nextRemaining <= 0.01) { await completeAndClose([{ ...portion, status: 'paid', paymentId, paymentOrigin: 'terminal', transactionRef: tx.transactionId, terminalDeviceId: terminal.deviceId }], [paymentId], updatedFinancials.totalAmount, portion.amount); return; }
-      toast.success(t('splitPayment.portionPaid', { defaultValue: '{{person}} paid successfully', person: portion.label }));
+      settlement = await settleTerminalPortion(orderFinancials, portion, {
+        processPayment: async () => {
+          const rawPayment: any = await bridge.ecr.processPayment(portion.amount, { deviceId: terminal!.deviceId, orderId, reference: `${orderId}:${portion.id}` });
+          const tx = extractTransactionDetails(rawPayment);
+          if (!tx.success || tx.status !== 'approved' || !tx.transactionId) throw new Error(tx.errorMessage || 'Card payment was not approved');
+          return { transactionId: tx.transactionId };
+        },
+        recordPayment: (transactionId) => recordPortionPayment(portion, 'terminal', transactionId, terminal!.deviceId),
+        persistFinancials,
+      });
     } catch (error) {
       console.error('[SplitPaymentModal] Terminal card payment failed:', error);
       updatePortion(portionId, (current) => ({ ...current, status: 'draft', paymentOrigin: 'manual' }));
       toast.error(error instanceof Error ? error.message : t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' }));
+      return;
     }
-  }, [activeTab, alreadyPaidAmount, bridge, completeAndClose, ensureLatestOutstanding, getPortion, orderId, persistAdditionalDiscount, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
+    if (settlement.discountPersistFailed) toast.error(t('splitPayment.discountPersistFailed', { defaultValue: 'Payment recorded, but the discount could not be saved to the order. Review the order total before closing it.' }));
+    try {
+      if (receiptMode === 'individual') await safePrintSplitReceipt(settlement.paymentId);
+      const nextRemaining = round2(Math.max(0, settlement.financials.totalAmount - (alreadyPaidAmount + portion.amount)));
+      if (nextRemaining <= 0.01) { await completeAndClose([{ ...portion, status: 'paid', paymentId: settlement.paymentId, paymentOrigin: 'terminal', transactionRef: settlement.transactionId, terminalDeviceId: terminal.deviceId }], [settlement.paymentId], settlement.financials.totalAmount, portion.amount); return; }
+      toast.success(t('splitPayment.portionPaid', { defaultValue: '{{person}} paid successfully', person: portion.label }));
+    } catch (error) {
+      console.error('[SplitPaymentModal] Split completion failed after payment was recorded:', error);
+      toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.'));
+    }
+  }, [activeTab, alreadyPaidAmount, bridge, completeAndClose, ensureLatestOutstanding, getPortion, orderFinancials, orderId, persistFinancials, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
 
   const handleConfirm = useCallback(async () => {
     if (!canConfirm) return;
@@ -342,17 +350,22 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     setIsProcessing(true);
     try {
       await ensureLatestOutstanding(round2(draftPortions.reduce((sum, portion) => sum + portion.amount, 0)), activeTab);
-      const updatedFinancials = await persistAdditionalDiscount(round2(draftPortions.reduce((sum, portion) => sum + portion.discountAmount, 0)));
-      const paymentIds: string[] = []; const recordedPortions: SplitPortion[] = [];
-      for (const portion of draftPortions) { const origin: PaymentOrigin = portion.method === 'card' ? (portion.paymentOrigin || 'manual') : 'manual'; const paymentId = await recordPortionPayment(portion, origin, portion.transactionRef, portion.terminalDeviceId); paymentIds.push(paymentId); recordedPortions.push({ ...portion, status: 'paid', paymentId, paymentOrigin: origin }); if (receiptMode === 'individual') await safePrintSplitReceipt(paymentId); }
-      await completeAndClose(recordedPortions, paymentIds, updatedFinancials.totalAmount, recordedPortions.reduce((sum, portion) => sum + portion.amount, 0));
+      const portionOrigins = new Map<string, PaymentOrigin>(draftPortions.map((portion) => [portion.id, portion.method === 'card' ? (portion.paymentOrigin || 'manual') : 'manual']));
+      const settlement = await settleDraftPortions(orderFinancials, draftPortions, {
+        recordPayment: (portion) => recordPortionPayment(portion, portionOrigins.get(portion.id) ?? 'manual', portion.transactionRef, portion.terminalDeviceId),
+        persistFinancials,
+        onPortionSettled: receiptMode === 'individual' ? async (_portion, paymentId) => { await safePrintSplitReceipt(paymentId); } : undefined,
+      });
+      if (settlement.discountPersistFailures.length > 0) toast.error(t('splitPayment.discountPersistFailed', { defaultValue: 'Payment recorded, but the discount could not be saved to the order. Review the order total before closing it.' }));
+      const recordedPortions: SplitPortion[] = draftPortions.map((portion, index) => ({ ...portion, status: 'paid', paymentId: settlement.paymentIds[index], paymentOrigin: portionOrigins.get(portion.id) ?? 'manual' }));
+      await completeAndClose(recordedPortions, settlement.paymentIds, settlement.financials.totalAmount, recordedPortions.reduce((sum, portion) => sum + portion.amount, 0));
     } catch (error) {
       console.error('[SplitPaymentModal] Split confirmation failed:', error);
       toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.'));
     } finally {
       setIsProcessing(false);
     }
-  }, [activeTab, canConfirm, completeAndClose, ensureLatestOutstanding, persistAdditionalDiscount, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, t]);
+  }, [activeTab, canConfirm, completeAndClose, ensureLatestOutstanding, orderFinancials, persistFinancials, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, t]);
 
   const MethodToggle: React.FC<{ portion: SplitPortion }> = ({ portion }) => {
     const locked = portion.status !== 'draft' || isProcessing;

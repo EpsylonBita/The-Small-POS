@@ -3394,6 +3394,10 @@ pub fn start_sync_loop(
         // probe failures. Reset on the first successful probe.
         const OFFLINE_FLIP_THRESHOLD: u32 = 2;
         let mut consecutive_offline_probes: u32 = 0;
+        // Parity-queue capacity edge tracker: warn! once when the queue
+        // crosses the warning threshold, then keep emitting the renderer
+        // event every tick while it stays there.
+        let mut parity_capacity_warning_active = false;
 
         loop {
             if cancel.is_cancelled() || !is_running.load(Ordering::SeqCst) {
@@ -3441,6 +3445,12 @@ pub fn start_sync_loop(
                 serde_json::json!({ "isOnline": network_is_online })
             };
             let _ = app.emit("network_status", &network_status_for_ui);
+
+            // Parity-queue capacity early warning. Runs on every tick --
+            // including offline and auth-paused ticks, which is exactly when
+            // the backlog grows -- so staff see "sync backlog growing" long
+            // before the enqueue cap fail-closes domain writes at checkout.
+            emit_parity_queue_capacity_warning(&db, &app, &mut parity_capacity_warning_active);
 
             // If terminal is not configured yet, still emit sync status so
             // UI state remains consistent.
@@ -4132,6 +4142,56 @@ async fn force_parity_sync_once(db: &DbState, app: &AppHandle) -> Result<usize, 
     }
 
     Ok(result.processed.max(0) as usize)
+}
+
+/// Emit `sync:queue-capacity-warning` while the parity queue sits at or
+/// above `sync_queue::CAPACITY_WARNING_PERCENT` of either capacity ceiling.
+///
+/// Follows the `sync:dead-letter:monetary` pattern: the queue module builds
+/// the payload, this Tauri layer emits the event. The event repeats every
+/// tick while pressure persists (state broadcast, like `sync_status`), but
+/// the warn! log fires only on the rising edge so a long offline stretch
+/// does not flood the log.
+fn emit_parity_queue_capacity_warning(db: &DbState, app: &AppHandle, warning_active: &mut bool) {
+    let warning = {
+        let conn = match db.conn.lock() {
+            Ok(conn) => conn,
+            Err(_) => return,
+        };
+        match sync_queue::capacity_warning(&conn) {
+            Ok(warning) => warning,
+            Err(error) => {
+                warn!(error = %error, "Failed to inspect parity sync queue capacity");
+                return;
+            }
+        }
+    };
+
+    match warning {
+        Some(warning) => {
+            if !*warning_active {
+                warn!(
+                    replayable = warning.replayable,
+                    max_replayable = warning.max_replayable,
+                    conflicts = warning.conflicts,
+                    max_conflicts = warning.max_conflicts,
+                    "Parity sync queue backlog growing; approaching fail-closed capacity"
+                );
+            }
+            *warning_active = true;
+            let _ = app.emit("sync:queue-capacity-warning", &warning);
+        }
+        None => {
+            if *warning_active {
+                info!("Parity sync queue backlog back below the capacity warning threshold");
+                // Falling-edge clear: a single null payload tells the
+                // renderer to drop its warning state without needing a
+                // staleness timer tuned to the sync-loop interval.
+                let _ = app.emit("sync:queue-capacity-warning", serde_json::Value::Null);
+            }
+            *warning_active = false;
+        }
+    }
 }
 
 /// Trigger an immediate sync cycle (called by `sync_force`).

@@ -193,7 +193,7 @@ const LoyaltyPage: React.FC = () => {
 
   if (!loading && !settings?.is_active) {
     return (
-      <div className={`h-full flex items-center justify-center p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+      <div className={`h-full flex items-center justify-center p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-white text-gray-900'}`}>
         <div className={`p-8 rounded-2xl text-center max-w-md border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
           <Award className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
           <h2 className="text-xl font-bold mb-2">{t('loyalty.programInactive', 'Loyalty Program Inactive')}</h2>
@@ -206,7 +206,7 @@ const LoyaltyPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-white text-gray-900'}`}>
       {/* Header + Stats Card */}
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">

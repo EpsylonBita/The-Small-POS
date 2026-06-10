@@ -48,12 +48,13 @@ import {
 import { posApiGet, posApiPost } from '../utils/api-helpers';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
+import { getPluginLogo } from '../utils/plugin-icons';
 
 // ============================================================
 // TYPES
 // ============================================================
 
-type IntegrationCategory = 'delivery' | 'hotel' | 'government' | 'payment' | 'analytics' | 'ecommerce' | 'communications';
+type IntegrationCategory = 'delivery' | 'hotel' | 'government' | 'payment' | 'analytics' | 'ecommerce' | 'communications' | 'other';
 
 interface Integration {
   id: string;
@@ -74,6 +75,21 @@ interface IntegrationWithStatus extends Integration {
     store_status_override?: string;
     target_terminal_id?: string | null;
   };
+}
+
+interface RemoteIntegrationPayload {
+  id?: string;
+  plugin_id?: string | null;
+  provider?: string | null;
+  name?: string | null;
+  description?: string | null;
+  category?: string | null;
+  is_purchased?: boolean;
+  is_active?: boolean;
+  status?: string | null;
+  requires_partner_credentials?: boolean;
+  settings?: IntegrationWithStatus['settings'];
+  last_sync_at?: string | null;
 }
 
 interface IntegrationStats {
@@ -272,6 +288,7 @@ const CATEGORY_CONFIG: Record<IntegrationCategory, { label: string; icon: typeof
   analytics: { label: 'Analytics', icon: BarChart3 },
   ecommerce: { label: 'E-commerce', icon: ShoppingCart },
   communications: { label: 'Communications', icon: Phone },
+  other: { label: 'Other Plugins', icon: Plug },
 };
 
 type PluginFieldKey = 'api_key' | 'api_secret' | 'merchant_id' | 'store_id' | 'store_url' | 'chain_id' | 'webhook_secret';
@@ -383,6 +400,58 @@ const calculateStats = (integrations: IntegrationWithStatus[]): IntegrationStats
 const normalizeProviderId = (value: string) =>
   value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 
+const INTEGRATION_CATALOG_BY_ID = new Map(
+  ALL_INTEGRATIONS.map((integration) => [normalizeProviderId(integration.id), integration])
+);
+
+const normalizeIntegrationCategory = (
+  value: unknown,
+  fallback: IntegrationCategory = 'other'
+): IntegrationCategory => {
+  if (typeof value !== 'string') return fallback;
+  const normalized = normalizeProviderId(value);
+  return normalized in CATEGORY_CONFIG ? normalized as IntegrationCategory : fallback;
+};
+
+const getRemoteIntegrationId = (integration: RemoteIntegrationPayload) =>
+  normalizeProviderId(
+    integration.plugin_id ||
+    integration.provider ||
+    integration.name ||
+    integration.id ||
+    ''
+  );
+
+const mapRemoteStatus = (integration: RemoteIntegrationPayload): IntegrationWithStatus['status'] => {
+  if (integration.status === 'connected') return 'connected';
+  if (integration.status === 'pending' || integration.status === 'error') return 'pending';
+  if (integration.status === 'inactive') return 'disconnected';
+  return integration.is_active ? 'connected' : 'disconnected';
+};
+
+const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationWithStatus | null => {
+  const id = getRemoteIntegrationId(remote);
+  if (!id) return null;
+
+  const fallback = INTEGRATION_CATALOG_BY_ID.get(id);
+  const requiresPartnerCredentials = Boolean(
+    remote.requires_partner_credentials ?? fallback?.requiresPartnerCredentials
+  );
+
+  return {
+    id,
+    name: remote.name || fallback?.name || id.replace(/_/g, ' '),
+    description: remote.description || fallback?.description || '',
+    icon: fallback?.icon || <Plug className="w-6 h-6" />,
+    category: normalizeIntegrationCategory(remote.category, fallback?.category || 'other'),
+    requiredModule: fallback?.requiredModule,
+    requiresPartnerCredentials,
+    status: requiresPartnerCredentials ? 'pending' : mapRemoteStatus(remote),
+    lastSyncedAt: typeof remote.last_sync_at === 'string' ? remote.last_sync_at : undefined,
+    settings: remote.settings || undefined,
+  };
+};
+
 async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
   try {
     const result = await posApiGet<{ config?: Record<string, any> }>('/pos/mydata/config');
@@ -411,6 +480,39 @@ async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
 // ============================================================
 // INTEGRATION CARD COMPONENT
 // ============================================================
+
+interface IntegrationLogoProps {
+  integration: Integration;
+  isDark: boolean;
+}
+
+const IntegrationLogo: React.FC<IntegrationLogoProps> = ({ integration, isDark }) => {
+  const logo = getPluginLogo(integration.id);
+
+  return (
+    <div
+      className={`w-14 h-12 shrink-0 rounded-xl flex items-center justify-center overflow-hidden ${
+        logo
+          ? 'bg-white border border-gray-200'
+          : isDark
+          ? 'bg-zinc-900 border border-zinc-800 text-zinc-100'
+          : 'bg-gray-100 text-gray-700'
+      }`}
+      title={logo?.label || integration.name}
+      aria-label={logo ? `${logo.label} logo` : integration.name}
+    >
+      {logo ? (
+        <img
+          src={logo.url}
+          alt={logo.label}
+          className="max-h-8 max-w-[44px] object-contain"
+        />
+      ) : (
+        integration.icon
+      )}
+    </div>
+  );
+};
 
 interface IntegrationCardProps {
   integration: IntegrationWithStatus;
@@ -464,13 +566,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
     >
       <div className="flex items-start gap-4">
         {/* Icon */}
-        <div
-          className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${
-            isDark ? 'bg-zinc-900 border border-zinc-800 text-zinc-100' : 'bg-gray-100 text-gray-700'
-          }`}
-        >
-          {integration.icon}
-        </div>
+        <IntegrationLogo integration={integration} isDark={isDark} />
 
         {/* Info */}
         <div className="flex-1 min-w-0">
@@ -687,7 +783,7 @@ export const IntegrationsPage: React.FC = () => {
   
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
-  const { hasModule, isLoading: modulesLoading, refetch: refetchModules } = useAcquiredModules();
+  const { isLoading: modulesLoading, refetch: refetchModules } = useAcquiredModules();
   const { getSetting } = useTerminalSettings();
   // State
   const [integrations, setIntegrations] = useState<IntegrationWithStatus[]>([]);
@@ -760,84 +856,58 @@ export const IntegrationsPage: React.FC = () => {
     }
   }, [myDataConfig]);
 
-  // Filter integrations based on enabled modules
-  const filteredIntegrations = useMemo(() => {
-    return ALL_INTEGRATIONS.filter(integration => {
-      if (!integration.requiredModule) return true;
-      return hasModule(integration.requiredModule);
-    });
-  }, [hasModule]);
-
-    const fetchMyDataConfig = useCallback(async () => {
-      try {
-        const myDataResult = await fetchMyDataConfigQuietly();
-        if (myDataResult.ok && myDataResult.config) {
-          setMyDataConfig(myDataResult.config);
-          setMyDataConfigError(null);
-          return;
-        }
-
-        if (myDataResult.status === 404) {
-          setMyDataConfig({});
-          setMyDataConfigError('MyData not configured');
-          return;
-        }
-
-        setMyDataConfigError(myDataResult.error || 'Failed to fetch MyData config');
-      } catch (err) {
-        console.warn('Failed to fetch MyData config:', err);
-        setMyDataConfigError('Failed to fetch MyData config');
+  const fetchMyDataConfig = useCallback(async () => {
+    try {
+      const myDataResult = await fetchMyDataConfigQuietly();
+      if (myDataResult.ok && myDataResult.config) {
+        setMyDataConfig(myDataResult.config);
+        setMyDataConfigError(null);
+        return;
       }
-    }, []);
 
-    // Fetch integration statuses
+      if (myDataResult.status === 404) {
+        setMyDataConfig({});
+        setMyDataConfigError('MyData not configured');
+        return;
+      }
+
+      setMyDataConfigError(myDataResult.error || 'Failed to fetch MyData config');
+    } catch (err) {
+      console.warn('Failed to fetch MyData config:', err);
+      setMyDataConfigError('Failed to fetch MyData config');
+    }
+  }, []);
+
+  // Fetch integration statuses
   const fetchIntegrations = useCallback(async () => {
-      try {
-        setLoading(true);
-        setError(null);
+    try {
+      setLoading(true);
+      setError(null);
 
-        const integrationsResult = await posApiGet<{ integrations?: any[] }>('/pos/integrations');
-        const remoteIntegrations = integrationsResult.success ? (integrationsResult.data?.integrations || []) : [];
-        const remoteMap = new Map(remoteIntegrations.map((item: any) => [normalizeProviderId(item.provider), item]));
+      const integrationsResult = await posApiGet<{ integrations?: RemoteIntegrationPayload[] }>('/pos/integrations');
+      if (!integrationsResult.success) {
+        throw new Error(integrationsResult.error || 'Failed to fetch integrations');
+      }
 
-        // Map to IntegrationWithStatus
-        const integrationsWithStatus: IntegrationWithStatus[] = filteredIntegrations.flatMap(integration => {
-          const remote = remoteMap.get(normalizeProviderId(integration.id));
-          if (integration.id === 'ergani_digital_schedule' && !remote?.is_purchased) {
-            return [];
-          }
-          const remoteStatus = remote?.status;
-          const mappedStatus = remoteStatus === 'connected'
-            ? 'connected'
-            : remoteStatus === 'pending' || remoteStatus === 'error'
-            ? 'pending'
-            : remoteStatus === 'inactive'
-            ? 'disconnected'
-            : (remote?.is_active ? 'connected' : 'disconnected');
-
-          return [{
-            ...integration,
-            status: integration.requiresPartnerCredentials
-              ? 'pending'
-              : mappedStatus,
-            lastSyncedAt: typeof remote?.last_sync_at === 'string' ? remote.last_sync_at : undefined,
-            settings: remote?.settings || undefined,
-          }];
+      const seenIds = new Set<string>();
+      const integrationsWithStatus = (integrationsResult.data?.integrations || [])
+        .filter((integration) => integration.is_purchased === true)
+        .map(mapPurchasedIntegration)
+        .filter((integration): integration is IntegrationWithStatus => {
+          if (!integration || seenIds.has(integration.id)) return false;
+          seenIds.add(integration.id);
+          return true;
         });
 
-        setIntegrations(integrationsWithStatus);
-      } catch (err) {
-        console.error('Failed to fetch integrations:', err);
-        setError(err instanceof Error ? err.message : 'Failed to fetch integrations');
-        // Still show integrations as disconnected
-        setIntegrations(filteredIntegrations
-          .filter(i => i.id !== 'ergani_digital_schedule')
-          .map(i => ({ ...i, status: 'disconnected' }))
-        );
-      } finally {
-        setLoading(false);
-      }
-    }, [filteredIntegrations]);
+      setIntegrations(integrationsWithStatus);
+    } catch (err) {
+      console.error('Failed to fetch integrations:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch integrations');
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   // Initial fetch
   useEffect(() => {
@@ -1169,6 +1239,7 @@ export const IntegrationsPage: React.FC = () => {
       analytics: [],
       ecommerce: [],
       communications: [],
+      other: [],
     };
 
     integrations.forEach(integration => {
@@ -1187,7 +1258,7 @@ export const IntegrationsPage: React.FC = () => {
   // Loading state
   if (loading || modulesLoading) {
     return (
-      <div className={`min-h-screen flex items-center justify-center ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
+      <div className={`min-h-screen flex items-center justify-center ${isDark ? 'bg-black' : 'bg-white'}`}>
         <div className="text-center">
           <Loader2 className={`w-8 h-8 animate-spin mx-auto mb-3 ${isDark ? 'text-emerald-400' : 'text-blue-500'}`} />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -1199,7 +1270,7 @@ export const IntegrationsPage: React.FC = () => {
   }
 
   return (
-    <div className={`min-h-screen ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
+    <div className={`min-h-screen ${isDark ? 'bg-black' : 'bg-white'}`}>
       {/* Header */}
       <div className={`sticky top-0 z-10 px-4 py-4 border-b ${isDark ? 'bg-black/95 border-zinc-800' : 'bg-white/95 border-gray-200'} backdrop-blur-sm`}>
         <div className="max-w-6xl mx-auto">
@@ -1311,10 +1382,10 @@ export const IntegrationsPage: React.FC = () => {
           <div className={`text-center py-12 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
             <Plug size={48} className={`mx-auto mb-4 ${isDark ? 'text-zinc-600' : 'text-gray-400'}`} />
             <h3 className={`text-lg font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              {t('integrations.empty.title', 'No plugins available')}
+              {t('integrations.empty.title', 'No purchased plugins')}
             </h3>
             <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-              {t('integrations.empty.description', 'Enable modules to unlock plugins')}
+              {t('integrations.empty.description', 'Purchased plugins assigned to this organization will appear here.')}
             </p>
           </div>
         )}
@@ -1331,19 +1402,6 @@ export const IntegrationsPage: React.FC = () => {
             onConfigure={handleConfigure}
           />
         ))}
-
-        {/* Coming Soon Notice */}
-        {groupedIntegrations.length > 0 && (
-          <div className={`p-6 rounded-xl text-center border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
-            <AlertCircle size={32} className={`mx-auto mb-3 ${isDark ? 'text-amber-400' : 'text-amber-500'}`} />
-            <h3 className={`font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              {t('integrations.comingSoon.title', 'More plugins coming soon')}
-            </h3>
-            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-              {t('integrations.comingSoon.description', 'We\'re working on adding more plugins.')}
-            </p>
-          </div>
-        )}
       </div>
 
         {/* MyData Configuration Modal */}

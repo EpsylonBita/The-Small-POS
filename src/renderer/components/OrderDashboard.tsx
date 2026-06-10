@@ -108,6 +108,7 @@ import type {
   PickupToDeliveryConversionParams,
 } from "../../lib/ipc-adapter";
 import { buildSplitPaymentItems } from "../utils/splitPaymentItems";
+import { resolveOrderCompletionOutcome } from "../utils/orderCompletionOutcome";
 import { deriveEditSettlementFinancials } from "../utils/editSettlementFinancials";
 import {
   calculatePickupToDeliveryTotal,
@@ -2532,11 +2533,29 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       console.log("[OrderDashboard] Fiscal print result:", fiscalResult);
     };
 
-    // Handle order completion from menu modal
-    const handleOrderComplete = async (orderData: any): Promise<void> => {
+    // Handle order completion from menu modal. Resolves false on failure so
+    // MenuModal/PaymentModal keep the cart and skip their success toasts.
+    const handleOrderComplete = async (orderData: any): Promise<boolean> => {
       const isSplitPayment = orderData.paymentData?.method === "pending";
       const isTablePaymentSave = orderData.paymentData?.method === "table";
       let createdOrderId: string | undefined;
+      let orderPersisted = false;
+      const finishOrderCompletion = (succeeded: boolean): boolean => {
+        const outcome = resolveOrderCompletionOutcome({
+          succeeded,
+          orderPersisted,
+        });
+        if (outcome.resetOrderUiState) {
+          setShowMenuModal(false);
+          setSelectedOrderType(null);
+          setExistingCustomer(null);
+          setCustomerInfo({ name: "", phone: "" });
+          setSelectedTable(null);
+          setTableNumber("");
+          setTableGuestCount(1);
+        }
+        return outcome.completionResult;
+      };
       try {
         console.log(
           "[OrderDashboard.handleOrderComplete] orderData:",
@@ -2805,7 +2824,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               },
             );
             toast.error(t("orderDashboard.addressRequired"));
-            return; // Prevent order creation without address
+            return finishOrderCompletion(false); // Prevent order creation without address
           }
         }
 
@@ -2990,6 +3009,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         if (result.success) {
           createdOrderId = result.orderId;
+          orderPersisted = true;
 
           if (isTableOrder && result.orderId && selectedTable) {
             const tableSessionOpenPayload = {
@@ -3092,7 +3112,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }
 
           // Capture split payment data for the SplitPaymentModal (rendered in OrderDashboard).
-          // This must happen before the finally block closes MenuModal.
+          // This must happen before finishOrderCompletion closes MenuModal.
           if (isSplitPayment && createdOrderId) {
             setSplitPaymentData({
               kind: "new-order",
@@ -3224,20 +3244,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               "[OrderDashboard] No orderId in result, skipping auto-print",
             );
           }
+
+          return finishOrderCompletion(true);
         } else {
           toast.error(result.error || t("orderDashboard.orderCreateFailed"));
+          return finishOrderCompletion(false);
         }
       } catch (error) {
         console.error("Error creating order:", error);
         toast.error(t("orderDashboard.orderCreateFailed"));
-      } finally {
-        setShowMenuModal(false);
-        setSelectedOrderType(null);
-        setExistingCustomer(null);
-        setCustomerInfo({ name: "", phone: "" });
-        setSelectedTable(null);
-        setTableNumber("");
-        setTableGuestCount(1);
+        // If the order persisted before the throw, finishOrderCompletion still
+        // finalizes the UI — retrying from a stale cart would duplicate it.
+        return finishOrderCompletion(false);
       }
     };
 

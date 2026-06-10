@@ -91,7 +91,7 @@ interface MenuModalProps {
     ghost_metadata?: Record<string, unknown> | null;
     deliveryFee?: number;
     deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
-  }) => Promise<void | boolean> | void | boolean;
+  }) => Promise<boolean> | boolean;
   // Edit mode props
   editMode?: boolean;
   editOrderId?: string;

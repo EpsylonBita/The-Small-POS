@@ -30,6 +30,8 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'edit-settlement-financials.test.ts'),
   path.join(testsRoot, 'renderer', 'edit-settlement-delta-modal.test.ts'),
   path.join(testsRoot, 'renderer', 'edit-settlement-flow.test.ts'),
+  path.join(testsRoot, 'renderer', 'split-payment-discount-persistence.test.ts'),
+  path.join(testsRoot, 'renderer', 'checkout-failure-contract.test.ts'),
   path.join(testsRoot, 'renderer', 'delivery-zones-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'staff-schedule-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'module-context-sync.test.ts'),

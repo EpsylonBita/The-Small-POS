@@ -40,7 +40,7 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
   'analytics',    // Business analytics dashboard
   'orders',       // Order management
 
-  // Delivery module (enables delivery orders and pricing)
+  // Delivery capability remains implemented; standalone dispatch navigation is optional metadata.
   'delivery',
   'delivery_zones', // Delivery zone management
 

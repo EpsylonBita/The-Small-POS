@@ -2157,6 +2157,14 @@
     }
   },
   "sync": {
+    "capacity": {
+      "badge": "Coda {{percent}}%",
+      "title": "La coda di sincronizzazione si sta riempiendo",
+      "toast": "La coda di sincronizzazione si sta riempiendo — le vendite continuano, ma riconnetti presto questo terminale per svuotare la coda.",
+      "detail": "Le nuove vendite si fermano quando la coda offline è piena. Riconnetti questo terminale per svuotare la coda.",
+      "replayable": "In attesa di invio: {{current}} di {{max}}",
+      "conflicts": "Conflitti irrisolti: {{current}} di {{max}}"
+    },
     "title": "Sincronizzazione",
     "subtitle": "Sincronizza i dati con il server",
     "lastSync": "Ultima sincronizzazione",
@@ -4547,6 +4555,22 @@
     },
     "errors": {
       "loadFailed": "Impossibile caricare il programma del personale"
+    },
+    "import": {
+      "action": "Importa",
+      "failed": "Importazione non riuscita: {{message}}",
+      "importing": "Importazione in corso...",
+      "invalidFile": "Il file non sembra un programma del personale.",
+      "nothingImported": "Nessun turno valido è stato importato.",
+      "success": "Importati {{imported}} turni da {{format}}. Saltati {{skipped}}.",
+      "unmatchedStaff": "Nessun membro del personale corrispondente per: {{names}}. Aggiungi o rinomina le righe del personale e importa di nuovo.",
+      "unmatchedSuffix": "nessuna corrispondenza"
+    },
+    "previewWeek": {
+      "action": "Anteprima settimana",
+      "activeStaffCount": "{{count}} membri del personale attivi in programma",
+      "empty": "Nessun membro del personale attivo è in programma per questa settimana.",
+      "title": "Anteprima settimana"
     }
   },
   "receipt": {
@@ -5469,7 +5493,8 @@
     "confirm": "Confirm Split",
     "processing": "Processing...",
     "success": "Split payment completed successfully",
-    "failed": "Split payment failed. Please try again."
+    "failed": "Split payment failed. Please try again.",
+    "discountPersistFailed": "Pagamento registrato, ma lo sconto non è stato salvato sull'ordine. Verifica il totale dell'ordine prima di chiuderlo."
   },
   "recovery": {
     "common": {

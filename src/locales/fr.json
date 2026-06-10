@@ -2157,6 +2157,14 @@
     }
   },
   "sync": {
+    "capacity": {
+      "badge": "File {{percent}}%",
+      "title": "La file de synchronisation se remplit",
+      "toast": "La file de synchronisation se remplit — les ventes continuent, mais reconnectez vite ce terminal pour vider la file.",
+      "detail": "Les nouvelles ventes s'arrêtent quand la file hors ligne est pleine. Reconnectez ce terminal pour vider la file.",
+      "replayable": "En attente d'envoi : {{current}} sur {{max}}",
+      "conflicts": "Conflits non résolus : {{current}} sur {{max}}"
+    },
     "title": "Synchronisation",
     "subtitle": "Synchroniser les données avec le serveur",
     "lastSync": "Dernière synchronisation",
@@ -4547,6 +4555,22 @@
     },
     "errors": {
       "loadFailed": "Impossible de charger le planning du personnel"
+    },
+    "import": {
+      "action": "Importer",
+      "failed": "Échec de l'importation : {{message}}",
+      "importing": "Importation...",
+      "invalidFile": "Le fichier ne ressemble pas à un planning du personnel.",
+      "nothingImported": "Aucun service valide n'a été importé.",
+      "success": "{{imported}} service(s) importé(s) depuis {{format}}. {{skipped}} ignoré(s).",
+      "unmatchedStaff": "Aucun membre du personnel correspondant pour : {{names}}. Ajoutez ou renommez les lignes du personnel, puis importez à nouveau.",
+      "unmatchedSuffix": "aucune correspondance"
+    },
+    "previewWeek": {
+      "action": "Aperçu de la semaine",
+      "activeStaffCount": "{{count}} membres du personnel actifs planifiés",
+      "empty": "Aucun membre du personnel actif n'est planifié cette semaine.",
+      "title": "Aperçu de la semaine"
     }
   },
   "receipt": {
@@ -5469,7 +5493,8 @@
     "confirm": "Confirm Split",
     "processing": "Processing...",
     "success": "Split payment completed successfully",
-    "failed": "Split payment failed. Please try again."
+    "failed": "Split payment failed. Please try again.",
+    "discountPersistFailed": "Paiement enregistré, mais la remise n'a pas pu être enregistrée sur la commande. Vérifiez le total de la commande avant de la clôturer."
   },
   "recovery": {
     "common": {

@@ -784,7 +784,7 @@ export const StaffScheduleView: React.FC = memo(() => {
 
   if (loading) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black' : 'bg-slate-50'}`}>
+      <div className="h-full flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
           <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
           <p className={isDark ? 'text-zinc-400' : 'text-gray-600'}>
@@ -816,7 +816,7 @@ export const StaffScheduleView: React.FC = memo(() => {
   }
 
   return (
-    <div className={`h-full min-h-0 overflow-hidden ${isDark ? 'bg-black text-zinc-100' : 'bg-slate-50 text-slate-950'}`}>
+    <div className={`h-full min-h-0 overflow-hidden ${isDark ? 'text-zinc-100' : 'text-slate-950'}`}>
       <input
         ref={importFileInputRef}
         type="file"
@@ -1161,87 +1161,89 @@ export const StaffScheduleView: React.FC = memo(() => {
               </button>
             </div>
 
-            <div className="min-h-0 overflow-auto p-4 md:p-5">
+            <div className="min-h-0 overflow-y-auto scrollbar-hide p-4 md:p-5">
               {weeklyPreviewRows.length === 0 ? (
                 <div className={`flex min-h-48 items-center justify-center rounded-xl border border-dashed text-center text-sm ${isDark ? 'border-zinc-700 text-zinc-400' : 'border-slate-300 text-slate-500'}`}>
                   {t('staffSchedule.previewWeek.empty', 'No active staff are scheduled for this week.')}
                 </div>
               ) : (
-                <div className="min-w-[920px] overflow-hidden rounded-xl border border-inherit">
-                  <div className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] border-b text-xs font-semibold uppercase ${isDark ? 'bg-zinc-900 border-zinc-800 text-zinc-400' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
-                    <div className={`border-r p-3 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}>
-                      {t('staffSchedule.fields.staff', 'Staff')}
-                    </div>
-                    {weekDays.map(day => {
-                      const dayKey = localDateKey(day);
-                      const isToday = dayKey === todayKey;
-                      return (
-                        <div
-                          key={`preview-header-${dayKey}`}
-                          className={`border-r p-3 last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${isToday ? (isDark ? 'text-blue-300' : 'text-blue-700') : ''}`}
-                        >
-                          <div>{getDayLabel(day)}</div>
-                          <div className="mt-0.5 font-normal normal-case">
-                            {day.toLocaleDateString([], { day: '2-digit', month: 'short' })}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {weeklyPreviewRows.map(row => (
-                    <div
-                      key={row.staff.id}
-                      className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] border-b last:border-b-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}
-                    >
-                      <div className={`border-r p-3 ${isDark ? 'border-zinc-800 bg-zinc-950/60' : 'border-slate-200 bg-white'}`}>
-                        <p className="truncate text-sm font-semibold">{row.staff.name}</p>
-                        <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
-                          {row.staff.role?.displayName || row.staff.role?.name || t('staffSchedule.roles.staff', 'Staff')}
-                        </p>
-                        {(row.staff.staffCode || row.staff.staff_code) ? (
-                          <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
-                            {row.staff.staffCode || row.staff.staff_code}
-                          </p>
-                        ) : null}
+                <div className="overflow-x-auto scrollbar-hide rounded-xl border border-inherit">
+                  <div className="min-w-max">
+                    <div className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] border-b text-xs font-semibold uppercase ${isDark ? 'bg-zinc-900 border-zinc-800 text-zinc-400' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
+                      <div className={`border-r p-3 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}>
+                        {t('staffSchedule.fields.staff', 'Staff')}
                       </div>
-
                       {weekDays.map(day => {
                         const dayKey = localDateKey(day);
-                        const dayShifts = row.shiftsByDay[dayKey] || [];
+                        const isToday = dayKey === todayKey;
                         return (
                           <div
-                            key={`${row.staff.id}-${dayKey}`}
-                            className={`min-h-24 border-r last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${
-                              dayShifts.length === 0
-                                ? isDark ? 'bg-amber-950/40' : 'bg-amber-50'
-                                : isDark ? 'bg-zinc-950/30' : 'bg-white'
-                            }`}
+                            key={`preview-header-${dayKey}`}
+                            className={`border-r p-3 last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${isToday ? (isDark ? 'text-blue-300' : 'text-blue-700') : ''}`}
                           >
-                            {dayShifts.length === 0 ? (
-                              <div className={`flex h-full min-h-24 w-full items-center justify-center px-2 text-center text-sm font-bold uppercase tracking-wide ${
-                                isDark ? 'text-amber-200' : 'text-amber-800'
-                              }`}>
-                                {t('staffSchedule.dayOff', 'Day Off')}
-                              </div>
-                            ) : (
-                              <div className="space-y-1.5 p-2">
-                                {dayShifts.map(shift => (
-                                  <div
-                                    key={`preview-${shift.id}`}
-                                    className={`rounded-lg border-l-4 px-2 py-2 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'}`}
-                                    style={{ borderLeftColor: shift.roleColor }}
-                                  >
-                                    <p className="text-base font-bold leading-tight">{formatTimeRange(shift.start, shift.end)}</p>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
+                            <div>{getDayLabel(day)}</div>
+                            <div className="mt-0.5 font-normal normal-case">
+                              {day.toLocaleDateString([], { day: '2-digit', month: 'short' })}
+                            </div>
                           </div>
                         );
                       })}
                     </div>
-                  ))}
+
+                    {weeklyPreviewRows.map(row => (
+                      <div
+                        key={row.staff.id}
+                        className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] border-b last:border-b-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}
+                      >
+                        <div className={`border-r p-3 ${isDark ? 'border-zinc-800 bg-zinc-950/60' : 'border-slate-200 bg-white'}`}>
+                          <p className="truncate text-sm font-semibold">{row.staff.name}</p>
+                          <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
+                            {row.staff.role?.displayName || row.staff.role?.name || t('staffSchedule.roles.staff', 'Staff')}
+                          </p>
+                          {(row.staff.staffCode || row.staff.staff_code) ? (
+                            <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
+                              {row.staff.staffCode || row.staff.staff_code}
+                            </p>
+                          ) : null}
+                        </div>
+
+                        {weekDays.map(day => {
+                          const dayKey = localDateKey(day);
+                          const dayShifts = row.shiftsByDay[dayKey] || [];
+                          return (
+                            <div
+                              key={`${row.staff.id}-${dayKey}`}
+                              className={`min-h-24 border-r last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${
+                                dayShifts.length === 0
+                                  ? isDark ? 'bg-amber-950/40' : 'bg-amber-50'
+                                  : isDark ? 'bg-zinc-950/30' : 'bg-white'
+                              }`}
+                            >
+                              {dayShifts.length === 0 ? (
+                                <div className={`flex h-full min-h-24 w-full items-center justify-center px-2 text-center text-sm font-bold uppercase tracking-wide ${
+                                  isDark ? 'text-amber-200' : 'text-amber-800'
+                                }`}>
+                                  {t('staffSchedule.dayOff', 'Day Off')}
+                                </div>
+                              ) : (
+                                <div className="space-y-1.5 p-2">
+                                  {dayShifts.map(shift => (
+                                    <div
+                                      key={`preview-${shift.id}`}
+                                      className={`rounded-lg border-l-4 px-2 py-2 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'}`}
+                                      style={{ borderLeftColor: shift.roleColor }}
+                                    >
+                                      <p className="text-base font-bold leading-tight">{formatTimeRange(shift.start, shift.end)}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>

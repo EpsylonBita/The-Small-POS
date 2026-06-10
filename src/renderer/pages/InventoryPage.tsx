@@ -369,7 +369,7 @@ const InventoryPage: React.FC = () => {
   }, [t]);
 
   return (
-    <div className={`min-h-screen p-6 ${isDark ? 'bg-black text-white' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`min-h-screen p-6 ${isDark ? 'text-white' : 'text-gray-900'}`}>
       {/* Header */}
       <div className={`flex items-center justify-between mb-6 rounded-2xl border px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex items-center gap-3">

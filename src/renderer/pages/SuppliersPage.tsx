@@ -728,7 +728,7 @@ const SuppliersPage: React.FC = () => {
   const selectedInvoiceCanPay = Boolean(selectedInvoice && selectedInvoiceStatus !== 'paid' && selectedInvoiceStatus !== 'cancelled');
 
   return (
-    <div className={`h-full min-h-0 overflow-hidden p-4 md:p-5 ${isDark ? 'bg-black text-white' : 'bg-gray-50 text-gray-950'}`}>
+    <div className={`h-full min-h-0 overflow-hidden p-4 md:p-5 ${isDark ? 'text-white' : 'text-gray-950'}`}>
       <div className="flex h-full min-h-0 flex-col gap-4">
         <section className={`shrink-0 rounded-2xl border p-4 md:p-5 ${panelClass}`}>
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">

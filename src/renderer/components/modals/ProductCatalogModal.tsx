@@ -96,7 +96,7 @@ interface ProductCatalogModalProps {
     discountAmount?: number;
     deliveryFee?: number;
     deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
-  }) => void;
+  }) => Promise<boolean> | boolean;
 }
 
 export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
@@ -606,9 +606,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     setShowPaymentModal(true);
   };
 
-  const handlePaymentComplete = (paymentData: any) => {
-    setShowPaymentModal(false);
-    onOrderComplete?.({
+  const handlePaymentComplete = async (paymentData: any): Promise<boolean> => {
+    const completionResult = await onOrderComplete?.({
       items: cartItems.map(item => ({
         id: item.id,
         menu_item_id: item.id,
@@ -629,12 +628,22 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       deliveryFee,
       deliveryZoneInfo: effectiveDeliveryZoneInfo,
     });
+
+    // A false completion means createOrder never persisted the order (timeout,
+    // offline fallback also failed). Keep the cart and the payment modal open
+    // so staff can retry without re-keying the order.
+    if (completionResult === false) {
+      return false;
+    }
+
+    setShowPaymentModal(false);
     setCartItems([]);
     setOfferEvaluation(null);
     setDiscountPercentage(0);
     setManualDeliveryFee(0);
     setManualDeliveryFeeInput('');
     setLocalDeliveryZoneInfo(null);
+    return true;
   };
 
   if (!isOpen) return null;

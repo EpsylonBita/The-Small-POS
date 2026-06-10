@@ -12,7 +12,12 @@
 //! # Queue Semantics
 //!
 //! - FIFO within priority bands (higher priority processed first).
-//! - Max queue size: 500 items (configurable via `MAX_QUEUE_SIZE`).
+//! - Max replayable queue size: 5000 `pending`/`processing` rows
+//!   (`MAX_QUEUE_SIZE`); `conflict` rows are bounded separately by
+//!   `MAX_CONFLICT_ROWS` because they drain via operator resolution,
+//!   not replay.
+//! - Capacity early warning at 80% of either ceiling (`capacity_warning`),
+//!   emitted to the renderer as `sync:queue-capacity-warning`.
 //! - Exponential backoff: initial 1s, doubles per attempt, capped at 60s.
 //! - Max retries: 10 (item marked `failed` after exhaustion).
 //! - Age warning threshold: 24 hours (logged, not blocking).
@@ -34,8 +39,46 @@ use crate::{db, storage, sync};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum number of items allowed in the queue before rejecting new entries.
-pub const MAX_QUEUE_SIZE: i64 = 500;
+/// Maximum number of replayable rows (status `pending` or `processing`)
+/// allowed in the queue before `enqueue` rejects new entries.
+///
+/// Sizing (founder decision 2026-06-10): this cap fail-closes domain writes
+/// (order/payment/refund/shift transactions roll back when enqueue rejects),
+/// so it must absorb a full busy day fully offline with fiscalization
+/// active. Fiscal-active branches enqueue ~2-3 parity rows per order
+/// (order + payment + fiscal/adjustment follow-ups), and a high-volume
+/// store does ~600-800 orders/day, so a worst-case offline day is
+/// ~800 x 3 = 2,400 rows. 5,000 keeps roughly two such days of headroom
+/// before checkout stops. The previous value of 500 dated from the file's
+/// creation and was never sized against volume; it walled out at ~170-250
+/// offline orders mid-day.
+///
+/// Depth-sensitive queries stay in the same cost class at this size: the
+/// capacity COUNT rides the `idx_parity_sync_queue_active` partial index
+/// (migrate_v50), and `dequeue`/`peek` are `LIMIT 1` scans ordered by
+/// `idx_parity_sq_priority_created`.
+///
+/// `conflict` rows do NOT count against this cap -- they never drain
+/// offline and have their own operator-resolution path -- they are bounded
+/// separately by `MAX_CONFLICT_ROWS`.
+pub const MAX_QUEUE_SIZE: i64 = 5000;
+
+/// Separate fail-closed ceiling for `conflict` rows.
+///
+/// Conflicts wait for operator resolution rather than replay, so counting
+/// them against the replayable cap above squeezed checkout capacity with
+/// rows that no amount of network recovery could drain. They still need a
+/// backstop: at this ceiling `enqueue` rejects with the same fail-closed
+/// semantics, because a four-digit unresolved-conflict backlog means a
+/// systemic bug (e.g. a version-stamping loop) and continuing to accept
+/// writes that will also conflict is unsafe. Normal operation produces a
+/// handful of conflicts a day, so 1,000 is purely a runaway-pathology bound.
+pub const MAX_CONFLICT_ROWS: i64 = 1000;
+
+/// Percentage of either capacity ceiling at which `capacity_warning`
+/// starts returning a payload so the operator UI can surface "sync backlog
+/// growing" long before `enqueue` fail-closes checkout.
+pub const CAPACITY_WARNING_PERCENT: i64 = 80;
 
 /// Default initial retry delay in milliseconds.
 const DEFAULT_INITIAL_RETRY_DELAY_MS: i64 = 1000;
@@ -222,6 +265,35 @@ pub struct QueueStatus {
     pub failed: i64,
     pub conflicts: i64,
     pub oldest_item_age: Option<i64>,
+}
+
+/// Active-row usage split by how rows leave the queue: `replayable` rows
+/// (`pending` + `processing`) drain through `process_queue`, while
+/// `conflict` rows wait for operator resolution. Each side has its own
+/// ceiling (`MAX_QUEUE_SIZE` / `MAX_CONFLICT_ROWS`).
+#[derive(Debug, Clone, Copy)]
+pub struct QueueCapacityUsage {
+    pub replayable: i64,
+    pub conflicts: i64,
+}
+
+/// Early-warning payload for a queue approaching a capacity ceiling.
+///
+/// Mirrors the `MonetaryDeadLetter` pattern: this module builds the
+/// payload, and the Tauri layer (the sync loop in `sync.rs`) emits it to
+/// the renderer as `sync:queue-capacity-warning` so staff see "sync
+/// backlog growing" long before `enqueue` fail-closes domain writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueCapacityWarning {
+    pub replayable: i64,
+    pub max_replayable: i64,
+    pub conflicts: i64,
+    pub max_conflicts: i64,
+    /// Replayable usage as an integer percentage of `MAX_QUEUE_SIZE`.
+    pub replayable_percent: i64,
+    /// Conflict usage as an integer percentage of `MAX_CONFLICT_ROWS`.
+    pub conflict_percent: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -477,30 +549,102 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
 // Queue operations
 // ---------------------------------------------------------------------------
 
+/// Count active rows split into replayable (`pending`/`processing`) and
+/// `conflict` buckets.
+///
+/// Single pass whose WHERE clause matches the `idx_parity_sync_queue_active`
+/// partial-index predicate (migrate_v50) exactly, keeping this O(active
+/// rows). SQLite's partial-index implication check is syntactic, so a
+/// narrower `IN ('pending', 'processing')` filter would NOT use the index
+/// and would fall back to a full-table scan.
+pub fn capacity_usage(conn: &Connection) -> Result<QueueCapacityUsage, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT status, COUNT(*)
+             FROM parity_sync_queue
+             WHERE status IN ('pending', 'processing', 'conflict')
+             GROUP BY status",
+        )
+        .map_err(|e| format!("sync_queue capacity prepare: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| format!("sync_queue capacity query: {e}"))?;
+
+    let mut usage = QueueCapacityUsage {
+        replayable: 0,
+        conflicts: 0,
+    };
+    for row in rows {
+        let (status, count) = row.map_err(|e| format!("sync_queue capacity row: {e}"))?;
+        if status == "conflict" {
+            usage.conflicts += count;
+        } else {
+            usage.replayable += count;
+        }
+    }
+
+    Ok(usage)
+}
+
+/// Returns a warning payload when either capacity dimension sits at or
+/// above `CAPACITY_WARNING_PERCENT` of its ceiling, `None` while
+/// comfortably below.
+///
+/// Called from the sync loop on every tick -- including offline ticks,
+/// which is exactly when the backlog grows -- so the renderer hears about
+/// backlog pressure well before `enqueue` starts rejecting.
+pub fn capacity_warning(conn: &Connection) -> Result<Option<QueueCapacityWarning>, String> {
+    let usage = capacity_usage(conn)?;
+    let replayable_threshold = MAX_QUEUE_SIZE * CAPACITY_WARNING_PERCENT / 100;
+    let conflict_threshold = MAX_CONFLICT_ROWS * CAPACITY_WARNING_PERCENT / 100;
+
+    if usage.replayable < replayable_threshold && usage.conflicts < conflict_threshold {
+        return Ok(None);
+    }
+
+    Ok(Some(QueueCapacityWarning {
+        replayable: usage.replayable,
+        max_replayable: MAX_QUEUE_SIZE,
+        conflicts: usage.conflicts,
+        max_conflicts: MAX_CONFLICT_ROWS,
+        replayable_percent: usage.replayable * 100 / MAX_QUEUE_SIZE,
+        conflict_percent: usage.conflicts * 100 / MAX_CONFLICT_ROWS,
+    }))
+}
+
 /// Enqueue a new sync item. Returns the generated UUID.
 ///
-/// Rejects if the queue has reached `MAX_QUEUE_SIZE`.
+/// Rejects (fail-closed) if replayable rows have reached `MAX_QUEUE_SIZE`
+/// or conflict rows have reached `MAX_CONFLICT_ROWS`.
 pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String> {
-    // Wave 6: capacity check counts only ACTIVE rows (pending /
-    // processing / conflict). On HEAD this did a full-table COUNT(*),
-    // which also counted permanently-failed rows that can never be
-    // dequeued or retried — over time, the "queue full" guard tripped
-    // on historical dead-letters even though the real working set was
-    // tiny. The `idx_parity_sync_queue_active` partial index
-    // introduced in `migrate_v50` makes this COUNT O(active rows)
-    // instead of O(total rows).
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM parity_sync_queue
-             WHERE status IN ('pending', 'processing', 'conflict')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("sync_queue count: {e}"))?;
+    // Wave 6 narrowed the capacity COUNT from a full-table COUNT(*) to
+    // ACTIVE rows only, so permanently-failed dead-letters stopped
+    // tripping the guard. Founder decision 2026-06-10 narrows it again:
+    // only REPLAYABLE rows (pending/processing) consume `MAX_QUEUE_SIZE`,
+    // because `conflict` rows never drain offline -- they wait for
+    // operator resolution -- and were squeezing checkout capacity.
+    // Conflicts keep their own fail-closed ceiling below so unbounded
+    // conflict growth still surfaces. `capacity_usage` rides the
+    // `idx_parity_sync_queue_active` partial index, so both gates stay
+    // O(active rows).
+    let QueueCapacityUsage {
+        replayable,
+        conflicts,
+    } = capacity_usage(conn)?;
 
-    if count >= MAX_QUEUE_SIZE {
+    if conflicts >= MAX_CONFLICT_ROWS {
         return Err(format!(
-            "Sync queue is full ({count}/{MAX_QUEUE_SIZE}). \
+            "Sync queue conflict backlog is full ({conflicts}/{MAX_CONFLICT_ROWS}). \
+             Resolve conflicted items before enqueuing more."
+        ));
+    }
+
+    if replayable >= MAX_QUEUE_SIZE {
+        return Err(format!(
+            "Sync queue is full ({replayable}/{MAX_QUEUE_SIZE}). \
              Clear or process pending items before enqueuing more."
         ));
     }
@@ -3372,8 +3516,21 @@ pub fn check_age_warnings(conn: &Connection) -> Result<Vec<String>, String> {
         .filter_map(|r| r.ok())
         .collect();
 
-    for warning in &warnings {
+    // Cap per-item logging: with the raised queue cap, a multi-day offline
+    // backlog can put thousands of rows past the age threshold, and this
+    // runs at the top of every processing cycle. A summary line keeps the
+    // signal without flooding the log. The returned Vec is intentionally
+    // complete -- only the logging is capped.
+    const MAX_LOGGED_AGE_WARNINGS: usize = 5;
+    for warning in warnings.iter().take(MAX_LOGGED_AGE_WARNINGS) {
         warn!("{}", warning);
+    }
+    if warnings.len() > MAX_LOGGED_AGE_WARNINGS {
+        warn!(
+            total = warnings.len(),
+            shown = MAX_LOGGED_AGE_WARNINGS,
+            "Additional sync queue items exceed the age threshold"
+        );
     }
 
     Ok(warnings)
@@ -5535,6 +5692,149 @@ mod tests {
             },
         )
         .expect("enqueue test item")
+    }
+
+    fn capacity_enqueue_input(record_id: &str) -> EnqueueInput {
+        EnqueueInput {
+            table_name: "orders".to_string(),
+            record_id: record_id.to_string(),
+            operation: "INSERT".to_string(),
+            data: "{}".to_string(),
+            organization_id: "org-1".to_string(),
+            priority: None,
+            module_type: Some("orders".to_string()),
+            conflict_strategy: Some("server-wins".to_string()),
+            version: Some(1),
+        }
+    }
+
+    /// Bulk-insert rows directly so capacity tests do not pay the
+    /// per-`enqueue` capacity COUNT + info! log 5,000 times.
+    fn insert_raw_queue_rows(conn: &Connection, count: i64, status: &str) {
+        let now = Utc::now().to_rfc3339();
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO parity_sync_queue
+                    (id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, status)
+                 VALUES (?1, 'orders', ?2, 'INSERT', '{}', 'org-1', ?3, 0, 1000, 0,
+                         'orders', 'server-wins', 1, ?4)",
+            )
+            .expect("prepare bulk queue insert");
+        for index in 0..count {
+            stmt.execute(params![
+                Uuid::new_v4().to_string(),
+                format!("rec-{status}-{index}"),
+                now,
+                status
+            ])
+            .expect("insert raw queue row");
+        }
+    }
+
+    #[test]
+    fn enqueue_rejects_when_replayable_rows_reach_raised_cap() {
+        let conn = test_connection();
+        insert_raw_queue_rows(&conn, MAX_QUEUE_SIZE - 1, "pending");
+
+        // One slot left: the MAX_QUEUE_SIZE-th replayable row is accepted...
+        enqueue_test_item(&conn, "orders", "INSERT", "last-slot", json!({}));
+
+        // ...and the next is rejected fail-closed with the same queue-full
+        // error contract callers roll transactions back on.
+        let error = enqueue(&conn, &capacity_enqueue_input("over-cap"))
+            .expect_err("enqueue past the replayable cap must fail closed");
+        assert!(
+            error.contains("Sync queue is full"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains(&format!("({MAX_QUEUE_SIZE}/{MAX_QUEUE_SIZE})")),
+            "error should report usage against the raised cap: {error}"
+        );
+    }
+
+    #[test]
+    fn conflict_and_failed_rows_do_not_consume_replayable_capacity() {
+        let conn = test_connection();
+        // Replayable usage of MAX_QUEUE_SIZE - 1, split across both
+        // replayable statuses to prove `processing` still counts.
+        insert_raw_queue_rows(&conn, MAX_QUEUE_SIZE - 100, "pending");
+        insert_raw_queue_rows(&conn, 99, "processing");
+        // A pile of conflicts and dead-letters that previously squeezed
+        // checkout capacity must no longer consume the final slot.
+        insert_raw_queue_rows(&conn, 300, "conflict");
+        insert_raw_queue_rows(&conn, 200, "failed");
+
+        enqueue_test_item(&conn, "orders", "INSERT", "final-slot", json!({}));
+
+        let error = enqueue(&conn, &capacity_enqueue_input("over-cap"))
+            .expect_err("replayable rows alone must still enforce the cap");
+        assert!(
+            error.contains("Sync queue is full"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn enqueue_fails_closed_when_conflict_ceiling_is_reached() {
+        let conn = test_connection();
+        insert_raw_queue_rows(&conn, MAX_CONFLICT_ROWS - 1, "conflict");
+
+        // Below the ceiling, conflicts never block domain writes.
+        enqueue_test_item(&conn, "orders", "INSERT", "ok-below-ceiling", json!({}));
+
+        insert_raw_queue_rows(&conn, 1, "conflict");
+        let error = enqueue(&conn, &capacity_enqueue_input("conflict-wall"))
+            .expect_err("enqueue at the conflict ceiling must fail closed");
+        assert!(
+            error.contains("conflict backlog is full"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains(&format!("({MAX_CONFLICT_ROWS}/{MAX_CONFLICT_ROWS})")),
+            "error should report usage against the conflict ceiling: {error}"
+        );
+    }
+
+    #[test]
+    fn capacity_warning_fires_at_eighty_percent_of_replayable_cap() {
+        let conn = test_connection();
+        let threshold = MAX_QUEUE_SIZE * CAPACITY_WARNING_PERCENT / 100;
+        insert_raw_queue_rows(&conn, threshold - 1, "pending");
+
+        assert!(
+            capacity_warning(&conn)
+                .expect("inspect capacity below threshold")
+                .is_none(),
+            "no warning expected below the threshold"
+        );
+
+        insert_raw_queue_rows(&conn, 1, "pending");
+        let warning = capacity_warning(&conn)
+            .expect("inspect capacity at threshold")
+            .expect("warning must fire at 80% of the replayable cap");
+        assert_eq!(warning.replayable, threshold);
+        assert_eq!(warning.max_replayable, MAX_QUEUE_SIZE);
+        assert_eq!(warning.replayable_percent, CAPACITY_WARNING_PERCENT);
+        assert_eq!(warning.conflicts, 0);
+        assert_eq!(warning.max_conflicts, MAX_CONFLICT_ROWS);
+    }
+
+    #[test]
+    fn capacity_warning_fires_at_eighty_percent_of_conflict_ceiling() {
+        let conn = test_connection();
+        let threshold = MAX_CONFLICT_ROWS * CAPACITY_WARNING_PERCENT / 100;
+        insert_raw_queue_rows(&conn, threshold, "conflict");
+
+        let warning = capacity_warning(&conn)
+            .expect("inspect conflict capacity")
+            .expect("warning must fire at 80% of the conflict ceiling");
+        assert_eq!(warning.conflicts, threshold);
+        assert_eq!(warning.conflict_percent, CAPACITY_WARNING_PERCENT);
+        // A conflict-driven warning must not fabricate replayable pressure.
+        assert_eq!(warning.replayable, 0);
     }
 
     async fn spawn_mock_http_server(

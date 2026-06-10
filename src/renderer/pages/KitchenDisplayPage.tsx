@@ -911,7 +911,7 @@ const KitchenDisplayPage: React.FC = () => {
   };
 
   return (
-    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'} ${externalWindow ? 'h-screen' : ''}`}>
+    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${externalWindow || isDark ? 'bg-black text-zinc-100' : 'bg-white text-gray-900'} ${externalWindow ? 'h-screen' : ''}`}>
       {/* Header + Stats Card */}
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
       <div className="flex items-center justify-between mb-4">

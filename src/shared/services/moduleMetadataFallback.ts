@@ -35,7 +35,7 @@ export function getFallbackModuleMetadata(moduleId: ModuleId): ModuleMetadata {
     description: '',
     category: 'addon',
     isCore: normalizedId === 'dashboard' || normalizedId === 'settings',
-    showInNavigation: true,
+    showInNavigation: normalizedId !== 'delivery',
     sortOrder: 0,
     requiredFeatures: [],
     compatibleBusinessTypes: [],

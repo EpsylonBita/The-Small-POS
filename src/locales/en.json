@@ -2157,6 +2157,14 @@
     }
   },
   "sync": {
+    "capacity": {
+      "badge": "Backlog {{percent}}%",
+      "title": "Sync backlog growing",
+      "toast": "Sync backlog growing — sales keep working, but reconnect this terminal soon so the queue can drain.",
+      "detail": "New sales stop when the offline queue is full. Reconnect this terminal so the backlog can drain.",
+      "replayable": "Queued for replay: {{current}} of {{max}}",
+      "conflicts": "Unresolved conflicts: {{current}} of {{max}}"
+    },
     "title": "Synchronization",
     "subtitle": "Sync data with server",
     "lastSync": "Last Sync",
@@ -4547,6 +4555,22 @@
     },
     "errors": {
       "loadFailed": "Failed to load staff schedule"
+    },
+    "import": {
+      "action": "Import",
+      "failed": "Import failed: {{message}}",
+      "importing": "Importing...",
+      "invalidFile": "File does not look like a staff schedule.",
+      "nothingImported": "No valid shifts were imported.",
+      "success": "Imported {{imported}} shift(s) from {{format}}. Skipped {{skipped}}.",
+      "unmatchedStaff": "No matching staff for: {{names}}. Add or rename the staff rows and import again.",
+      "unmatchedSuffix": "no match"
+    },
+    "previewWeek": {
+      "action": "Preview week",
+      "activeStaffCount": "{{count}} active staff scheduled",
+      "empty": "No active staff are scheduled for this week.",
+      "title": "Week preview"
     }
   },
   "receipt": {
@@ -5469,7 +5493,8 @@
     "confirm": "Confirm Split",
     "processing": "Processing...",
     "success": "Split payment completed successfully",
-    "failed": "Split payment failed. Please try again."
+    "failed": "Split payment failed. Please try again.",
+    "discountPersistFailed": "Payment recorded, but the discount could not be saved to the order. Review the order total before closing it."
   },
   "recovery": {
     "common": {

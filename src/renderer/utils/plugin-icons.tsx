@@ -226,7 +226,7 @@ function resolvePluginKey(plugin?: OrderPlugin | string): OrderPlugin | null {
   return ALL_KNOWN_PLUGINS.includes(normalized as OrderPlugin) ? (normalized as OrderPlugin) : null;
 }
 
-function getPluginLogo(plugin?: OrderPlugin | string) {
+export function getPluginLogo(plugin?: OrderPlugin | string) {
   if (!plugin) return null;
   const key = normalizePluginKey(String(plugin));
   return PLUGIN_LOGOS[key] || null;
@@ -453,6 +453,7 @@ export default {
   getPluginColor,
   getPluginName,
   getPluginAbbrev,
+  getPluginLogo,
   isExternalPlugin,
   // Deprecated exports for backward compatibility
   PlatformIcon,

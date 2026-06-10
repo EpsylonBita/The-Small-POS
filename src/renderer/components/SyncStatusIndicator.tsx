@@ -50,7 +50,10 @@ import {
   type ParitySyncSnapshot,
   runParitySyncCycle,
 } from '../services/ParitySyncCoordinator';
-import type { QueueStatus } from '../../../../shared/pos/sync-queue-types';
+import type {
+  QueueCapacityWarning,
+  QueueStatus,
+} from '../../../../shared/pos/sync-queue-types';
 import { getSyncQueueBridge } from '../services/SyncQueueBridge';
 import type { SubscriptionConnectionStatus } from '../services/RealtimeManager';
 
@@ -510,6 +513,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const [parityQueueStatus, setParityQueueStatus] = useState<ParityQueueSnapshot>(() =>
     normalizeParityQueueStatus(null),
   );
+  // Parity-queue capacity early warning, fed by the backend
+  // `sync:queue-capacity-warning` event (payload while >= 80% of a capacity
+  // ceiling, a single null on the falling edge). Kept separate from
+  // SyncHealthState on purpose: a capacity warning must inform staff
+  // without flipping `isSynced` or any blocker logic — checkout still works.
+  const [capacityWarning, setCapacityWarning] =
+    useState<QueueCapacityWarning | null>(null);
+  const capacityWarningActiveRef = useRef(false);
   const [lastParitySync, setLastParitySync] =
     useState<DiagnosticsLastParitySync | null>(null);
   const [realtimeStatus, setRealtimeStatus] =
@@ -632,6 +643,36 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     };
   }, [loadSyncStatus, loadFinancialStats]);
 
+  useEffect(() => {
+    const handleCapacityWarning = (payload: QueueCapacityWarning | null) => {
+      const next =
+        payload &&
+        typeof payload === 'object' &&
+        typeof payload.replayable === 'number'
+          ? payload
+          : null;
+      // One toast per rising edge (and per app session while under
+      // pressure) so staff notice the backlog without the badge being the
+      // only signal. The chip and detail banner remain the durable state.
+      if (next && !capacityWarningActiveRef.current) {
+        toast(
+          t('sync.capacity.toast', {
+            defaultValue:
+              'Sync backlog growing — sales keep working, but reconnect this terminal soon so the queue can drain.',
+          }),
+          { icon: '⚠️', duration: 8000, id: 'sync-queue-capacity-warning' },
+        );
+      }
+      capacityWarningActiveRef.current = next !== null;
+      setCapacityWarning(next);
+    };
+
+    onEvent('sync:queue-capacity-warning', handleCapacityWarning);
+    return () => {
+      offEvent('sync:queue-capacity-warning', handleCapacityWarning);
+    };
+  }, [t]);
+
   // --- System health loading (eager — loads on mount) ---
 
   const loadSystemHealth = useCallback(async () => {
@@ -744,6 +785,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const parityPendingCount = parityQueueStatus.pending;
   const parityFailedCount = parityQueueStatus.failed;
   const parityConflictCount = parityQueueStatus.conflicts;
+  // Whichever capacity dimension (replayable rows vs conflict rows) is
+  // closer to its fail-closed ceiling drives the chip percentage.
+  const capacityWarningPercent = capacityWarning
+    ? Math.max(
+        capacityWarning.replayablePercent,
+        capacityWarning.conflictPercent,
+      )
+    : 0;
 
   const hasErrors =
     !!syncStatus.error ||
@@ -1338,6 +1387,36 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <p className="mt-3 max-w-3xl text-sm text-slate-600 dark:text-slate-300/85">
                 {syncHealthDetail}
               </p>
+              {capacityWarning && (
+                <div className="mt-3 flex max-w-3xl items-start gap-2.5 rounded-[18px] border border-orange-500/30 bg-orange-500/10 px-4 py-3">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-orange-600 dark:text-orange-300" />
+                  <div className="min-w-0 text-sm text-orange-800 dark:text-orange-200">
+                    <p className="font-semibold">
+                      {t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
+                    </p>
+                    <p className="mt-1 text-xs text-orange-700/90 dark:text-orange-200/80">
+                      {t('sync.capacity.detail', {
+                        defaultValue:
+                          'New sales stop when the offline queue is full. Reconnect this terminal so the backlog can drain.',
+                      })}
+                    </p>
+                    <p className="mt-1 text-xs font-medium tabular-nums">
+                      {t('sync.capacity.replayable', {
+                        defaultValue: 'Queued for replay: {{current}} of {{max}}',
+                        current: capacityWarning.replayable,
+                        max: capacityWarning.maxReplayable,
+                      })}
+                      {capacityWarning.conflicts > 0
+                        ? ` · ${t('sync.capacity.conflicts', {
+                            defaultValue: 'Unresolved conflicts: {{current}} of {{max}}',
+                            current: capacityWarning.conflicts,
+                            max: capacityWarning.maxConflicts,
+                          })}`
+                        : null}
+                    </p>
+                  </div>
+                </div>
+              )}
               <div className="mt-4 flex flex-wrap gap-2">
                 <span className={metaChipClass}>
                   <span className={cn('h-2 w-2 rounded-full', syncStatus.isOnline ? 'bg-green-500' : 'bg-red-500')} />
@@ -2302,6 +2381,22 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             <RefreshCw className={`w-3.5 h-3.5 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`} />
           </button>
         </div>
+      )}
+
+      {/* Queue capacity early warning — visible in collapsed view so staff
+          see the backlog growing long before enqueue fail-closes checkout. */}
+      {capacityWarning && (
+        <button
+          onClick={() => setShowDetailPanel(true)}
+          className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-orange-600 transition-colors hover:bg-orange-500/15 dark:text-orange-300"
+          title={t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
+        >
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          {t('sync.capacity.badge', {
+            defaultValue: 'Backlog {{percent}}%',
+            percent: capacityWarningPercent,
+          })}
+        </button>
       )}
 
       {showDetailPanel && renderDetailModal()}

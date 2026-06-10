@@ -2157,6 +2157,14 @@
     }
   },
   "sync": {
+    "capacity": {
+      "badge": "Rückstau {{percent}}%",
+      "title": "Sync-Rückstau wächst",
+      "toast": "Der Sync-Rückstau wächst — Verkäufe laufen weiter, aber verbinden Sie dieses Terminal bald wieder, damit die Warteschlange abfließen kann.",
+      "detail": "Neue Verkäufe stoppen, wenn die Offline-Warteschlange voll ist. Verbinden Sie dieses Terminal wieder, damit der Rückstau abfließen kann.",
+      "replayable": "Zur Übertragung anstehend: {{current}} von {{max}}",
+      "conflicts": "Ungelöste Konflikte: {{current}} von {{max}}"
+    },
     "title": "Synchronisation",
     "subtitle": "Daten mit Server synchronisieren",
     "lastSync": "Letzte Synchronisation",
@@ -4547,6 +4555,22 @@
     },
     "errors": {
       "loadFailed": "Personalplan konnte nicht geladen werden"
+    },
+    "import": {
+      "action": "Importieren",
+      "failed": "Import fehlgeschlagen: {{message}}",
+      "importing": "Wird importiert...",
+      "invalidFile": "Die Datei sieht nicht wie ein Personalplan aus.",
+      "nothingImported": "Es wurden keine gültigen Schichten importiert.",
+      "success": "{{imported}} Schicht(en) aus {{format}} importiert. {{skipped}} übersprungen.",
+      "unmatchedStaff": "Kein passendes Personal für: {{names}}. Personalzeilen hinzufügen oder umbenennen und erneut importieren.",
+      "unmatchedSuffix": "keine Übereinstimmung"
+    },
+    "previewWeek": {
+      "action": "Wochenvorschau",
+      "activeStaffCount": "{{count}} aktive Mitarbeiter eingeplant",
+      "empty": "Für diese Woche sind keine aktiven Mitarbeiter eingeplant.",
+      "title": "Wochenvorschau"
     }
   },
   "receipt": {
@@ -5469,7 +5493,8 @@
     "confirm": "Confirm Split",
     "processing": "Processing...",
     "success": "Split payment completed successfully",
-    "failed": "Split payment failed. Please try again."
+    "failed": "Split payment failed. Please try again.",
+    "discountPersistFailed": "Zahlung erfasst, aber der Rabatt konnte nicht in der Bestellung gespeichert werden. Prüfen Sie die Bestellsumme, bevor Sie die Bestellung abschließen."
   },
   "recovery": {
     "common": {

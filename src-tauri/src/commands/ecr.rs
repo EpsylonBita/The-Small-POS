@@ -1422,37 +1422,53 @@ pub async fn ecr_connect_device(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let device_id = parse_required_device_id(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let device = db::ecr_get_device(&conn, &device_id)
-        .ok_or_else(|| format!("Device {device_id} not found"))?;
 
-    let connection_type = device
-        .get("connectionType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("serial_usb");
-    let connection_details = device
-        .get("connectionDetails")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-    let protocol_name = device
-        .get("protocol")
-        .and_then(|v| v.as_str())
-        .unwrap_or("generic");
-    let settings = device
-        .get("settings")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
+    // Load the connection config under the DB lock, then drop the guard
+    // before the device handshake below: the transport connect +
+    // `initialize()` can stall for seconds on absent hardware, and the
+    // guard must not be held across the await (it is not `Send`).
+    let (connection_type, connection_details, protocol_name, settings) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let device = db::ecr_get_device(&conn, &device_id)
+            .ok_or_else(|| format!("Device {device_id} not found"))?;
+
+        let connection_type = device
+            .get("connectionType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("serial_usb")
+            .to_string();
+        let connection_details = device
+            .get("connectionDetails")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        let protocol_name = device
+            .get("protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("generic")
+            .to_string();
+        let settings = device
+            .get("settings")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+
+        (connection_type, connection_details, protocol_name, settings)
+        // MutexGuard drops here; DB lock released.
+    };
 
     // Attempt real protocol connection via DeviceManager
-    match mgr.connect_device(
-        &device_id,
-        connection_type,
-        &connection_details,
-        protocol_name,
-        &settings,
-    ) {
+    match mgr
+        .connect_device_offloaded(
+            &device_id,
+            &connection_type,
+            &connection_details,
+            &protocol_name,
+            &settings,
+        )
+        .await
+    {
         Ok(()) => {
             let now = chrono::Utc::now().to_rfc3339();
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
             db::ecr_update_device(
                 &conn,
                 &device_id,
@@ -1472,6 +1488,7 @@ pub async fn ecr_connect_device(
             Ok(serde_json::json!({ "success": true }))
         }
         Err(e) => {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
             db::ecr_update_device(
                 &conn,
                 &device_id,
@@ -1677,7 +1694,10 @@ pub async fn ecr_process_payment(
                 original_transaction_id: None,
                 fiscal_data: None,
             };
-            match mgr.process_transaction(did, &request) {
+            // The card exchange can span the whole customer interaction
+            // (up to ~60s) — run it on the blocking pool, not a Tokio
+            // worker. Same envelope as the sync call.
+            match mgr.process_transaction_offloaded(did, request).await {
                 Ok(resp) => {
                     let status_str = format!("{:?}", resp.status).to_lowercase();
                     let transaction = serde_json::json!({
@@ -1827,7 +1847,7 @@ pub async fn ecr_process_refund(
                 original_transaction_id: original_tx_id,
                 fiscal_data: None,
             };
-            match mgr.process_transaction(did, &request) {
+            match mgr.process_transaction_offloaded(did, request).await {
                 Ok(resp) => {
                     let status_str = format!("{:?}", resp.status).to_lowercase();
                     let transaction = serde_json::json!({
@@ -1935,7 +1955,7 @@ pub async fn ecr_void_transaction(
                 original_transaction_id: Some(txid.clone()),
                 fiscal_data: None,
             };
-            if let Err(e) = mgr.process_transaction(did, &request) {
+            if let Err(e) = mgr.process_transaction_offloaded(did, request).await {
                 tracing::warn!("ECR void failed: {e}");
             }
         }
@@ -1989,7 +2009,7 @@ pub async fn ecr_settlement(
     );
     if let Some(ref did) = device_id {
         if mgr.is_connected(did) {
-            match mgr.settlement(did) {
+            match mgr.settlement_offloaded(did).await {
                 Ok(result) => {
                     return Ok(serde_json::json!({
                         "success": result.success,
@@ -2101,34 +2121,49 @@ pub async fn ecr_test_connection(
     mgr: tauri::State<'_, ecr::DeviceManager>,
 ) -> Result<serde_json::Value, String> {
     let device_id = parse_required_device_id(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let device = db::ecr_get_device(&conn, &device_id)
-        .ok_or_else(|| format!("Device {device_id} not found"))?;
 
-    let connection_type = device
-        .get("connectionType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("serial_usb");
-    let connection_details = device
-        .get("connectionDetails")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-    let protocol_name = device
-        .get("protocol")
-        .and_then(|v| v.as_str())
-        .unwrap_or("generic");
-    let settings = device
-        .get("settings")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
+    // Load the connection config under the DB lock, then drop the guard
+    // before the status inquiry below: it is synchronous device I/O (and
+    // can queue behind an in-flight transaction on a connected device),
+    // and the guard must not be held across the await (it is not `Send`).
+    let (connection_type, connection_details, protocol_name, settings) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let device = db::ecr_get_device(&conn, &device_id)
+            .ok_or_else(|| format!("Device {device_id} not found"))?;
 
-    match mgr.test_connection(
-        &device_id,
-        connection_type,
-        &connection_details,
-        protocol_name,
-        &settings,
-    ) {
+        let connection_type = device
+            .get("connectionType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("serial_usb")
+            .to_string();
+        let connection_details = device
+            .get("connectionDetails")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        let protocol_name = device
+            .get("protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("generic")
+            .to_string();
+        let settings = device
+            .get("settings")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+
+        (connection_type, connection_details, protocol_name, settings)
+        // MutexGuard drops here; DB lock released.
+    };
+
+    match mgr
+        .test_connection_offloaded(
+            &device_id,
+            &connection_type,
+            &connection_details,
+            &protocol_name,
+            &settings,
+        )
+        .await
+    {
         Ok(ok) => Ok(serde_json::json!({
             "success": true,
             "connected": ok
@@ -2151,13 +2186,20 @@ pub async fn ecr_test_print(
 
     // If connected, send a short test via raw bytes
     if mgr.is_connected(&device_id) {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let device = db::ecr_get_device(&conn, &device_id)
-            .ok_or_else(|| format!("Device {device_id} not found"))?;
-        let print_mode = device
-            .get("printMode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("register_prints");
+        // Read the print mode under the DB lock, then drop the guard
+        // before the printer write below: the guard must not be held
+        // across the await (it is not `Send`).
+        let print_mode = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let device = db::ecr_get_device(&conn, &device_id)
+                .ok_or_else(|| format!("Device {device_id} not found"))?;
+            device
+                .get("printMode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("register_prints")
+                .to_string()
+            // MutexGuard drops here; DB lock released.
+        };
 
         if print_mode == "pos_sends_receipt" {
             // Build a simple ESC/POS test receipt
@@ -2175,13 +2217,15 @@ pub async fn ecr_test_print(
             b.feed(3);
             b.cut();
             let data = b.build();
-            mgr.send_raw(&device_id, &data)?;
+            mgr.send_raw_offloaded(&device_id, data).await?;
         } else {
             // For register_prints mode, send a status inquiry
-            let _ = mgr.send_raw(
-                &device_id,
-                &[0x02, 0x01, 0x21, 0x4A, 0x05, 0x6A, 0x03], // STATUS frame
-            );
+            let _ = mgr
+                .send_raw_offloaded(
+                    &device_id,
+                    vec![0x02, 0x01, 0x21, 0x4A, 0x05, 0x6A, 0x03], // STATUS frame
+                )
+                .await;
         }
 
         return Ok(serde_json::json!({ "success": true, "printed": true }));
@@ -2322,7 +2366,7 @@ pub async fn ecr_fiscal_print(
                 crate::escpos::PaperWidth::Mm80,
                 greek_mode,
             );
-            mgr.send_raw(&device_id, &escpos_bytes)?;
+            mgr.send_raw_offloaded(&device_id, escpos_bytes).await?;
         }
         _ => {
             // register_prints mode: send structured fiscal receipt via protocol.
@@ -2339,7 +2383,9 @@ pub async fn ecr_fiscal_print(
                 fiscal_data: Some(fiscal_data),
             };
 
-            let device_result = mgr.process_transaction(&device_id, &request);
+            // Capture before the request is moved into the offloaded call.
+            let request_amount = request.amount;
+            let device_result = mgr.process_transaction_offloaded(&device_id, request).await;
 
             // Phase 4 — persist result and enqueue remote fiscal receipt backfill.
             // Re-acquire DB lock; these writes are fast.
@@ -2351,7 +2397,7 @@ pub async fn ecr_fiscal_print(
                         "deviceId": device_id,
                         "orderId": order_id,
                         "transactionType": "fiscal_receipt",
-                        "amount": request.amount,
+                        "amount": request_amount,
                         "currency": "EUR",
                         "status": format!("{:?}", resp.status).to_lowercase(),
                         "fiscalReceiptNumber": resp.fiscal_receipt_number,
