@@ -266,10 +266,16 @@ const MenuPage: React.FC = () => {
       items = menuItems.filter((item) => item.category_id === selectedCategory);
     }
 
-    // Filter by subcategory (standard vs customizable)
+    // Filter by subcategory. Flavor filters come from real item flavor_type
+    // availability; legacy customizable filters remain supported for older routes.
     if (selectedSubcategory) {
-      const isCustomizable = selectedSubcategory.includes('customizable');
-      if (isCustomizable) {
+      const isSavory = selectedSubcategory.includes('savory') || selectedSubcategory.includes('savoury');
+      const isSweet = selectedSubcategory.includes('sweet');
+
+      if (isSavory || isSweet) {
+        const targetFlavorType = isSweet ? 'sweet' : 'savory';
+        items = items.filter(item => item.flavor_type === targetFlavorType);
+      } else if (selectedSubcategory.includes('customizable')) {
         items = items.filter(item => item.is_customizable);
       } else {
         items = items.filter(item => !item.is_customizable);
@@ -563,6 +569,7 @@ const MenuPage: React.FC = () => {
                   selectedSubcategory={selectedSubcategory}
                   onSubcategoryChange={setSelectedSubcategory}
                   categories={categories}
+                  menuItems={menuItems}
                 />
 
                 {/* Menu Items Grid */}

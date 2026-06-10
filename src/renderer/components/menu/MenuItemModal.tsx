@@ -299,6 +299,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
     [selectedExtras]
   );
 
+  const flavorFilterButtonBaseClass =
+    'inline-flex h-12 min-w-[7rem] items-center justify-center rounded-full border px-5 text-sm font-semibold antialiased box-border transition-colors duration-150 touch-feedback';
+
   const modalHeader = (
     <div className="flex-shrink-0 px-5 pt-3 pb-1.5 space-y-2">
       <div className="flex items-center justify-between">
@@ -395,18 +398,18 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       <div className="flex gap-2 pb-2 border-b liquid-glass-modal-border">
         <button
           onClick={() => setActiveFlavorType('savory')}
-          className={`px-3.5 py-1.5 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'savory'
-              ? 'bg-orange-500 text-white shadow-lg'
-              : 'liquid-glass-modal-button'
+          className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'savory'
+              ? 'border-orange-400/70 bg-orange-500 text-white shadow-[0_8px_18px_rgba(249,115,22,0.22)]'
+              : 'border-white/20 bg-white/[0.05] liquid-glass-modal-text hover:border-white/35 hover:bg-white/[0.08]'
             }`}
         >
           {t('menu.itemModal.savory')}
         </button>
         <button
           onClick={() => setActiveFlavorType('sweet')}
-          className={`px-3.5 py-1.5 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'sweet'
-              ? 'bg-pink-500 text-white shadow-lg'
-              : 'liquid-glass-modal-button'
+          className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'sweet'
+              ? 'border-pink-400/70 bg-pink-500 text-white shadow-[0_8px_18px_rgba(236,72,153,0.22)]'
+              : 'border-white/20 bg-white/[0.05] liquid-glass-modal-text hover:border-white/35 hover:bg-white/[0.08]'
             }`}
         >
           {t('menu.itemModal.sweet')}
@@ -448,7 +451,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                   : selectedIngredients.length}
               </span>
             </div>
-            <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden pos-scrollbar-glass">
+            <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide touch-pan-x">
               <div className="flex items-center gap-1.5 w-max min-w-full pb-0.5">
                 {selectedExtras.map((selectedItem) => {
                   const ingredientName = getIngredientName(selectedItem.ingredient);
@@ -518,9 +521,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={() => setQuantity(Math.max(1, quantity - 1))}
-            className="liquid-glass-modal-button w-9 h-9 rounded-full flex items-center justify-center text-base font-bold"
+            className="liquid-glass-modal-button w-9 h-9 rounded-full flex items-center justify-center text-base font-bold text-white/95"
           >
-            <Minus className="w-4 h-4" />
+            <Minus className="w-5 h-5" strokeWidth={3} />
           </button>
           <span className="text-lg font-bold liquid-glass-modal-text min-w-[1.75rem] text-center">
             {quantity}

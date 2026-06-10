@@ -14,7 +14,7 @@ import { reservationsService } from '../services/ReservationsService';
 import { useOrderStore } from '../hooks/useOrderStore';
 import { useShift } from '../contexts/shift-context';
 import { useI18n } from '../contexts/i18n-context';
-import { useAcquiredModules } from '../hooks/useAcquiredModules';
+import { MODULE_IDS, useAcquiredModules } from '../hooks/useAcquiredModules';
 import { useTables } from '../hooks/useTables';
 import { useModules } from '../contexts/module-context';
 import { useFeatures } from '../hooks/useFeatures';
@@ -185,7 +185,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const { requestOverride } = useDeliveryValidation();
 
   // Module-based feature flags
-  const { hasDeliveryModule, hasTablesModule } = useAcquiredModules();
+  const { hasDeliveryModule, hasTablesModule, hasModule } = useAcquiredModules();
+  const hasLoyaltyModule = hasModule(MODULE_IDS.LOYALTY);
 
   // Get organizationId and businessType from module context (with credential cache fallback)
   const { organizationId: moduleOrgId, businessType } = useModules();
@@ -674,7 +675,28 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       // Extract discount information
       const discountPercentage = orderData.discountPercentage || 0;
-      const discountAmount = orderData.discountAmount || 0;
+      const manualDiscountAmount = Number(orderData.discountAmount || 0);
+      const loyaltyRedemption =
+        hasLoyaltyModule &&
+        orderData.loyalty_redemption &&
+        typeof orderData.loyalty_redemption === 'object'
+          ? orderData.loyalty_redemption
+          : null;
+      const loyaltyDiscountAmount = Math.max(
+        0,
+        Number(
+          orderData.loyalty_discount_amount ??
+            loyaltyRedemption?.discount_amount ??
+            0,
+        ),
+      );
+      const discountAmount = Math.max(
+        0,
+        Number(
+          orderData.total_discount_amount ??
+            manualDiscountAmount + loyaltyDiscountAmount,
+        ),
+      );
 
       // Prices are entered gross for Greece, so VAT is extracted from the discounted amount.
       const subtotalAfterDiscount = orderData.total; // Already includes discount
@@ -829,6 +851,40 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         const displayOrderNumber = result.orderNumber || result.orderId || '';
         toast.success(t('orderFlow.orderCreated', { orderNumber: displayOrderNumber }));
 
+        if (hasLoyaltyModule && !isGhostOrder && loyaltyRedemption && result.orderId) {
+          const redeemCustomerId = resolvePersistedCustomerId(
+            loyaltyRedemption.customer_id,
+            orderToCreate.customer_id,
+            orderToCreate.customerId,
+          );
+          const redeemPoints = Math.max(
+            0,
+            Math.trunc(Number(loyaltyRedemption.points_redeemed || 0)),
+          );
+
+          if (redeemCustomerId && redeemPoints > 0) {
+            bridge.loyalty
+              .redeemPoints({
+                customerId: redeemCustomerId,
+                points: redeemPoints,
+                orderId: result.orderId,
+              })
+              .then((res: any) => {
+                if (!res?.success) {
+                  throw new Error(res?.error || 'Loyalty redemption failed');
+                }
+              })
+              .catch((error: any) => {
+                console.warn('[OrderFlow] Loyalty redemption failed:', error);
+                toast.error(
+                  t('loyalty.redeemFailed', {
+                    defaultValue: 'Order saved, but loyalty points were not redeemed',
+                  }),
+                );
+              });
+          }
+        }
+
         // Track order + discount application
         try {
           ActivityTracker.trackOrderCreated(result.orderId || displayOrderNumber, total_amount)
@@ -907,7 +963,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, t, silentRefresh, finalizeCreatedOrderPayment]);
+  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment]);
 
   return (
     <div className={`order-flow ${className}`}>

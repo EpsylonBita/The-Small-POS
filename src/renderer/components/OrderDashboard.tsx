@@ -64,7 +64,7 @@ import { PrintPreviewModal } from "./modals/PrintPreviewModal";
 import { FloatingActionButton } from "./ui/FloatingActionButton";
 import { useTheme } from "../contexts/theme-context";
 import { useI18n } from "../contexts/i18n-context";
-import { useAcquiredModules } from "../hooks/useAcquiredModules";
+import { MODULE_IDS, useAcquiredModules } from "../hooks/useAcquiredModules";
 import { useTables } from "../hooks/useTables";
 import { useModules } from "../contexts/module-context";
 import toast from "react-hot-toast";
@@ -400,7 +400,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     );
 
     // Module-based feature flags
-    const { hasDeliveryModule, hasTablesModule } = useAcquiredModules();
+    const { hasDeliveryModule, hasTablesModule, hasModule } = useAcquiredModules();
+    const hasLoyaltyModule = hasModule(MODULE_IDS.LOYALTY);
 
     // Delivery validation hook
     const {
@@ -2847,11 +2848,25 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           0,
           Number(orderData.coupon_discount_amount || 0),
         );
+        const loyaltyRedemption =
+          hasLoyaltyModule &&
+          orderData.loyalty_redemption &&
+          typeof orderData.loyalty_redemption === "object"
+            ? orderData.loyalty_redemption
+            : null;
+        const loyaltyDiscountAmount = Math.max(
+          0,
+          Number(
+            orderData.loyalty_discount_amount ??
+              loyaltyRedemption?.discount_amount ??
+              0,
+          ),
+        );
         const totalDiscountAmount = Math.max(
           0,
           Number(
             orderData.total_discount_amount ??
-              manualDiscountAmount + couponDiscountAmount,
+              manualDiscountAmount + couponDiscountAmount + loyaltyDiscountAmount,
           ),
         );
         const discountPercentage = orderData.discountPercentage || 0;
@@ -3177,6 +3192,55 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               });
           }
 
+          if (hasLoyaltyModule && !isGhostOrder && loyaltyRedemption && result.orderId) {
+            const redeemCustomerId = resolvePersistedCustomerId(
+              loyaltyRedemption.customer_id,
+              orderToCreate.customer_id,
+              orderToCreate.customerId,
+            );
+            const redeemPoints = Math.max(
+              0,
+              Math.trunc(Number(loyaltyRedemption.points_redeemed || 0)),
+            );
+
+            if (redeemCustomerId && redeemPoints > 0) {
+              bridge.loyalty
+                .redeemPoints({
+                  customerId: redeemCustomerId,
+                  points: redeemPoints,
+                  orderId: result.orderId,
+                })
+                .then((res: any) => {
+                  if (res?.success) {
+                    toast.success(
+                      t("loyalty.redeemSuccess", {
+                        points: redeemPoints,
+                        discount: formatCurrency(
+                          Number(res.discountValue ?? loyaltyDiscountAmount),
+                        ),
+                        defaultValue:
+                          "Redeemed {{points}} points for {{discount}} discount",
+                      }),
+                    );
+                    return undefined;
+                  }
+                  throw new Error(res?.error || "Loyalty redemption failed");
+                })
+                .catch((error: any) => {
+                  console.warn(
+                    "[OrderDashboard] Loyalty redemption failed:",
+                    error,
+                  );
+                  toast.error(
+                    t("loyalty.redeemFailed", {
+                      defaultValue:
+                        "Order saved, but loyalty points were not redeemed",
+                    }),
+                  );
+                });
+            }
+          }
+
           if (result.orderId && !isSplitPayment && !isTableOrder) {
             if (initialPayment) {
               await silentRefresh().catch((err) => {
@@ -3215,7 +3279,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
             // Auto-earn loyalty points (fire-and-forget, non-blocking)
             const loyaltyCustomerId = orderToCreate.customer_id;
-            if (loyaltyCustomerId && !isGhostOrder) {
+            if (hasLoyaltyModule && loyaltyCustomerId && !isGhostOrder) {
               bridge.loyalty
                 .earnPoints({
                   customerId: loyaltyCustomerId,

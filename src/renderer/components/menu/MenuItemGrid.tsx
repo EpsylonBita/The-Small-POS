@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { MenuItemCard } from './MenuItemCard';
 import { ComboCard } from './ComboCard';
 import { menuService, MenuItem } from '../../services/MenuService';
-import { AlertTriangle, Utensils } from 'lucide-react';
+import { AlertTriangle, Utensils, X } from 'lucide-react';
 import type { MenuCombo } from '@shared/types/combo';
 import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
 
@@ -23,6 +24,24 @@ interface MenuItemGridProps {
   comboMode?: boolean;
   combos?: MenuCombo[];
   onComboSelect?: (combo: MenuCombo) => void;
+}
+
+interface MenuItemPreview {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  category: string;
+  preparationTime: number;
+  image?: string;
+  is_customizable?: boolean;
+  ingredients?: string[] | null;
+  customizations?: MenuItem['customizations'];
+}
+
+interface MenuItemPreviewState {
+  item: MenuItemPreview;
+  anchorRect: DOMRect;
 }
 
 export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
@@ -44,6 +63,45 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<MenuItemPreviewState | null>(null);
+
+  const previewPosition = useMemo(() => {
+    if (!preview) return null;
+
+    const width = Math.min(360, Math.max(280, window.innerWidth - 32));
+    const heightEstimate = 280;
+    const gap = 12;
+    const centeredLeft = preview.anchorRect.left + (preview.anchorRect.width / 2) - (width / 2);
+    const left = Math.min(Math.max(16, centeredLeft), Math.max(16, window.innerWidth - width - 16));
+    const preferredTop = preview.anchorRect.top - heightEstimate - gap;
+    const fallbackTop = preview.anchorRect.bottom + gap;
+    const top = preferredTop >= 16
+      ? preferredTop
+      : Math.min(Math.max(16, fallbackTop), Math.max(16, window.innerHeight - heightEstimate - 16));
+
+    return { left, top, width };
+  }, [preview]);
+
+  useEffect(() => {
+    if (!preview) return;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPreview(null);
+      }
+    };
+    const closeOnViewportChange = () => setPreview(null);
+
+    window.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('resize', closeOnViewportChange);
+    window.addEventListener('scroll', closeOnViewportChange, true);
+
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('resize', closeOnViewportChange);
+      window.removeEventListener('scroll', closeOnViewportChange, true);
+    };
+  }, [preview]);
 
   useEffect(() => {
     // Wave 5 H: guard against setState-after-unmount. The previous
@@ -200,8 +258,8 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
     }
 
     return (
-      <div className="flex-1 p-2 sm:p-4 overflow-y-auto touch-scroll scrollbar-hide">
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-3 sm:gap-4">
+      <div className="flex-1 p-2 sm:p-3 overflow-y-auto touch-scroll scrollbar-hide">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-2.5 sm:gap-3">
           {combos.map((combo) => (
             <ComboCard
               key={combo.id}
@@ -217,8 +275,8 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
 
   if (loading) {
     return (
-      <div className="flex-1 p-2 sm:p-4 overflow-y-auto scrollbar-hide">
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-3 sm:gap-4">
+      <div className="flex-1 p-2 sm:p-3 overflow-y-auto scrollbar-hide">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-2.5 sm:gap-3">
           {[1, 2, 3, 4, 5, 6, 7, 8].map(i => (
             <div
               key={i}
@@ -301,8 +359,92 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   }
 
   return (
-    <div className="flex-1 p-2 sm:p-4 overflow-y-auto touch-scroll scrollbar-hide">
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-3 sm:gap-4">
+    <div className="flex-1 p-2 sm:p-3 overflow-y-auto touch-scroll scrollbar-hide">
+      {preview && previewPosition && createPortal(
+        <div className="fixed inset-0 z-[2147483001]" onPointerDown={() => setPreview(null)}>
+          <div
+            className={`absolute max-h-[min(70vh,22rem)] overflow-hidden rounded-2xl border p-4 shadow-2xl backdrop-blur-2xl ${
+              resolvedTheme === 'dark'
+                ? 'border-white/15 bg-zinc-950/85 text-white shadow-black/50'
+                : 'border-white/70 bg-white/90 text-gray-950 shadow-gray-900/20'
+            }`}
+            style={{
+              left: previewPosition.left,
+              top: previewPosition.top,
+              width: previewPosition.width,
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="false"
+            aria-label={preview.item.name}
+          >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h4 className="line-clamp-2 text-xl font-bold leading-tight">
+                  {preview.item.name}
+                </h4>
+                <span className={`mt-1 block text-lg font-bold ${
+                  resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
+                }`}>
+                  {preview.item.is_customizable ? t('menu.item.from') : ''}€{preview.item.price.toFixed(2)}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreview(null)}
+                className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border transition-colors ${
+                  resolvedTheme === 'dark'
+                    ? 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                    : 'border-black/10 bg-black/5 text-gray-600 hover:bg-black/10 hover:text-gray-950'
+                }`}
+                aria-label={t('common.actions.close')}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="max-h-[14rem] overflow-y-auto pr-1 scrollbar-hide">
+              {preview.item.description ? (
+                <p className={`text-base font-semibold leading-relaxed ${
+                  resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-800'
+                }`}>
+                  {preview.item.description}
+                </p>
+              ) : (
+                <p className={resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-500'}>
+                  {t('menu.item.noDescription', 'No description available')}
+                </p>
+              )}
+
+              {(preview.item.ingredients?.filter(Boolean).length ?? 0) > 0 && (
+                <div className="mt-4">
+                  <div className={`mb-2 text-xs font-semibold uppercase tracking-wide ${
+                    resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-500'
+                  }`}>
+                    {t('menu.cart.ingredients')}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {preview.item.ingredients!.filter(Boolean).map((ingredient, index) => (
+                      <span
+                        key={`${preview.item.id}-glance-ingredient-${index}`}
+                        className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                          resolvedTheme === 'dark'
+                            ? 'bg-yellow-300/12 text-yellow-200'
+                            : 'bg-yellow-100 text-yellow-800'
+                        }`}
+                      >
+                        {ingredient}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-2.5 sm:gap-3">
         {menuItems.map((item) => {
           // Tier-price resolution lives in a shared util so cart-repricing
           // in MenuModal (when order type changes mid-edit) uses exactly
@@ -320,11 +462,14 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                 category: item.category_id,
                 preparationTime: item.preparation_time || item.preparationTime || 0,
                 image: item.image_url || '',
-                is_customizable: item.is_customizable
+                is_customizable: item.is_customizable,
+                ingredients: item.ingredients || null,
+                customizations: item.customizations,
               }}
               orderType={orderType}
               onSelect={() => onItemSelect(item)}
               onQuickAdd={onQuickAdd ? (_cardItem, quantity) => onQuickAdd(item, quantity) : undefined}
+              onPreview={(previewItem, anchorRect) => setPreview({ item: previewItem, anchorRect })}
             />
           );
         })}

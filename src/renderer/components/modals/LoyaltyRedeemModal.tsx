@@ -1,9 +1,8 @@
 import React, { useState, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Gift, Award, Star, Minus, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import toast from 'react-hot-toast';
-import { getBridge } from '../../../lib';
-import { useTheme } from '../../contexts/theme-context';
+import { formatCurrency } from '../../utils/format';
 
 interface LoyaltyRedeemModalProps {
   isOpen: boolean;
@@ -18,69 +17,106 @@ interface LoyaltyRedeemModalProps {
   redemptionRate: number;
   /** Minimum points required to redeem */
   minRedemptionPoints: number;
+  /** Optional cap from the current cart value so points cannot exceed the payable subtotal. */
+  maxRedeemablePoints?: number;
 }
 
 export function LoyaltyRedeemModal({
   isOpen,
   onClose,
   onRedeem,
-  customerId,
   customerName,
   pointsBalance,
   tier,
   redemptionRate,
   minRedemptionPoints,
+  maxRedeemablePoints,
 }: LoyaltyRedeemModalProps) {
-  const bridge = getBridge();
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
-  const isDark = resolvedTheme === 'dark';
 
   const [pointsToRedeem, setPointsToRedeem] = useState(minRedemptionPoints);
-  const [redeeming, setRedeeming] = useState(false);
+  const [amountInput, setAmountInput] = useState('');
+
+  const effectiveMaxPoints = Math.max(
+    0,
+    Math.min(pointsBalance, maxRedeemablePoints ?? pointsBalance),
+  );
+  const maxRedeemableAmount = useMemo(
+    () => Number((effectiveMaxPoints * redemptionRate).toFixed(2)),
+    [effectiveMaxPoints, redemptionRate],
+  );
+  const minRedeemableAmount = useMemo(
+    () => Number((minRedemptionPoints * redemptionRate).toFixed(2)),
+    [minRedemptionPoints, redemptionRate],
+  );
+
+  const formatAmountInput = (amount: number) => {
+    const safeAmount = Number.isFinite(amount) ? Math.max(0, amount) : 0;
+    return safeAmount.toFixed(2);
+  };
+
+  const parseAmountInput = (value: string) => {
+    const normalized = value.replace(/[^\d.,]/g, '').replace(',', '.');
+    const parsed = Number.parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const clampPoints = (points: number) => {
+    const safePoints = Number.isFinite(points) ? Math.trunc(points) : 0;
+    return Math.max(0, Math.min(safePoints, effectiveMaxPoints));
+  };
+
+  const setRedeemPoints = (points: number) => {
+    const clampedPoints = clampPoints(points);
+    setPointsToRedeem(clampedPoints);
+    setAmountInput(formatAmountInput(clampedPoints * redemptionRate));
+  };
+
+  React.useEffect(() => {
+    if (!isOpen) return;
+    setRedeemPoints(effectiveMaxPoints);
+  }, [effectiveMaxPoints, isOpen, minRedemptionPoints, redemptionRate]);
 
   const discountPreview = useMemo(
-    () => pointsToRedeem * redemptionRate,
+    () => Number((pointsToRedeem * redemptionRate).toFixed(2)),
     [pointsToRedeem, redemptionRate],
   );
 
-  const canRedeem = pointsToRedeem >= minRedemptionPoints && pointsToRedeem <= pointsBalance;
+  const canRedeem =
+    effectiveMaxPoints >= minRedemptionPoints &&
+    pointsToRedeem >= minRedemptionPoints &&
+    pointsToRedeem <= effectiveMaxPoints;
 
-  const handleRedeem = async () => {
-    if (!canRedeem || redeeming) return;
-    setRedeeming(true);
-    try {
-      const result: any = await bridge.loyalty.redeemPoints({
-        customerId,
-        points: pointsToRedeem,
-      });
-      if (result?.success) {
-        const discount = (result.discountValue ?? pointsToRedeem * redemptionRate) as number;
-        toast.success(
-          t('loyalty.redeemSuccess', {
-            points: pointsToRedeem,
-            discount: `€${discount.toFixed(2)}`,
-          }),
-        );
-        onRedeem(discount, pointsToRedeem);
-        onClose();
-      } else {
-        toast.error(result?.error || 'Redemption failed');
-      }
-    } catch (err: any) {
-      toast.error(err?.message || 'Redemption failed');
-    } finally {
-      setRedeeming(false);
-    }
+  const handleRedeem = () => {
+    if (!canRedeem) return;
+    onRedeem(discountPreview, pointsToRedeem);
+    onClose();
   };
 
   const adjustPoints = (delta: number) => {
-    setPointsToRedeem((prev) => {
-      const next = prev + delta;
-      if (next < minRedemptionPoints) return minRedemptionPoints;
-      if (next > pointsBalance) return pointsBalance;
-      return next;
-    });
+    const next = pointsToRedeem + delta;
+    const nextPoints = next < minRedemptionPoints
+      ? minRedemptionPoints
+      : Math.min(next, effectiveMaxPoints);
+    setRedeemPoints(nextPoints);
+  };
+
+  const handlePointsChange = (value: string) => {
+    const parsedPoints = Number.parseInt(value, 10);
+    setRedeemPoints(Number.isNaN(parsedPoints) ? 0 : parsedPoints);
+  };
+
+  const handleAmountChange = (value: string) => {
+    setAmountInput(value);
+    const requestedAmount = Math.min(parseAmountInput(value), maxRedeemableAmount);
+    const nextPoints = redemptionRate > 0
+      ? Math.floor((requestedAmount + 0.000001) / redemptionRate)
+      : 0;
+    setPointsToRedeem(clampPoints(nextPoints));
+  };
+
+  const normalizeAmountInput = () => {
+    setAmountInput(formatAmountInput(discountPreview));
   };
 
   const getTierColor = (t: string | undefined) => {
@@ -94,90 +130,101 @@ export function LoyaltyRedeemModal({
 
   if (!isOpen) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div
-        className={`w-full max-w-md rounded-2xl p-6 shadow-xl ${
-          isDark ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'
-        }`}
-      >
+  const glassPanelClass = 'rounded-xl border liquid-glass-modal-border bg-white/10 p-4 backdrop-blur-xl dark:bg-black/20';
+  const glassSubtlePanelClass = 'rounded-lg border liquid-glass-modal-border bg-white/10 px-3 py-2 text-xs liquid-glass-modal-text-muted backdrop-blur-xl dark:bg-black/20';
+  const glassIconButtonClass = 'liquid-glass-modal-button !min-h-0 !p-2 disabled:opacity-30 disabled:pointer-events-none';
+  const glassQuickButtonClass = (active: boolean) =>
+    `flex-1 rounded-lg border py-1 text-xs font-medium transition-colors ${
+      active
+        ? 'border-purple-400/60 bg-purple-500/30 text-purple-100 shadow-sm'
+        : 'liquid-glass-modal-border liquid-glass-modal-text-muted bg-white/10 hover:bg-white/20 dark:bg-black/20 dark:hover:bg-white/10'
+    }`;
+
+  const modal = (
+    <div className="fixed inset-0 z-[2147483000] flex items-center justify-center p-4">
+      <div className="liquid-glass-modal-backdrop !fixed !inset-0" aria-hidden="true" />
+      <div className="liquid-glass-modal-shell relative w-full max-w-md overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="liquid-glass-modal-header !px-5 !py-4">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-purple-500/20">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl border liquid-glass-modal-border bg-purple-500/20 text-purple-300 backdrop-blur-xl">
               <Gift className="w-5 h-5 text-purple-500" />
             </div>
-            <h2 className="text-lg font-bold">
+            <h2 className="liquid-glass-modal-title !text-lg">
               {t('loyalty.redeemTitle', 'Redeem Loyalty Points')}
             </h2>
           </div>
           <button
             onClick={onClose}
-            className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
+            className="liquid-glass-modal-close"
+            aria-label={t('common.actions.close', 'Close')}
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Customer Info */}
-        <div
-          className={`p-4 rounded-xl mb-4 ${
-            isDark ? 'bg-gray-700/50' : 'bg-gray-50'
-          }`}
-        >
+        <div className="space-y-4 p-5">
+          {/* Customer Info */}
+          <div className={glassPanelClass}>
           <div className="flex items-center justify-between mb-2">
-            <span className="font-medium">{customerName || t('loyalty.unknownCustomer', 'Unknown')}</span>
+            <span className="font-medium liquid-glass-modal-text">{customerName || t('loyalty.unknownCustomer', 'Unknown')}</span>
             {tier && (
               <span
-                className={`px-2 py-0.5 text-xs font-medium rounded flex items-center gap-1 ${getTierColor(tier)}`}
+                className={`px-2 py-0.5 text-xs font-medium rounded-lg border liquid-glass-modal-border flex items-center gap-1 ${getTierColor(tier)}`}
               >
                 <Star className="w-3 h-3 fill-current" />
                 {tier}
               </span>
             )}
           </div>
-          <div className="flex items-center justify-between text-sm">
-            <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>
-              {t('loyalty.balance', 'Balance')}
-            </span>
-            <span className="font-bold text-purple-500">{pointsBalance.toLocaleString()} pts</span>
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div>
+              <span className="block text-xs liquid-glass-modal-text-muted">
+                {t('loyalty.availableBalance', 'Available balance')}
+              </span>
+              <span className="font-bold text-purple-500">
+                {pointsBalance.toLocaleString()} {t('loyalty.pointsShort', 'pts')}
+              </span>
+            </div>
+            <div>
+              <span className="block text-xs liquid-glass-modal-text-muted">
+                {t('loyalty.maxRedeemable', 'Max redeemable')}
+              </span>
+              <span className="font-bold text-green-500">
+                {formatCurrency(maxRedeemableAmount)}
+              </span>
+            </div>
+          </div>
+          <div className={`mt-3 ${glassSubtlePanelClass}`}>
+            {t('loyalty.manualRedeemHint', 'Enter the amount or points to apply to this cart.')}
           </div>
         </div>
 
         {/* Points Selector */}
-        <div className="mb-4">
-          <label className={`text-sm mb-2 block ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <div>
+          <label className="text-sm mb-2 block liquid-glass-modal-text-muted">
             {t('loyalty.pointsToRedeem', 'Points to redeem')}
           </label>
           <div className="flex items-center gap-3">
             <button
               onClick={() => adjustPoints(-50)}
               disabled={pointsToRedeem <= minRedemptionPoints}
-              className={`p-2 rounded-lg ${
-                isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-100 hover:bg-gray-200'
-              } disabled:opacity-30`}
+              className={glassIconButtonClass}
             >
               <Minus className="w-5 h-5" />
             </button>
             <input
-              type="number"
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
               value={pointsToRedeem}
-              onChange={(e) => {
-                const val = parseInt(e.target.value, 10);
-                if (!isNaN(val) && val >= 0) {
-                  setPointsToRedeem(Math.min(val, pointsBalance));
-                }
-              }}
-              className={`flex-1 text-center text-2xl font-bold py-2 rounded-lg ${
-                isDark ? 'bg-gray-700 text-white' : 'bg-gray-100 text-gray-900'
-              } outline-none`}
+              onChange={(e) => handlePointsChange(e.target.value)}
+              className="liquid-glass-modal-input flex-1 text-center text-2xl font-bold"
             />
             <button
               onClick={() => adjustPoints(50)}
-              disabled={pointsToRedeem >= pointsBalance}
-              className={`p-2 rounded-lg ${
-                isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-100 hover:bg-gray-200'
-              } disabled:opacity-30`}
+              disabled={pointsToRedeem >= effectiveMaxPoints}
+              className={glassIconButtonClass}
             >
               <Plus className="w-5 h-5" />
             </button>
@@ -185,37 +232,57 @@ export function LoyaltyRedeemModal({
 
           {/* Quick select buttons */}
           <div className="flex gap-2 mt-2">
-            {[minRedemptionPoints, Math.floor(pointsBalance * 0.5), pointsBalance]
-              .filter((v, i, a) => v >= minRedemptionPoints && v <= pointsBalance && a.indexOf(v) === i)
+            {[minRedemptionPoints, Math.floor(effectiveMaxPoints * 0.5), effectiveMaxPoints]
+              .filter((v, i, a) => v >= minRedemptionPoints && v <= effectiveMaxPoints && a.indexOf(v) === i)
               .map((pts) => (
                 <button
                   key={pts}
-                  onClick={() => setPointsToRedeem(pts)}
-                  className={`flex-1 py-1 text-xs rounded-lg font-medium ${
-                    pointsToRedeem === pts
-                      ? 'bg-purple-500 text-white'
-                      : isDark
-                        ? 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                  }`}
+                  onClick={() => setRedeemPoints(pts)}
+                  className={glassQuickButtonClass(pointsToRedeem === pts)}
                 >
-                  {pts === pointsBalance ? 'All' : pts.toLocaleString()}
+                  {pts === effectiveMaxPoints ? t('common.all', 'All') : pts.toLocaleString()}
                 </button>
               ))}
           </div>
         </div>
 
-        {/* Discount Preview */}
-        <div
-          className={`p-4 rounded-xl mb-6 border ${
-            isDark ? 'bg-green-900/20 border-green-500/30' : 'bg-green-50 border-green-200'
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-sm ${isDark ? 'text-green-400' : 'text-green-700'}`}>
-              {t('loyalty.discountPreview', { amount: `€${discountPreview.toFixed(2)}` })}
+        {/* Cash Amount Selector */}
+        <div>
+          <label className="text-sm mb-2 block liquid-glass-modal-text-muted">
+            {t('loyalty.amountToRedeem', 'Discount amount')}
+          </label>
+          <div className="liquid-glass-modal-input flex items-center px-3 py-2">
+            <span className="mr-2 font-semibold opacity-70">€</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={amountInput}
+              onChange={(e) => handleAmountChange(e.target.value)}
+              onBlur={normalizeAmountInput}
+              className="w-full bg-transparent text-2xl font-bold outline-none liquid-glass-modal-text"
+            />
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-3 text-xs liquid-glass-modal-text-muted">
+            <span>
+              {t('loyalty.minimumRedeemable', {
+                points: minRedemptionPoints,
+                amount: formatCurrency(minRedeemableAmount),
+                defaultValue: 'Minimum {{points}} pts / {{amount}}',
+              })}
             </span>
-            <span className="text-xl font-bold text-green-500">€{discountPreview.toFixed(2)}</span>
+            <span>
+              {pointsToRedeem.toLocaleString()} {t('loyalty.pointsShort', 'pts')}
+            </span>
+          </div>
+        </div>
+
+        {/* Discount Preview */}
+        <div className="rounded-xl border border-emerald-400/30 bg-emerald-500/15 p-4 backdrop-blur-xl">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-emerald-300">
+              {t('loyalty.discountPreview', { amount: formatCurrency(discountPreview) })}
+            </span>
+            <span className="text-xl font-bold text-emerald-400">{formatCurrency(discountPreview)}</span>
           </div>
         </div>
 
@@ -230,26 +297,29 @@ export function LoyaltyRedeemModal({
         <div className="flex gap-3">
           <button
             onClick={onClose}
-            className={`flex-1 py-3 rounded-xl font-medium ${
-              isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-100 hover:bg-gray-200'
-            }`}
+            className="liquid-glass-modal-button flex-1"
           >
             {t('loyalty.redeemCancel', 'Skip')}
           </button>
           <button
             onClick={handleRedeem}
-            disabled={!canRedeem || redeeming}
-            className="flex-1 py-3 rounded-xl font-medium bg-purple-500 text-white hover:bg-purple-600 disabled:opacity-50 flex items-center justify-center gap-2"
+            disabled={!canRedeem}
+            className="liquid-glass-modal-button flex-1 border-purple-400/50 bg-purple-500/30 text-purple-100 hover:bg-purple-500/40 disabled:opacity-50 disabled:pointer-events-none flex items-center justify-center gap-2"
           >
             <Award className="w-4 h-4" />
-            {redeeming
-              ? '...'
-              : t('loyalty.redeemConfirm', {
-                  discount: `€${discountPreview.toFixed(2)}`,
-                })}
+            {t('loyalty.redeemConfirm', {
+              discount: formatCurrency(discountPreview),
+            })}
           </button>
+        </div>
         </div>
       </div>
     </div>
   );
+
+  if (typeof document === 'undefined') {
+    return modal;
+  }
+
+  return createPortal(modal, document.body);
 }

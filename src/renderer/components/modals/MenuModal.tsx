@@ -3,11 +3,12 @@ import { useTranslation } from 'react-i18next';
 import { MenuCategoryTabs } from '../menu/MenuCategoryTabs';
 import { MenuItemGrid } from '../menu/MenuItemGrid';
 import { MenuCart } from '../menu/MenuCart';
-import type { AppliedCoupon } from '../menu/MenuCart';
+import type { AppliedCoupon, AppliedLoyaltyRedemption } from '../menu/MenuCart';
 import { MenuItemModal } from '../menu/MenuItemModal';
 import { ComboChoiceModal } from '../menu/ComboChoiceModal';
 import type { ChosenComboItem } from '../menu/ComboChoiceModal';
 import { PaymentModal } from './PaymentModal';
+import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { useFeaturedItems } from '../../hooks/useFeaturedItems';
@@ -17,7 +18,7 @@ import { useKdsLiveDraftSync } from '../../hooks/useKdsLiveDraftSync';
 import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
-import { menuService } from '../../services/MenuService';
+import { menuService, type MenuItem } from '../../services/MenuService';
 import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import type { MenuCombo } from '@shared/types/combo';
@@ -62,6 +63,19 @@ type MenuModalCartItem = MenuCartItem & {
   category?: { id?: string | null } | string | null;
 } & Partial<OfferRewardLineMetadata>;
 
+interface LoyaltySettingsState {
+  is_active: boolean;
+  redemption_rate: number;
+  min_redemption_points: number;
+}
+
+interface LoyaltyCustomerState {
+  customer_id?: string | null;
+  points_balance: number;
+  tier?: string | null;
+  customer_name?: string | null;
+}
+
 interface MenuModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -85,6 +99,13 @@ interface MenuModalProps {
     coupon_id?: string | null;
     coupon_code?: string | null;
     coupon_discount_amount?: number;
+    loyalty_redemption?: {
+      customer_id: string;
+      points_redeemed: number;
+      discount_amount: number;
+    } | null;
+    loyalty_discount_amount?: number;
+    loyalty_points_redeemed?: number;
     total_discount_amount?: number;
     is_ghost?: boolean;
     ghost_source?: string | null;
@@ -141,6 +162,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
   const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
   const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
+  const hasLoyaltyModule = hasModule(MODULE_IDS.LOYALTY);
   const bridge = getBridge();
   const [selectedCategory, setSelectedCategory] = useState<string>("featured");
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("");
@@ -156,6 +178,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [ghostModeArmed, setGhostModeArmed] = useState(false);
   const [ghostModeArmedAt, setGhostModeArmedAt] = useState<string | null>(null);
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
+  const [menuItemsForCategoryTabs, setMenuItemsForCategoryTabs] = useState<MenuItem[]>([]);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [isLocalProcessing, setIsLocalProcessing] = useState(false);
@@ -212,6 +235,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [isValidatingCoupon, setIsValidatingCoupon] = useState(false);
   const [couponError, setCouponError] = useState<string | null>(null);
 
+  // Loyalty redemption state. This is a pending cart discount until the order
+  // has been created; points are deducted only after a real order_id exists.
+  const [loyaltySettings, setLoyaltySettings] = useState<LoyaltySettingsState | null>(null);
+  const [loyaltyCustomer, setLoyaltyCustomer] = useState<LoyaltyCustomerState | null>(null);
+  const [isLoadingLoyalty, setIsLoadingLoyalty] = useState(false);
+  const [isLoyaltyRedeemModalOpen, setIsLoyaltyRedeemModalOpen] = useState(false);
+  const [appliedLoyaltyRedemption, setAppliedLoyaltyRedemption] =
+    useState<AppliedLoyaltyRedemption | null>(null);
+
   // State for editing a cart item
   const [editingCartItem, setEditingCartItem] = useState<any>(null);
 
@@ -258,6 +290,77 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const effectiveMinimumOrderAmount = hasDeliveryPro
     ? (effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? defaultMinimumOrderAmount)
     : 0;
+
+  const loyaltyCustomerId = resolvePersistedCustomerId(
+    selectedCustomer?.id,
+    selectedCustomer?.customer_id,
+    selectedCustomer?.customerId,
+  );
+  const selectedCustomerName =
+    selectedCustomer?.name ||
+    selectedCustomer?.customer_name ||
+    selectedCustomer?.full_name ||
+    null;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setAppliedLoyaltyRedemption(null);
+    setIsLoyaltyRedeemModalOpen(false);
+
+    if (!isOpen || editMode || !hasLoyaltyModule || !loyaltyCustomerId) {
+      setLoyaltySettings(null);
+      setLoyaltyCustomer(null);
+      setIsLoadingLoyalty(false);
+      return;
+    }
+
+    setIsLoadingLoyalty(true);
+    Promise.all([
+      bridge.loyalty.getSettings().catch((error: unknown) => {
+        console.warn('[MenuModal] Failed to load loyalty settings:', error);
+        return null;
+      }),
+      bridge.loyalty.getCustomerBalance(loyaltyCustomerId).catch((error: unknown) => {
+        console.warn('[MenuModal] Failed to load loyalty balance:', error);
+        return null;
+      }),
+    ])
+      .then(([settingsResult, balanceResult]: [any, any]) => {
+        if (cancelled) return;
+
+        const settings = settingsResult?.settings;
+        setLoyaltySettings(settings ? {
+          is_active: settings.is_active === true,
+          redemption_rate: Number(settings.redemption_rate ?? 0.01) || 0.01,
+          min_redemption_points: Number(settings.min_redemption_points ?? 100) || 100,
+        } : null);
+
+        const customer = balanceResult?.customer;
+        setLoyaltyCustomer(customer ? {
+          customer_id: customer.customer_id ?? loyaltyCustomerId,
+          points_balance: Number(customer.points_balance ?? 0) || 0,
+          tier: customer.tier ?? null,
+          customer_name: customer.customer_name ?? selectedCustomerName,
+        } : null);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingLoyalty(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    bridge.loyalty,
+    editMode,
+    hasLoyaltyModule,
+    isOpen,
+    loyaltyCustomerId,
+    selectedCustomerName,
+  ]);
 
   const buildSelectedAddressString = useCallback(() => {
     return buildSavedAddressQuery(selectedAddress);
@@ -836,6 +939,45 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      setMenuItemsForCategoryTabs([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadMenuItemsForCategoryTabs = async () => {
+      try {
+        const items = await menuService.getMenuItems();
+        if (!cancelled) {
+          setMenuItemsForCategoryTabs(items);
+        }
+      } catch (error) {
+        console.warn('[MenuModal] Unable to load menu item flavor availability for category tabs:', error);
+        if (!cancelled) {
+          setMenuItemsForCategoryTabs([]);
+        }
+      }
+    };
+
+    void loadMenuItemsForCategoryTabs();
+
+    let unsubscribe: (() => void) | undefined;
+    try {
+      unsubscribe = menuService.subscribeToMenuUpdates(() => {
+        void loadMenuItemsForCategoryTabs();
+      });
+    } catch (error) {
+      console.warn('[MenuModal] Unable to subscribe category tab flavor availability updates:', error);
+    }
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [isOpen]);
+
   // Load combos when modal opens
   useEffect(() => {
     const loadCombos = async () => {
@@ -989,6 +1131,60 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const handleRemoveCoupon = () => {
     setAppliedCoupon(null);
     setCouponError(null);
+  };
+
+  const handleOpenLoyaltyRedeem = () => {
+    if (!hasLoyaltyModule) {
+      toast.error(t('loyalty.moduleUnavailable', 'Loyalty module is not enabled for this terminal'));
+      return;
+    }
+    if (!loyaltyRedeemAvailable) {
+      if (loyaltyRedeemDisabledReason) {
+        toast.error(loyaltyRedeemDisabledReason);
+      }
+      return;
+    }
+    setIsLoyaltyRedeemModalOpen(true);
+  };
+
+  const handleApplyLoyaltyRedemption = (discountValue: number, pointsRedeemed: number) => {
+    if (!hasLoyaltyModule) {
+      toast.error(t('loyalty.moduleUnavailable', 'Loyalty module is not enabled for this terminal'));
+      return;
+    }
+    if (!loyaltyCustomerId) {
+      toast.error(t('loyalty.noCustomerSelected', 'Select a saved customer to redeem points'));
+      return;
+    }
+
+    const normalizedPoints = Math.max(0, Math.trunc(pointsRedeemed));
+    if (normalizedPoints < loyaltyMinRedemptionPoints || normalizedPoints > maxLoyaltyRedeemablePoints) {
+      toast.error(loyaltyRedeemDisabledReason || t('loyalty.insufficientPoints', { min: loyaltyMinRedemptionPoints }));
+      return;
+    }
+
+    const normalizedDiscount = Math.min(
+      Number(discountValue.toFixed(2)),
+      subtotalBeforeLoyaltyDiscount,
+    );
+
+    setAppliedLoyaltyRedemption({
+      customerId: loyaltyCustomerId,
+      customerName: loyaltyCustomer?.customer_name || selectedCustomerName,
+      pointsRedeemed: normalizedPoints,
+      discountAmount: normalizedDiscount,
+      pointsBalance: loyaltyPointsBalance,
+      tier: loyaltyCustomer?.tier ?? null,
+    });
+    toast.success(t('loyalty.redeemPrepared', {
+      points: normalizedPoints,
+      discount: formatCurrency(normalizedDiscount),
+      defaultValue: '{{points}} points ready for {{discount}} discount',
+    }));
+  };
+
+  const handleRemoveLoyaltyRedemption = () => {
+    setAppliedLoyaltyRedemption(null);
   };
 
   const buildMenuOfferCartItems = useCallback((items: MenuModalCartItem[]): OfferEvaluationCartItem[] => {
@@ -1223,9 +1419,82 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     discountPercentage: currentDiscountPercentage,
   } = calculateManualDiscount(subtotalAfterOfferDiscounts);
   const currentCouponDiscountAmount = calculateCouponDiscount();
-  const totalDiscountAmount = offerDiscountAmount + currentManualDiscountAmount + currentCouponDiscountAmount;
-  const discountedSubtotal = cartSubtotal - totalDiscountAmount;
+  const subtotalBeforeLoyaltyDiscount = Math.max(
+    cartSubtotal - offerDiscountAmount - currentManualDiscountAmount - currentCouponDiscountAmount,
+    0,
+  );
+  const loyaltyRedemptionRate = Math.max(0, Number(loyaltySettings?.redemption_rate ?? 0.01) || 0.01);
+  const loyaltyMinRedemptionPoints = Math.max(
+    1,
+    Number(loyaltySettings?.min_redemption_points ?? 100) || 100,
+  );
+  const loyaltyPointsBalance = Math.max(0, Number(loyaltyCustomer?.points_balance ?? 0) || 0);
+  const maxLoyaltyRedeemablePoints = loyaltyRedemptionRate > 0
+    ? Math.max(0, Math.min(
+        loyaltyPointsBalance,
+        Math.floor((subtotalBeforeLoyaltyDiscount + 0.000001) / loyaltyRedemptionRate),
+      ))
+    : 0;
+  const maxLoyaltyRedeemableAmount = Number((maxLoyaltyRedeemablePoints * loyaltyRedemptionRate).toFixed(2));
+  const effectiveLoyaltyRedemption = hasLoyaltyModule ? appliedLoyaltyRedemption : null;
+  const currentLoyaltyDiscountAmount = effectiveLoyaltyRedemption
+    ? Math.min(effectiveLoyaltyRedemption.discountAmount, subtotalBeforeLoyaltyDiscount)
+    : 0;
+  const totalDiscountAmount =
+    offerDiscountAmount +
+    currentManualDiscountAmount +
+    currentCouponDiscountAmount +
+    currentLoyaltyDiscountAmount;
+  const discountedSubtotal = Math.max(cartSubtotal - totalDiscountAmount, 0);
   const finalOrderTotal = discountedSubtotal + resolvedDeliveryFee;
+
+  const loyaltyRedeemDisabledReason = (() => {
+    if (!hasLoyaltyModule) {
+      return t('loyalty.moduleUnavailable', 'Loyalty module is not enabled for this terminal');
+    }
+    if (!loyaltyCustomerId) {
+      return t('loyalty.noCustomerSelected', 'Select a saved customer to redeem points');
+    }
+    if (!loyaltySettings) {
+      return t('loyalty.settingsUnavailable', 'Loyalty settings are not available on this terminal');
+    }
+    if (!loyaltySettings.is_active) {
+      return t('loyalty.programInactive', 'Loyalty Program Inactive');
+    }
+    if (!loyaltyCustomer) {
+      return t('loyalty.noAccountForCustomer', 'This customer has no loyalty account');
+    }
+    if (maxLoyaltyRedeemablePoints < loyaltyMinRedemptionPoints) {
+      return t('loyalty.notEnoughRedeemablePoints', {
+        min: loyaltyMinRedemptionPoints,
+        defaultValue: 'Minimum {{min}} points required',
+      });
+    }
+    return null;
+  })();
+  const loyaltyRedeemAvailable =
+    !isLoadingLoyalty &&
+    !loyaltyRedeemDisabledReason &&
+    maxLoyaltyRedeemablePoints >= loyaltyMinRedemptionPoints;
+
+  useEffect(() => {
+    if (!appliedLoyaltyRedemption) return;
+    const stillValid =
+      hasLoyaltyModule &&
+      appliedLoyaltyRedemption.customerId === loyaltyCustomerId &&
+      loyaltySettings?.is_active === true &&
+      appliedLoyaltyRedemption.pointsRedeemed <= maxLoyaltyRedeemablePoints;
+
+    if (!stillValid) {
+      setAppliedLoyaltyRedemption(null);
+    }
+  }, [
+    appliedLoyaltyRedemption,
+    hasLoyaltyModule,
+    loyaltyCustomerId,
+    loyaltySettings?.is_active,
+    maxLoyaltyRedeemablePoints,
+  ]);
 
   const handleAddToCart = async (item: any, quantity: number, customizations: any[], notes: string) => {
     // Get category ID from the item, or fallback to selected category
@@ -1541,6 +1810,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           manualDiscountMode,
           manualDiscountValue,
           total_discount_amount: totalDiscountAmount,
+          ...(effectiveLoyaltyRedemption ? {
+            loyalty_redemption: {
+              customer_id: effectiveLoyaltyRedemption.customerId,
+              points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
+              discount_amount: currentLoyaltyDiscountAmount,
+            },
+            loyalty_discount_amount: currentLoyaltyDiscountAmount,
+            loyalty_points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
+          } : {}),
           is_ghost: isGhostOrder,
           ghost_source: isGhostOrder ? 'manual_code_x_1' : null,
           ghost_metadata: ghostMetadata,
@@ -1565,6 +1843,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setSelectedSubcategory("");
       setManualDiscountMode('percentage');
       setManualDiscountValue(0);
+      setAppliedLoyaltyRedemption(null);
       setGhostModeArmed(false);
       setGhostModeArmedAt(null);
       setShowPaymentModal(false);
@@ -1607,6 +1886,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         manualDiscountMode,
         manualDiscountValue,
         total_discount_amount: totalDiscountAmount,
+        ...(effectiveLoyaltyRedemption ? {
+          loyalty_redemption: {
+            customer_id: effectiveLoyaltyRedemption.customerId,
+            points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
+            discount_amount: currentLoyaltyDiscountAmount,
+          },
+          loyalty_discount_amount: currentLoyaltyDiscountAmount,
+          loyalty_points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
+        } : {}),
         is_ghost: false,
         ghost_source: null,
         ghost_metadata: null,
@@ -1653,10 +1941,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         onClose={onClose}
         ariaLabel={getModalTitle()}
         header={
-          <div className="flex flex-col gap-1 px-6 py-3 border-b border-white/10 flex-shrink-0">
+          <div className="flex flex-col gap-1 px-5 py-2.5 border-b border-white/10 flex-shrink-0">
             {/* Main row: Title + Customer + Close */}
-            <div className="flex items-center justify-between w-full">
-              <h2 className="liquid-glass-modal-title text-xl">
+            <div className="flex items-center justify-between gap-4 w-full">
+              <h2 className="liquid-glass-modal-title text-xl flex-shrink-0">
                 {getModalTitle()}
                 {editMode && (
                   <span className="ml-3 text-xs font-medium text-amber-400 bg-amber-500/20 px-2 py-0.5 rounded-full align-middle">
@@ -1665,6 +1953,28 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   </span>
                 )}
               </h2>
+
+              <div className="relative min-w-[14rem] max-w-2xl flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  ref={menuSearchRef}
+                  type="text"
+                  autoFocus
+                  value={menuSearchQuery}
+                  onChange={(e) => setMenuSearchQuery(e.target.value)}
+                  placeholder={t('menu.search.placeholder', 'Search menu items...')}
+                  className="h-10 w-full rounded-xl border border-white/15 bg-white/[0.08] pl-9 pr-9 text-sm text-white placeholder-gray-400 backdrop-blur-md focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+                {menuSearchQuery && (
+                  <button
+                    onClick={() => setMenuSearchQuery('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-gray-400 transition-colors hover:bg-white/10 hover:text-white"
+                    aria-label={t('common.actions.clear', 'Clear')}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
 
               <div className="flex items-center gap-3">
                 {/* Customer info chip or Add Customer button */}
@@ -1734,35 +2044,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0">
           {/* Left Panel - Menu */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-            {/* Search bar */}
-            <div className="px-3 pt-3 pb-1">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                <input
-                  ref={menuSearchRef}
-                  type="text"
-                  autoFocus
-                  value={menuSearchQuery}
-                  onChange={(e) => setMenuSearchQuery(e.target.value)}
-                  placeholder={t('menu.search.placeholder', 'Search menu items...')}
-                  className="w-full pl-9 pr-8 py-2 rounded-lg bg-white/10 border border-white/20 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-                {menuSearchQuery && (
-                  <button
-                    onClick={() => setMenuSearchQuery('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-            </div>
             <MenuCategoryTabs
               selectedCategory={selectedCategory}
               onCategoryChange={(cat) => { setSelectedCategory(cat); setMenuSearchQuery(''); }}
               selectedSubcategory={selectedSubcategory}
               onSubcategoryChange={setSelectedSubcategory}
               categories={categories}
+              menuItems={menuItemsForCategoryTabs}
             />
             <MenuItemGrid
               selectedCategory={selectedCategory}
@@ -1780,8 +2068,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           </div>
 
           {/* Right Panel - Cart - Flex layout for proper height inheritance */}
-          <div className="w-72 md:w-80 flex-shrink-0 flex flex-col min-h-0 overflow-hidden">
-            <MenuCart
+          <div className="w-72 md:w-[19rem] flex-shrink-0 min-h-0 bg-transparent py-2 pl-3 pr-2">
+            <div className="flex h-full min-h-0 flex-col overflow-visible bg-transparent">
+              <MenuCart
               cartItems={cartItems}
               onCheckout={handleCheckout}
               onUpdateCart={setCartItems}
@@ -1814,13 +2103,25 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               couponDiscount={currentCouponDiscountAmount}
               isValidatingCoupon={isValidatingCoupon}
               couponError={couponError}
+              loyaltyRedemption={effectiveLoyaltyRedemption}
+              loyaltyDiscount={currentLoyaltyDiscountAmount}
+              loyaltyRedeemAvailable={hasLoyaltyModule && (loyaltyRedeemAvailable || Boolean(effectiveLoyaltyRedemption))}
+              loyaltyRedeemLoading={hasLoyaltyModule && isLoadingLoyalty}
+              loyaltyRedeemDisabledReason={hasLoyaltyModule ? loyaltyRedeemDisabledReason : null}
+              loyaltyRedeemablePoints={hasLoyaltyModule ? maxLoyaltyRedeemablePoints : 0}
+              loyaltyRedeemableAmount={hasLoyaltyModule ? maxLoyaltyRedeemableAmount : 0}
+              onOpenLoyaltyRedeem={
+                !editMode && hasLoyaltyModule ? handleOpenLoyaltyRedeem : undefined
+              }
+              onRemoveLoyaltyRedemption={hasLoyaltyModule ? handleRemoveLoyaltyRedemption : undefined}
               offerDiscountAmount={offerDiscountAmount}
               matchedOfferNames={matchedOfferNames}
               onAddManualItem={handleAddManualItem}
               onLinePriceChange={handleLinePriceChange}
               ghostModeFeatureEnabled={ghostModeFeatureEnabled}
               ghostModeArmed={ghostModeArmed}
-            />
+              />
+            </div>
           </div>
         </div>
       </LiquidGlassModal>
@@ -1856,6 +2157,22 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             refocusMenuSearch();
           }}
           onConfirm={handleComboChoiceConfirm}
+        />
+      )}
+
+      {/* Loyalty Redemption Modal */}
+      {isOpen && hasLoyaltyModule && isLoyaltyRedeemModalOpen && loyaltyCustomerId && loyaltySettings && loyaltyCustomer && (
+        <LoyaltyRedeemModal
+          isOpen={isLoyaltyRedeemModalOpen}
+          onClose={() => setIsLoyaltyRedeemModalOpen(false)}
+          onRedeem={handleApplyLoyaltyRedemption}
+          customerId={loyaltyCustomerId}
+          customerName={loyaltyCustomer.customer_name || selectedCustomerName || undefined}
+          pointsBalance={loyaltyPointsBalance}
+          tier={loyaltyCustomer.tier ?? undefined}
+          redemptionRate={loyaltyRedemptionRate}
+          minRedemptionPoints={loyaltyMinRedemptionPoints}
+          maxRedeemablePoints={maxLoyaltyRedeemablePoints}
         />
       )}
 

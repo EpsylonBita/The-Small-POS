@@ -3,8 +3,8 @@ use serde::Deserialize;
 use tauri::Emitter;
 
 use crate::{
-    db, normalize_phone, payload_arg0_as_string, read_local_json_array, read_local_setting,
-    storage, sync_queue, value_i64, value_str, write_local_json,
+    db, fetch_supabase_rows, normalize_phone, payload_arg0_as_string, read_local_json_array,
+    read_local_setting, storage, sync_queue, value_i64, value_str, write_local_json,
 };
 
 #[derive(Debug, Deserialize)]
@@ -906,6 +906,25 @@ fn extract_privacy_tombstones(response: &serde_json::Value) -> Vec<serde_json::V
         .unwrap_or_default()
 }
 
+fn customer_response_has_next_page(response: &serde_json::Value) -> bool {
+    if let Some(has_next) = response
+        .pointer("/pagination/hasNextPage")
+        .and_then(|value| value.as_bool())
+    {
+        return has_next;
+    }
+
+    let page = response
+        .pointer("/pagination/page")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(1);
+    let total_pages = response
+        .pointer("/pagination/totalPages")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(1);
+    page < total_pages
+}
+
 fn sqlite_table_columns(
     conn: &rusqlite::Connection,
     table: &str,
@@ -1072,16 +1091,158 @@ async fn sync_customer_privacy_tombstones(db: &db::DbState) -> Result<usize, Str
     Ok(applied_count)
 }
 
-/// Fetch all customers through the trusted POS admin API and replace the local cache.
-async fn sync_customer_fetch_all(db: &db::DbState) -> Result<Vec<serde_json::Value>, String> {
-    let _ = sync_customer_privacy_tombstones(db).await;
-    let response = crate::admin_fetch(Some(db), "/api/pos/customers", "GET", None).await?;
-    let customers = extract_customers_from_pos_response(&response)
+fn resolved_customer_sync_org_id(db: &db::DbState) -> Option<String> {
+    storage::get_credential("organization_id")
+        .or_else(|| read_local_setting(db, "terminal", "organization_id"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn fetch_supabase_table_pages(
+    table: &str,
+    params: &[(&str, String)],
+    page_size: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut rows = Vec::new();
+    let mut offset = 0usize;
+
+    loop {
+        let mut page_params = params.to_vec();
+        page_params.push(("limit", page_size.to_string()));
+        page_params.push(("offset", offset.to_string()));
+
+        let response = fetch_supabase_rows(table, &page_params).await?;
+        let page = response.as_array().cloned().unwrap_or_default();
+        let page_len = page.len();
+        rows.extend(page);
+
+        if page_len < page_size {
+            break;
+        }
+
+        offset += page_size;
+        if offset > 1_000_000 {
+            return Err(format!("{table} pagination exceeded safety limit"));
+        }
+    }
+
+    Ok(rows)
+}
+
+async fn sync_customer_fetch_all_from_supabase(
+    db: &db::DbState,
+) -> Result<Vec<serde_json::Value>, String> {
+    crate::hydrate_terminal_credentials_from_local_settings(db);
+
+    let org_id = resolved_customer_sync_org_id(db)
+        .ok_or("Terminal not configured: missing organization_id")?;
+    let page_size = 1000usize;
+    let mut customers = fetch_supabase_table_pages(
+        "customers",
+        &[
+            ("select", "*".to_string()),
+            ("organization_id", format!("eq.{org_id}")),
+            ("order", "updated_at.desc.nullslast".to_string()),
+        ],
+        page_size,
+    )
+    .await?;
+
+    let addresses = fetch_supabase_table_pages(
+        "customer_addresses",
+        &[
+            ("select", "*".to_string()),
+            ("organization_id", format!("eq.{org_id}")),
+            ("order", "updated_at.desc.nullslast".to_string()),
+        ],
+        page_size,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "Unable to fetch customer addresses from Supabase fallback");
+        Vec::new()
+    });
+
+    let mut addresses_by_customer: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for address in addresses {
+        if let Some(customer_id) = value_str(&address, &["customer_id", "customerId"]) {
+            addresses_by_customer
+                .entry(customer_id)
+                .or_default()
+                .push(address);
+        }
+    }
+
+    for customer in &mut customers {
+        let Some(customer_id) = value_str(customer, &["id", "customer_id", "customerId"]) else {
+            continue;
+        };
+        let attached_addresses = addresses_by_customer
+            .remove(&customer_id)
+            .unwrap_or_default();
+        if let Some(object) = customer.as_object_mut() {
+            object.insert(
+                "addresses".to_string(),
+                serde_json::Value::Array(attached_addresses),
+            );
+        }
+    }
+
+    let customers = customers
         .into_iter()
         .map(normalize_customer_for_cache)
         .collect::<Vec<_>>();
+
     write_local_json(db, "customer_cache_v1", &serde_json::json!(customers))?;
-    let tombstones = extract_privacy_tombstones(&response);
+    Ok(customers)
+}
+
+/// Fetch all customers through the trusted POS admin API and replace the local cache.
+async fn sync_customer_fetch_all(db: &db::DbState) -> Result<Vec<serde_json::Value>, String> {
+    match sync_customer_fetch_all_from_supabase(db).await {
+        Ok(customers) => {
+            tracing::info!(
+                count = customers.len(),
+                "Synced customers directly from Supabase fallback"
+            );
+            return Ok(customers);
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "Supabase customer directory fallback unavailable; trying admin API"
+            );
+        }
+    }
+
+    let _ = sync_customer_privacy_tombstones(db).await;
+    let page_size = 500u64;
+    let mut page = 1u64;
+    let mut customers = Vec::new();
+    let mut tombstones = Vec::new();
+
+    loop {
+        let path = format!("/api/pos/customers?page={page}&limit={page_size}");
+        let response = crate::admin_fetch(Some(db), &path, "GET", None).await?;
+        customers.extend(
+            extract_customers_from_pos_response(&response)
+                .into_iter()
+                .map(normalize_customer_for_cache),
+        );
+        tombstones.extend(extract_privacy_tombstones(&response));
+
+        if !customer_response_has_next_page(&response) {
+            break;
+        }
+
+        page += 1;
+        if page > 1000 {
+            return Err("Customer pagination exceeded safety limit".into());
+        }
+    }
+
+    write_local_json(db, "customer_cache_v1", &serde_json::json!(customers))?;
     let applied_ids = apply_privacy_tombstones_to_cache(db, &tombstones)?;
     let _ = acknowledge_privacy_tombstones(db, applied_ids).await;
     if !tombstones.is_empty() {
@@ -1369,9 +1530,11 @@ pub async fn customer_search(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let query = parse_search_payload(arg0).query.to_lowercase();
-    let _ = sync_customer_privacy_tombstones(&db).await;
     if query.is_empty() {
-        // Fetch all customers from admin API and refresh local cache
+        // Fetch all customers through the fastest configured sync path and
+        // refresh local cache. Do not call the admin privacy-tombstone endpoint
+        // first here: if the tenant admin host is down, that request delays the
+        // direct Supabase fallback and makes the Users page appear frozen.
         match sync_customer_fetch_all(&db).await {
             Ok(customers) => return Ok(serde_json::json!(customers)),
             Err(e) => {
@@ -1381,6 +1544,8 @@ pub async fn customer_search(
             }
         }
     }
+
+    let _ = sync_customer_privacy_tombstones(&db).await;
     let cache = read_local_json_array(&db, "customer_cache_v1")?;
     let matches: Vec<serde_json::Value> = cache
         .into_iter()
@@ -1996,6 +2161,48 @@ mod dto_tests {
         .expect("customer ban tuple payload should parse");
         assert_eq!(parsed.customer_id, "cust-2");
         assert!(parsed.is_banned);
+    }
+
+    #[test]
+    fn customer_response_pagination_detects_next_page() {
+        assert!(customer_response_has_next_page(&serde_json::json!({
+            "pagination": {
+                "page": 1,
+                "totalPages": 2,
+                "hasNextPage": true
+            }
+        })));
+
+        assert!(!customer_response_has_next_page(&serde_json::json!({
+            "pagination": {
+                "page": 2,
+                "totalPages": 2,
+                "hasNextPage": false
+            }
+        })));
+    }
+
+    #[test]
+    fn extract_customers_from_list_response_uses_customers_array() {
+        let customers = extract_customers_from_pos_response(&serde_json::json!({
+            "success": true,
+            "customers": [
+                { "id": "cust-1", "name": "Customer One" },
+                { "id": "cust-2", "name": "Customer Two" }
+            ],
+            "customer": null,
+            "multiple": true
+        }));
+
+        assert_eq!(customers.len(), 2);
+        assert_eq!(
+            customers[0].get("id").and_then(|v| v.as_str()),
+            Some("cust-1")
+        );
+        assert_eq!(
+            customers[1].get("id").and_then(|v| v.as_str()),
+            Some("cust-2")
+        );
     }
 
     #[test]

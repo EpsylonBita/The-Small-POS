@@ -315,11 +315,26 @@ pub(crate) async fn fetch_supabase_rows(
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
-    let resp = client
+    let mut request = client
         .get(url)
         .header("apikey", &supabase_key)
         .header("Authorization", format!("Bearer {supabase_key}"))
-        .header("Content-Type", "application/json")
+        .header("Content-Type", "application/json");
+
+    if let Some(terminal_id) = storage::get_credential("terminal_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        request = request.header("x-terminal-id", terminal_id);
+    }
+    if let Some(api_key) = storage::get_credential("pos_api_key")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        request = request.header("x-pos-api-key", api_key);
+    }
+
+    let resp = request
         .send()
         .await
         .map_err(|e| format!("Supabase request failed: {e}"))?;

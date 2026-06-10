@@ -60,6 +60,85 @@ interface CustomerAddress {
   address_fingerprint?: string;
 }
 
+function mapCustomerToUser(customer: any): UserProfile | null {
+  const id = customer?.id || customer?.customer_id || customer?.customerId;
+  if (!id) return null;
+
+  return {
+    id: String(id),
+    name: customer.name || customer.full_name || customer.customer_name || customer.phone || '',
+    email: customer.email || undefined,
+    phone: customer.phone || customer.customer_phone || undefined,
+    type: 'customer',
+    loyalty_points: Number(customer.loyalty_points ?? customer.points_balance ?? 0) || 0,
+    total_orders: Number(customer.total_orders ?? 0) || 0,
+    created_at: customer.created_at || new Date(0).toISOString(),
+    updated_at: customer.updated_at,
+    address: customer.address,
+    postal_code: customer.postal_code,
+    notes: customer.notes,
+    is_banned: Boolean(customer.is_banned),
+  };
+}
+
+function extractCustomerList(payload: any): any[] {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  if (Array.isArray(payload?.customers)) {
+    return payload.customers;
+  }
+
+  if (Array.isArray(payload?.data?.customers)) {
+    return payload.data.customers;
+  }
+
+  const customer = payload?.customer ?? payload?.data?.customer;
+  return customer ? [customer] : [];
+}
+
+function mapCustomersToUsers(customers: any[]): UserProfile[] {
+  return customers
+    .map(mapCustomerToUser)
+    .filter((user): user is UserProfile => Boolean(user));
+}
+
+async function fetchPosCustomersDirectory(): Promise<UserProfile[]> {
+  const pageSize = 500;
+  let page = 1;
+  const customers: any[] = [];
+
+  while (page <= 50) {
+    const result = await posApiGet<any>(`pos/customers?page=${page}&limit=${pageSize}`);
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to load customers');
+    }
+
+    const payload = result.data;
+    const pageCustomers = extractCustomerList(payload);
+
+    customers.push(...pageCustomers);
+
+    const pagination = payload?.pagination ?? payload?.data?.pagination;
+    const hasNextPage =
+      pagination?.hasNextPage === true ||
+      (!pagination && pageCustomers.length === pageSize);
+    if (!hasNextPage) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return mapCustomersToUsers(customers);
+}
+
+async function fetchNativeCustomersDirectory(bridge: ReturnType<typeof getBridge>): Promise<UserProfile[]> {
+  const customers = extractCustomerList((await bridge.customers.search('')) || []);
+  return mapCustomersToUsers(customers);
+}
+
 function createAddressSessionToken(): string {
   return [
     'addr',
@@ -140,29 +219,43 @@ const UsersPage: React.FC = () => {
   const loadUsers = async () => {
     setLoading(true);
     try {
-      // Use the supported customer contract only; /api/pos/users is deprecated.
-      const customers = (await bridge.customers.search('')) || [];
+      // Use the native POS sync first. It can read customers directly from
+      // Supabase with terminal credentials, avoiding tenant admin-host
+      // timeouts. The POS HTTP API remains a compatibility fallback.
+      const sources: Array<{ name: string; users: UserProfile[] }> = [];
 
-      // Merge into single list
-      const unified = [
-        ...customers.map((customer: any) => ({
-          id: customer.id,
-          name: customer.name || customer.full_name || customer.phone,
-          email: customer.email,
-          phone: customer.phone,
-          type: 'customer' as const,
-          loyalty_points: customer.loyalty_points || 0,
-          total_orders: customer.total_orders || 0,
-          created_at: customer.created_at,
-          updated_at: customer.updated_at,
-          is_banned: Boolean(customer.is_banned)
-        }))
-      ]
+      try {
+        const nativeUsers = await fetchNativeCustomersDirectory(bridge);
+        if (nativeUsers.length > 0) {
+          sources.push({ name: 'native-customer-sync', users: nativeUsers });
+        }
+      } catch (cacheError) {
+        console.warn('Customer native sync/cache unavailable:', cacheError);
+      }
+
+      if (sources.length === 0) {
+        try {
+          const remoteUsers = await fetchPosCustomersDirectory();
+          if (remoteUsers.length > 0) {
+            sources.push({ name: 'pos-customers-api', users: remoteUsers });
+          }
+        } catch (remoteError) {
+          console.warn('POS customers API unavailable:', remoteError);
+        }
+      }
+
+      const unified = sources
+        .sort((left, right) => right.users.length - left.users.length)[0]?.users || [];
 
       // Deduplicate by ID in case IPC and live refresh overlap.
       const uniqueUsers = Array.from(
         new Map(unified.map(user => [user.id, user])).values()
       )
+
+      console.info('[UsersPage] loaded customers', {
+        count: uniqueUsers.length,
+        sources: sources.map(source => ({ name: source.name, count: source.users.length })),
+      });
 
       setUsers(uniqueUsers)
     } catch (error) {
@@ -632,7 +725,7 @@ const UsersPage: React.FC = () => {
                 resolvedTheme === 'dark' ? 'bg-gray-700 text-white border-gray-600' : 'bg-gray-50 text-gray-900 border-gray-300'
               }`}
             >
-              <option value="all">{t('filters.all', 'All')}</option>
+              <option value="all">{t('users.filterAll', 'All')}</option>
               <option value="customer">{t('users.filterCustomers', 'Customers')}</option>
               <option value="app_user">{t('users.filterAppUsers', 'App Users')}</option>
             </select>

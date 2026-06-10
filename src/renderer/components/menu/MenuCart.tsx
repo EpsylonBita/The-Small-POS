@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw } from 'lucide-react';
+import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw, Award } from 'lucide-react';
 import { useI18n } from '../../contexts/i18n-context';
 import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
@@ -78,6 +78,15 @@ export interface AppliedCoupon {
   minimum_order_amount?: number;
 }
 
+export interface AppliedLoyaltyRedemption {
+  customerId: string;
+  customerName?: string | null;
+  pointsRedeemed: number;
+  discountAmount: number;
+  pointsBalance?: number;
+  tier?: string | null;
+}
+
 interface MenuCartProps {
   cartItems: CartItem[];
   onCheckout: () => void;
@@ -106,6 +115,16 @@ interface MenuCartProps {
   couponDiscount?: number;
   isValidatingCoupon?: boolean;
   couponError?: string | null;
+  // Loyalty redemption props
+  loyaltyRedemption?: AppliedLoyaltyRedemption | null;
+  loyaltyDiscount?: number;
+  loyaltyRedeemAvailable?: boolean;
+  loyaltyRedeemLoading?: boolean;
+  loyaltyRedeemDisabledReason?: string | null;
+  loyaltyRedeemablePoints?: number;
+  loyaltyRedeemableAmount?: number;
+  onOpenLoyaltyRedeem?: () => void;
+  onRemoveLoyaltyRedemption?: () => void;
   offerDiscountAmount?: number;
   matchedOfferNames?: string[];
   // Manual item props
@@ -142,6 +161,15 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   couponDiscount = 0,
   isValidatingCoupon = false,
   couponError,
+  loyaltyRedemption = null,
+  loyaltyDiscount,
+  loyaltyRedeemAvailable = false,
+  loyaltyRedeemLoading = false,
+  loyaltyRedeemDisabledReason,
+  loyaltyRedeemablePoints = 0,
+  loyaltyRedeemableAmount = 0,
+  onOpenLoyaltyRedeem,
+  onRemoveLoyaltyRedemption,
   offerDiscountAmount = 0,
   matchedOfferNames = [],
   onAddManualItem,
@@ -309,7 +337,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     }
   }, [isCouponModalOpen, onApplyCoupon, t]);
 
-  const { start: startLoyaltyReader } = useLoyaltyReader(isCouponModalOpen, handleLoyaltyCardScanned);
+  const loyaltyFeatureEnabled = Boolean(onOpenLoyaltyRedeem || loyaltyRedemption);
+  const { start: startLoyaltyReader } = useLoyaltyReader(
+    isCouponModalOpen && loyaltyFeatureEnabled,
+    loyaltyFeatureEnabled ? handleLoyaltyCardScanned : undefined,
+  );
 
   const clearSelectionHoldTimer = React.useCallback(() => {
     if (selectionHoldTimeoutRef.current) {
@@ -738,7 +770,38 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const discountControlEnabled = Boolean(onDiscountChange || onManualDiscountChange);
   const isAppliedDiscountOverMax =
     effectiveDiscountMode === 'percentage' && effectiveDiscountPercentage > maxDiscountPercentage;
-  const totalAfterDiscount = Math.max(subtotal - offerDiscountAmount - discountAmount - couponDiscount, 0);
+  const loyaltyDiscountAmount = Math.max(0, loyaltyDiscount ?? loyaltyRedemption?.discountAmount ?? 0);
+  const totalAfterDiscount = Math.max(
+    subtotal - offerDiscountAmount - discountAmount - couponDiscount - loyaltyDiscountAmount,
+    0,
+  );
+  const loyaltyControlEnabled = loyaltyFeatureEnabled;
+  const cartActionCount = [
+    Boolean(onApplyCoupon),
+    discountControlEnabled,
+    loyaltyControlEnabled,
+  ].filter(Boolean).length;
+  const cartActionGridClass =
+    cartActionCount >= 3
+      ? 'grid-cols-3'
+      : cartActionCount === 2
+        ? 'grid-cols-2'
+        : 'grid-cols-1';
+  const cartActionIconButtonBaseClass = 'font-semibold antialiased transition-colors flex items-center justify-center rounded-lg bg-transparent border-0 p-0 shadow-none focus:outline-none focus:ring-2';
+  const safeLoyaltyRedeemablePoints = Math.max(0, Math.trunc(loyaltyRedeemablePoints || 0));
+  const safeLoyaltyRedeemableAmount = Math.max(0, loyaltyRedeemableAmount || 0);
+  const loyaltyActionTitle = loyaltyRedeemDisabledReason || (
+    safeLoyaltyRedeemableAmount > 0
+      ? t('menu.cart.loyaltyAvailableTitle', {
+          amount: formatCurrency(safeLoyaltyRedeemableAmount),
+          points: safeLoyaltyRedeemablePoints,
+          defaultValue: '{{points}} pts / {{amount}} available',
+        })
+      : t('loyalty.redeemTitle', 'Redeem Loyalty Points')
+  );
+  const discountActionTitle = effectiveDiscountMode === 'percentage'
+    ? t('menu.cart.discount', { percent: effectiveDiscountPercentage })
+    : t('menu.cart.discountAmount', 'Discount');
   const editingLineItem = editingLineItemId === null
     ? null
     : cartItems.find(item => item.id === editingLineItemId) ?? null;
@@ -853,11 +916,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
   return (
     <div
-      className="flex flex-col h-full w-full border-l border-black/10 dark:border-white/10 bg-white/5 dark:bg-black/10"
+      className="flex h-full w-full flex-col overflow-hidden rounded-[28px] border border-black/15 bg-transparent shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-white/60 dark:shadow-[0_12px_32px_rgba(0,0,0,0.08)]"
     >
       {/* Header - flex-shrink-0 keeps it fixed size */}
       <div className="flex-shrink-0 border-b border-black/10 dark:border-white/10">
-        <div className="flex items-center justify-between p-4">
+        <div className="flex items-center justify-between px-4 py-3">
           <h3 className="text-lg font-semibold liquid-glass-modal-title !text-base">
             {t('menu.cart.header', { count: uniqueCartItems.length })}
           </h3>
@@ -1000,7 +1063,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       </div>
 
       {/* Scrollable Cart Items - flex-1 + min-h-0 allows proper scrolling */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 touch-scroll pos-scrollbar-glass">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 touch-scroll scrollbar-hide">
         {uniqueCartItems.length === 0 ? (
           <div className="text-center py-6 sm:py-8">
             <ShoppingCart className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 text-black/20 dark:text-white/20" />
@@ -1373,25 +1436,49 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       </div>
 
       {/* Cart Footer - flex-shrink-0 keeps it fixed at bottom */}
-      <div className="flex-shrink-0 p-4 border-t border-black/10 dark:border-white/10 bg-white/5 dark:bg-black/10 space-y-3">
+      <div className="flex-shrink-0 p-3 border-t border-black/10 dark:border-white/10 bg-transparent space-y-3">
         {/* Coupon + Discount Controls */}
-        {!editMode && (onApplyCoupon || discountControlEnabled) && (
+        {!editMode && (onApplyCoupon || discountControlEnabled || loyaltyControlEnabled) && (
           <div className="space-y-2">
-            <div className={`grid gap-2 ${onApplyCoupon && discountControlEnabled ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            <div className={`grid gap-2 ${cartActionGridClass}`}>
               {onApplyCoupon && (
                 <button
                   type="button"
                   onClick={() => setIsCouponModalOpen(true)}
-                  className="h-11 px-3 text-sm font-semibold border rounded-lg antialiased transition-colors bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-blue-500 flex items-center justify-between"
+                  title={appliedCoupon?.code || t('menu.cart.couponButton', 'Coupon')}
+                  aria-label={appliedCoupon
+                    ? t('menu.cart.couponApplied', 'Coupon applied')
+                    : t('menu.cart.couponButton', 'Coupon')}
+                  className={`${cartActionIconButtonBaseClass} text-sky-600 focus:ring-sky-400 dark:text-sky-300`}
                 >
-                  <span>{t('menu.cart.couponButton', 'Coupon')}</span>
                   {isValidatingCoupon ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <Loader2 className="h-8 w-8 animate-spin flex-shrink-0" />
                   ) : (
-                    <span className="text-xs font-semibold opacity-80">
-                      {appliedCoupon ? appliedCoupon.code : t('menu.cart.applyCoupon', 'Apply')}
-                    </span>
+                    <Ticket className="h-8 w-8 flex-shrink-0" aria-hidden="true" />
                   )}
+                  <span className="sr-only">{t('menu.cart.couponButton', 'Coupon')}</span>
+                </button>
+              )}
+
+              {loyaltyControlEnabled && (
+                <button
+                  type="button"
+                  onClick={onOpenLoyaltyRedeem}
+                  disabled={!loyaltyRedeemAvailable || loyaltyRedeemLoading}
+                  title={loyaltyActionTitle}
+                  aria-label={loyaltyActionTitle}
+                  className={`${cartActionIconButtonBaseClass} ${
+                    loyaltyRedeemAvailable
+                      ? 'text-purple-600 focus:ring-purple-400 dark:text-purple-300'
+                      : 'cursor-not-allowed text-purple-700/35 dark:text-purple-200/35'
+                  }`}
+                >
+                  {loyaltyRedeemLoading ? (
+                    <Loader2 className="h-8 w-8 animate-spin flex-shrink-0" />
+                  ) : (
+                    <Award className="h-8 w-8 flex-shrink-0" aria-hidden="true" />
+                  )}
+                  <span className="sr-only">{t('menu.cart.loyaltyButton', 'Loyalty')}</span>
                 </button>
               )}
 
@@ -1399,14 +1486,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 <button
                   type="button"
                   onClick={openDiscountModal}
-                  className="h-11 px-3 text-sm font-semibold border rounded-lg antialiased transition-colors bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-blue-500 flex items-center justify-between"
+                  title={discountActionTitle}
+                  aria-label={discountActionTitle}
+                  className={`${cartActionIconButtonBaseClass} text-amber-600 focus:ring-amber-400 dark:text-amber-300`}
                 >
-                  <span>{t('menu.cart.discountAmount', 'Discount')}</span>
-                  <span>
-                    {effectiveDiscountMode === 'percentage'
-                      ? `${effectiveDiscountPercentage}%`
-                      : formatCurrency(discountAmount)}
-                  </span>
+                  <Percent className="h-8 w-8 flex-shrink-0" aria-hidden="true" />
+                  <span className="sr-only">{t('menu.cart.discountAmount', 'Discount')}</span>
                 </button>
               )}
             </div>
@@ -1441,6 +1526,33 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   <button
                     onClick={onRemoveCoupon}
                     className="p-1 rounded-full transition-colors text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+
+            {loyaltyRedemption && (
+              <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-purple-500/10 dark:bg-purple-500/20 border border-purple-500/20 dark:border-purple-500/30">
+                <div className="flex items-center gap-2">
+                  <Award className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                  <div>
+                    <span className="text-sm font-semibold antialiased text-purple-700 dark:text-purple-300">
+                      {t('menu.cart.loyaltyRedemption', '{{points}} pts', {
+                        points: loyaltyRedemption.pointsRedeemed,
+                      })}
+                    </span>
+                    <span className="text-xs ml-2 antialiased text-purple-600/70 dark:text-purple-300/70">
+                      {formatCurrency(loyaltyDiscountAmount)} {t('menu.cart.loyaltyOff', 'off')}
+                    </span>
+                  </div>
+                </div>
+                {onRemoveLoyaltyRedemption && (
+                  <button
+                    onClick={onRemoveLoyaltyRedemption}
+                    className="p-1 rounded-full transition-colors text-purple-600 dark:text-purple-300 hover:bg-purple-500/20"
+                    title={t('menu.cart.removeLoyaltyRedemption', 'Remove loyalty redemption')}
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -1500,6 +1612,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             </span>
             <span className="text-emerald-600 dark:text-emerald-400">
               -{formatCurrency(couponDiscount)}
+            </span>
+          </div>
+        )}
+
+        {loyaltyDiscountAmount > 0 && loyaltyRedemption && (
+          <div className="flex justify-between items-center text-sm font-medium antialiased">
+            <span className="flex items-center gap-1 text-purple-600 dark:text-purple-400">
+              <Award className="w-3.5 h-3.5" />
+              {t('menu.cart.loyaltyDiscount', 'Loyalty')}:
+            </span>
+            <span className="text-purple-600 dark:text-purple-400">
+              -{formatCurrency(loyaltyDiscountAmount)}
             </span>
           </div>
         )}

@@ -4,7 +4,7 @@ use serde_json::Value;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::{db, storage, sync_queue, value_f64, value_str};
+use crate::{db, read_local_json_array, storage, sync_queue, value_f64, value_i64, value_str};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -83,6 +83,68 @@ fn loyalty_customer_select_clause() -> &'static str {
             total_redeemed, tier, customer_name, customer_email, customer_phone,
             loyalty_card_uid, last_synced_at, created_at, updated_at
      FROM loyalty_customers"
+}
+
+fn legacy_loyalty_customer_from_customer(customer: &Value, org_id: &str) -> Option<Value> {
+    let points = value_i64(customer, &["loyalty_points", "loyaltyPoints"])?;
+    if points <= 0 {
+        return None;
+    }
+
+    let customer_id = value_str(customer, &["id", "customerId", "customer_id"])?;
+    Some(serde_json::json!({
+        "id": customer_id,
+        "user_profile_id": null,
+        "customer_id": customer_id,
+        "organization_id": org_id,
+        "points_balance": points,
+        "total_earned": points,
+        "total_redeemed": 0,
+        "tier": "none",
+        "customer_name": value_str(customer, &["name", "fullName", "customer_name"]),
+        "customer_email": value_str(customer, &["email", "customerEmail", "customer_email"]),
+        "customer_phone": value_str(customer, &["phone", "customerPhone", "customer_phone", "mobile", "telephone"]),
+        "loyalty_card_uid": value_str(customer, &["loyalty_card_uid", "loyaltyCardUid"]),
+        "created_at": value_str(customer, &["created_at", "createdAt"]),
+        "updated_at": value_str(customer, &["updated_at", "updatedAt"]),
+    }))
+}
+
+fn legacy_loyalty_customers_from_local_cache(
+    db: &db::DbState,
+    org_id: &str,
+    search: &str,
+) -> Result<Vec<Value>, String> {
+    let needle = search.trim().to_lowercase();
+    let mut rows: Vec<Value> = read_local_json_array(db, "customer_cache_v1")?
+        .into_iter()
+        .filter_map(|customer| legacy_loyalty_customer_from_customer(&customer, org_id))
+        .filter(|customer| {
+            if needle.is_empty() {
+                return true;
+            }
+            let haystack = [
+                value_str(customer, &["customer_name"]),
+                value_str(customer, &["customer_email"]),
+                value_str(customer, &["customer_phone"]),
+                value_str(customer, &["customer_id"]),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+            haystack.contains(&needle)
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        value_i64(b, &["points_balance"])
+            .unwrap_or(0)
+            .cmp(&value_i64(a, &["points_balance"]).unwrap_or(0))
+    });
+    rows.truncate(100);
+    Ok(rows)
 }
 
 fn find_loyalty_customer_row(
@@ -360,6 +422,15 @@ pub async fn loyalty_sync_customers(db: tauri::State<'_, db::DbState>) -> Result
         if id.is_empty() {
             continue;
         }
+        let customer_id = c
+            .get("customer_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| c.get("user_profile_id").and_then(|v| v.as_str()))
+            .unwrap_or(id);
+        let user_profile_id = c
+            .get("user_profile_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(customer_id);
         conn.execute(
             "INSERT OR REPLACE INTO loyalty_customers (
                 id, user_profile_id, customer_id, organization_id, points_balance,
@@ -369,17 +440,8 @@ pub async fn loyalty_sync_customers(db: tauri::State<'_, db::DbState>) -> Result
                       COALESCE(?14, datetime('now')), ?15)",
             params![
                 id,
-                c.get("user_profile_id")
-                    .and_then(|v| v.as_str())
-                    .map(|value| value.to_string()),
-                c.get("customer_id")
-                    .and_then(|v| v.as_str())
-                    .map(|value| value.to_string())
-                    .or_else(|| {
-                        c.get("user_profile_id")
-                            .and_then(|v| v.as_str())
-                            .map(|value| value.to_string())
-                    }),
+                user_profile_id,
+                customer_id,
                 org_id,
                 c.get("points_balance")
                     .and_then(|v| v.as_i64())
@@ -461,6 +523,13 @@ pub async fn loyalty_get_customers(
             .collect();
         rows
     };
+
+    if customers.is_empty() {
+        let legacy_customers = legacy_loyalty_customers_from_local_cache(&db, &org_id, &search)?;
+        if !legacy_customers.is_empty() {
+            return Ok(serde_json::json!({ "customers": legacy_customers }));
+        }
+    }
 
     Ok(serde_json::json!({ "customers": customers }))
 }
@@ -764,6 +833,50 @@ pub async fn loyalty_redeem_points(
         .optional()
         .map_err(|e| format!("loyalty_redeem_points balance: {e}"))?
         .ok_or_else(|| "Customer not found".to_string())?;
+
+    if let Some(existing_order_id) = order_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        let existing_redemption: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT ABS(points), id
+                 FROM loyalty_transactions
+                 WHERE customer_id = ?1
+                   AND organization_id = ?2
+                   AND order_id = ?3
+                   AND transaction_type = 'redeem'
+                 ORDER BY created_at ASC
+                 LIMIT 1",
+                params![
+                    canonical_customer_id.as_str(),
+                    org_id.as_str(),
+                    existing_order_id
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("loyalty_redeem_points existing tx: {e}"))?;
+
+        if let Some((existing_points, existing_tx_id)) = existing_redemption {
+            if existing_points != points {
+                return Err(format!(
+                    "Loyalty redemption already exists for this order with {existing_points} points"
+                ));
+            }
+
+            let discount_value = (existing_points as f64) * redemption_rate;
+            return Ok(serde_json::json!({
+                "success": true,
+                "alreadyRedeemed": true,
+                "transactionId": existing_tx_id,
+                "pointsRedeemed": existing_points,
+                "discountValue": discount_value,
+                "newBalance": current_balance
+            }));
+        }
+    }
 
     if current_balance < points {
         return Err(format!(

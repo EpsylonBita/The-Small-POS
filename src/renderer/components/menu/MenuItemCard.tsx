@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
-import { Plus, Minus } from 'lucide-react';
+import { Plus, Minus, Settings2 } from 'lucide-react';
 
 interface CustomizationOption {
   id: string;
@@ -25,6 +25,7 @@ interface MenuItem {
   preparationTime: number;
   image?: string;
   is_customizable?: boolean;
+  ingredients?: string[] | null;
   customizations?: Customization[];
 }
 
@@ -33,17 +34,48 @@ interface MenuItemCardProps {
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   onSelect: () => void;
   onQuickAdd?: (item: MenuItem, quantity: number) => void;
+  onPreview?: (item: MenuItem, anchorRect: DOMRect) => void;
 }
 
-export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'delivery', onSelect, onQuickAdd }) => {
+export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQuickAdd, onPreview }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
+  const cardRef = useRef<HTMLDivElement>(null);
   const [quickQuantity, setQuickQuantity] = useState(1);
   const [showQuantitySelector, setShowQuantitySelector] = useState(false);
+  const holdTimerRef = useRef<number | null>(null);
+  const suppressNextClickRef = useRef(false);
+
+  const clearHoldTimer = () => {
+    if (holdTimerRef.current !== null) {
+      window.clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+  };
+
+  const handlePointerDown = () => {
+    clearHoldTimer();
+    suppressNextClickRef.current = false;
+    holdTimerRef.current = window.setTimeout(() => {
+      suppressNextClickRef.current = true;
+      if (cardRef.current) {
+        onPreview?.(item, cardRef.current.getBoundingClientRect());
+      }
+    }, 550);
+  };
+
+  const handlePointerEnd = () => {
+    clearHoldTimer();
+  };
 
   // For customizable items, always open the modal
   // For non-customizable items, add directly to cart with quantity 1
   const handleCardClick = () => {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      return;
+    }
+
     if (item.is_customizable) {
       onSelect();
     } else if (onQuickAdd) {
@@ -80,15 +112,20 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
 
   return (
     <div
+      ref={cardRef}
       onClick={handleCardClick}
-      className={`p-3 sm:p-4 rounded-xl border cursor-pointer transition-all duration-200 hover:scale-[1.02] sm:hover:scale-[1.05] active:scale-95 aspect-square flex flex-col touch-feedback min-h-[140px] sm:min-h-[160px] relative ${
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerEnd}
+      onPointerCancel={handlePointerEnd}
+      onPointerLeave={handlePointerEnd}
+      className={`p-3 rounded-xl border cursor-pointer transition-colors duration-150 active:scale-[0.98] flex flex-col touch-feedback min-h-[132px] sm:min-h-[144px] relative ${
         item.is_customizable
           ? resolvedTheme === 'dark'
-            ? 'bg-orange-500/15 border-orange-500/30 hover:bg-orange-500/25 hover:border-orange-500/50 active:bg-orange-500/35'
-            : 'bg-orange-100/50 border-orange-300/50 hover:bg-orange-200/60 hover:border-orange-400/60 active:bg-orange-200/70'
+            ? 'bg-orange-500/15 border-orange-500/30 active:bg-orange-500/25'
+            : 'bg-amber-100/95 border-amber-400/90 shadow-[0_10px_24px_rgba(15,23,42,0.08)] active:bg-amber-200/80'
           : resolvedTheme === 'dark'
-            ? 'bg-gray-700/30 border-gray-600/30 hover:bg-gray-700/50 hover:border-gray-500/50 active:bg-gray-600/50'
-            : 'bg-white/30 border-gray-200/30 hover:bg-white/50 hover:border-gray-300/50 active:bg-gray-100/50'
+            ? 'bg-gray-700/30 border-gray-600/30 active:bg-gray-600/50'
+            : 'bg-white border-slate-300/80 shadow-[0_10px_24px_rgba(15,23,42,0.08)] active:bg-slate-50'
       }`}
       role="button"
       tabIndex={0}
@@ -161,26 +198,28 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
         </div>
       )}
 
-      {/* Customizable Label - Orange Text Only */}
+      {/* Customizable indicator */}
       {item.is_customizable && (
         <div className="mb-1.5">
-          <span className="text-sm sm:text-base font-semibold text-orange-500 antialiased">
-            {t('menu.item.customizable')}
-          </span>
+          <Settings2
+            className={`h-5 w-5 ${resolvedTheme === 'dark' ? 'text-orange-300' : 'text-amber-800'}`}
+            aria-label={t('menu.item.customizable')}
+            role="img"
+          />
         </div>
       )}
 
       {/* Item Name - Larger and Clearer */}
-      <h3 className={`text-lg sm:text-xl font-bold mb-1.5 line-clamp-2 leading-tight antialiased ${
+      <h3 className={`text-lg font-bold mb-1.5 line-clamp-2 leading-tight antialiased ${
         resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
       }`}>
         {item.name}
       </h3>
 
-      {/* Item Description - Gray text */}
+      {/* Item Description */}
       {item.description && (
-        <p className={`text-sm sm:text-base leading-snug line-clamp-2 mb-1.5 antialiased ${
-          resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+        <p className={`text-sm font-semibold leading-snug line-clamp-2 mb-1.5 antialiased ${
+          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-800'
         }`}>
           {item.description}
         </p>
@@ -190,16 +229,11 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
       <div className="flex-1 min-h-1" />
 
       {/* Price Section - Clear and Readable */}
-      <div className="flex flex-col">
-        <span className={`text-lg sm:text-xl font-bold antialiased ${
-          resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
+      <div className="mt-auto flex justify-end">
+        <span className={`text-lg font-extrabold tracking-tight antialiased text-right ${
+          resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-800'
         }`}>
           {item.is_customizable ? t('menu.item.from') : ''}€{item.price.toFixed(2)}
-        </span>
-        <span className={`text-sm sm:text-base antialiased ${
-          resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-        }`}>
-          {orderType === 'pickup' ? t('menu.item.pickup') : t('menu.item.delivery')}
         </span>
       </div>
     </div>

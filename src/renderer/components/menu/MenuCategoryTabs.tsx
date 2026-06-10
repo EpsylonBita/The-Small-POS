@@ -1,6 +1,16 @@
-import React, { useCallback, useState, useRef, useEffect } from 'react';
+import React, { useCallback, useState, useRef, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
+
+type MenuFlavorType = 'savory' | 'sweet';
+
+interface MenuCategoryFlavorItem {
+  category_id?: string | null;
+  categoryId?: string | null;
+  category?: { id?: string | null } | string | null;
+  flavor_type?: MenuFlavorType | 'all' | 'savoury' | null;
+  flavorType?: MenuFlavorType | 'all' | 'savoury' | null;
+}
 
 interface MenuCategoryTabsProps {
   selectedCategory: string;
@@ -8,6 +18,7 @@ interface MenuCategoryTabsProps {
   selectedSubcategory?: string;
   onSubcategoryChange?: (subcategoryId: string) => void;
   categories: Array<{ id: string; name: string; icon?: string }>;
+  menuItems?: MenuCategoryFlavorItem[];
 }
 
 export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
@@ -15,7 +26,8 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
   onCategoryChange,
   selectedSubcategory = '',
   onSubcategoryChange,
-  categories
+  categories,
+  menuItems = []
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -76,7 +88,24 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
     scrollContainerRef.current.scrollLeft = scrollLeft - walk;
   };
 
-  // Get subcategories for selected category
+  const resolveItemCategoryId = (item: MenuCategoryFlavorItem): string | null => {
+    if (typeof item.category_id === 'string' && item.category_id.trim()) return item.category_id;
+    if (typeof item.categoryId === 'string' && item.categoryId.trim()) return item.categoryId;
+    if (typeof item.category === 'string' && item.category.trim()) return item.category;
+    if (item.category && typeof item.category === 'object' && typeof item.category.id === 'string' && item.category.id.trim()) {
+      return item.category.id;
+    }
+    return null;
+  };
+
+  const normalizeFlavorType = (value: unknown): MenuFlavorType | null => {
+    if (typeof value !== 'string') return null;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'savoury') return 'savory';
+    return normalized === 'savory' || normalized === 'sweet' ? normalized : null;
+  };
+
+  // Get subcategories that have actual items in the selected category.
   const getSubcategories = useCallback((categoryId: string) => {
     if (categoryId === 'all' || categoryId === 'featured') {
       return [];
@@ -85,15 +114,35 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
     const category = categories.find(cat => cat.id === categoryId);
     if (!category) return [];
 
+    const categoryItems = menuItems.filter((item) => resolveItemCategoryId(item) === categoryId);
+    const hasSavoryItems = categoryItems.some((item) => normalizeFlavorType(item.flavor_type ?? item.flavorType) === 'savory');
+    const hasSweetItems = categoryItems.some((item) => normalizeFlavorType(item.flavor_type ?? item.flavorType) === 'sweet');
+
     return [
-      { id: `${categoryId}-savory`, name: t('menu.categories.savory'), icon: '🧂' },
-      { id: `${categoryId}-sweet`, name: t('menu.categories.sweet'), icon: '🍯' }
+      ...(hasSavoryItems ? [{ id: `${categoryId}-savory`, name: t('menu.categories.savory', 'Savoury'), icon: '🧂' }] : []),
+      ...(hasSweetItems ? [{ id: `${categoryId}-sweet`, name: t('menu.categories.sweet'), icon: '🍯' }] : [])
     ];
-  }, [categories, t]);
+  }, [categories, menuItems, t]);
+
+  const subcategories = useMemo(
+    () => getSubcategories(selectedCategory),
+    [getSubcategories, selectedCategory],
+  );
+
+  useEffect(() => {
+    if (!onSubcategoryChange || !selectedSubcategory) return;
+
+    const selectedSubcategoryStillExists = subcategories.some(
+      (subcategory) => subcategory.id === selectedSubcategory,
+    );
+    if (!selectedSubcategoryStillExists) {
+      onSubcategoryChange(subcategories[0]?.id ?? '');
+    }
+  }, [onSubcategoryChange, selectedSubcategory, subcategories]);
 
   const handleCategoryChange = useCallback((categoryId: string) => {
     onCategoryChange(categoryId);
-    // Auto-select first subcategory (savory) when category has subcategories
+    // Auto-select the first available flavor filter when this category has one.
     if (onSubcategoryChange) {
       const subs = getSubcategories(categoryId);
       onSubcategoryChange(subs.length > 0 ? subs[0].id : '');
@@ -106,36 +155,30 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
     }
   }, [onSubcategoryChange]);
 
-  const subcategories = getSubcategories(selectedCategory);
+  const categoryFadeMask = [
+    showLeftFade ? 'transparent 0' : 'black 0',
+    showLeftFade ? 'black 2.25rem' : 'black 0',
+    showRightFade ? 'black calc(100% - 2.25rem)' : 'black 100%',
+    showRightFade ? 'transparent 100%' : 'black 100%'
+  ].join(', ');
+  const categoryScrollStyle: React.CSSProperties = {
+    scrollbarWidth: 'none',
+    msOverflowStyle: 'none',
+    WebkitOverflowScrolling: 'touch',
+    ...(showLeftFade || showRightFade
+      ? {
+          maskImage: `linear-gradient(to right, ${categoryFadeMask})`,
+          WebkitMaskImage: `linear-gradient(to right, ${categoryFadeMask})`,
+          maskRepeat: 'no-repeat',
+          WebkitMaskRepeat: 'no-repeat'
+        }
+      : {})
+  };
 
   return (
     <div className="border-b border-gray-200/20">
       {/* Main Categories */}
       <div className="p-2 sm:p-3 relative">
-        {/* Left Fade - Opacity mask */}
-        {showLeftFade && (
-          <div
-            className="absolute left-0 top-0 bottom-0 w-24 z-10 pointer-events-none"
-            style={{
-              background: resolvedTheme === 'dark'
-                ? 'linear-gradient(to right, rgb(17, 24, 39) 0%, rgba(17, 24, 39, 0.8) 30%, rgba(17, 24, 39, 0) 100%)'
-                : 'linear-gradient(to right, rgb(255, 255, 255) 0%, rgba(255, 255, 255, 0.8) 30%, rgba(255, 255, 255, 0) 100%)'
-            }}
-          />
-        )}
-
-        {/* Right Fade - Opacity mask */}
-        {showRightFade && (
-          <div
-            className="absolute right-0 top-0 bottom-0 w-24 z-10 pointer-events-none"
-            style={{
-              background: resolvedTheme === 'dark'
-                ? 'linear-gradient(to left, rgb(17, 24, 39) 0%, rgba(17, 24, 39, 0.8) 30%, rgba(17, 24, 39, 0) 100%)'
-                : 'linear-gradient(to left, rgb(255, 255, 255) 0%, rgba(255, 255, 255, 0.8) 30%, rgba(255, 255, 255, 0) 100%)'
-            }}
-          />
-        )}
-
         <div
           ref={scrollContainerRef}
           className="flex gap-1.5 sm:gap-2 overflow-x-auto scrollbar-hide cursor-grab select-none touch-pan-x"
@@ -144,20 +187,20 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
           onMouseLeave={handleMouseLeave}
           onMouseUp={handleMouseUp}
           onMouseMove={handleMouseMove}
-          style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}
+          style={categoryScrollStyle}
         >
           {categories.map((category) => (
             <button
               key={category.id}
               onClick={() => handleCategoryChange(category.id)}
-              className={`px-3 py-2 rounded-lg text-sm font-semibold antialiased transition-all duration-200 whitespace-nowrap min-h-[36px] touch-feedback active:scale-95 flex-shrink-0 ${
+              className={`min-h-[38px] flex-shrink-0 whitespace-nowrap rounded-xl border px-3.5 py-2 text-sm font-semibold antialiased shadow-sm backdrop-blur-md transition-all duration-200 touch-feedback hover:-translate-y-0.5 active:translate-y-0 active:scale-95 sm:px-4 ${
                 selectedCategory === category.id
                   ? resolvedTheme === 'dark'
-                    ? 'bg-blue-600 text-white border border-blue-500'
-                    : 'bg-blue-500 text-white'
+                    ? 'border-blue-300/45 bg-blue-500/85 text-white shadow-none ring-1 ring-blue-200/20'
+                    : 'border-blue-400/50 bg-blue-500 text-white shadow-none ring-1 ring-blue-200/30'
                   : resolvedTheme === 'dark'
-                    ? 'bg-gray-800 text-gray-200 border border-gray-700'
-                    : 'bg-gray-100 text-gray-800 border border-gray-300'
+                    ? 'border-white/12 bg-white/[0.08] text-zinc-100 shadow-black/20 hover:border-white/25 hover:bg-white/[0.14]'
+                    : 'border-white/70 bg-white/75 text-gray-800 shadow-gray-900/5 hover:border-blue-200 hover:bg-white'
               }`}
             >
               {category.name}
@@ -174,14 +217,14 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
               <button
                 key={subcategory.id}
                 onClick={() => handleSubcategoryChange(subcategory.id)}
-                className={`px-3 sm:px-4 py-2 rounded-full text-sm font-semibold antialiased transition-all duration-200 whitespace-nowrap min-h-[40px] touch-feedback active:scale-95 ${
+                className={`min-h-[40px] whitespace-nowrap rounded-full border px-3.5 py-2 text-sm font-semibold antialiased shadow-sm backdrop-blur-md transition-all duration-200 touch-feedback hover:-translate-y-0.5 active:translate-y-0 active:scale-95 sm:px-4 ${
                   selectedSubcategory === subcategory.id
                     ? resolvedTheme === 'dark'
-                      ? 'bg-green-600 text-white border border-green-500'
-                      : 'bg-green-500 text-white'
+                      ? 'border-emerald-300/45 bg-emerald-500/75 text-white shadow-none ring-1 ring-emerald-200/20'
+                      : 'border-emerald-300/60 bg-emerald-500 text-white shadow-none ring-1 ring-emerald-200/30'
                     : resolvedTheme === 'dark'
-                      ? 'bg-gray-800 text-gray-200 hover:bg-gray-700 border border-gray-700'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-300'
+                      ? 'border-white/12 bg-white/[0.08] text-zinc-100 shadow-black/20 hover:border-white/25 hover:bg-white/[0.14]'
+                      : 'border-white/70 bg-white/75 text-gray-700 shadow-gray-900/5 hover:border-emerald-200 hover:bg-white'
                 }`}
               >
                 {subcategory.name}
