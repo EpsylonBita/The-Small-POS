@@ -92,7 +92,15 @@ export const POS_EXCLUDED_MODULES: Set<string> = new Set([
  * Modules that are planned but not yet implemented.
  * These will show as "Coming Soon" if enabled in the admin dashboard.
  */
-export const POS_COMING_SOON_MODULES: Set<string> = new Set([]);
+export const POS_COMING_SOON_MODULES: Set<string> = new Set([
+  // THE-307: gift cards are live on Android POS (POSSystemMobile) via
+  // /api/pos/gift-cards/*; the desktop has no issue/redeem/lookup surface
+  // yet. Showing the purchased module as a disabled "coming soon" entry is
+  // honest parity signalling — removing it from this set without adding it
+  // to POS_IMPLEMENTED_MODULES would render an enabled nav button with no
+  // view behind it.
+  'gift_cards',
+]);
 
 /**
  * Check if a module is explicitly excluded from POS surfaces.

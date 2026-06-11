@@ -24,6 +24,7 @@ import {
   getCoreModuleIds,
   getRemovedModuleIds,
   isModuleExcludedFromPos,
+  shouldShowInNavigation,
 } from '../../shared/constants/pos-modules';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { getCachedTerminalCredentials } from '../services/terminal-credentials';
@@ -993,9 +994,17 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     // Combine all modules (enabled + locked) that should show in navigation
     const allNavModules: NavigationModule[] = [];
 
+    // A module may only reach navigation if this client can actually render
+    // it: a core screen, an implemented module, or an explicit "coming soon"
+    // entry (disabled in NavigationSidebar). Without this, any pos_enabled
+    // catalog module the desktop has not implemented (e.g. gift_cards before
+    // THE-307) renders an enabled nav button with no view behind it.
+    const isRenderable = (moduleId: string): boolean =>
+      isCoreModule(moduleId) || shouldShowInNavigation(moduleId);
+
     // Add enabled modules (including guaranteed core modules)
     for (const m of modulesWithCore) {
-      if (!isModuleExcludedFromPos(m.module.id) && m.module.showInNavigation) {
+      if (!isModuleExcludedFromPos(m.module.id) && m.module.showInNavigation && isRenderable(m.module.id)) {
         allNavModules.push({
           module: m.module,
           isEnabled: true,
@@ -1006,7 +1015,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
     // Add locked modules (not already in enabled)
     for (const m of lockedModules) {
-      if (!isModuleExcludedFromPos(m.module.id) && m.module.showInNavigation && !enabledIds.has(m.module.id)) {
+      if (!isModuleExcludedFromPos(m.module.id) && m.module.showInNavigation && isRenderable(m.module.id) && !enabledIds.has(m.module.id)) {
         allNavModules.push({
           module: m.module,
           isEnabled: false,

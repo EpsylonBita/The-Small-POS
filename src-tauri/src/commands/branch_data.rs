@@ -470,6 +470,25 @@ async fn fetch_branch_scoped_payload(
             ))
         }
         Err(remote_error) => {
+            // THE-306 gating sweep item 3: a MODULE_REQUIRED denial means the
+            // org has not acquired this dataset's vertical module — that is an
+            // empty dataset, not an outage. Cache the empty payload so offline
+            // reads agree with the acquisition boundary instead of
+            // resurrecting stale rows from before the module lapsed.
+            if crate::is_module_required_error(&remote_error) {
+                let payload = json!([]);
+                let synced_at = {
+                    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+                    cache_payload(&conn, branch_id, cache_key, scope_key, &payload)?
+                };
+                return Ok(local_first_success(
+                    payload,
+                    "module_required",
+                    Some(synced_at),
+                    None,
+                ));
+            }
+
             let cached = {
                 let conn = db.conn.lock().map_err(|error| error.to_string())?;
                 read_cache_entry(&conn, branch_id, cache_key, scope_key)?

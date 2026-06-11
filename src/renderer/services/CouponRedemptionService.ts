@@ -1,9 +1,13 @@
-import { posApiPost } from '../utils/api-helpers';
+import { isModuleRequiredApiError, posApiPost } from '../utils/api-helpers';
 
 const COUPON_REDEMPTION_QUEUE_KEY = 'pos_coupon_redemption_queue_v1';
 const MAX_RETRY_ATTEMPTS = 10;
 const BASE_RETRY_DELAY_MS = 5000;
 const MAX_RETRY_DELAY_MS = 5 * 60 * 1000;
+// THE-306 gating sweep item 3: MODULE_REQUIRED denials are an
+// operator/billing state — park the item on a slow probe cadence without
+// consuming retry attempts so re-acquiring the coupons module drains it.
+const MODULE_REQUIRED_RETRY_DELAY_MS = 30 * 60 * 1000;
 
 export interface CouponRedemptionPayload {
   couponId: string;
@@ -99,7 +103,9 @@ class CouponRedemptionService {
     this.writeQueue(queue);
   }
 
-  private async applyCoupon(payload: CouponRedemptionPayload): Promise<boolean> {
+  private async applyCoupon(
+    payload: CouponRedemptionPayload
+  ): Promise<{ applied: boolean; moduleDenied: boolean }> {
     try {
       const response = await posApiPost<CouponApplyResponse>('pos/coupons/apply', {
         coupon_id: payload.couponId,
@@ -108,17 +114,18 @@ class CouponRedemptionService {
       });
 
       if (!response.success) {
-        return false;
+        return { applied: false, moduleDenied: isModuleRequiredApiError(response.error) };
       }
 
       if (response.data && response.data.success === false) {
-        return false;
+        return { applied: false, moduleDenied: false };
       }
 
-      return true;
+      return { applied: true, moduleDenied: false };
     } catch (error) {
       console.warn('[CouponRedemptionService] Coupon apply request failed:', error);
-      return false;
+      const message = error instanceof Error ? error.message : String(error);
+      return { applied: false, moduleDenied: isModuleRequiredApiError(message) };
     }
   }
 
@@ -127,7 +134,7 @@ class CouponRedemptionService {
       return { applied: false, queued: false };
     }
 
-    const applied = await this.applyCoupon(payload);
+    const { applied, moduleDenied } = await this.applyCoupon(payload);
     if (applied) {
       return { applied: true, queued: false };
     }
@@ -137,7 +144,9 @@ class CouponRedemptionService {
       ...payload,
       attempts: 0,
       createdAt: new Date(now).toISOString(),
-      nextRetryAt: now + BASE_RETRY_DELAY_MS,
+      // Module-denied applies keep the slow probe cadence from the start —
+      // the org has to re-acquire coupons before this can ever succeed.
+      nextRetryAt: now + (moduleDenied ? MODULE_REQUIRED_RETRY_DELAY_MS : BASE_RETRY_DELAY_MS),
     });
 
     return { applied: false, queued: true };
@@ -158,8 +167,24 @@ class CouponRedemptionService {
         continue;
       }
 
-      const applied = await this.applyCoupon(item);
+      const { applied, moduleDenied } = await this.applyCoupon(item);
       if (applied) {
+        continue;
+      }
+
+      if (moduleDenied) {
+        // THE-306 gating sweep item 3: fail closed, queue retained — keep
+        // the item WITHOUT consuming an attempt (re-acquiring the coupons
+        // module must drain it) and probe on the slow module cadence.
+        console.info('[CouponRedemptionService] Coupons module not acquired; parking apply', {
+          orderId: item.orderId,
+          couponId: item.couponId,
+        });
+        updatedQueue.push({
+          ...item,
+          lastAttemptAt: new Date(now).toISOString(),
+          nextRetryAt: now + MODULE_REQUIRED_RETRY_DELAY_MS,
+        });
         continue;
       }
 

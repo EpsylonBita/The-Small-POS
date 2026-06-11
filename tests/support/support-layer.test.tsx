@@ -17,6 +17,11 @@ import {
 } from '../../src/renderer/utils/delivery-routing';
 import { sortOrdersOldestFirst } from '../../src/renderer/utils/order-sorting';
 import {
+  isViewAccessDenied,
+  resolveViewModuleId,
+} from '../../src/renderer/utils/module-view-access';
+import { isModuleRequiredApiError } from '../../src/renderer/utils/api-helpers';
+import {
   buildResolvedAddressDetails,
   getSuggestionStreetLabel,
   selectPrimaryOnlineSuggestions,
@@ -1737,4 +1742,53 @@ test('resolveShiftEarnedTotal uses explicit totals and falls back to cash plus c
     } as never),
     50,
   );
+});
+
+test('isViewAccessDenied fails closed for unowned module views (THE-315)', () => {
+  const owned = (...ids: string[]) => ids.map((id) => ({ module: { id } }));
+  const typicalOrg = owned('orders', 'menu', 'users', 'tables');
+
+  // A catalog module the org never acquired is denied even though the API
+  // sync path leaves it out of lockedModules entirely.
+  assert.equal(isViewAccessDenied(typicalOrg, 'delivery'), true);
+  assert.equal(isViewAccessDenied(typicalOrg, 'rooms'), true);
+
+  // Owning the module grants the view.
+  assert.equal(isViewAccessDenied(owned('delivery'), 'delivery'), false);
+
+  // Core screen + non-module shell views are always reachable.
+  assert.equal(isViewAccessDenied(typicalOrg, 'dashboard'), false);
+  assert.equal(isViewAccessDenied(typicalOrg, 'settings'), false);
+
+  // View aliases resolve to their backing module before the check.
+  assert.equal(resolveViewModuleId('customers'), 'users');
+  assert.equal(resolveViewModuleId('integrations'), 'plugin_integrations');
+  assert.equal(isViewAccessDenied(typicalOrg, 'customers'), false);
+  assert.equal(isViewAccessDenied(typicalOrg, 'integrations'), true);
+  assert.equal(isViewAccessDenied(owned('plugin_integrations'), 'integrations'), false);
+
+  // Bootstrap window: module data not hydrated yet -> nothing is denied
+  // (a synced terminal always carries its core modules, so an empty list
+  // can only mean "not loaded").
+  assert.equal(isViewAccessDenied([], 'delivery'), false);
+
+  // Unknown ids are denied too once data is loaded — fail closed beats the
+  // old fail-open; the layout's ModuleNotAvailableView only handled ids
+  // that slipped through.
+  assert.equal(isViewAccessDenied(typicalOrg, 'not_a_module'), true);
+});
+
+test('isModuleRequiredApiError recognizes both transport shapes (THE-306 sweep item 3)', () => {
+  // Web fetch path: the route's error code verbatim.
+  assert.equal(isModuleRequiredApiError('MODULE_REQUIRED'), true);
+  // IPC path: admin_fetch folds the code into its message.
+  assert.equal(
+    isModuleRequiredApiError('MODULE_REQUIRED (HTTP 403): {"success":false,"error":"MODULE_REQUIRED","missingModules":["coupons"]}'),
+    true,
+  );
+  // Everything else keeps the normal retry path.
+  assert.equal(isModuleRequiredApiError('HTTP 403'), false);
+  assert.equal(isModuleRequiredApiError('Failed to fetch'), false);
+  assert.equal(isModuleRequiredApiError(undefined), false);
+  assert.equal(isModuleRequiredApiError(null), false);
 });

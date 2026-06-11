@@ -24,6 +24,7 @@ import {
   findBestPromotion,
 } from '../utils/promotions';
 import { toLocalDateString } from '../utils/date';
+import { posApiPost } from '../utils/api-helpers';
 
 interface PromotionFromAPI {
   id: string;
@@ -311,17 +312,17 @@ class PromotionsService {
     }
 
     try {
-      const { error } = await supabase.from('promotion_redemptions').insert({
-        organization_id: this.organizationId,
+      // API-first: record through the terminal-authenticated Admin API rather
+      // than writing promotion_redemptions directly via the anon Supabase client.
+      const response = await posApiPost('/api/pos/promotions/record-redemption', {
         promotion_id: promotionId,
         order_id: orderId,
         customer_id: customerId,
         discount_applied: discountApplied,
-        redeemed_at: new Date().toISOString(),
       });
 
-      if (error) {
-        console.error('Error recording redemption:', error);
+      if (!response.success) {
+        console.error('Error recording redemption:', response.error);
         return false;
       }
 
@@ -473,30 +474,31 @@ class PromotionsService {
     }
 
     try {
-      // Insert events into inventory_events table for async processing
-      const insertData = events.map(event => ({
-        organization_id: event.organization_id,
-        branch_id: event.branch_id,
-        event_type: event.event_type,
-        reference_id: event.order_id,
-        reference_type: 'order',
-        metadata: {
-          bundle_id: event.bundle_id,
-          bundle_sku: event.bundle_sku,
-          bundle_name: event.bundle_name,
-          quantity_sold: event.quantity_sold,
-          deduction_type: event.deduction_type,
-          components: event.components,
-        },
-        created_at: event.timestamp,
-      }));
+      // API-first: emit through the terminal-authenticated Admin API rather than
+      // inserting inventory_events directly via the anon Supabase client. The
+      // server derives organization scope from the authenticated terminal.
+      const payload = {
+        events: events.map(event => ({
+          event_type: event.event_type,
+          reference_id: event.order_id,
+          reference_type: 'order',
+          branch_id: event.branch_id,
+          metadata: {
+            bundle_id: event.bundle_id,
+            bundle_sku: event.bundle_sku,
+            bundle_name: event.bundle_name,
+            quantity_sold: event.quantity_sold,
+            deduction_type: event.deduction_type,
+            components: event.components,
+          },
+          created_at: event.timestamp,
+        })),
+      };
 
-      const { error } = await supabase
-        .from('inventory_events')
-        .insert(insertData);
+      const response = await posApiPost('/api/pos/inventory/events', payload);
 
-      if (error) {
-        console.error('[PromotionsService] Error emitting bundle inventory events:', error);
+      if (!response.success) {
+        console.error('[PromotionsService] Error emitting bundle inventory events:', response.error);
         return false;
       }
 

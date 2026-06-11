@@ -150,6 +150,13 @@ pub const MAX_RETRY_ATTEMPTS: i64 = 10;
 /// minutes of retries before the item surfaces for review.
 pub const MAX_DEFERRAL_CYCLES: i64 = 50;
 
+/// Retry spacing for items parked by `mark_module_required` (THE-306 gating
+/// sweep item 3). Module acquisition is an operator/billing action on a human
+/// timescale, so probe every 30 minutes instead of hot-retrying — one cheap
+/// MODULE_REQUIRED round-trip per item per half hour until the org buys the
+/// module back (or the item is handled in the Recovery Center).
+pub const MODULE_REQUIRED_RETRY_SECS: i64 = 30 * 60;
+
 /// Age threshold in milliseconds for old-item warnings (24 hours).
 const AGE_WARNING_THRESHOLD_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -3411,6 +3418,48 @@ pub fn mark_deferred(
     Ok(())
 }
 
+/// Park a module-denied item (THE-306 gating sweep item 3).
+///
+/// The admin API answered `403 {"error":"MODULE_REQUIRED",...}`: the
+/// organization has not acquired the vertical module this item belongs to.
+/// That is an operator/billing state, not a data problem — the row must stay
+/// queued so re-acquiring the module drains it (fail closed, queue
+/// retained). Unlike `mark_deferred` this therefore does NOT consume
+/// `attempts` (50 deferral cycles at 5s would escalate to `conflict` within
+/// minutes) and reschedules on the slow `MODULE_REQUIRED_RETRY_SECS`
+/// cadence instead.
+pub fn mark_module_required(
+    conn: &Connection,
+    item_id: &str,
+    reason: &str,
+    expected_generation: i64,
+) -> Result<(), String> {
+    let next_retry = Utc::now() + ChronoDuration::seconds(MODULE_REQUIRED_RETRY_SECS);
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 error_message = ?1,
+                 next_retry_at = ?2
+             WHERE id = ?3 AND claim_generation = ?4",
+            params![
+                reason,
+                next_retry.to_rfc3339(),
+                item_id,
+                expected_generation,
+            ],
+        )
+        .map_err(|e| format!("sync_queue mark_module_required: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "mark_module_required no-op — claim_generation mismatch"
+        );
+    }
+    Ok(())
+}
+
 /// Mark an item as having a conflict.
 pub fn mark_conflict(
     conn: &Connection,
@@ -3558,7 +3607,9 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         "driver_earnings" | "driver_earning" | "shift_expenses" | "staff_payments" => {
             prepare_financial_request(conn, item, &payload, terminal_id.as_str())
         }
-        "loyalty_transactions" => prepare_loyalty_request(item, &payload, terminal_id.as_str()),
+        "loyalty_transactions" => {
+            prepare_loyalty_request(conn, item, &payload, terminal_id.as_str())
+        }
         "housekeeping_tasks" => prepare_housekeeping_request(item, &payload, terminal_id.as_str()),
         "customer_addresses" => {
             prepare_customer_address_request(conn, item, &payload, terminal_id.as_str())
@@ -3651,19 +3702,62 @@ fn prepare_shift_request(
     }))
 }
 
+/// Resolves the order reference a loyalty request should carry. The admin
+/// server re-keys orders on sync ingest (server `orders.id` != POS-local id)
+/// and resolves client-sent ids via `orders.id` then `orders.client_order_id`.
+/// The order sync sends the local row's `client_request_id` as
+/// `client_order_id` when present and the local id otherwise (see
+/// `prepare_order_request`), so mirroring that pick is what keeps loyalty
+/// ledger rows linked to their order. Lookup failures degrade to the payload
+/// id unchanged — the admin route then stores an unlinked ledger row rather
+/// than rejecting the award.
+fn resolve_loyalty_order_reference(conn: &Connection, payload: &Value) -> Option<String> {
+    let local_order_id = payload
+        .get("order_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?;
+
+    let client_request_id = conn
+        .query_row(
+            "SELECT client_request_id FROM orders WHERE id = ?1 LIMIT 1",
+            params![local_order_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .unwrap_or_else(|error| {
+            warn!(
+                order_id = %local_order_id,
+                "Loyalty order reference lookup failed; sending local order id: {error}"
+            );
+            None
+        })
+        .flatten();
+
+    Some(
+        client_request_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| local_order_id.to_string()),
+    )
+}
+
 /// Wave 5 Session 6: loyalty dispatcher. The admin loyalty API exposes two
 /// distinct endpoints (`/api/pos/loyalty/earn` and `/api/pos/loyalty/redeem`)
 /// with narrow payload shapes — a raw pass-through of the producer payload
 /// would hit neither. This function mirrors the legacy `sync_loyalty_transaction`
-/// at `sync.rs:13015` exactly: inspects `transaction_type`, selects the
+/// at `sync.rs:13015`: inspects `transaction_type`, selects the
 /// endpoint, and reshapes the body (extracts the fields admin expects;
 /// flips `points` sign for redeem because the local row stores the redemption
-/// as a negative delta).
+/// as a negative delta). On top of the legacy shape it swaps the POS-local
+/// `order_id` for the server-resolvable reference via
+/// `resolve_loyalty_order_reference`.
 fn prepare_loyalty_request(
+    conn: &Connection,
     item: &SyncQueueItem,
     payload: &Value,
     terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
+    let order_id = resolve_loyalty_order_reference(conn, payload);
     let tx_type = payload
         .get("transaction_type")
         .and_then(Value::as_str)
@@ -3695,9 +3789,13 @@ fn prepare_loyalty_request(
                 .unwrap_or(0);
             serde_json::json!({
                 "customer_id": payload.get("customer_id").and_then(Value::as_str).unwrap_or_default(),
-                "order_id": payload.get("order_id").and_then(Value::as_str),
+                "order_id": order_id,
                 "amount_cents": amount_cents,
                 "description": payload.get("description").and_then(Value::as_str),
+                // Replay-safe fallback for order-less awards. The admin route
+                // prefers its per-order key when order_id is present, so this
+                // only anchors the rare order-less case to the local row.
+                "idempotency_key": format!("loyalty:{}", item.record_id),
             })
         }
         "redeem" => {
@@ -3711,8 +3809,10 @@ fn prepare_loyalty_request(
             serde_json::json!({
                 "customer_id": payload.get("customer_id").and_then(Value::as_str).unwrap_or_default(),
                 "points": points,
-                "order_id": payload.get("order_id").and_then(Value::as_str),
+                "order_id": order_id,
                 "description": payload.get("description").and_then(Value::as_str),
+                // Replay-safe fallback for order-less redemptions (see earn).
+                "idempotency_key": format!("loyalty:{}", item.record_id),
             })
         }
         _ => unreachable!("tx_type validated above"),
@@ -4955,6 +5055,32 @@ fn is_parent_order_wait_response(status: u16, response_body: &str) -> bool {
         || lower.contains("parent_order_sync")
 }
 
+/// Returns the missing-module list when the response is the admin API's
+/// uniform module-acquisition denial (THE-306 gating sweep):
+/// `403 {"success":false,"error":"MODULE_REQUIRED","missingModules":[...]}`.
+/// `Some("")` means the denial matched but carried no module list.
+fn parse_module_required_response(status: u16, response_body: &str) -> Option<String> {
+    if status != 403 {
+        return None;
+    }
+    let json = serde_json::from_str::<Value>(response_body).ok()?;
+    if json.get("error").and_then(Value::as_str) != Some("MODULE_REQUIRED") {
+        return None;
+    }
+    let missing = json
+        .get("missingModules")
+        .and_then(Value::as_array)
+        .map(|modules| {
+            modules
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    Some(missing)
+}
+
 /// Process all pending items in the queue by sending them to the admin API.
 ///
 /// Items are processed FIFO within priority bands. On success, items are
@@ -5126,6 +5252,32 @@ pub async fn process_queue(
                     let reason = "Waiting for parent order sync";
                     mark_deferred(&db, &item.id, reason, item.claim_generation)?;
                     telemetry.record_deferred(&item, reason);
+                } else if let Some(missing_modules) =
+                    parse_module_required_response(status, &response_body)
+                {
+                    // THE-306 gating sweep item 3: fail closed, queue
+                    // retained. Without this branch a MODULE_REQUIRED 403
+                    // fell into the generic 4xx arm and dead-lettered the
+                    // row permanently — re-acquiring the module could never
+                    // drain it.
+                    let reason = if missing_modules.is_empty() {
+                        "MODULE_REQUIRED: organization has not acquired this item's module"
+                            .to_string()
+                    } else {
+                        format!(
+                            "MODULE_REQUIRED: organization is missing module(s): {missing_modules}"
+                        )
+                    };
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    mark_module_required(&db, &item.id, &reason, item.claim_generation)?;
+                    telemetry.record_deferred(&item, "module_required");
+                    warn!(
+                        item_id = %item.id,
+                        table_name = %item.table_name,
+                        record_id = %item.record_id,
+                        missing_modules = %missing_modules,
+                        "Parity item parked pending module acquisition"
+                    );
                 } else if is_replay_conflict_response(status, &response_body, &item) {
                     let server_record = fetch_server_record(
                         &client,
@@ -7448,6 +7600,246 @@ mod tests {
     }
 
     #[test]
+    fn prepare_loyalty_earn_sends_order_client_request_id_when_present() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, client_request_id, items, total_amount, status, sync_status)
+             VALUES ('order-loyalty-earn-1', 'client-req-loyalty-earn-1', '[]', 12.5, 'completed', 'synced')",
+            [],
+        )
+        .expect("seed local order");
+
+        let item = queue_item(
+            "loyalty_transactions",
+            "INSERT",
+            "loyalty-row-earn-1",
+            json!({
+                "transaction_type": "earn",
+                "customer_id": "customer-loyalty-1",
+                "order_id": "order-loyalty-earn-1",
+                "amount_cents": 1250,
+                "description": "Visit award"
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        assert_eq!(request.endpoint, "/api/pos/loyalty/earn");
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        // The admin re-keys orders on sync ingest, so the POS-local order id
+        // is unresolvable there. client_request_id is the value the order
+        // sync sent as client_order_id, which the loyalty routes resolve.
+        assert_eq!(
+            body.get("order_id").and_then(Value::as_str),
+            Some("client-req-loyalty-earn-1")
+        );
+        assert_eq!(
+            body.get("idempotency_key").and_then(Value::as_str),
+            Some("loyalty:loyalty-row-earn-1")
+        );
+    }
+
+    #[test]
+    fn prepare_loyalty_redeem_sends_order_client_request_id_when_present() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, client_request_id, items, total_amount, status, sync_status)
+             VALUES ('order-loyalty-redeem-1', 'client-req-loyalty-redeem-1', '[]', 30.0, 'completed', 'synced')",
+            [],
+        )
+        .expect("seed local order");
+
+        let item = queue_item(
+            "loyalty_transactions",
+            "INSERT",
+            "loyalty-row-redeem-1",
+            json!({
+                "transaction_type": "redeem",
+                "customer_id": "customer-loyalty-2",
+                "order_id": "order-loyalty-redeem-1",
+                "points": -50,
+                "description": "Redeem at checkout"
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        assert_eq!(request.endpoint, "/api/pos/loyalty/redeem");
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("order_id").and_then(Value::as_str),
+            Some("client-req-loyalty-redeem-1")
+        );
+        // The redeem sign flip is pre-existing behavior that must survive
+        // the order-reference change.
+        assert_eq!(body.get("points").and_then(Value::as_i64), Some(50));
+        assert_eq!(
+            body.get("idempotency_key").and_then(Value::as_str),
+            Some("loyalty:loyalty-row-redeem-1")
+        );
+    }
+
+    #[test]
+    fn prepare_loyalty_request_falls_back_to_local_order_id_without_client_request_id() {
+        let conn = test_connection();
+        // Pre-v12 rows have no client_request_id; the order sync sent the
+        // local id as client_order_id for them, so the local id is the value
+        // the server can still resolve.
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status)
+             VALUES ('order-loyalty-legacy-1', '[]', 8.0, 'completed', 'synced')",
+            [],
+        )
+        .expect("seed local order");
+
+        let item = queue_item(
+            "loyalty_transactions",
+            "INSERT",
+            "loyalty-row-legacy-1",
+            json!({
+                "transaction_type": "earn",
+                "customer_id": "customer-loyalty-3",
+                "order_id": "order-loyalty-legacy-1",
+                "amount_cents": 800
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("order_id").and_then(Value::as_str),
+            Some("order-loyalty-legacy-1")
+        );
+    }
+
+    #[test]
+    fn prepare_loyalty_request_ignores_blank_client_request_id() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, client_request_id, items, total_amount, status, sync_status)
+             VALUES ('order-loyalty-blank-1', '  ', '[]', 8.0, 'completed', 'synced')",
+            [],
+        )
+        .expect("seed local order");
+
+        let item = queue_item(
+            "loyalty_transactions",
+            "INSERT",
+            "loyalty-row-blank-1",
+            json!({
+                "transaction_type": "earn",
+                "customer_id": "customer-loyalty-4",
+                "order_id": "order-loyalty-blank-1",
+                "amount_cents": 400
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("order_id").and_then(Value::as_str),
+            Some("order-loyalty-blank-1")
+        );
+    }
+
+    #[test]
+    fn prepare_loyalty_request_keeps_payload_order_id_when_order_row_is_missing() {
+        let conn = test_connection();
+        // No local order row (e.g. replay after the order was pruned): send
+        // the payload id unchanged; the admin route degrades to an unlinked
+        // ledger row when it cannot resolve the id.
+        let item = queue_item(
+            "loyalty_transactions",
+            "INSERT",
+            "loyalty-row-orphan-1",
+            json!({
+                "transaction_type": "earn",
+                "customer_id": "customer-loyalty-5",
+                "order_id": "order-loyalty-gone-1",
+                "amount_cents": 600
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("order_id").and_then(Value::as_str),
+            Some("order-loyalty-gone-1")
+        );
+    }
+
+    #[test]
+    fn prepare_loyalty_request_sends_null_order_id_for_orderless_transactions() {
+        let conn = test_connection();
+        let item = queue_item(
+            "loyalty_transactions",
+            "INSERT",
+            "loyalty-row-orderless-1",
+            json!({
+                "transaction_type": "earn",
+                "customer_id": "customer-loyalty-6",
+                "amount_cents": 200,
+                "description": "Birthday award"
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(body.get("order_id"), Some(&Value::Null));
+        // The order-less idempotency anchor is the local row id.
+        assert_eq!(
+            body.get("idempotency_key").and_then(Value::as_str),
+            Some("loyalty:loyalty-row-orderless-1")
+        );
+    }
+
+    #[test]
     fn prepare_payment_request_defers_while_parent_order_update_is_pending() {
         let conn = test_connection();
         seed_terminal_context(&conn);
@@ -9503,6 +9895,115 @@ mod tests {
         assert_eq!(
             status, "processing",
             "row status must remain 'processing' (stale 409 must not flip to 'conflict')"
+        );
+        assert_eq!(attempts, 0, "attempts must NOT bump");
+        assert_eq!(generation, 7, "claim_generation must remain at 7");
+    }
+
+    // -------------------------------------------------------------------
+    // THE-306 gating sweep item 3: MODULE_REQUIRED retry hygiene.
+    // The admin API's module-acquisition denial must park the row pending
+    // (queue retained) without consuming attempts, instead of falling into
+    // the generic 4xx arm and dead-lettering it.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_module_required_response_matches_only_the_uniform_contract() {
+        assert_eq!(
+            parse_module_required_response(
+                403,
+                r#"{"success":false,"error":"MODULE_REQUIRED","missingModules":["coupons","delivery"]}"#,
+            ),
+            Some("coupons, delivery".to_string()),
+            "uniform denial must match and surface the missing modules"
+        );
+        assert_eq!(
+            parse_module_required_response(403, r#"{"error":"MODULE_REQUIRED"}"#),
+            Some(String::new()),
+            "denial without a module list still matches"
+        );
+        assert_eq!(
+            parse_module_required_response(403, r#"{"error":"Forbidden"}"#),
+            None,
+            "other 403 bodies must not match"
+        );
+        assert_eq!(
+            parse_module_required_response(
+                400,
+                r#"{"error":"MODULE_REQUIRED","missingModules":["coupons"]}"#,
+            ),
+            None,
+            "the error code only counts on a 403"
+        );
+        assert_eq!(
+            parse_module_required_response(403, "MODULE_REQUIRED but not json"),
+            None,
+            "non-JSON bodies must not match"
+        );
+    }
+
+    #[test]
+    fn mark_module_required_parks_pending_without_burning_attempts() {
+        let conn = test_connection();
+        seed_h8_sibling_test_row(&conn, "mr-park", "processing", 7);
+
+        let result = mark_module_required(
+            &conn,
+            "mr-park",
+            "MODULE_REQUIRED: organization is missing module(s): coupons",
+            0,
+        );
+        assert!(
+            result.is_ok(),
+            "mark_module_required must succeed: {result:?}"
+        );
+
+        let (status, attempts, generation) = read_h8_state(&conn, "mr-park");
+        assert_eq!(status, "pending", "row must return to the pending pool");
+        assert_eq!(
+            attempts, 7,
+            "attempts must NOT change — module denial is not a failed replay"
+        );
+        assert_eq!(generation, 0, "claim_generation untouched");
+
+        let (error_message, next_retry_at): (String, String) = conn
+            .query_row(
+                "SELECT error_message, next_retry_at FROM parity_sync_queue WHERE id = 'mr-park'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read parked row");
+        assert!(
+            error_message.contains("MODULE_REQUIRED"),
+            "reason must be visible to the Recovery Center: {error_message}"
+        );
+        let next_retry = chrono::DateTime::parse_from_rfc3339(&next_retry_at)
+            .expect("next_retry_at must be RFC3339")
+            .with_timezone(&Utc);
+        let seconds_out = (next_retry - Utc::now()).num_seconds();
+        assert!(
+            (MODULE_REQUIRED_RETRY_SECS - 60..=MODULE_REQUIRED_RETRY_SECS + 60)
+                .contains(&seconds_out),
+            "probe must be on the slow module cadence (~{MODULE_REQUIRED_RETRY_SECS}s), got {seconds_out}s"
+        );
+    }
+
+    #[test]
+    fn mark_module_required_with_stale_generation_is_a_noop() {
+        let conn = test_connection();
+        seed_h8_sibling_test_row(&conn, "mr-stale", "processing", 0);
+        bump_h8_generation(&conn, "mr-stale", 7);
+
+        let result = mark_module_required(&conn, "mr-stale", "MODULE_REQUIRED: coupons", 0);
+        assert!(
+            result.is_ok(),
+            "stale mark_module_required must be Ok no-op"
+        );
+
+        let (status, attempts, generation) = read_h8_state(&conn, "mr-stale");
+        assert_eq!(
+            status, "processing",
+            "row status must remain 'processing' (stale module denial must not flip to 'pending')"
         );
         assert_eq!(attempts, 0, "attempts must NOT bump");
         assert_eq!(generation, 7, "claim_generation must remain at 7");

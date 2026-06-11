@@ -141,7 +141,15 @@ pub async fn delivery_zone_cache_refresh(
         path.push_str(&format!("?branch_id={branch_id}"));
     }
 
-    let response = crate::admin_fetch(Some(&db), &path, "GET", None).await?;
+    // THE-306 gating sweep item 3: an org without the delivery_zones module
+    // gets the uniform MODULE_REQUIRED denial here — that is "no zones", not
+    // an error. Cache the empty set so offline validation agrees with the
+    // acquisition boundary.
+    let response = match crate::admin_fetch(Some(&db), &path, "GET", None).await {
+        Ok(response) => response,
+        Err(error) if crate::is_module_required_error(&error) => json!({ "zones": [] }),
+        Err(error) => return Err(error),
+    };
     let zones = response
         .get("zones")
         .and_then(Value::as_array)

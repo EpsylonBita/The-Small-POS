@@ -10,6 +10,7 @@ import ContentContainer from './ui/ContentContainer';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { useModules, useModuleAccess, getModuleAccessStatic } from '../contexts/module-context';
+import { isViewAccessDenied } from '../utils/module-view-access';
 import ZReportModal from './modals/ZReportModal';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 import { ShiftManager, ShiftManagerRef } from './ShiftManager';
@@ -197,9 +198,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
 
   const [showExpenses, setShowExpenses] = React.useState(false);
 
-  // Route guard state for upgrade modal
+  // Route guard state for upgrade modal. requiredPlan is unknown for modules
+  // the sync payload omits entirely (not acquired, not just plan-locked);
+  // UpgradePromptModal falls back to its default plan copy in that case.
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
-  const [blockedModule, setBlockedModule] = useState<{ moduleId: string; requiredPlan: string } | null>(null);
+  const [blockedModule, setBlockedModule] = useState<{ moduleId: string; requiredPlan?: string } | null>(null);
 
   const shiftManagerRef = useRef<ShiftManagerRef>(null);
   const pendingReportDate = isPendingLocalSubmit
@@ -211,16 +214,24 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   // This provides centralized access checking for the current view
   const currentViewAccess = useModuleAccess(currentView as any);
 
-  // Route guard useEffect: Redirect to dashboard if currentView is a locked module
-  // This catches cases where currentView is set externally (persisted state, deep-links, programmatic changes)
+  // Route guard useEffect: Redirect to dashboard if currentView is a module
+  // view the org has not acquired. This catches cases where currentView is
+  // set externally (persisted state, deep-links, programmatic changes).
+  // Fails closed (THE-315): a module ABSENT from the sync payload is just as
+  // inaccessible as one reported locked-with-plan — the old isLocked check
+  // let absent modules through because the API sync path clears lockedModules.
   useEffect(() => {
-    if (currentViewAccess.isLocked && currentViewAccess.requiredPlan && currentView !== 'dashboard') {
-      console.warn('🔒 Route guard useEffect: Redirecting from locked module:', currentView);
-      setCurrentView('dashboard');
-      setBlockedModule({ moduleId: currentView, requiredPlan: currentViewAccess.requiredPlan });
-      setShowUpgradePrompt(true);
+    if (currentView === 'dashboard') {
+      return;
     }
-  }, [currentView, currentViewAccess.isLocked, currentViewAccess.requiredPlan]);
+    if (!isViewAccessDenied(enabledModules, currentView)) {
+      return;
+    }
+    console.warn('🔒 Route guard useEffect: Redirecting from inaccessible module view:', currentView);
+    setCurrentView('dashboard');
+    setBlockedModule({ moduleId: currentView, requiredPlan: currentViewAccess.requiredPlan });
+    setShowUpgradePrompt(true);
+  }, [currentView, currentViewAccess.requiredPlan, enabledModules]);
 
   // Initialize orders on mount - temporarily disabled
   // useEffect(() => {
@@ -234,10 +245,12 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   const handleViewChange = (view: string) => {
     console.log('🔄 View change requested:', view);
 
-    // Check if the requested view is a locked module using centralized utility
-    const access = getModuleAccessStatic(enabledModules, lockedModules, view);
-    if (access.isLocked && access.requiredPlan) {
-      console.warn('🔒 Access denied to locked module:', view);
+    // Fail-closed module check (THE-315): deny any module-backed view whose
+    // module is not in the enabled list — locked-with-plan AND absent-from-
+    // payload alike. requiredPlan (when known) still drives the modal copy.
+    if (isViewAccessDenied(enabledModules, view)) {
+      const access = getModuleAccessStatic(enabledModules, lockedModules, view);
+      console.warn('🔒 Access denied to module view:', view);
       setBlockedModule({ moduleId: view, requiredPlan: access.requiredPlan });
       setShowUpgradePrompt(true);
       return; // Don't change view

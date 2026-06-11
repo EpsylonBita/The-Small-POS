@@ -59,6 +59,18 @@ function toAdminApiPath(endpoint: string): string {
   return `/api/${clean}`;
 }
 
+/**
+ * THE-306 gating sweep: true when an admin POS API failure is the uniform
+ * module-acquisition denial (`403 {error:'MODULE_REQUIRED',...}`). Both
+ * transports preserve the marker — the web path returns the error code
+ * verbatim and the IPC path embeds it in admin_fetch's
+ * "MODULE_REQUIRED (HTTP 403): ..." message — so callers can park work on a
+ * slow probe cadence instead of hot-retrying an unowned module.
+ */
+export function isModuleRequiredApiError(error: string | null | undefined): boolean {
+  return typeof error === 'string' && error.includes('MODULE_REQUIRED');
+}
+
 function normalizeTransportError(method: string, error?: string | null): string {
   const fallback =
     method === 'GET'

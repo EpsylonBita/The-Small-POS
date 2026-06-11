@@ -1067,6 +1067,16 @@ pub(crate) fn is_terminal_auth_failure(error: &str) -> bool {
         || lower.contains("terminal is inactive")
 }
 
+/// True when an `admin_fetch` error is the admin API's uniform
+/// module-acquisition denial (THE-306 gating sweep):
+/// `403 {"error":"MODULE_REQUIRED","missingModules":[...]}`.
+/// `admin_fetch` folds the JSON `error` field into its message as
+/// `"MODULE_REQUIRED (HTTP 403): ..."`, so a marker check is stable across
+/// both the message prefix and the echoed body.
+pub(crate) fn is_module_required_error(error: &str) -> bool {
+    error.contains("MODULE_REQUIRED")
+}
+
 pub(crate) fn terminal_access_reset_reason(error: &str) -> &'static str {
     if let Some(code) = terminal_auth_failure_code(error) {
         return match code.as_str() {
