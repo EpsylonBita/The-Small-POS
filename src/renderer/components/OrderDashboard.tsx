@@ -2906,25 +2906,90 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             : 0;
 
         const total = subtotal - totalDiscountAmount + deliveryFee;
+        const paymentMethod =
+          typeof orderData.paymentData?.method === "string"
+            ? orderData.paymentData.method
+            : null;
+        const isRoomChargePayment = paymentMethod === "room_charge";
+        const roomId =
+          orderData.paymentData?.roomId ||
+          orderData.paymentData?.room_id ||
+          orderData.roomId ||
+          orderData.room_id ||
+          null;
         const initialPayment =
           !isGhostOrder &&
           !isSplitPayment &&
-          (orderData.paymentData?.method === "cash" ||
-            orderData.paymentData?.method === "card")
+          (paymentMethod === "cash" ||
+            paymentMethod === "card" ||
+            paymentMethod === "room_charge")
             ? {
-                method: orderData.paymentData.method,
+                method: paymentMethod,
+                payment_method: paymentMethod,
                 amount: total,
                 cashReceived:
-                  orderData.paymentData.method === "cash"
+                  paymentMethod === "cash"
                     ? orderData.paymentData?.cashReceived
                     : undefined,
                 changeGiven:
-                  orderData.paymentData.method === "cash"
+                  paymentMethod === "cash"
                     ? orderData.paymentData?.change
                     : undefined,
                 transactionRef: orderData.paymentData?.transactionId,
               }
             : undefined;
+
+        const existingOrderId = orderData.paymentData?.existingOrderId;
+        if (existingOrderId && (paymentMethod === "cash" || paymentMethod === "card")) {
+          const paymentResult: any = await bridge.payments.recordPayment({
+            orderId: existingOrderId,
+            method: paymentMethod,
+            amount: total,
+            cashReceived:
+              paymentMethod === "cash"
+                ? orderData.paymentData?.cashReceived
+                : undefined,
+            changeGiven:
+              paymentMethod === "cash"
+                ? orderData.paymentData?.change
+                : undefined,
+            transactionRef: orderData.paymentData?.transactionId,
+          });
+          if (paymentResult?.success === false) {
+            throw new Error(paymentResult.error || "Failed to record payment");
+          }
+          await silentRefresh().catch((err) =>
+            console.debug("[OrderDashboard] Silent refresh after fallback payment failed:", err),
+          );
+          finalizeCreatedOrderPayment(existingOrderId, isGhostOrder).catch(
+            (printError: any) => {
+              if (isGhostOrder) {
+                console.error(
+                  "[OrderDashboard] Fallback receipt print error:",
+                  printError,
+                );
+                toast.error(
+                  t("orderDashboard.printFailed", {
+                    defaultValue: "Receipt print failed",
+                  }),
+                );
+                return undefined;
+              }
+
+              console.warn(
+                "[OrderDashboard] Fallback fiscal print error (non-blocking):",
+                printError,
+              );
+              toast.error(
+                t("orderDashboard.fiscalPrintFailed", {
+                  defaultValue: "Cash register print failed",
+                }),
+              );
+            },
+          );
+          return finishOrderCompletion(true);
+        }
+
         const isTableOrder =
           orderType === "dine-in" ||
           orderData.orderType === "dine-in" ||
@@ -3002,7 +3067,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             "pickup") as Order["orderType"],
           payment_method: isGhostOrder
             ? null
-            : orderData.paymentData?.method || "cash",
+            : paymentMethod || "cash",
+          room_id: isRoomChargePayment ? roomId : null,
+          roomId: isRoomChargePayment ? roomId : null,
           ...tableOrderCreateFields,
           initialPayment,
           // Full delivery address fields for proper sync to Supabase
@@ -3025,6 +3092,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         if (result.success) {
           createdOrderId = result.orderId;
           orderPersisted = true;
+
+          const roomCharge = (result as any).roomCharge;
+          if (isRoomChargePayment && roomCharge?.applied === false && result.orderId) {
+            await silentRefresh().catch((err) =>
+              console.debug("[OrderDashboard] Silent refresh after room-charge fallback failed:", err),
+            );
+            orderData.paymentData.existingOrderId = result.orderId;
+            orderData.paymentData.existingOrderNumber = result.orderNumber;
+            orderData.paymentData.roomChargeFallback = true;
+            orderData.paymentData.roomChargeFallbackReason =
+              roomCharge.code || roomCharge.error || "room_charge_not_applied";
+            return false;
+          }
 
           if (isTableOrder && result.orderId && selectedTable) {
             const tableSessionOpenPayload = {
@@ -3257,13 +3337,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     "[OrderDashboard] Ghost receipt print error:",
                     printError,
                   );
-                  toast.error(
-                    t("orderDashboard.printFailed", {
-                      defaultValue: "Receipt print failed",
-                    }),
-                  );
-                  return;
-                }
+                      toast.error(
+                        t("orderDashboard.printFailed", {
+                          defaultValue: "Receipt print failed",
+                        }),
+                      );
+                      return undefined;
+                    }
 
                 console.warn(
                   "[OrderDashboard] Cash register print error (non-blocking):",
@@ -5043,21 +5123,23 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     }
 
     return (
-      <div className={`space-y-4 relative ${className}`}>
+      <div className={`relative flex h-full min-h-0 flex-col gap-4 overflow-hidden ${className}`}>
         {/* Order Conflict Banner */}
         {/* Conflict banner intentionally disabled: remote always wins */}
 
         {/* Order Tabs - Module dependent */}
-        <OrderTabsBar
-          activeTab={activeTab}
-          onTabChange={handleTabChange}
-          orderCounts={orderCounts}
-          showDeliveredTab={hasDeliveryModule}
-          showTablesTab={hasTablesModule}
-        />
+        <div className="shrink-0">
+          <OrderTabsBar
+            activeTab={activeTab}
+            onTabChange={handleTabChange}
+            orderCounts={orderCounts}
+            showDeliveredTab={hasDeliveryModule}
+            showTablesTab={hasTablesModule}
+          />
+        </div>
 
         {/* Bulk Actions */}
-        <div ref={bulkActionsBarRef}>
+        <div ref={bulkActionsBarRef} className="shrink-0">
           <BulkActionsBar
             selectedCount={selectedOrders.length}
             selectionType={selectionType}
@@ -5070,12 +5152,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         </div>
 
         {/* Orders Grid or Tables Grid based on active tab */}
-        {activeTab === "tables" ? (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {activeTab === "tables" ? (
           <div
             ref={orderGridRef}
-            className={`overflow-hidden rounded-2xl border p-4 shadow-sm transition-colors ${
+            className={`h-full overflow-y-auto rounded-2xl border p-4 shadow-sm transition-colors scrollbar-hide touch-scroll ${
               resolvedTheme === "light"
-                ? "border-slate-200/80 bg-white/90"
+                ? "border-amber-100/80 bg-[#fffaf1]/90"
                 : "border-white/10 bg-slate-950/45"
             }`}
           >
@@ -5113,7 +5196,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     <div
                       className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
                         resolvedTheme === "light"
-                          ? "border-slate-200 bg-slate-50"
+                          ? "border-amber-100/80 bg-[#fffdf8]"
                           : "border-white/10 bg-white/[0.055]"
                       }`}
                     >
@@ -5139,7 +5222,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     <div
                       className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
                         resolvedTheme === "light"
-                          ? "border-slate-200 bg-slate-50"
+                          ? "border-amber-100/80 bg-[#fffdf8]"
                           : "border-white/10 bg-white/[0.055]"
                       }`}
                     >
@@ -5159,7 +5242,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     <div
                       className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
                         resolvedTheme === "light"
-                          ? "border-slate-200 bg-slate-50"
+                          ? "border-amber-100/80 bg-[#fffdf8]"
                           : "border-white/10 bg-white/[0.055]"
                       }`}
                     >
@@ -5204,7 +5287,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                           tableStatusFilter === status
                             ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20"
                             : resolvedTheme === "light"
-                              ? "bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+                              ? "bg-[#fffdf8] text-slate-700 ring-1 ring-amber-100/80 hover:bg-[#fff7e8]"
                               : "bg-white/[0.06] text-slate-200 hover:bg-white/[0.1]"
                         }`}
                       >
@@ -5230,7 +5313,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 <div
                   className={`flex items-center gap-2 overflow-x-auto rounded-xl border p-1 backdrop-blur-xl scrollbar-hide ${
                     resolvedTheme === "light"
-                      ? "border-slate-200 bg-slate-50"
+                      ? "border-amber-100/80 bg-[#fffdf8]"
                       : "border-white/10 bg-white/[0.055]"
                   }`}
                 >
@@ -5251,7 +5334,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       effectiveTableFloorFilter === "all"
                         ? "bg-blue-600 text-white"
                         : resolvedTheme === "light"
-                          ? "text-slate-700 hover:bg-white"
+                          ? "text-slate-700 hover:bg-[#fffaf1]"
                           : "text-slate-200 hover:bg-white/[0.08]"
                     }`}
                   >
@@ -5266,7 +5349,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         effectiveTableFloorFilter === floor
                           ? "bg-blue-600 text-white"
                           : resolvedTheme === "light"
-                            ? "text-slate-700 hover:bg-white"
+                            ? "text-slate-700 hover:bg-[#fffaf1]"
                             : "text-slate-200 hover:bg-white/[0.08]"
                       }`}
                     >
@@ -5360,7 +5443,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                             <div
                               className={`rounded-xl border px-3 py-2 ${
                                 resolvedTheme === "light"
-                                  ? "border-white/80 bg-white/70"
+                                  ? "border-amber-100/80 bg-[#fffdf8]/80"
                                   : "border-white/10 bg-black/20"
                               }`}
                             >
@@ -5387,7 +5470,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                             <div
                               className={`rounded-xl border px-3 py-2 ${
                                 resolvedTheme === "light"
-                                  ? "border-white/80 bg-white/70"
+                                  ? "border-amber-100/80 bg-[#fffdf8]/80"
                                   : "border-white/10 bg-black/20"
                               }`}
                             >
@@ -5458,7 +5541,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                               <div
                                 className={`mt-3 h-2 overflow-hidden rounded-full ${
                                   resolvedTheme === "light"
-                                    ? "bg-white/80"
+                                    ? "bg-[#fffdf8]/80"
                                     : "bg-black/30"
                                 }`}
                               >
@@ -5472,7 +5555,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                             <div
                               className={`mt-4 rounded-xl border px-3 py-3 ${
                                 resolvedTheme === "light"
-                                  ? "border-emerald-200 bg-white/70"
+                                  ? "border-emerald-200 bg-[#fffdf8]/80"
                                   : "border-emerald-400/20 bg-emerald-400/10"
                               }`}
                             >
@@ -5503,7 +5586,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                               <span
                                 className={`inline-flex max-w-full items-center gap-1 rounded-lg border px-2 py-1 font-semibold ${
                                   resolvedTheme === "light"
-                                    ? "border-slate-200 bg-white/60"
+                                    ? "border-amber-100/80 bg-[#fffdf8]/70"
                                     : "border-white/10 bg-white/[0.04]"
                                 }`}
                               >
@@ -5545,7 +5628,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                               }}
                               className={`inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-black transition-all active:scale-95 ${
                                 resolvedTheme === "light"
-                                  ? "border-slate-200 bg-white/75 text-slate-700 hover:bg-white"
+                                  ? "border-amber-100/80 bg-[#fffdf8]/80 text-slate-700 hover:bg-[#fffaf1]"
                                   : "border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.1]"
                               }`}
                             >
@@ -5569,7 +5652,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           </div>
         ) : (
           /* Orders Grid - shown for Orders/Delivered/Canceled tabs */
-          <div ref={orderGridRef}>
+          <div ref={orderGridRef} className="h-full min-h-0 overflow-hidden">
             <OrderGrid
               orders={filteredOrders}
               selectedOrders={selectedOrders}
@@ -5577,17 +5660,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               onOrderDoubleClick={handleOrderDoubleClick}
               activeTab={activeTab as "orders" | "delivered" | "canceled"}
               storeMapOrigin={storeMapOrigin}
+              className="h-full min-h-0"
             />
           </div>
         )}
+        </div>
 
         {/* Floating Action Button for New Order */}
         <FloatingActionButton
           onClick={handleNewOrderClick}
           disabled={!isShiftActive}
-          className={`!bottom-6 !right-6 ${
+          aria-label={t("orders.newOrder")}
+          movable
+          positionStorageKey="pos-orders-new-order-fab-position"
+          className={`${
             !isShiftActive
-              ? "cursor-not-allowed opacity-50"
+              ? "cursor-not-allowed opacity-80"
               : resolvedTheme === "dark"
                 ? "shadow-blue-500/30"
                 : ""

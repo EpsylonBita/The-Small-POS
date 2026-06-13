@@ -686,6 +686,8 @@ export interface CreateOrderPayload {
   order_type: string;
   payment_method?: string;
   initialPayment?: CreateOrderInitialPayment;
+  room_id?: string | null;
+  roomId?: string | null;
   customer_id?: string;
   customer_name?: string;
   customer_phone?: string;
@@ -703,7 +705,8 @@ export interface CreateOrderPayload {
 }
 
 export interface CreateOrderInitialPayment {
-  method: "cash" | "card" | "other";
+  method: "cash" | "card" | "other" | "room_charge";
+  payment_method?: "cash" | "card" | "other" | "room_charge";
   amount: number;
   currency?: string;
   discountAmount?: number;
@@ -877,8 +880,8 @@ export interface CustomerAddress {
 export interface RecordPaymentParams {
   orderId: string;
   order_id?: string;
-  method: "cash" | "card";
-  payment_method?: "cash" | "card";
+  method: "cash" | "card" | "room_charge";
+  payment_method?: "cash" | "card" | "room_charge";
   amount: number;
   amount_cents?: number;
   currency?: string;

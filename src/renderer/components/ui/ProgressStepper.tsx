@@ -35,24 +35,24 @@ const STEP_TONES: Record<StepStatus, {
         label: 'text-slate-500 dark:text-slate-300/75',
     },
     active: {
-        shell: 'bg-cyan-500/[0.08] dark:bg-cyan-500/10',
+        shell: 'bg-transparent dark:bg-transparent',
         border: 'border-cyan-300/80 dark:border-cyan-400/40',
         icon: 'text-cyan-600 dark:text-cyan-200',
-        halo: 'bg-cyan-400/18 dark:bg-cyan-300/14',
+        halo: 'bg-transparent dark:bg-transparent',
         label: 'text-slate-900 dark:text-white',
     },
     complete: {
-        shell: 'bg-emerald-500/[0.08] dark:bg-emerald-500/10',
+        shell: 'bg-transparent dark:bg-transparent',
         border: 'border-emerald-300/80 dark:border-emerald-400/40',
         icon: 'text-emerald-600 dark:text-emerald-200',
-        halo: 'bg-emerald-400/18 dark:bg-emerald-300/12',
+        halo: 'bg-transparent dark:bg-transparent',
         label: 'text-slate-800 dark:text-slate-100',
     },
     error: {
-        shell: 'bg-rose-500/[0.08] dark:bg-rose-500/10',
+        shell: 'bg-transparent dark:bg-transparent',
         border: 'border-rose-300/80 dark:border-rose-400/40',
         icon: 'text-rose-600 dark:text-rose-200',
-        halo: 'bg-rose-400/18 dark:bg-rose-300/12',
+        halo: 'bg-transparent dark:bg-transparent',
         label: 'text-slate-800 dark:text-slate-100',
     },
 };
@@ -69,7 +69,7 @@ function StepIcon({ status }: { status: StepStatus }) {
         case 'error':
             return <X className="h-4 w-4" strokeWidth={2.3} />;
         case 'active':
-            return <div className="h-2.5 w-2.5 rounded-full bg-current shadow-[0_0_18px_currentColor]" />;
+            return <Circle className="h-4 w-4" strokeWidth={2.1} />;
         case 'pending':
         default:
             return <Circle className="h-4 w-4" strokeWidth={1.9} />;

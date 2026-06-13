@@ -8,6 +8,7 @@ import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, B
 import { getBridge } from '../../../lib';
 import { calculateSubtotalFromItems } from './order-math';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -19,6 +20,53 @@ interface OrderApprovalPanelProps {
 
 const ESTIMATED_TIME_OPTIONS = [15, 20, 25, 30, 45, 60];
 const DECLINE_REASON_MAX_LENGTH = 500;
+const KIOSK_ORDER_NUMBER_PATTERN = /^#?[A-Za-z]+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\d+$/;
+const KIOSK_SHORT_ORDER_NUMBER_PATTERN = /^#?K[A-Za-z]*-\d+$/i;
+
+function readFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function resolveOrderTotalAmount(order: unknown, fallback: number): number {
+  const record = (order ?? {}) as Record<string, unknown>;
+  const cents =
+    readFiniteNumber(record.total_amount_cents) ??
+    readFiniteNumber(record.totalAmountCents);
+  if (cents !== null) {
+    return cents / 100;
+  }
+
+  return (
+    readFiniteNumber(record.total_amount) ??
+    readFiniteNumber(record.totalAmount) ??
+    fallback
+  );
+}
+
+function resolveDisplayOrderNumber(orderNumber: string, createdAt?: string | null): string {
+  const trimmedOrderNumber = orderNumber.trim();
+  if (isKioskOrderNumber(trimmedOrderNumber)) {
+    return formatCompactOrderNumberForDisplay(trimmedOrderNumber, createdAt);
+  }
+
+  return trimmedOrderNumber;
+}
+
+function isKioskOrderNumber(orderNumber: string): boolean {
+  return (
+    KIOSK_ORDER_NUMBER_PATTERN.test(orderNumber) ||
+    KIOSK_SHORT_ORDER_NUMBER_PATTERN.test(orderNumber)
+  );
+}
 
 /**
  * Safely parses items from JSON string format.
@@ -216,7 +264,7 @@ export function OrderApprovalPanel({
   const canClose = viewOnly;
 
   // Normalize fields to handle different shapes
-  const orderNumber = order.order_number || order.orderNumber || '';
+  const rawOrderNumber = order.order_number || order.orderNumber || '';
   const orderType = normalizeOrderTypeForDisplay(
     (order.order_type || order.orderType || '').toString(),
   );
@@ -228,6 +276,8 @@ export function OrderApprovalPanel({
   });
   const customerPhone = order.customer_phone || order.customerPhone || '';
   const createdAtRaw = order.created_at || order.createdAt;
+  const orderNumber = resolveDisplayOrderNumber(rawOrderNumber, createdAtRaw);
+  const isKioskOrder = isKioskOrderNumber(rawOrderNumber.trim());
   const createdAt = createdAtRaw ? new Date(createdAtRaw) : null;
   const deliveryAddressRaw = order.delivery_address || order.address || '';
   const [deliveryAddress, setDeliveryAddress] = React.useState<string>(deliveryAddressRaw);
@@ -525,7 +575,7 @@ export function OrderApprovalPanel({
   const deliveryFee = order.deliveryFee ?? 0;
   const discountAmount = order.discount_amount || 0;
   const discountPercentage = order.discount_percentage || 0;
-  const totalAmount = order.total_amount || order.totalAmount || subtotal;
+  const totalAmount = resolveOrderTotalAmount(fullOrder || order, subtotal);
 
   const handleApprove = useCallback(async () => {
     if (!estimatedTime) {
@@ -633,7 +683,15 @@ export function OrderApprovalPanel({
                   id={`order-approval-title-${order.id}`}
                   className="mt-3 truncate text-2xl font-bold liquid-glass-modal-text"
                 >
-                  {t('orderApprovalPanel.orderNumber', { number: orderNumber, defaultValue: `Order #${orderNumber}` })}
+                  {isKioskOrder
+                    ? t('orderApprovalPanel.kioskOrderNumber', {
+                        number: orderNumber,
+                        defaultValue: `Order ${orderNumber}`,
+                      })
+                    : t('orderApprovalPanel.orderNumber', {
+                        number: orderNumber,
+                        defaultValue: `Order #${orderNumber}`,
+                      })}
                 </h2>
                 {createdAt && (
                   <p className="mt-1 text-sm liquid-glass-modal-text-muted">

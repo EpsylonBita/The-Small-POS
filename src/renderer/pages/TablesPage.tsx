@@ -14,6 +14,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
@@ -46,6 +47,7 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import { getBridge } from '../../lib';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 // ============================================================
 // CONSTANTS
@@ -135,7 +137,8 @@ const TableCard = memo<TableCardProps>(({ table, isSelected, onPress, isDark }) 
   const StatusIcon = getStatusIcon(table.status);
 
   return (
-    <button
+    <motion.button
+      variants={pageMotionItem}
       onClick={onPress}
       className={`relative p-0 overflow-hidden rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] ${
         isSelected
@@ -190,7 +193,7 @@ const TableCard = memo<TableCardProps>(({ table, isSelected, onPress, isDark }) 
           </div>
         )}
       </div>
-    </button>
+    </motion.button>
   );
 });
 
@@ -227,7 +230,8 @@ const FloorPlanTable = memo<FloorPlanTableProps>(({ table, scale, isSelected, on
   };
 
   return (
-    <button
+    <motion.button
+      variants={pageMotionItem}
       className={`absolute flex flex-col items-center justify-center shadow-lg transition-all duration-200 hover:scale-105 ${
         isSelected ? 'ring-4 ring-white/50' : ''
       }`}
@@ -246,7 +250,7 @@ const FloorPlanTable = memo<FloorPlanTableProps>(({ table, scale, isSelected, on
       {table.status === 'occupied' && (
         <Users className="w-3 h-3 text-white/80 mt-0.5" />
       )}
-    </button>
+    </motion.button>
   );
 });
 
@@ -621,7 +625,7 @@ const TablesPage: React.FC = () => {
   // Loading state
   if (isLoading && tables.length === 0) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-gray-900' : 'bg-[#fdfaf5]'}`}>
         <div className="text-center">
           <div className="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4" />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -633,24 +637,24 @@ const TablesPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-full flex flex-col ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+    <motion.div
+      initial="hidden"
+      animate="show"
+      variants={pageMotionContainer}
+      className={`h-full flex flex-col ${isDark ? 'bg-gray-900' : 'bg-[#fdfaf5]'}`}
+    >
       {/* Header */}
-      <div className="px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-blue-500/20 flex items-center justify-center">
-            <Utensils className="w-6 h-6 text-blue-500" />
-          </div>
-          <div>
-            <h1 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              {t('tables.title', 'Tables')}
-            </h1>
-            <div className="flex items-center gap-2 mt-0.5">
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                {stats.availableTables} {t('tables.available', 'available')} / {stats.totalTables} {t('tables.total', 'total')}
-              </p>
-              {/* Real-time indicator */}
-              <Wifi className="w-3 h-3 text-green-500" />
-            </div>
+      <motion.div variants={pageMotionItem} className="px-6 py-4 flex items-center justify-between">
+        <div className="min-w-0">
+          <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
+            {t('tables.title', 'Tables')}
+          </h1>
+          <div className="mt-1 flex items-center gap-2">
+            <p className={`truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              {stats.availableTables} {t('tables.available', 'available')} / {stats.totalTables} {t('tables.total', 'total')}
+            </p>
+            {/* Real-time indicator */}
+            <Wifi className="h-3 w-3 shrink-0 text-green-500" />
           </div>
         </div>
 
@@ -706,28 +710,34 @@ const TablesPage: React.FC = () => {
 
           {/* Refresh */}
           <button
+            type="button"
             onClick={handleRefresh}
             disabled={isRefreshing}
-            className={`p-2.5 rounded-xl ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-white hover:bg-gray-50'} border ${
-              isDark ? 'border-white/10' : 'border-gray-200'
-            } transition-colors disabled:opacity-50`}
+            title={t('common.refresh', 'Refresh')}
+            aria-label={t('common.refresh', 'Refresh')}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+              isDark
+                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                : 'border border-black bg-black text-white hover:bg-zinc-800'
+            } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
           >
-            <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''} ${isDark ? 'text-gray-300' : 'text-gray-600'}`} />
+            <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Stats Row */}
-      <div className="px-6 pb-4">
-        <div className="flex gap-3 overflow-x-auto scrollbar-hide">
+      <motion.div variants={pageMotionItem} className="px-6 pb-4">
+        <motion.div variants={pageMotionContainer} className="flex gap-3 overflow-x-auto scrollbar-hide">
           {([
             { key: 'available', color: STATUS_COLORS.available, icon: CheckCircle, count: stats.availableTables },
             { key: 'occupied', color: STATUS_COLORS.occupied, icon: Users, count: stats.occupiedTables },
             { key: 'reserved', color: STATUS_COLORS.reserved, icon: Clock, count: stats.reservedTables },
             { key: 'cleaning', color: STATUS_COLORS.cleaning, icon: Coffee, count: stats.cleaningTables },
           ] as const).map(({ key, color, icon: Icon, count }) => (
-            <button
+            <motion.button
               key={key}
+              variants={pageMotionItem}
               onClick={() => setFilter(f => ({ ...f, statusFilter: f.statusFilter === key ? 'all' : key }))}
               className={`flex items-center gap-3 px-4 py-2.5 rounded-xl border-2 transition-all ${
                 filter.statusFilter === key
@@ -749,23 +759,23 @@ const TablesPage: React.FC = () => {
                   {t(`tables.status.${key}`, STATUS_LABELS[key as TableStatus])}
                 </div>
               </div>
-            </button>
+            </motion.button>
           ))}
-        </div>
-      </div>
+        </motion.div>
+      </motion.div>
 
       {/* Error Banner */}
       {error && (
-        <div className="mx-6 mb-4 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
+        <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
           <AlertTriangle className="w-5 h-5 text-red-500" />
           <p className="text-red-500 text-sm">{error.message}</p>
-        </div>
+        </motion.div>
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-auto px-6 pb-6">
+      <motion.div variants={pageMotionItem} className="flex-1 overflow-auto px-6 pb-6">
         {viewMode === 'grid' ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+          <motion.div variants={pageMotionContainer} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
             {filteredTables.map(table => (
               <TableCard
                 key={table.id}
@@ -775,9 +785,9 @@ const TablesPage: React.FC = () => {
                 isDark={isDark}
               />
             ))}
-          </div>
+          </motion.div>
         ) : (
-          <div className={`rounded-2xl border ${isDark ? 'bg-gray-800/50 border-white/10' : 'bg-white border-gray-200'}`}>
+          <motion.div variants={pageMotionItem} className={`rounded-2xl border ${isDark ? 'bg-gray-800/50 border-white/10' : 'bg-white border-gray-200'}`}>
             <div className="relative w-full h-[500px] overflow-hidden rounded-2xl">
               {filteredTables.map(table => (
                 <FloorPlanTable
@@ -809,12 +819,12 @@ const TablesPage: React.FC = () => {
                 </div>
               ))}
             </div>
-          </div>
+          </motion.div>
         )}
 
         {/* Empty State */}
         {filteredTables.length === 0 && !isLoading && (
-          <div className="flex flex-col items-center justify-center py-16">
+          <motion.div variants={pageMotionItem} className="flex flex-col items-center justify-center py-16">
             <Utensils className={`w-16 h-16 mb-4 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
             <p className={`text-lg font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {hasActiveFilters
@@ -829,9 +839,9 @@ const TablesPage: React.FC = () => {
                 {t('tables.clearFilters', 'Clear Filters')}
               </button>
             )}
-          </div>
+          </motion.div>
         )}
-      </div>
+      </motion.div>
 
       {/* Status Change Modal */}
       <StatusChangeModal
@@ -846,7 +856,7 @@ const TablesPage: React.FC = () => {
         onNewReservation={handleNewReservation}
         isDark={isDark}
       />
-    </div>
+    </motion.div>
   );
 };
 

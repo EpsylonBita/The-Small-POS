@@ -3611,6 +3611,7 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             prepare_loyalty_request(conn, item, &payload, terminal_id.as_str())
         }
         "housekeeping_tasks" => prepare_housekeeping_request(item, &payload, terminal_id.as_str()),
+        "room_checkins" => prepare_room_checkin_request(item, &payload, terminal_id.as_str()),
         "customer_addresses" => {
             prepare_customer_address_request(conn, item, &payload, terminal_id.as_str())
         }
@@ -4721,6 +4722,89 @@ fn prepare_housekeeping_request(
     }))
 }
 
+/// Build the replay request for an offline room check-in
+/// (hotel-rooms-full-pass task 10.2).
+///
+/// Queue rows come from `offline_room_checkin` (entity `room_checkins`,
+/// `record_id` = `client_request_id`, snake_case capture payload). The
+/// server contract is `POST /api/pos/rooms/{roomId}/checkin` with a
+/// camelCase Zod body; `clientRequestId` is the exactly-once replay key,
+/// so a lost-ack repeat comes back as `200 idempotentReplay` and both 2xx
+/// shapes complete the item. A `403 MODULE_REQUIRED` parks the row via
+/// `mark_module_required` (Req 12.2) and a genuine 409 (e.g.
+/// `ROOM_HAS_ACTIVE_FOLIO`) flows to the existing conflict-review
+/// machinery for staff review — all downstream of this preparation.
+fn prepare_room_checkin_request(
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    let Some(room_id) = string_field(payload, &["room_id", "roomId"]) else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Room check-in sync request is missing room_id".to_string(),
+        });
+    };
+    let Some(guest_name) = string_field(payload, &["guest_name", "guestName"]) else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Room check-in sync request is missing guest_name".to_string(),
+        });
+    };
+    let Some(check_in_date) = string_field(payload, &["check_in_date", "checkInDate"]) else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Room check-in sync request is missing check_in_date".to_string(),
+        });
+    };
+    let Some(check_out_date) = string_field(payload, &["check_out_date", "checkOutDate"]) else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Room check-in sync request is missing check_out_date".to_string(),
+        });
+    };
+    // The replay key is persisted inside the queued payload at capture time;
+    // the queue row's record_id mirrors it, so a legacy row without the
+    // payload copy still replays exactly-once.
+    let client_request_id = string_field(payload, &["client_request_id", "clientRequestId"])
+        .unwrap_or_else(|| item.record_id.trim().to_string());
+    if client_request_id.is_empty() {
+        return Ok(RequestPreparation::Failed {
+            reason: "Room check-in sync request is missing client_request_id".to_string(),
+        });
+    }
+
+    let mut body = Map::new();
+    body.insert("guestName".to_string(), Value::String(guest_name));
+    body.insert("checkInDate".to_string(), Value::String(check_in_date));
+    body.insert("checkOutDate".to_string(), Value::String(check_out_date));
+    body.insert(
+        "clientRequestId".to_string(),
+        Value::String(client_request_id),
+    );
+    // Optional capture fields are queued as explicit nulls; the server
+    // schema accepts nullable+optional, so only concrete values are sent.
+    if let Some(guest_email) = string_field(payload, &["guest_email", "guestEmail"]) {
+        body.insert("guestEmail".to_string(), Value::String(guest_email));
+    }
+    if let Some(guest_phone) = string_field(payload, &["guest_phone", "guestPhone"]) {
+        body.insert("guestPhone".to_string(), Value::String(guest_phone));
+    }
+    if let Some(party_size) = payload
+        .get("party_size")
+        .or_else(|| payload.get("partySize"))
+        .and_then(Value::as_i64)
+    {
+        body.insert("partySize".to_string(), Value::from(party_size));
+    }
+    if let Some(notes) = string_field(payload, &["notes"]) {
+        body.insert("notes".to_string(), Value::String(notes));
+    }
+
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: format!("/api/pos/rooms/{room_id}/checkin"),
+        method: Method::POST,
+        body: Some(Value::Object(body).to_string()),
+        terminal_id: terminal_id.to_string(),
+    }))
+}
+
 fn extract_response_string(response: Option<&Value>, paths: &[&str]) -> Option<String> {
     for path in paths {
         let mut current = response?;
@@ -5535,6 +5619,14 @@ fn resolve_special_entity_endpoint(item: &SyncQueueItem) -> Option<String> {
         "salon_staff_shifts" => Some("/api/pos/staff-schedule".to_string()),
         "drive_thru_orders" => Some("/api/pos/drive-through".to_string()),
         "rooms" => Some(format!("/api/pos/rooms/{}", item.record_id)),
+        "room_checkins" => {
+            // record_id is the client_request_id replay key, not the room —
+            // the target room travels inside the queued capture payload.
+            let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+            let room_id = string_field(&payload, &["room_id", "roomId"])
+                .unwrap_or_else(|| item.record_id.clone());
+            Some(format!("/api/pos/rooms/{room_id}/checkin"))
+        }
         "products" => Some(format!("/api/pos/products/{}", item.record_id)),
         _ => None,
     }
@@ -6685,6 +6777,16 @@ mod tests {
             "room-101",
             serde_json::json!({ "status": "occupied" }),
         );
+        let room_checkin_item = queue_item(
+            "room_checkins",
+            "INSERT",
+            "5e0e7c6a-9f1d-4d5c-8a3b-2f4f6f8d9a1b",
+            serde_json::json!({
+                "room_id": "room-101",
+                "guest_name": "Maria Papadopoulou",
+                "client_request_id": "5e0e7c6a-9f1d-4d5c-8a3b-2f4f6f8d9a1b"
+            }),
+        );
         let product_item = queue_item(
             "products",
             "UPDATE",
@@ -6718,6 +6820,11 @@ mod tests {
         );
         assert_eq!(resolve_endpoint(&drive_thru_item), "/api/pos/drive-through");
         assert_eq!(resolve_endpoint(&room_item), "/api/pos/rooms/room-101");
+        assert_eq!(
+            resolve_endpoint(&room_checkin_item),
+            "/api/pos/rooms/room-101/checkin",
+            "room check-ins must target the payload's room, not the record_id replay key"
+        );
         assert_eq!(
             resolve_endpoint(&product_item),
             "/api/pos/products/product-1"
@@ -10007,5 +10114,357 @@ mod tests {
         );
         assert_eq!(attempts, 0, "attempts must NOT bump");
         assert_eq!(generation, 7, "claim_generation must remain at 7");
+    }
+
+    // -------------------------------------------------------------------
+    // hotel-rooms-full-pass task 10.2: `room_checkins` replay mapping.
+    // Rows are captured offline by `offline_room_checkin` (record_id =
+    // client_request_id replay key, snake_case payload) and must replay as
+    // `POST /api/pos/rooms/{room_id}/checkin` with the server's camelCase
+    // contract. 2xx (incl. 200 idempotentReplay) completes the item, 403
+    // MODULE_REQUIRED parks it, and a genuine 409 surfaces for staff review.
+    // -------------------------------------------------------------------
+
+    const ROOM_CHECKIN_REPLAY_KEY: &str = "5e0e7c6a-9f1d-4d5c-8a3b-2f4f6f8d9a1b";
+
+    /// The exact queue payload shape `capture_room_checkin` persists —
+    /// optional capture fields present as explicit nulls.
+    fn room_checkin_capture_payload() -> Value {
+        json!({
+            "room_id": "room-1",
+            "guest_name": "Maria Papadopoulou",
+            "guest_phone": Value::Null,
+            "guest_email": Value::Null,
+            "check_in_date": "2026-06-12",
+            "check_out_date": "2026-06-14",
+            "party_size": Value::Null,
+            "notes": Value::Null,
+            "client_request_id": ROOM_CHECKIN_REPLAY_KEY,
+            "organization_id": "org-room-checkin",
+            "branch_id": TEST_BRANCH_ID,
+        })
+    }
+
+    /// Enqueue with the same arguments `offline_mutations::enqueue_parity_item`
+    /// uses in production for this entity (priority 0, module `hospitality`,
+    /// conflict strategy `manual`, version 1).
+    fn enqueue_room_checkin_test_item(conn: &Connection) -> String {
+        enqueue_payload_item(
+            conn,
+            "room_checkins",
+            ROOM_CHECKIN_REPLAY_KEY,
+            "INSERT",
+            &room_checkin_capture_payload(),
+            Some(0),
+            Some("hospitality"),
+            Some("manual"),
+            Some(1),
+        )
+        .expect("enqueue room check-in item")
+    }
+
+    #[test]
+    fn prepare_room_checkin_request_maps_capture_payload_to_server_contract() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let mut item = queue_item(
+            "room_checkins",
+            "INSERT",
+            ROOM_CHECKIN_REPLAY_KEY,
+            json!({
+                "room_id": "room-1",
+                "guest_name": "Maria Papadopoulou",
+                "guest_phone": "+30 694 000 0000",
+                "guest_email": "maria@example.com",
+                "check_in_date": "2026-06-12",
+                "check_out_date": "2026-06-14",
+                "party_size": 3,
+                "notes": "Late arrival",
+                "client_request_id": ROOM_CHECKIN_REPLAY_KEY,
+                "organization_id": "org-room-checkin",
+                "branch_id": TEST_BRANCH_ID,
+            }),
+        );
+        item.module_type = "hospitality".to_string();
+
+        let prepared = prepare_request(&conn, &item).expect("prepare room check-in request");
+        let RequestPreparation::Ready(spec) = prepared else {
+            panic!("room check-in request should be ready");
+        };
+        assert_eq!(spec.endpoint, "/api/pos/rooms/room-1/checkin");
+        assert_eq!(spec.method, Method::POST);
+        assert_eq!(spec.terminal_id, TEST_TERMINAL_ID);
+
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("json body");
+        assert_eq!(body["guestName"], "Maria Papadopoulou");
+        assert_eq!(body["checkInDate"], "2026-06-12");
+        assert_eq!(body["checkOutDate"], "2026-06-14");
+        assert_eq!(body["clientRequestId"], ROOM_CHECKIN_REPLAY_KEY);
+        assert_eq!(body["guestEmail"], "maria@example.com");
+        assert_eq!(body["guestPhone"], "+30 694 000 0000");
+        assert_eq!(body["partySize"], 3);
+        assert_eq!(body["notes"], "Late arrival");
+        // Snake_case capture keys must not leak into the server body.
+        assert!(body.get("room_id").is_none());
+        assert!(body.get("guest_name").is_none());
+        assert!(body.get("client_request_id").is_none());
+    }
+
+    #[test]
+    fn prepare_room_checkin_request_omits_null_optionals_and_preflights_room_id() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let mut item = queue_item(
+            "room_checkins",
+            "INSERT",
+            ROOM_CHECKIN_REPLAY_KEY,
+            room_checkin_capture_payload(),
+        );
+        item.module_type = "hospitality".to_string();
+
+        let prepared = prepare_request(&conn, &item).expect("prepare room check-in request");
+        let RequestPreparation::Ready(spec) = prepared else {
+            panic!("room check-in request should be ready");
+        };
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("json body");
+        // Null capture optionals are omitted, not forwarded as nulls.
+        assert!(body.get("guestEmail").is_none());
+        assert!(body.get("guestPhone").is_none());
+        assert!(body.get("partySize").is_none());
+        assert!(body.get("notes").is_none());
+
+        // A corrupted row without a target room dead-letters locally with a
+        // clear reason instead of producing a malformed endpoint.
+        let mut broken_payload = room_checkin_capture_payload();
+        broken_payload
+            .as_object_mut()
+            .expect("payload object")
+            .remove("room_id");
+        let mut broken = queue_item(
+            "room_checkins",
+            "INSERT",
+            ROOM_CHECKIN_REPLAY_KEY,
+            broken_payload,
+        );
+        broken.module_type = "hospitality".to_string();
+        match prepare_request(&conn, &broken).expect("prepare broken room check-in") {
+            RequestPreparation::Failed { reason } => assert!(
+                reason.contains("room_id"),
+                "failure reason must name the missing field: {reason}"
+            ),
+            other => panic!("expected failed preparation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_parks_room_checkin_pending_when_module_is_required() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_room_checkin_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            403,
+            r#"{"success":false,"error":"MODULE_REQUIRED","missingModules":["rooms","guest_billing"]}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let request = requests.recv().await.expect("captured check-in request");
+        assert_eq!(
+            request.request_line,
+            "POST /api/pos/rooms/room-1/checkin HTTP/1.1"
+        );
+
+        let (status, attempts, error_message, next_retry_at): (String, i64, String, String) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts, error_message, next_retry_at
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read parked row");
+        assert_eq!(
+            status, "pending",
+            "module denial parks the row — queue retained for re-acquisition"
+        );
+        assert_eq!(attempts, 0, "module denial must NOT burn attempts");
+        assert!(
+            error_message.contains("MODULE_REQUIRED"),
+            "reason must be visible to the Recovery Center: {error_message}"
+        );
+        assert!(
+            error_message.contains("rooms, guest_billing"),
+            "reason must surface the missing modules: {error_message}"
+        );
+        let next_retry = chrono::DateTime::parse_from_rfc3339(&next_retry_at)
+            .expect("next_retry_at must be RFC3339")
+            .with_timezone(&Utc);
+        let seconds_out = (next_retry - Utc::now()).num_seconds();
+        assert!(
+            (MODULE_REQUIRED_RETRY_SECS - 60..=MODULE_REQUIRED_RETRY_SECS + 60)
+                .contains(&seconds_out),
+            "probe must be on the slow module cadence (~{MODULE_REQUIRED_RETRY_SECS}s), got {seconds_out}s"
+        );
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_completes_room_checkin_on_idempotent_replay_response() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_room_checkin_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        // 200 idempotentReplay is what the server answers when this
+        // clientRequestId was already consumed by an earlier lost-ack
+        // attempt — like a fresh 201, it must complete the queue item.
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            200,
+            r#"{"success":true,"folio":{"id":"folio-1"},"room":{"id":"room-1","status":"occupied"},"idempotentReplay":true}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let request = requests.recv().await.expect("captured check-in request");
+        assert_eq!(
+            request.request_line,
+            "POST /api/pos/rooms/room-1/checkin HTTP/1.1"
+        );
+        let body: Value = serde_json::from_str(&request.body).expect("request body json");
+        assert_eq!(body["guestName"], "Maria Papadopoulou");
+        assert_eq!(body["checkInDate"], "2026-06-12");
+        assert_eq!(body["checkOutDate"], "2026-06-14");
+        assert_eq!(body["clientRequestId"], ROOM_CHECKIN_REPLAY_KEY);
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(
+            remaining, 0,
+            "2xx (incl. 200 idempotentReplay) must complete and remove the item"
+        );
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_marks_room_checkin_active_folio_409_for_staff_review() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_room_checkin_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        // First response: a genuine conflict — another guest's folio is
+        // active, NOT an idempotent replay of this clientRequestId. Second
+        // response serves the conflict arm's fetch_server_record GET probe
+        // (no GET /api/pos/sync/room_checkins/{id} route exists → 404).
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(
+                409,
+                r#"{"success":false,"error":"Room already has an active guest folio","code":"ROOM_HAS_ACTIVE_FOLIO"}"#,
+            ),
+            MockResponse::json(404, r#"{"success":false,"error":"Not found"}"#),
+        ])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            result.conflicts, 1,
+            "a genuine 409 must surface as a staff-review item"
+        );
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].http_status, Some(409));
+        assert!(
+            result.errors[0].error.contains("requiring review"),
+            "error must carry the review reason: {}",
+            result.errors[0].error
+        );
+
+        let replay_request = requests.recv().await.expect("captured check-in request");
+        assert_eq!(
+            replay_request.request_line,
+            "POST /api/pos/rooms/room-1/checkin HTTP/1.1"
+        );
+        let fetch_request = requests.recv().await.expect("captured fetch probe");
+        assert_eq!(
+            fetch_request.request_line,
+            format!("GET /api/pos/sync/room_checkins/{ROOM_CHECKIN_REPLAY_KEY} HTTP/1.1")
+        );
+
+        // Manual conflict strategy: the row leaves the retry pool for
+        // operator review instead of replaying forever, with the discarded
+        // payload preserved in the audit log for staff.
+        let (status, attempts): (String, i64) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read conflicted row");
+        assert_eq!(status, "conflict");
+        assert_eq!(attempts, 0);
+
+        let audit_count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM conflict_audit_log
+                 WHERE entity_id = ?1 AND entity_type = 'room_checkins'",
+                params![ROOM_CHECKIN_REPLAY_KEY],
+                |row| row.get(0),
+            )
+            .expect("read conflict audit row");
+        assert_eq!(audit_count, 1);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
     }
 }

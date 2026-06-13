@@ -1122,6 +1122,79 @@ pub async fn offline_room_update_status(
     }))
 }
 
+/// Capture an offline room check-in: patch the cached `/api/pos/rooms`
+/// entry to `occupied` and enqueue a `room_checkins` parity item whose
+/// `record_id` is the exactly-once replay key (`client_request_id`).
+///
+/// The replay key is generated at capture time when the caller did not
+/// supply one and is persisted inside the queued payload so it survives
+/// restarts — the server's `POST /api/pos/rooms/{roomId}/checkin` keys
+/// idempotent replay on `clientRequestId`.
+fn capture_room_checkin(db: &db::DbState, payload: &Value) -> Result<Value, String> {
+    let room_id = read_string(payload, &["roomId", "room_id"])
+        .ok_or_else(|| "Missing room id".to_string())?;
+    let guest_name = read_string(payload, &["guestName", "guest_name"])
+        .ok_or_else(|| "Missing guest name".to_string())?;
+    let check_in_date = read_string(payload, &["checkInDate", "check_in_date"])
+        .ok_or_else(|| "Missing check-in date".to_string())?;
+    let check_out_date = read_string(payload, &["checkOutDate", "check_out_date"])
+        .ok_or_else(|| "Missing check-out date".to_string())?;
+    let client_request_id = read_string(payload, &["clientRequestId", "client_request_id"])
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let updated_room = patch_rooms_cache(db, &room_id, "occupied")?;
+
+    let queue_payload = json!({
+        "room_id": room_id,
+        "guest_name": guest_name,
+        "guest_phone": read_string(payload, &["guestPhone", "guest_phone"]),
+        "guest_email": read_string(payload, &["guestEmail", "guest_email"]),
+        "check_in_date": check_in_date,
+        "check_out_date": check_out_date,
+        "party_size": read_i64(payload, &["partySize", "party_size"]),
+        "notes": read_string(payload, &["notes"]),
+        "client_request_id": client_request_id.clone(),
+        "organization_id": organization_id(db, payload),
+        "branch_id": branch_id(db, payload),
+    });
+
+    let queue_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        enqueue_parity_item(
+            &conn,
+            "room_checkins",
+            &client_request_id,
+            "INSERT",
+            &queue_payload,
+            "hospitality",
+            "manual",
+        )?
+    };
+
+    Ok(json!({
+        "success": true,
+        "data": {
+            "room": updated_room,
+            "clientRequestId": client_request_id,
+            "queueId": queue_id,
+            "queued": true,
+        }
+    }))
+}
+
+#[tauri::command]
+pub async fn offline_room_checkin(
+    arg0: Option<Value>,
+    arg1: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let payload = object_payload(arg0, arg1)?;
+    let response = capture_room_checkin(&db, &payload)?;
+    emit_queue_hint(&app, "hospitality");
+    Ok(response)
+}
+
 fn patch_housekeeping_cache(
     db: &db::DbState,
     task_id: &str,
@@ -1308,4 +1381,297 @@ pub async fn offline_product_update_quantity(
             "queued": true,
         }
     }))
+}
+
+#[cfg(test)]
+mod offline_room_checkin_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Real schema via the production migration chain + the parity queue
+    /// DDL (`sync_queue::create_tables`) — never inline fake schemas.
+    fn test_db_state() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        sync_queue::create_tables(&conn).expect("create parity queue tables");
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
+
+    fn seed_rooms_cache(db: &db::DbState, path: &str) {
+        let response = json!({
+            "success": true,
+            "rooms": [
+                {
+                    "id": "room-1",
+                    "room_number": "101",
+                    "status": "available",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "id": "room-2",
+                    "room_number": "102",
+                    "status": "available",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                },
+            ],
+        });
+        cache_admin_get_response(db, path, &response).expect("seed rooms cache");
+    }
+
+    /// Org + branch included inline so the helpers never fall through to
+    /// the OS keyring (`storage::get_credential`) during tests.
+    fn base_payload() -> Value {
+        json!({
+            "room_id": "room-1",
+            "guest_name": "Maria Papadopoulou",
+            "check_in_date": "2026-06-12",
+            "check_out_date": "2026-06-14",
+            "organization_id": "org-room-checkin",
+            "branch_id": "branch-room-checkin",
+        })
+    }
+
+    fn read_queue_row(
+        db: &db::DbState,
+    ) -> (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) {
+        let conn = db.conn.lock().expect("db lock");
+        conn.query_row(
+            "SELECT table_name, record_id, operation, data, organization_id,
+                    module_type, conflict_strategy, status
+             FROM parity_sync_queue",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("exactly one parity queue row")
+    }
+
+    fn room_status(cached: &Value, room_id: &str) -> String {
+        cached
+            .get("rooms")
+            .and_then(Value::as_array)
+            .and_then(|rooms| {
+                rooms
+                    .iter()
+                    .find(|room| room.get("id").and_then(Value::as_str) == Some(room_id))
+            })
+            .and_then(|room| room.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn room_checkin_patches_all_cached_rooms_paths_to_occupied() {
+        let db = test_db_state();
+        seed_rooms_cache(&db, "/api/pos/rooms");
+        seed_rooms_cache(&db, "/api/pos/rooms?branch_id=branch-room-checkin");
+
+        let response = capture_room_checkin(&db, &base_payload()).expect("capture check-in");
+
+        for path in [
+            "/api/pos/rooms",
+            "/api/pos/rooms?branch_id=branch-room-checkin",
+        ] {
+            let (cached, _) =
+                read_cached_admin_get_response(&db, path).expect("rooms cache present");
+            assert_eq!(room_status(&cached, "room-1"), "occupied");
+            assert_eq!(room_status(&cached, "room-2"), "available");
+        }
+
+        assert_eq!(response.get("success").and_then(Value::as_bool), Some(true));
+        let data = response.get("data").expect("data envelope");
+        assert_eq!(
+            data.get("room")
+                .and_then(|room| room.get("status"))
+                .and_then(Value::as_str),
+            Some("occupied")
+        );
+        assert_eq!(data.get("queued").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn room_checkin_enqueue_row_shape_with_generated_client_request_id() {
+        let db = test_db_state();
+        seed_rooms_cache(&db, "/api/pos/rooms");
+
+        let response = capture_room_checkin(&db, &base_payload()).expect("capture check-in");
+        let generated = response
+            .get("data")
+            .and_then(|data| data.get("clientRequestId"))
+            .and_then(Value::as_str)
+            .expect("clientRequestId in response")
+            .to_string();
+        Uuid::parse_str(&generated).expect("generated client_request_id must be a uuid");
+
+        let (
+            table_name,
+            record_id,
+            operation,
+            data,
+            organization_id,
+            module_type,
+            conflict_strategy,
+            status,
+        ) = read_queue_row(&db);
+        assert_eq!(table_name, "room_checkins");
+        assert_eq!(record_id, generated);
+        assert_eq!(operation, "INSERT");
+        assert_eq!(organization_id, "org-room-checkin");
+        assert_eq!(module_type, "hospitality");
+        assert_eq!(conflict_strategy, "manual");
+        assert_eq!(status, "pending");
+
+        // Payload round-trip: the replay key is persisted in the queued
+        // payload (must survive restarts), alongside the capture fields.
+        let queued: Value = serde_json::from_str(&data).expect("queued payload parses");
+        assert_eq!(
+            queued.get("client_request_id").and_then(Value::as_str),
+            Some(generated.as_str())
+        );
+        assert_eq!(
+            queued.get("room_id").and_then(Value::as_str),
+            Some("room-1")
+        );
+        assert_eq!(
+            queued.get("guest_name").and_then(Value::as_str),
+            Some("Maria Papadopoulou")
+        );
+        assert_eq!(
+            queued.get("check_in_date").and_then(Value::as_str),
+            Some("2026-06-12")
+        );
+        assert_eq!(
+            queued.get("check_out_date").and_then(Value::as_str),
+            Some("2026-06-14")
+        );
+        assert_eq!(
+            queued.get("branch_id").and_then(Value::as_str),
+            Some("branch-room-checkin")
+        );
+        // Optional capture fields are present as explicit nulls.
+        assert_eq!(queued.get("guest_phone"), Some(&Value::Null));
+        assert_eq!(queued.get("guest_email"), Some(&Value::Null));
+        assert_eq!(queued.get("party_size"), Some(&Value::Null));
+        assert_eq!(queued.get("notes"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn room_checkin_preserves_caller_client_request_id_and_optionals() {
+        let db = test_db_state();
+        seed_rooms_cache(&db, "/api/pos/rooms");
+
+        let mut payload = base_payload();
+        let object = payload.as_object_mut().expect("payload object");
+        object.insert(
+            "client_request_id".to_string(),
+            json!("5e0e7c6a-9f1d-4d5c-8a3b-2f4f6f8d9a1b"),
+        );
+        object.insert("guest_phone".to_string(), json!("+30 694 000 0000"));
+        object.insert("guest_email".to_string(), json!("maria@example.com"));
+        object.insert("party_size".to_string(), json!(3));
+        object.insert("notes".to_string(), json!("Late arrival"));
+
+        let response = capture_room_checkin(&db, &payload).expect("capture check-in");
+        assert_eq!(
+            response
+                .get("data")
+                .and_then(|data| data.get("clientRequestId"))
+                .and_then(Value::as_str),
+            Some("5e0e7c6a-9f1d-4d5c-8a3b-2f4f6f8d9a1b")
+        );
+
+        let (_, record_id, _, data, _, _, _, _) = read_queue_row(&db);
+        assert_eq!(record_id, "5e0e7c6a-9f1d-4d5c-8a3b-2f4f6f8d9a1b");
+
+        let queued: Value = serde_json::from_str(&data).expect("queued payload parses");
+        assert_eq!(
+            queued.get("client_request_id").and_then(Value::as_str),
+            Some("5e0e7c6a-9f1d-4d5c-8a3b-2f4f6f8d9a1b")
+        );
+        assert_eq!(
+            queued.get("guest_phone").and_then(Value::as_str),
+            Some("+30 694 000 0000")
+        );
+        assert_eq!(
+            queued.get("guest_email").and_then(Value::as_str),
+            Some("maria@example.com")
+        );
+        assert_eq!(queued.get("party_size").and_then(Value::as_i64), Some(3));
+        assert_eq!(
+            queued.get("notes").and_then(Value::as_str),
+            Some("Late arrival")
+        );
+    }
+
+    #[test]
+    fn room_checkin_enqueues_even_when_rooms_cache_is_cold() {
+        let db = test_db_state();
+
+        let response = capture_room_checkin(&db, &base_payload()).expect("capture check-in");
+        let data = response.get("data").expect("data envelope");
+        assert_eq!(data.get("room"), Some(&Value::Null));
+        assert_eq!(data.get("queued").and_then(Value::as_bool), Some(true));
+
+        let (table_name, _, operation, _, _, _, _, status) = read_queue_row(&db);
+        assert_eq!(table_name, "room_checkins");
+        assert_eq!(operation, "INSERT");
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn room_checkin_validates_required_fields() {
+        let db = test_db_state();
+
+        let cases: [(&str, &str); 4] = [
+            ("room_id", "Missing room id"),
+            ("guest_name", "Missing guest name"),
+            ("check_in_date", "Missing check-in date"),
+            ("check_out_date", "Missing check-out date"),
+        ];
+        for (field, expected_error) in cases {
+            let mut payload = base_payload();
+            payload
+                .as_object_mut()
+                .expect("payload object")
+                .remove(field);
+            let error =
+                capture_room_checkin(&db, &payload).expect_err("missing required field must fail");
+            assert!(
+                error.contains(expected_error),
+                "expected '{expected_error}' in '{error}'"
+            );
+        }
+
+        let conn = db.conn.lock().expect("db lock");
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .expect("count queue rows");
+        assert_eq!(queued, 0, "validation failures must not enqueue");
+    }
 }

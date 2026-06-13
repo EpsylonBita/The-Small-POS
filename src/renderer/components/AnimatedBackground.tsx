@@ -6,17 +6,19 @@ import { useTheme } from '../contexts/theme-context'
 export default function AnimatedBackground() {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === 'dark'
+  const lightOrbGradient = 'radial-gradient(circle, #000000 0%, #92400e 35%, #eab308 55%, #fde68a 70%, transparent 100%)'
+  const darkOrbGradient = 'radial-gradient(circle, #ffffff 0%, #fde68a 35%, #facc15 55%, #d97706 70%, transparent 100%)'
 
   return (
     <div className={`fixed inset-0 overflow-hidden ${isDark ? 'bg-black' : 'bg-white'}`}>
-      {/* Light Theme Orbs - Black core with blue edges */}
+      {/* Light Theme Orbs - Black core with yellow edges */}
       {!isDark && (
         <>
         {/* Lava lamp blob 1 */}
         <motion.div
           className="absolute w-[700px] h-[700px] rounded-full blur-[100px] opacity-70"
           style={{
-            background: 'radial-gradient(circle, #000000 0%, #1e40af 35%, #3b82f6 55%, #60a5fa 70%, transparent 100%)',
+            background: lightOrbGradient,
             left: '-10%',
             top: '-10%',
           }}
@@ -36,7 +38,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[600px] h-[600px] rounded-full blur-[90px] opacity-65"
           style={{
-            background: 'radial-gradient(circle, #000000 0%, #1e40af 35%, #3b82f6 55%, #60a5fa 70%, transparent 100%)',
+            background: lightOrbGradient,
             right: '-10%',
             bottom: '-10%',
           }}
@@ -57,7 +59,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[550px] h-[550px] rounded-full blur-[85px] opacity-60"
           style={{
-            background: 'radial-gradient(circle, #000000 0%, #1e40af 35%, #3b82f6 55%, #60a5fa 70%, transparent 100%)',
+            background: lightOrbGradient,
             left: '50%',
             top: '-10%',
           }}
@@ -78,7 +80,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[650px] h-[650px] rounded-full blur-[95px] opacity-55"
           style={{
-            background: 'radial-gradient(circle, #000000 0%, #1e40af 35%, #3b82f6 55%, #60a5fa 70%, transparent 100%)',
+            background: lightOrbGradient,
             left: '70%',
             bottom: '30%',
           }}
@@ -99,7 +101,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[500px] h-[500px] rounded-full blur-[80px] opacity-65"
           style={{
-            background: 'radial-gradient(circle, #000000 0%, #1e40af 35%, #3b82f6 55%, #60a5fa 70%, transparent 100%)',
+            background: lightOrbGradient,
             left: '10%',
             bottom: '-10%',
           }}
@@ -120,7 +122,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[580px] h-[580px] rounded-full blur-[88px] opacity-60"
           style={{
-            background: 'radial-gradient(circle, #000000 0%, #1e40af 35%, #3b82f6 55%, #60a5fa 70%, transparent 100%)',
+            background: lightOrbGradient,
             right: '30%',
             top: '40%',
           }}
@@ -139,14 +141,14 @@ export default function AnimatedBackground() {
         </>
       )}
 
-      {/* Dark Theme Orbs - White core with blue edges */}
+      {/* Dark Theme Orbs - White core with yellow edges */}
       {isDark && (
         <>
         {/* Lava lamp blob 1 */}
         <motion.div
           className="absolute w-[700px] h-[700px] rounded-full blur-[100px] opacity-50"
           style={{
-            background: 'radial-gradient(circle, #ffffff 0%, #60a5fa 35%, #3b82f6 55%, #1e40af 70%, transparent 100%)',
+            background: darkOrbGradient,
             left: '-10%',
             top: '-10%',
           }}
@@ -166,7 +168,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[600px] h-[600px] rounded-full blur-[90px] opacity-45"
           style={{
-            background: 'radial-gradient(circle, #ffffff 0%, #60a5fa 35%, #3b82f6 55%, #1e40af 70%, transparent 100%)',
+            background: darkOrbGradient,
             right: '-10%',
             bottom: '-10%',
           }}
@@ -187,7 +189,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[550px] h-[550px] rounded-full blur-[85px] opacity-40"
           style={{
-            background: 'radial-gradient(circle, #ffffff 0%, #60a5fa 35%, #3b82f6 55%, #1e40af 70%, transparent 100%)',
+            background: darkOrbGradient,
             left: '50%',
             top: '-10%',
           }}
@@ -208,7 +210,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[650px] h-[650px] rounded-full blur-[95px] opacity-35"
           style={{
-            background: 'radial-gradient(circle, #ffffff 0%, #60a5fa 35%, #3b82f6 55%, #1e40af 70%, transparent 100%)',
+            background: darkOrbGradient,
             left: '70%',
             bottom: '30%',
           }}
@@ -229,7 +231,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[500px] h-[500px] rounded-full blur-[80px] opacity-45"
           style={{
-            background: 'radial-gradient(circle, #ffffff 0%, #60a5fa 35%, #3b82f6 55%, #1e40af 70%, transparent 100%)',
+            background: darkOrbGradient,
             left: '10%',
             bottom: '-10%',
           }}
@@ -250,7 +252,7 @@ export default function AnimatedBackground() {
         <motion.div
           className="absolute w-[580px] h-[580px] rounded-full blur-[88px] opacity-40"
           style={{
-            background: 'radial-gradient(circle, #ffffff 0%, #60a5fa 35%, #3b82f6 55%, #1e40af 70%, transparent 100%)',
+            background: darkOrbGradient,
             right: '30%',
             top: '40%',
           }}

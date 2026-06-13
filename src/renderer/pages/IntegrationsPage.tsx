@@ -11,7 +11,8 @@
  * @since 2.4.0
  */
 
-import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, memo, useRef } from 'react';
+import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
@@ -49,6 +50,7 @@ import { posApiGet, posApiPost } from '../utils/api-helpers';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 import { getPluginLogo } from '../utils/plugin-icons';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 // ============================================================
 // TYPES
@@ -557,7 +559,8 @@ const IntegrationCard = memo<IntegrationCardProps>(({
   const isEnabled = integration.status === 'connected';
 
   return (
-    <div
+    <motion.div
+      variants={pageMotionItem}
       className={`relative p-4 rounded-xl border transition-all duration-200 hover:shadow-md ${
         isDark
           ? 'bg-zinc-950 border-zinc-800 hover:border-zinc-600'
@@ -580,9 +583,8 @@ const IntegrationCard = memo<IntegrationCardProps>(({
           {/* Status Badge */}
           <div className="flex items-center gap-2 mt-3">
             <div
-              className="flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium"
+              className="flex items-center gap-1.5 text-xs font-medium"
               style={{
-                backgroundColor: `${statusColor}20`,
                 color: statusColor,
               }}
             >
@@ -650,7 +652,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
           </span>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 });
 
@@ -686,7 +688,7 @@ const CategorySection = memo<CategorySectionProps>(({
   const connectedCount = integrations.filter(i => i.status === 'connected').length;
 
   return (
-    <div className="mb-6">
+    <motion.section variants={pageMotionItem} className="mb-6">
       <button
         onClick={() => setIsExpanded(!isExpanded)}
         className={`w-full flex items-center justify-between p-3 rounded-lg mb-3 transition-colors ${
@@ -718,7 +720,7 @@ const CategorySection = memo<CategorySectionProps>(({
       </button>
 
       {isExpanded && (
-        <div className="grid gap-3 sm:grid-cols-1 lg:grid-cols-2">
+        <motion.div variants={pageMotionContainer} className="grid gap-3 sm:grid-cols-1 lg:grid-cols-2">
           {integrations.map(integration => (
             <IntegrationCard
               key={integration.id}
@@ -729,9 +731,9 @@ const CategorySection = memo<CategorySectionProps>(({
               onConfigure={onConfigure}
             />
           ))}
-        </div>
+        </motion.div>
       )}
-    </div>
+    </motion.section>
   );
 });
 
@@ -750,14 +752,12 @@ interface StatsCardProps {
 }
 
 const StatsCard = memo<StatsCardProps>(({ label, value, icon: Icon, color, isDark }) => (
-  <div
+  <motion.div
+    variants={pageMotionItem}
     className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
   >
     <div className="flex items-center gap-3">
-      <div
-        className="w-10 h-10 rounded-lg flex items-center justify-center"
-        style={{ backgroundColor: `${color}20` }}
-      >
+      <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
         <Icon size={20} style={{ color }} />
       </div>
       <div>
@@ -769,7 +769,7 @@ const StatsCard = memo<StatsCardProps>(({ label, value, icon: Icon, color, isDar
         </p>
       </div>
     </div>
-  </div>
+  </motion.div>
 ));
 
 StatsCard.displayName = 'StatsCard';
@@ -788,6 +788,8 @@ export const IntegrationsPage: React.FC = () => {
   // State
   const [integrations, setIntegrations] = useState<IntegrationWithStatus[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoadedIntegrations, setHasLoadedIntegrations] = useState(false);
+  const hasLoadedIntegrationsRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -880,8 +882,12 @@ export const IntegrationsPage: React.FC = () => {
 
   // Fetch integration statuses
   const fetchIntegrations = useCallback(async () => {
+    const shouldShowLoading = !hasLoadedIntegrationsRef.current;
+
     try {
-      setLoading(true);
+      if (shouldShowLoading) {
+        setLoading(true);
+      }
       setError(null);
 
       const integrationsResult = await posApiGet<{ integrations?: RemoteIntegrationPayload[] }>('/pos/integrations');
@@ -905,6 +911,8 @@ export const IntegrationsPage: React.FC = () => {
       setError(err instanceof Error ? err.message : 'Failed to fetch integrations');
       setIntegrations([]);
     } finally {
+      hasLoadedIntegrationsRef.current = true;
+      setHasLoadedIntegrations(true);
       setLoading(false);
     }
   }, []);
@@ -1254,11 +1262,12 @@ export const IntegrationsPage: React.FC = () => {
 
   // Calculate stats
   const stats = useMemo(() => calculateStats(integrations), [integrations]);
+  const isInitialPageLoading = !hasLoadedIntegrations && (loading || modulesLoading);
 
   // Loading state
-  if (loading || modulesLoading) {
+  if (isInitialPageLoading) {
     return (
-      <div className={`min-h-screen flex items-center justify-center ${isDark ? 'bg-black' : 'bg-white'}`}>
+      <div className={`min-h-screen flex items-center justify-center ${isDark ? 'bg-black' : 'bg-[#fdfaf5]'}`}>
         <div className="text-center">
           <Loader2 className={`w-8 h-8 animate-spin mx-auto mb-3 ${isDark ? 'text-emerald-400' : 'text-blue-500'}`} />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -1270,35 +1279,35 @@ export const IntegrationsPage: React.FC = () => {
   }
 
   return (
-    <div className={`min-h-screen ${isDark ? 'bg-black' : 'bg-white'}`}>
-      {/* Header */}
-      <div className={`sticky top-0 z-10 px-4 py-4 border-b ${isDark ? 'bg-black/95 border-zinc-800' : 'bg-white/95 border-gray-200'} backdrop-blur-sm`}>
-        <div className="max-w-6xl mx-auto">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div
-                className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                  isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-purple-100'
-                }`}
-              >
-                <Plug size={24} className={isDark ? 'text-emerald-400' : 'text-purple-500'} />
-              </div>
-              <div>
-                <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                  {t('integrations.title', 'Plugins')}
-                </h1>
-                <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                  {t('integrations.subtitle', 'Connect third-party plugins')}
-                </p>
-              </div>
+    <motion.div
+      initial="hidden"
+      animate="show"
+      variants={pageMotionContainer}
+      className={`min-h-screen ${isDark ? 'bg-black' : 'bg-[#fdfaf5]'}`}
+    >
+      {/* Content */}
+      <motion.div variants={pageMotionContainer} className="max-w-6xl mx-auto p-4">
+        {/* Header + Stats Card */}
+        <motion.div
+          variants={pageMotionItem}
+          className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <div className="min-w-0">
+              <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                {t('integrations.title', 'Plugins')}
+              </h1>
+              <p className={`mt-1 truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                {t('integrations.subtitle', 'Connect third-party plugins')}
+              </p>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center justify-end gap-3">
               {/* Online Status */}
-              <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg ${
+              <div className={`flex items-center gap-2 ${
                 isOnline
-                  ? isDark ? 'bg-green-500/20 text-green-400' : 'bg-green-100 text-green-600'
-                  : isDark ? 'bg-red-500/20 text-red-400' : 'bg-red-100 text-red-600'
+                  ? isDark ? 'text-green-400' : 'text-green-600'
+                  : isDark ? 'text-red-400' : 'text-red-600'
               }`}>
                 {isOnline ? <Wifi size={16} /> : <WifiOff size={16} />}
                 <span className="text-xs font-medium">
@@ -1308,13 +1317,16 @@ export const IntegrationsPage: React.FC = () => {
 
               {/* Refresh Button */}
               <button
+                type="button"
                 onClick={handleRefresh}
                 disabled={isRefreshing || !isOnline}
-                className={`p-2 rounded-lg transition-colors disabled:opacity-50 ${
+                title={t('common.refresh', 'Refresh')}
+                aria-label={t('common.refresh', 'Refresh')}
+                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
                   isDark
-                    ? 'hover:bg-zinc-800 text-zinc-300'
-                    : 'hover:bg-gray-100 text-gray-600'
-                }`}
+                    ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                    : 'border border-black bg-black text-white hover:bg-zinc-800'
+                } ${isRefreshing || !isOnline ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
               >
                 <RefreshCw
                   size={20}
@@ -1323,46 +1335,43 @@ export const IntegrationsPage: React.FC = () => {
               </button>
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* Content */}
-      <div className="max-w-6xl mx-auto p-4">
-        {/* Stats Row */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-          <StatsCard
-            label={t('integrations.stats.total', 'Total')}
-            value={stats.total}
-            icon={Plug}
-            color="#a1a1aa"
-            isDark={isDark}
-          />
-          <StatsCard
-            label={t('integrations.stats.connected', 'Connected')}
-            value={stats.connected}
-            icon={CheckCircle}
-            color="#22c55e"
-            isDark={isDark}
-          />
-          <StatsCard
-            label={t('integrations.stats.disconnected', 'Disconnected')}
-            value={stats.disconnected}
-            icon={XCircle}
-            color="#6b7280"
-            isDark={isDark}
-          />
-          <StatsCard
-            label={t('integrations.stats.pending', 'Pending')}
-            value={stats.pending}
-            icon={AlertCircle}
-            color="#f59e0b"
-            isDark={isDark}
-          />
-        </div>
+          {/* Stats */}
+          <motion.div variants={pageMotionContainer} className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <StatsCard
+              label={t('integrations.stats.total', 'Total')}
+              value={stats.total}
+              icon={Plug}
+              color="#facc15"
+              isDark={isDark}
+            />
+            <StatsCard
+              label={t('integrations.stats.connected', 'Connected')}
+              value={stats.connected}
+              icon={CheckCircle}
+              color="#22c55e"
+              isDark={isDark}
+            />
+            <StatsCard
+              label={t('integrations.stats.disconnected', 'Disconnected')}
+              value={stats.disconnected}
+              icon={XCircle}
+              color="#ef4444"
+              isDark={isDark}
+            />
+            <StatsCard
+              label={t('integrations.stats.pending', 'Pending')}
+              value={stats.pending}
+              icon={AlertCircle}
+              color="#f59e0b"
+              isDark={isDark}
+            />
+          </motion.div>
+        </motion.div>
 
         {/* Error State */}
         {error && (
-          <div className={`p-4 rounded-xl mb-6 ${isDark ? 'bg-red-500/10 border border-red-500/20' : 'bg-red-50 border border-red-200'}`}>
+          <motion.div variants={pageMotionItem} className={`p-4 rounded-xl mb-6 ${isDark ? 'bg-red-500/10 border border-red-500/20' : 'bg-red-50 border border-red-200'}`}>
             <div className="flex items-center gap-3">
               <AlertCircle className="text-red-500" size={20} />
               <div>
@@ -1374,12 +1383,12 @@ export const IntegrationsPage: React.FC = () => {
                 </p>
               </div>
             </div>
-          </div>
+          </motion.div>
         )}
 
         {/* Empty State */}
         {groupedIntegrations.length === 0 && !error && (
-          <div className={`text-center py-12 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+          <motion.div variants={pageMotionItem} className={`text-center py-12 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
             <Plug size={48} className={`mx-auto mb-4 ${isDark ? 'text-zinc-600' : 'text-gray-400'}`} />
             <h3 className={`text-lg font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('integrations.empty.title', 'No purchased plugins')}
@@ -1387,22 +1396,24 @@ export const IntegrationsPage: React.FC = () => {
             <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {t('integrations.empty.description', 'Purchased plugins assigned to this organization will appear here.')}
             </p>
-          </div>
+          </motion.div>
         )}
 
         {/* Integration Categories */}
-        {groupedIntegrations.map(([category, categoryIntegrations]) => (
-          <CategorySection
-            key={category}
-            category={category}
-            integrations={categoryIntegrations}
-            isDark={isDark}
-            toggleDisabledMessage={toggleAction.message}
-            onToggle={handleToggle}
-            onConfigure={handleConfigure}
-          />
-        ))}
-      </div>
+        <motion.div variants={pageMotionContainer}>
+          {groupedIntegrations.map(([category, categoryIntegrations]) => (
+            <CategorySection
+              key={category}
+              category={category}
+              integrations={categoryIntegrations}
+              isDark={isDark}
+              toggleDisabledMessage={toggleAction.message}
+              onToggle={handleToggle}
+              onConfigure={handleConfigure}
+            />
+          ))}
+        </motion.div>
+      </motion.div>
 
         {/* MyData Configuration Modal */}
         <LiquidGlassModal
@@ -1791,8 +1802,8 @@ export const IntegrationsPage: React.FC = () => {
             )}
           </div>
         </LiquidGlassModal>
-      </div>
-    );
-  };
+    </motion.div>
+  );
+};
 
 export default IntegrationsPage;

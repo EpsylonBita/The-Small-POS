@@ -21,6 +21,7 @@ import ConnectionSettingsModal from "./components/modals/ConnectionSettingsModal
 import SyncRecoveryModal, {
   type SyncRecoveryOpenContext,
 } from "./components/recovery/SyncRecoveryModal";
+import PageLoadMotion from "./components/ui/PageLoadMotion";
 
 import { ActivityTracker } from "./services/ActivityTracker";
 import {
@@ -678,7 +679,9 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       <ErrorBoundary>
         <ThemeProvider>
           <FullscreenAwareLayout>
-            <OnboardingPage />
+            <PageLoadMotion animationKey="onboarding" className="min-h-screen">
+              <OnboardingPage />
+            </PageLoadMotion>
           </FullscreenAwareLayout>
         </ThemeProvider>
       </ErrorBoundary>
@@ -1317,7 +1320,9 @@ function AppContent() {
         <ThemeProvider>
           <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <div className="h-screen w-screen overflow-hidden bg-black">
-              <ExternalDisplayPage />
+              <PageLoadMotion animationKey={externalDisplayKind} className="h-full w-full">
+                <ExternalDisplayPage />
+              </PageLoadMotion>
             </div>
             <Toaster
               position="top-center"
@@ -1353,9 +1358,17 @@ function AppContent() {
           <FullscreenAwareLayout
             updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
             onCheckForUpdates={autoUpdater.openUpdateDialog}
+            onOpenSettings={() => openConnectionSettings()}
           >
-            <LoginPage onLogin={handleLogin} />
+            <PageLoadMotion animationKey="login" className="min-h-screen">
+              <LoginPage onLogin={handleLogin} />
+            </PageLoadMotion>
           </FullscreenAwareLayout>
+          <ConnectionSettingsModal
+            isOpen={showConnectionSettings}
+            initialSection={connectionSettingsInitialSection}
+            onClose={closeConnectionSettings}
+          />
           <Toaster
             position="top-center"
             containerStyle={TOAST_CONTAINER_STYLE}
@@ -1379,6 +1392,7 @@ function AppContent() {
           <FullscreenAwareLayout
             updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
             onCheckForUpdates={autoUpdater.openUpdateDialog}
+            onOpenSettings={() => openConnectionSettings()}
           >
             {/* Shutdown/Restart Overlay */}
             {isShuttingDown && (
@@ -1421,7 +1435,14 @@ function AppContent() {
                   />
                 }
               />
-              <Route path="/new-order" element={<NewOrderPage />} />
+              <Route
+                path="/new-order"
+                element={
+                  <PageLoadMotion animationKey="new-order" className="min-h-screen">
+                    <NewOrderPage />
+                  </PageLoadMotion>
+                }
+              />
               <Route
                 path="*"
                 element={

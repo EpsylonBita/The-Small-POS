@@ -416,8 +416,11 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    * Trusts the canonical module registry from admin dashboard.
    *
    * Only shows modules that are:
-   * 1. Core modules (dashboard, settings) - always shown
+   * 1. Core POS screens (dashboard) - always shown
    * 2. Purchased modules that are POS-enabled
+   *
+   * Settings is a shell feature opened through ConnectionSettingsModal, not a
+   * module-backed view, so it is filtered by isModuleExcludedFromPos.
    *
    * Requirements: 1.1, 1.2, 2.1
    */

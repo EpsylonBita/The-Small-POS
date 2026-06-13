@@ -86,6 +86,7 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
  */
 export const POS_EXCLUDED_MODULES: Set<string> = new Set([
   'branches',
+  'settings',
 ]);
 
 /**

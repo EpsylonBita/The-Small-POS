@@ -234,6 +234,16 @@ export function formatCompactOrderNumberForDisplay(orderNumber: string, createdA
     return `${hashMatch[1].toUpperCase()} #${hashMatch[2].slice(0, 6).toUpperCase()}`;
   }
 
+  const kioskBusinessPeriodMatch = withoutHash.match(/^([A-Za-z]+)-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-(\d+)$/);
+  if (kioskBusinessPeriodMatch) {
+    return `${kioskBusinessPeriodMatch[1].toUpperCase()} #${kioskBusinessPeriodMatch[2]}`;
+  }
+
+  const kioskShortMatch = withoutHash.match(/^(K[A-Za-z]*)-(\d+)$/i);
+  if (kioskShortMatch) {
+    return `${kioskShortMatch[1].toUpperCase()} #${kioskShortMatch[2]}`;
+  }
+
   const match = withoutHash.match(/^([A-Za-z]+)-\d{8}-(\d+)$/);
   if (match) {
     return `${match[1].toUpperCase()} #${match[2]}`;

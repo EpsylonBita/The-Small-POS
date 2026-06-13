@@ -8,6 +8,7 @@ import SkeletonLoader from './ui/SkeletonLoader';
 import LoadingSpinner from './ui/LoadingSpinner';
 import type { StoreMapOrigin } from '../utils/delivery-routing';
 import { isTableServiceOrder, shouldShowInStandardOrderLane } from '../utils/tableOrderFlow';
+import { useTheme } from '../contexts/theme-context';
 
 const isCancelledOrderStatus = (status: unknown): boolean => {
   const normalized = String(status || '').toLowerCase();
@@ -34,6 +35,7 @@ const OrderGrid = memo<OrderGridProps>(({
   storeMapOrigin = null,
 }) => {
   const { t } = useTranslation();
+  const { resolvedTheme } = useTheme();
   const { orders: storeOrders, filter, isLoading } = useOrderStore();
   const baseOrders = ordersProp ?? storeOrders ?? [];
   const shouldApplyFilters = !ordersProp;
@@ -129,14 +131,14 @@ const OrderGrid = memo<OrderGridProps>(({
     return (
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
         <ClipboardList className="h-14 w-14 opacity-50" />
-        <div className="text-white/50 text-lg font-medium">{t('dashboard.noOrders', 'No orders found')}</div>
-        <div className="text-white/30 text-sm">{t('dashboard.ordersWillAppear', 'Orders will appear here when created')}</div>
+        <div className={`text-lg font-medium ${resolvedTheme === 'light' ? 'text-slate-500' : 'text-white/50'}`}>{t('dashboard.noOrders', 'No orders found')}</div>
+        <div className={`text-sm ${resolvedTheme === 'light' ? 'text-slate-400' : 'text-white/30'}`}>{t('dashboard.ordersWillAppear', 'Orders will appear here when created')}</div>
       </div>
     );
   }
 
   return (
-    <div className={`flex flex-col gap-2 sm:gap-3 overflow-y-auto max-h-[calc(100vh-280px)] max-h-[calc(100dvh-280px)] pr-1 sm:pr-2 touch-scroll scrollbar-hide ${className}`}>
+    <div className={`flex h-full min-h-0 flex-col gap-2 overflow-y-auto pr-1 scrollbar-hide touch-scroll sm:gap-3 sm:pr-2 ${className}`}>
       {orderCards}
     </div>
   );

@@ -1687,7 +1687,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
               : editMode
                 ? 'bg-amber-600 text-white hover:bg-amber-700 hover:scale-[1.02]'
-                : 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-[1.02]'
+                : 'bg-yellow-400 text-black hover:bg-yellow-300 hover:scale-[1.02]'
           }`}
         >
           {isSaving ? (

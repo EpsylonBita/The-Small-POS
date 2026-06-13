@@ -51,7 +51,16 @@ function main() {
   const normalizedReleaseTag = releaseTagInput.startsWith('v')
     ? releaseTagInput
     : `v${releaseTagInput}`;
-  const notes = args.notes || `Release ${normalizedReleaseTag}`;
+  const notesFile = args.notesFile && args.notesFile !== 'true'
+    ? path.resolve(args.notesFile)
+    : null;
+  if (notesFile && !fs.existsSync(notesFile)) {
+    throw new Error(`Release notes file not found: ${notesFile}`);
+  }
+  const notesFromFile = notesFile && fs.existsSync(notesFile)
+    ? fs.readFileSync(notesFile, 'utf8').trim()
+    : '';
+  const notes = notesFromFile || args.notes || `Release ${normalizedReleaseTag}`;
   const pubDate = args.pubDate || new Date().toISOString();
 
   const signatureRaw = fs.readFileSync(path.resolve(signatureFilePath), 'utf8');

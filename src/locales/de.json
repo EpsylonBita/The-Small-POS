@@ -2622,12 +2622,17 @@
       "cardFailed": "Kartenzahlung fehlgeschlagen. Bitte versuchen Sie es erneut.",
       "loadingMethods": "Zahlungsmethoden werden geladen",
       "loadingMethodsHint": "Terminal-Zahlungskonfiguration wird geprüft...",
-      "splitSimple": "SPLIT",
-      "enterCashReceived": "[NEEDS DE TRANSLATION] Μετρητά που Παραλήφθηκαν",
-      "insufficient": "[NEEDS DE TRANSLATION] Ανεπαρκή",
-      "completeCash": "[NEEDS DE TRANSLATION] Ολοκλήρωση",
-      "cashSimple": "[NEEDS DE TRANSLATION] ΜΕΤΡΗΤΑ",
-      "cardSimple": "[NEEDS DE TRANSLATION] ΚΑΡΤΑ"
+      "splitSimple": "TEILEN",
+      "enterCashReceived": "Erhaltenes Bargeld",
+      "insufficient": "Unzureichend",
+      "completeCash": "Abschließen",
+      "cashSimple": "BAR",
+      "cardSimple": "KARTE",
+      "roomChargeSimple": "ZIMMER",
+      "roomChargeRoom": "Zimmer {{roomNumber}}",
+      "roomChargeLabel": "Auf Zimmer buchen",
+      "roomChargeSuccess": "Auf Zimmer gebucht",
+      "roomChargeFallback": "Zimmerbuchung wurde nicht angewendet. Zahlung für diese Bestellung jetzt kassieren."
     },
     "customerSearch": {
       "title": "Kunde suchen",
@@ -2729,9 +2734,9 @@
       "transaction": "Transaktion",
       "coveredItems": "Abgedeckte Artikel",
       "item": "Artikel",
-      "address": "[NEEDS DE TRANSLATION] Διεύθυνση",
-      "noPhone": "[NEEDS DE TRANSLATION] Χωρίς τηλέφωνο",
-      "paymentMethod": "[NEEDS DE TRANSLATION] Τρόπος Πληρωμής"
+      "address": "Adresse",
+      "noPhone": "Keine Telefonnummer",
+      "paymentMethod": "Zahlungsmethode"
     },
     "simplePricing": {
       "title": "Preis festlegen"
@@ -5928,13 +5933,93 @@
       "loadFailed": "[NEEDS DE TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
     }
   },
+  "roomsView": {
+    "noBranch": "Bitte wählen Sie eine Filiale aus, um Zimmer anzuzeigen",
+    "status": {
+      "available": "Verfügbar",
+      "occupied": "Belegt",
+      "reserved": "Reserviert",
+      "maintenance": "Wartung",
+      "cleaning": "Reinigung"
+    }
+  },
   "guestBilling": {
+    "room": "Zimmer",
+    "folioDetails": "Gästekonto-Details",
+    "ongoing": "Laufend",
+    "totalCharges": "Gesamtbelastungen",
+    "totalPayments": "Gesamtzahlungen",
+    "notes": "Notizen",
+    "balance": "Saldo",
+    "addCharge": "Belastung hinzufügen",
+    "payment": "Zahlung",
+    "checkout": "Auschecken",
+    "printFolio": "Gästekonto drucken",
+    "searchPlaceholder": "Gast oder Zimmer suchen...",
+    "outstandingBalanceLabel": "Offener Saldo",
+    "status": {
+      "active": "Aktiv",
+      "closed": "Geschlossen",
+      "disputed": "Beanstandet"
+    },
     "empty": {
-      "title": "[NEEDS DE TRANSLATION] Δεν υπάρχουν λογαριασμοί επισκεπτών",
-      "description": "[NEEDS DE TRANSLATION] Οι λογαριασμοί επισκεπτών θα εμφανιστούν εδώ όταν δημιουργηθούν."
+      "title": "Keine Gästekonten",
+      "description": "Gästekonten werden hier angezeigt, sobald sie erstellt wurden."
     },
     "stats": {
-      "openFolios": "[NEEDS DE TRANSLATION] Ανοιχτοί Λογαριασμοί"
+      "activeFolios": "Aktive Gästekonten",
+      "outstandingBalance": "Offener Saldo",
+      "disputed": "Beanstandet",
+      "openFolios": "Offene Gästekonten"
+    },
+    "fields": {
+      "chargeType": "Belastungsart",
+      "description": "Beschreibung",
+      "paymentMethod": "Zahlungsmethode",
+      "amount": "Betrag",
+      "quantity": "Menge",
+      "reference": "Referenz",
+      "notes": "Notizen"
+    },
+    "chargeTypes": {
+      "room": "Zimmer",
+      "food": "Speisen",
+      "beverage": "Getränke",
+      "service": "Service",
+      "tax": "Steuer",
+      "other": "Sonstiges"
+    },
+    "paymentMethods": {
+      "cash": "Bar",
+      "card": "Karte",
+      "bankTransfer": "Banküberweisung",
+      "other": "Sonstiges"
+    },
+    "chargeModal": {
+      "title": "Belastung hinzufügen",
+      "submit": "Belastung buchen",
+      "success": "Belastung im Gästekonto gebucht"
+    },
+    "paymentModal": {
+      "title": "Zahlung hinzufügen",
+      "submit": "Zahlung buchen",
+      "success": "Zahlung im Gästekonto gebucht"
+    },
+    "checkoutModal": {
+      "success": "Gast ausgecheckt",
+      "outstanding": "Es bleibt ein offener Saldo von {{balance}}. Erfassen Sie vor dem Checkout eine Zahlung."
+    },
+    "errors": {
+      "moduleRequired": "Gästefakturierung ist für dieses Terminal nicht aktiviert.",
+      "actionFailed": "Gästekonto konnte nicht aktualisiert werden."
+    },
+    "error": {
+      "title": "Gästekonten konnten nicht geladen werden"
+    },
+    "validation": {
+      "amount": "Geben Sie einen Betrag größer als null ein.",
+      "quantity": "Die Menge muss größer als null sein.",
+      "description": "Beschreibung ist erforderlich."
     }
   },
   "filters": {

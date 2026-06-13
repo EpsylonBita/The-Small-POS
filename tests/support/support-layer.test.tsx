@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nProvider } from '../../src/renderer/contexts/i18n-context';
@@ -21,6 +23,16 @@ import {
   resolveViewModuleId,
 } from '../../src/renderer/utils/module-view-access';
 import { isModuleRequiredApiError } from '../../src/renderer/utils/api-helpers';
+import {
+  FOLIO_STATUSES,
+  FOLIO_STATUS_PRESENTATION,
+  folioChargesEndpoint,
+  folioCheckoutEndpoint,
+  folioPaymentsEndpoint,
+  isFolioStatus,
+  parseFolioCheckoutOutstanding,
+  summarizeFolios,
+} from '../../src/renderer/utils/guest-billing';
 import {
   buildResolvedAddressDetails,
   getSuggestionStreetLabel,
@@ -1791,4 +1803,356 @@ test('isModuleRequiredApiError recognizes both transport shapes (THE-306 sweep i
   assert.equal(isModuleRequiredApiError('Failed to fetch'), false);
   assert.equal(isModuleRequiredApiError(undefined), false);
   assert.equal(isModuleRequiredApiError(null), false);
+});
+
+// --- GuestBillingView folio vocabulary + action wiring (hotel-rooms-full-pass 10.4) ---
+
+const guestBillingViewPath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'pages',
+  'verticals',
+  'hotel',
+  'GuestBillingView.tsx',
+);
+
+const readGuestBillingViewSource = () => readFileSync(guestBillingViewPath, 'utf8');
+
+const roomsViewPath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'pages',
+  'verticals',
+  'hotel',
+  'RoomsView.tsx',
+);
+const roomsServicePath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'services',
+  'RoomsService.ts',
+);
+const paymentModalPath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'components',
+  'modals',
+  'PaymentModal.tsx',
+);
+const orderDashboardPath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'components',
+  'OrderDashboard.tsx',
+);
+const orderFlowPath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'components',
+  'OrderFlow.tsx',
+);
+const newOrderPagePath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'pages',
+  'NewOrderPage.tsx',
+);
+const orderServicePath = path.join(process.cwd(), 'src', 'services', 'OrderService.ts');
+const nativePaymentsPath = path.join(process.cwd(), 'src-tauri', 'src', 'payments.rs');
+const nativeSyncPath = path.join(process.cwd(), 'src-tauri', 'src', 'sync.rs');
+const localeDirectoryPath = path.join(process.cwd(), 'src', 'locales');
+const posLocaleCodes = ['de', 'el', 'en', 'fr', 'it'] as const;
+
+const readRoomsViewSource = () => readFileSync(roomsViewPath, 'utf8');
+const readRoomsServiceSource = () => readFileSync(roomsServicePath, 'utf8');
+const readPaymentModalSource = () => readFileSync(paymentModalPath, 'utf8');
+const readOrderDashboardSource = () => readFileSync(orderDashboardPath, 'utf8');
+const readOrderFlowSource = () => readFileSync(orderFlowPath, 'utf8');
+const readNewOrderPageSource = () => readFileSync(newOrderPagePath, 'utf8');
+const readOrderServiceSource = () => readFileSync(orderServicePath, 'utf8');
+const readNativePaymentsSource = () => readFileSync(nativePaymentsPath, 'utf8');
+const readNativeSyncSource = () => readFileSync(nativeSyncPath, 'utf8');
+
+const hasLocaleValue = (messages: unknown, key: string): boolean => {
+  const value = key
+    .split('.')
+    .reduce<unknown>(
+      (current, segment) =>
+        current && typeof current === 'object' && segment in current
+          ? (current as Record<string, unknown>)[segment]
+          : undefined,
+      messages,
+    );
+
+  return typeof value === 'string' && value.trim().length > 0 && !value.includes('[NEEDS');
+};
+
+test('guest billing status vocabulary matches the guest_folios server CHECK (task 10.4)', () => {
+  // Server truth: active | closed | disputed.
+  assert.deepEqual([...FOLIO_STATUSES], ['active', 'closed', 'disputed']);
+  assert.deepEqual(
+    Object.keys(FOLIO_STATUS_PRESENTATION).sort(),
+    ['active', 'closed', 'disputed'],
+  );
+  for (const status of FOLIO_STATUSES) {
+    assert.equal(isFolioStatus(status), true);
+    const presentation = FOLIO_STATUS_PRESENTATION[status];
+    assert.match(presentation.labelKey, /^guestBilling\.status\./);
+    assert.ok(presentation.defaultLabel.length > 0);
+    assert.ok(presentation.badgeClass.length > 0);
+  }
+
+  // The old desktop-only vocabulary never existed on the server and is gone.
+  for (const dead of ['open', 'settled', 'pending_checkout']) {
+    assert.equal(isFolioStatus(dead), false);
+    assert.equal(dead in FOLIO_STATUS_PRESENTATION, false);
+  }
+});
+
+test('GuestBillingView source carries only the server status vocabulary', () => {
+  const source = readGuestBillingViewSource();
+
+  // No quoted dead-status literal anywhere in the view.
+  assert.doesNotMatch(
+    source,
+    /['"`](open|settled|pending_checkout)['"`]/,
+    'the open/settled/pending_checkout vocabulary must not reappear in GuestBillingView',
+  );
+  // Status rendering and filters flow through the shared server-truth helpers.
+  assert.match(source, /FOLIO_STATUS_PRESENTATION/);
+  assert.match(source, /FOLIO_STATUSES/);
+  assert.match(source, /summarizeFolios/);
+});
+
+test('guest billing folio actions target the existing POS folio routes', () => {
+  assert.equal(folioChargesEndpoint('folio-1'), '/pos/guest-billing/folio-1/charges');
+  assert.equal(folioPaymentsEndpoint('folio-1'), '/pos/guest-billing/folio-1/payments');
+  assert.equal(folioCheckoutEndpoint('folio-1'), '/pos/guest-billing/folio-1/checkout');
+});
+
+test('GuestBillingView wires Add Charge / Payment / Checkout buttons to the folio endpoints', () => {
+  const source = readGuestBillingViewSource();
+
+  // Buttons post through the shared endpoint builders over the POS API bridge.
+  assert.match(source, /folioChargesEndpoint\(/);
+  assert.match(source, /folioPaymentsEndpoint\(/);
+  assert.match(source, /folioCheckoutEndpoint\(/);
+  assert.match(source, /posApiPost/);
+  // Checkout uses the close_paid resolution and steers outstanding balances
+  // to Add Payment via the dual-transport 409 parser.
+  assert.match(source, /resolution: 'close_paid'/);
+  assert.match(source, /parseFolioCheckoutOutstanding\(/);
+  assert.match(source, /setActionModal\('payment'\)/);
+  // MODULE_REQUIRED denials surface a clear message instead of raw transport noise.
+  assert.match(source, /isModuleRequiredApiError\(/);
+});
+
+test('parseFolioCheckoutOutstanding recognizes both transport shapes', () => {
+  // Browser fetch path: posApiFetch keeps only the human message + HTTP status.
+  const browser = parseFolioCheckoutOutstanding(
+    'Cannot complete checkout with outstanding balance 84.50.',
+    409,
+  );
+  assert.equal(browser.outstanding, true);
+  assert.equal(browser.balance, 84.5);
+
+  // Tauri IPC path: admin_fetch folds the entire JSON body into the error
+  // string and no status survives the bridge.
+  const ipc = parseFolioCheckoutOutstanding(
+    'Cannot complete checkout with outstanding balance 84.50. (HTTP 409): {"success":false,"error":"Cannot complete checkout with outstanding balance 84.50.","code":"folio_checkout_outstanding","balance":84.5,"reconciliation":{"status":"outstanding","paid":false}}',
+    undefined,
+  );
+  assert.equal(ipc.outstanding, true);
+  assert.equal(ipc.balance, 84.5);
+
+  // Everything else keeps the normal error path.
+  assert.equal(parseFolioCheckoutOutstanding('Folio is already closed', 409).outstanding, false);
+  assert.equal(
+    parseFolioCheckoutOutstanding(
+      'MODULE_REQUIRED (HTTP 403): {"success":false,"error":"MODULE_REQUIRED"}',
+      undefined,
+    ).outstanding,
+    false,
+  );
+  assert.equal(parseFolioCheckoutOutstanding(undefined, 409).outstanding, false);
+  assert.equal(parseFolioCheckoutOutstanding(null, 409).outstanding, false);
+  // A 500 carrying similar text is not the structured 409 denial.
+  assert.equal(
+    parseFolioCheckoutOutstanding('Cannot complete checkout with outstanding balance 84.50.', 500)
+      .outstanding,
+    false,
+  );
+});
+
+test('summarizeFolios counts active/disputed folios and sums only active balances', () => {
+  const summary = summarizeFolios([
+    { status: 'active', balance: 120.5 },
+    { status: 'active', balance: 0 },
+    { status: 'closed', balance: 0 },
+    { status: 'disputed', balance: 75 },
+  ]);
+
+  assert.equal(summary.activeCount, 2);
+  assert.equal(summary.disputedCount, 1);
+  assert.equal(summary.activeBalance, 120.5);
+
+  const empty = summarizeFolios([]);
+  assert.deepEqual(empty, { activeCount: 0, disputedCount: 0, activeBalance: 0 });
+});
+
+// --- RoomsView desktop convergence (hotel-rooms-full-pass 10.3) ---
+
+test('RoomsService preserves effective room status and active folio payloads', () => {
+  const source = readRoomsServiceSource();
+
+  assert.match(source, /effective_status\?: RoomStatus \| null/);
+  assert.match(source, /active_folio\?:/);
+  assert.match(source, /effectiveStatus: data\.effective_status \|\| null/);
+  assert.match(source, /activeFolio: transformActiveFolio\(data\.active_folio\)/);
+  assert.match(source, /balanceCents/);
+});
+
+test('RoomsView uses the room-stay endpoints for folio check-in and checkout', () => {
+  const source = readRoomsViewSource();
+
+  assert.match(source, /isModuleEnabled\('guest_billing' as any\)/);
+  assert.match(source, /offlineRoomCheckin\(/);
+  assert.match(source, /\/pos\/rooms\/\$\{encodeURIComponent\(selectedRoom\.id\)\}\/checkin/);
+  assert.match(source, /\/pos\/rooms\/\$\{encodeURIComponent\(room\.id\)\}\/checkout/);
+  assert.match(source, /parseFolioCheckoutOutstanding\(/);
+  assert.match(source, /folioPaymentsEndpoint\(/);
+});
+
+test('RoomsView fallback receipt is gated to rooms without guest billing and orders-owned orgs', () => {
+  const source = readRoomsViewSource();
+
+  assert.match(source, /const hasGuestBilling = isModuleEnabled\('guest_billing' as any\)/);
+  assert.match(source, /const hasOrders = isModuleEnabled\('orders' as any\)/);
+  assert.match(source, /if \(hasGuestBilling\) \{/);
+  assert.match(source, /if \(hasOrders\) \{[\s\S]*createFallbackReceiptOrder\(/);
+  assert.match(source, /else if \(!reservationCreated\) \{/);
+});
+
+test('RoomsView checkout cannot construct the old stay billing order', () => {
+  const source = readRoomsViewSource();
+
+  assert.doesNotMatch(source, /createHotelBillingOrder/);
+  assert.doesNotMatch(source, /checkoutAmount/);
+  assert.doesNotMatch(source, /nightsStayed/);
+  assert.doesNotMatch(source, /Room \$\{actionRoom\.roomNumber\} checkout/);
+});
+
+test('RoomsView renders effective status, active folio balance, and posts Add Charge to folio routes', () => {
+  const source = readRoomsViewSource();
+
+  assert.match(source, /getRoomEffectiveStatus\(room\)/);
+  assert.match(source, /room\.activeFolio\?\.guestName/);
+  assert.match(source, /room\.activeFolio\.balanceCents \/ 100/);
+  assert.match(source, /folioChargesEndpoint\(/);
+  assert.doesNotMatch(source, /console\.log\('Add charge'\)/);
+});
+
+// --- Charge-to-room desktop payment surface (hotel-rooms-full-pass 10.5) ---
+
+test('PaymentModal gates room_charge on room context, active folio, and module ownership', () => {
+  const source = readPaymentModalSource();
+
+  assert.match(source, /interface RoomChargeContext/);
+  assert.match(source, /roomChargeContext\?\.roomId && roomChargeContext\?\.activeFolioId/);
+  assert.match(source, /hasModule\(MODULE_IDS\.ROOMS\)/);
+  assert.match(source, /hasModule\(MODULE_IDS\.ORDERS\)/);
+  assert.match(source, /hasModule\('guest_billing'\)/);
+  assert.match(source, /handlePaymentMethodSelect\('room_charge'\)/);
+  assert.match(source, /room_id: roomChargeContext\.roomId/);
+});
+
+test('room_charge late failure keeps the created order and prompts immediate payment', () => {
+  const paymentModal = readPaymentModalSource();
+  const orderDashboard = readOrderDashboardSource();
+  const orderFlow = readOrderFlowSource();
+  const newOrderPage = readNewOrderPageSource();
+
+  assert.match(paymentModal, /interface RoomChargeFallbackPrompt/);
+  assert.match(paymentModal, /isRoomChargeFallbackPrompt\(completionResult\)/);
+  assert.match(paymentModal, /paymentPayload\.existingOrderId/);
+  assert.match(paymentModal, /existingOrderId: roomChargeFallback\.orderId/);
+  assert.match(paymentModal, /modals\.payment\.roomChargeFallback/);
+
+  for (const source of [orderDashboard, orderFlow, newOrderPage]) {
+    assert.match(source, /roomCharge\?\.applied === false/);
+    assert.match(source, /orderData\.paymentData\.existingOrderId = result\.orderId/);
+    assert.match(source, /orderData\.paymentData\.roomChargeFallback = true/);
+    assert.match(source, /bridge\.payments\.recordPayment\(/);
+    assert.match(source, /existingOrderId/);
+  }
+});
+
+test('order creation sends room_id for room_charge and strips API initialPayment', () => {
+  const orderService = readOrderServiceSource();
+
+  for (const source of [readOrderDashboardSource(), readOrderFlowSource(), readNewOrderPageSource()]) {
+    assert.match(source, /payment_method: isGhostOrder[\s\S]*paymentMethod/);
+    assert.match(source, /room_id: isRoomChargePayment \? roomId : null/);
+    assert.match(source, /paymentMethod === ['"]room_charge['"]/);
+  }
+
+  assert.match(orderService, /room_id: isRoomChargeOrder \? normalizedRoomId : null/);
+  assert.match(orderService, /initialPayment: isRoomChargeOrder \? null : normalizedInitialPayment/);
+  assert.match(orderService, /newOrder\.roomCharge = result\.roomCharge/);
+});
+
+test('native payment and sync layers preserve room_charge as a separate local method', () => {
+  const payments = readNativePaymentsSource();
+  const sync = readNativeSyncSource();
+
+  assert.match(payments, /"room_charge" \| "room-charge" => Some\("room_charge"\.to_string\(\)\)/);
+  assert.match(payments, /"room_charge" \| "room-charge" => "room_charge"\.to_string\(\)/);
+  assert.match(payments, /Only cash, card, and room_charge payments can be recorded locally/);
+  assert.match(sync, /"room_charge" \| "room-charge" => "room_charge"/);
+  assert.match(sync, /"room_id": str_any\(source, &\["roomId", "room_id"\]\)/);
+  assert.match(sync, /"room_id": str_any\(&data, &\["room_id", "roomId"\]\)/);
+});
+
+// --- Desktop hotel locale coverage (hotel-rooms-full-pass 10.6) ---
+
+test('desktop hotel and room-charge locale keys exist in every POS locale', () => {
+  const requiredKeys = new Set([
+    'roomsView.status.available',
+    'roomsView.status.occupied',
+    'roomsView.status.reserved',
+    'roomsView.status.maintenance',
+    'roomsView.status.cleaning',
+    'guestBilling.status.active',
+    'guestBilling.status.closed',
+    'guestBilling.status.disputed',
+  ]);
+  const translationCallPattern = /t\(\s*['"]([^'"`]+)['"]/g;
+  for (const source of [readPaymentModalSource(), readRoomsViewSource(), readGuestBillingViewSource()]) {
+    for (const match of source.matchAll(translationCallPattern)) {
+      const key = match[1];
+      if (
+        key.startsWith('modals.payment.') ||
+        key.startsWith('roomsView.') ||
+        key.startsWith('guestBilling.')
+      ) {
+        requiredKeys.add(key);
+      }
+    }
+  }
+
+  for (const locale of posLocaleCodes) {
+    const messages = JSON.parse(
+      readFileSync(path.join(localeDirectoryPath, `${locale}.json`), 'utf8'),
+    );
+    const missing = [...requiredKeys].filter((key) => !hasLocaleValue(messages, key)).sort();
+
+    assert.deepEqual(missing, [], `${locale} is missing desktop hotel/payment locale keys`);
+  }
 });

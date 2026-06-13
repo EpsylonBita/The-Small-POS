@@ -41,7 +41,16 @@ test('flavor tab copy and selected styling avoid clipped glow artifacts', () => 
 
   assert.equal(enLocale.menu.categories.savory, 'Savoury');
   assert.equal(enLocale.menu.itemModal.savory, 'Savoury');
+  assert.match(tabsSource, /border-yellow-300\/55 bg-yellow-400 text-black/);
+  assert.match(tabsSource, /border-yellow-500\/60 bg-yellow-400 text-black/);
+  assert.doesNotMatch(tabsSource, /border-blue-300\/45 bg-blue-500\/85 text-white/);
+  assert.doesNotMatch(tabsSource, /border-blue-400\/50 bg-blue-500 text-white/);
   assert.match(tabsSource, /bg-emerald-500\/75/);
+  assert.match(tabsSource, /border-b border-gray-200\/20 pb-1/);
+  assert.match(tabsSource, /relative px-2 py-3 sm:px-3 sm:py-4/);
+  assert.match(tabsSource, /cursor-grab select-none touch-pan-x py-1\.5/);
+  assert.match(tabsSource, /px-2 pb-4 pt-1 sm:px-4 sm:pb-5/);
+  assert.match(tabsSource, /overflow-x-auto scrollbar-hide touch-pan-x py-1\.5/);
   assert.doesNotMatch(tabsSource, /from-emerald-500\/95/);
   assert.doesNotMatch(tabsSource, /shadow-\[0_10px_28px/);
   assert.match(itemModalSource, /flavorFilterButtonBaseClass/);
@@ -98,6 +107,8 @@ test('menu modal cards and cart keep the compact glass layout', () => {
   assert.match(cartSource, /<Percent className="h-8 w-8 flex-shrink-0"/);
   assert.doesNotMatch(cartSource, /border-sky-500\/35 bg-sky-500\/12/);
   assert.doesNotMatch(cartSource, /<Gift className="w-5 h-5 flex-shrink-0"/);
+  assert.match(cartSource, /bg-yellow-400 text-black hover:bg-yellow-300/);
+  assert.doesNotMatch(cartSource, /: 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-\[1\.02\]'/);
 });
 
 test('menu modal keeps search in the title bar and cards expose hold preview details', () => {
@@ -108,6 +119,11 @@ test('menu modal keeps search in the title bar and cards expose hold preview det
   assert.match(modalSource, /liquid-glass-modal-title text-xl flex-shrink-0/);
   assert.match(modalSource, /ref=\{menuSearchRef\}/);
   assert.match(modalSource, /min-w-\[14rem\] max-w-2xl flex-1/);
+  assert.match(modalSource, /focus:border-yellow-400\/70 focus:outline-none focus:ring-1 focus:ring-yellow-400/);
+  assert.match(modalSource, /border border-blue-500\/40 bg-transparent px-3 py-1\.5 text-sm text-white/);
+  assert.match(modalSource, /<User className="w-3\.5 h-3\.5 text-blue-400" \/>/);
+  assert.doesNotMatch(modalSource, /bg-blue-500\/20 text-blue-300 border border-blue-500\/30/);
+  assert.doesNotMatch(modalSource, /focus:ring-blue-400/);
   assert.doesNotMatch(modalSource, /\/\* Search bar \*\//);
 
   assert.match(cardSource, /holdTimerRef/);
@@ -121,4 +137,24 @@ test('menu modal keeps search in the title bar and cards expose hold preview det
   assert.match(gridSource, /setPreview\(\{ item: previewItem, anchorRect \}\)/);
   assert.match(gridSource, /menu\.cart\.ingredients/);
   assert.match(gridSource, /ingredients: item\.ingredients \|\| null/);
+});
+
+test('menu modal edit mode formats order numbers and flattens kiosk customizations', () => {
+  const modalSource = readFileSync(menuModalPath, 'utf8');
+
+  assert.match(modalSource, /formatCompactOrderNumberForDisplay\(editOrderNumber\)/);
+  assert.doesNotMatch(modalSource, /#\$\{editOrderNumber\}/);
+  assert.match(modalSource, /parsed\.added/);
+  assert.match(modalSource, /parsed\.groups/);
+  assert.match(modalSource, /JSON\.parse\(trimmed\)/);
+  assert.match(modalSource, /Promise\.allSettled/);
+  assert.match(modalSource, /menuService\.getIngredients\(\)/);
+  assert.match(modalSource, /menuService\.getMenuItems\(\)/);
+  assert.match(modalSource, /menuService\.getMenuCategories\(\)/);
+  assert.match(modalSource, /buildMenuItemLookup/);
+  assert.match(modalSource, /catalogMenuItem\?\.categoryName/);
+  assert.match(modalSource, /item\.selectedIngredients/);
+  assert.match(modalSource, /item\.modifiers/);
+  assert.match(modalSource, /item\.ingredients/);
+  assert.match(modalSource, /resolveCustomizationIngredient\(c, ingredientLookup\)/);
 });

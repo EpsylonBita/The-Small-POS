@@ -2622,12 +2622,17 @@
       "cardFailed": "Pagamento con carta non riuscito. Riprovare.",
       "loadingMethods": "Caricamento metodi di pagamento",
       "loadingMethodsHint": "Verifica configurazione pagamento del terminale...",
-      "splitSimple": "SPLIT",
-      "enterCashReceived": "[NEEDS IT TRANSLATION] Μετρητά που Παραλήφθηκαν",
-      "insufficient": "[NEEDS IT TRANSLATION] Ανεπαρκή",
-      "completeCash": "[NEEDS IT TRANSLATION] Ολοκλήρωση",
-      "cashSimple": "[NEEDS IT TRANSLATION] ΜΕΤΡΗΤΑ",
-      "cardSimple": "[NEEDS IT TRANSLATION] ΚΑΡΤΑ"
+      "splitSimple": "DIVIDI",
+      "enterCashReceived": "Contanti ricevuti",
+      "insufficient": "Insufficiente",
+      "completeCash": "Completa",
+      "cashSimple": "CONTANTI",
+      "cardSimple": "CARTA",
+      "roomChargeSimple": "CAMERA",
+      "roomChargeRoom": "Camera {{roomNumber}}",
+      "roomChargeLabel": "Addebita alla camera",
+      "roomChargeSuccess": "Addebitato alla camera",
+      "roomChargeFallback": "L'addebito alla camera non è stato applicato. Incassa ora questa ordinazione."
     },
     "customerSearch": {
       "title": "Cerca cliente",
@@ -2729,9 +2734,9 @@
       "transaction": "Transazione",
       "coveredItems": "Articoli coperti",
       "item": "Articolo",
-      "address": "[NEEDS IT TRANSLATION] Διεύθυνση",
-      "noPhone": "[NEEDS IT TRANSLATION] Χωρίς τηλέφωνο",
-      "paymentMethod": "[NEEDS IT TRANSLATION] Τρόπος Πληρωμής"
+      "address": "Indirizzo",
+      "noPhone": "Nessun telefono",
+      "paymentMethod": "Metodo di pagamento"
     },
     "simplePricing": {
       "title": "Imposta prezzi"
@@ -5928,13 +5933,93 @@
       "loadFailed": "[NEEDS IT TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
     }
   },
+  "roomsView": {
+    "noBranch": "Seleziona una filiale per visualizzare le camere",
+    "status": {
+      "available": "Disponibile",
+      "occupied": "Occupata",
+      "reserved": "Prenotata",
+      "maintenance": "Manutenzione",
+      "cleaning": "Pulizia"
+    }
+  },
   "guestBilling": {
+    "room": "Camera",
+    "folioDetails": "Dettagli conto ospite",
+    "ongoing": "In corso",
+    "totalCharges": "Totale addebiti",
+    "totalPayments": "Totale pagamenti",
+    "notes": "Note",
+    "balance": "Saldo",
+    "addCharge": "Aggiungi addebito",
+    "payment": "Pagamento",
+    "checkout": "Checkout",
+    "printFolio": "Stampa conto",
+    "searchPlaceholder": "Cerca ospite o camera...",
+    "outstandingBalanceLabel": "Saldo residuo",
+    "status": {
+      "active": "Attivo",
+      "closed": "Chiuso",
+      "disputed": "Contestato"
+    },
     "empty": {
-      "title": "[NEEDS IT TRANSLATION] Δεν υπάρχουν λογαριασμοί επισκεπτών",
-      "description": "[NEEDS IT TRANSLATION] Οι λογαριασμοί επισκεπτών θα εμφανιστούν εδώ όταν δημιουργηθούν."
+      "title": "Nessun conto ospite",
+      "description": "I conti ospite appariranno qui quando verranno creati."
     },
     "stats": {
-      "openFolios": "[NEEDS IT TRANSLATION] Ανοιχτοί Λογαριασμοί"
+      "activeFolios": "Conti attivi",
+      "outstandingBalance": "Saldo residuo",
+      "disputed": "Contestati",
+      "openFolios": "Conti aperti"
+    },
+    "fields": {
+      "chargeType": "Tipo addebito",
+      "description": "Descrizione",
+      "paymentMethod": "Metodo di pagamento",
+      "amount": "Importo",
+      "quantity": "Quantità",
+      "reference": "Riferimento",
+      "notes": "Note"
+    },
+    "chargeTypes": {
+      "room": "Camera",
+      "food": "Cibo",
+      "beverage": "Bevanda",
+      "service": "Servizio",
+      "tax": "Imposta",
+      "other": "Altro"
+    },
+    "paymentMethods": {
+      "cash": "Contanti",
+      "card": "Carta",
+      "bankTransfer": "Bonifico bancario",
+      "other": "Altro"
+    },
+    "chargeModal": {
+      "title": "Aggiungi addebito",
+      "submit": "Registra addebito",
+      "success": "Addebito registrato sul conto"
+    },
+    "paymentModal": {
+      "title": "Aggiungi pagamento",
+      "submit": "Registra pagamento",
+      "success": "Pagamento registrato sul conto"
+    },
+    "checkoutModal": {
+      "success": "Ospite in checkout",
+      "outstanding": "Rimane un saldo di {{balance}}. Aggiungi un pagamento prima del checkout."
+    },
+    "errors": {
+      "moduleRequired": "La fatturazione ospiti non è abilitata per questo terminale.",
+      "actionFailed": "Impossibile aggiornare il conto."
+    },
+    "error": {
+      "title": "Impossibile caricare i conti ospite"
+    },
+    "validation": {
+      "amount": "Inserisci un importo maggiore di zero.",
+      "quantity": "La quantità deve essere maggiore di zero.",
+      "description": "La descrizione è obbligatoria."
     }
   },
   "filters": {

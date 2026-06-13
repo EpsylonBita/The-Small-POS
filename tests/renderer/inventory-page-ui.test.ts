@@ -34,6 +34,28 @@ test('InventoryPage opens item price and movement history from table rows', () =
   assert.match(source, /event\.stopPropagation\(\)/);
 });
 
+test('InventoryPage renders header and stat icons without wrapper boxes', () => {
+  const source = inventoryPageSource();
+
+  assert.match(source, /<h1 className="truncate text-3xl font-bold tracking-tight">\{t\('inventory\.title', 'Inventory'\)\}<\/h1>/);
+  assert.match(source, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
+  assert.match(source, /border border-white\/80 bg-white text-black hover:bg-zinc-200/);
+  assert.match(source, /border border-black bg-black text-white hover:bg-zinc-800/);
+  assert.match(source, /hover:scale-\[1\.03\]/);
+  assert.match(source, /<Boxes className=\{`w-5 h-5 shrink-0/);
+  assert.match(source, /<XCircle className=\{`w-5 h-5 shrink-0/);
+  assert.match(source, /<AlertTriangle className=\{`w-5 h-5 shrink-0/);
+  assert.match(source, /<CheckCircle className=\{`w-5 h-5 shrink-0/);
+  assert.match(source, /<BarChart3 className=\{`w-5 h-5 shrink-0/);
+  assert.doesNotMatch(source, /<Package className=\{`w-8 h-8 shrink-0/);
+  assert.doesNotMatch(source, /<div className=\{`[^`]*p-3 rounded-xl[^`]*`\}>\s*<Package className/);
+  assert.doesNotMatch(source, /<div className=\{`[^`]*p-2 rounded-lg[^`]*`\}>\s*<Boxes className/);
+  assert.doesNotMatch(source, /<div className=\{`[^`]*p-2 rounded-lg[^`]*`\}>\s*<XCircle className/);
+  assert.doesNotMatch(source, /<div className=\{`[^`]*p-2 rounded-lg[^`]*`\}>\s*<AlertTriangle className/);
+  assert.doesNotMatch(source, /<div className=\{`[^`]*p-2 rounded-lg[^`]*`\}>\s*<CheckCircle className/);
+  assert.doesNotMatch(source, /<div className=\{`[^`]*p-2 rounded-lg[^`]*`\}>\s*<BarChart3 className/);
+});
+
 test('InventoryPage history translation keys exist in every POS locale', () => {
   const requiredKeys = [
     'noCategory',

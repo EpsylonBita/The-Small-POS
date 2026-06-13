@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
@@ -52,6 +52,72 @@ import {
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 
+const NAVIGATION_SWIPE_THRESHOLD_PX = 45;
+const NAVIGATION_SWIPE_VERTICAL_LIMIT_PX = 40;
+const NAVIGATION_DRAG_HOLD_MS = 280;
+const NAVIGATION_ORDER_STORAGE_PREFIX = 'pos-navigation-module-order';
+
+interface NavigationDragSession {
+  pointerId: number;
+  moduleId: string;
+  startX: number;
+  startY: number;
+  offsetX: number;
+  offsetY: number;
+  insertIndex: number;
+  holdTimer: number | null;
+  isDragging: boolean;
+  originalOrder: string[];
+}
+
+const areStringArraysEqual = (first: string[], second: string[]) => {
+  if (first.length !== second.length) {
+    return false;
+  }
+
+  return first.every((value, index) => value === second[index]);
+};
+
+const buildNavigationOrder = (storedOrder: string[], moduleIds: string[]) => {
+  const availableIds = new Set(moduleIds);
+  const addedIds = new Set<string>();
+  const nextOrder: string[] = [];
+
+  for (const moduleId of storedOrder) {
+    if (availableIds.has(moduleId) && !addedIds.has(moduleId)) {
+      nextOrder.push(moduleId);
+      addedIds.add(moduleId);
+    }
+  }
+
+  for (const moduleId of moduleIds) {
+    if (!addedIds.has(moduleId)) {
+      nextOrder.push(moduleId);
+      addedIds.add(moduleId);
+    }
+  }
+
+  return nextOrder;
+};
+
+const moveNavigationIdToIndex = (order: string[], draggedId: string, targetIndex: number) => {
+  const sourceIndex = order.indexOf(draggedId);
+
+  if (sourceIndex === -1) {
+    return order;
+  }
+
+  const nextOrder = order.filter((moduleId) => moduleId !== draggedId);
+  const boundedIndex = Math.max(0, Math.min(targetIndex, nextOrder.length));
+  nextOrder.splice(boundedIndex, 0, draggedId);
+
+  if (areStringArraysEqual(order, nextOrder)) {
+    return order;
+  }
+
+  return nextOrder;
+};
+
 interface NavigationSidebarProps {
   currentView: string;
   onViewChange: (view: string) => void;
@@ -77,14 +143,131 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const { isShiftActive } = useShift();
+  const { staff, isShiftActive } = useShift();
   const { navigationModules, isLoading } = useModules();
 
   // State for upgrade modal
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [selectedLockedModule, setSelectedLockedModule] = useState<{ moduleId: string; requiredPlan: string } | null>(null);
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [moduleOrder, setModuleOrder] = useState<string[]>([]);
+  const [draggingModuleId, setDraggingModuleId] = useState<string | null>(null);
+  const [dragInsertIndex, setDragInsertIndex] = useState<number | null>(null);
+  const [dragPosition, setDragPosition] = useState<{ x: number; y: number } | null>(null);
+  const railRef = useRef<HTMLDivElement>(null);
+  const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const suppressClickRef = useRef(false);
+  const moduleOrderRef = useRef<string[]>([]);
+  const moduleButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const dragSessionRef = useRef<NavigationDragSession | null>(null);
+  const [availableHeight, setAvailableHeight] = useState<number | null>(null);
+
+  const navigationOrderStorageKey = useMemo(() => {
+    const organizationKey = staff?.organizationId ?? 'unknown-organization';
+    const terminalKey = staff?.terminalId ?? 'unknown-terminal';
+    const staffKey = staff?.staffId ?? 'unknown-staff';
+
+    return `${NAVIGATION_ORDER_STORAGE_PREFIX}:${organizationKey}:${terminalKey}:${staffKey}`;
+  }, [staff?.organizationId, staff?.staffId, staff?.terminalId]);
+
+  const navigationModuleIds = useMemo(
+    () => navigationModules.map(({ module }) => module.id),
+    [navigationModules],
+  );
+
+  useEffect(() => {
+    let storedOrder: string[] = [];
+
+    try {
+      const rawStoredOrder = localStorage.getItem(navigationOrderStorageKey);
+      const parsedOrder = rawStoredOrder ? JSON.parse(rawStoredOrder) : [];
+      if (Array.isArray(parsedOrder)) {
+        storedOrder = parsedOrder.filter((value): value is string => typeof value === 'string');
+      }
+    } catch (error) {
+      console.warn('[NavigationSidebar] Failed to load navigation order:', error);
+    }
+
+    const nextOrder = buildNavigationOrder(storedOrder, navigationModuleIds);
+    moduleOrderRef.current = nextOrder;
+    setModuleOrder((currentOrder) => (
+      areStringArraysEqual(currentOrder, nextOrder) ? currentOrder : nextOrder
+    ));
+  }, [navigationModuleIds, navigationOrderStorageKey]);
+
+  const orderedNavigationModules = useMemo(() => {
+    if (moduleOrder.length === 0) {
+      return navigationModules;
+    }
+
+    const modulesById = new Map(navigationModules.map((navModule) => [navModule.module.id, navModule]));
+    const orderedModules = moduleOrder.reduce<typeof navigationModules>((items, moduleId) => {
+      const navModule = modulesById.get(moduleId);
+      if (navModule) {
+        items.push(navModule);
+      }
+      return items;
+    }, []);
+    const orderedIds = new Set(orderedModules.map((navModule) => navModule.module.id));
+    const newModules = navigationModules.filter((navModule) => !orderedIds.has(navModule.module.id));
+
+    return [...orderedModules, ...newModules];
+  }, [moduleOrder, navigationModules]);
+
+  const draggedNavigationModule = useMemo(
+    () => orderedNavigationModules.find((navModule) => navModule.module.id === draggingModuleId) ?? null,
+    [draggingModuleId, orderedNavigationModules],
+  );
+
+  const dropSlotBeforeModuleId = useMemo(() => {
+    if (!draggingModuleId || dragInsertIndex === null) {
+      return null;
+    }
+
+    const orderedIdsWithoutDragged = orderedNavigationModules
+      .map((navModule) => navModule.module.id)
+      .filter((moduleId) => moduleId !== draggingModuleId);
+
+    return orderedIdsWithoutDragged[dragInsertIndex] ?? '__navigation_drop_end__';
+  }, [draggingModuleId, dragInsertIndex, orderedNavigationModules]);
+
+  useEffect(() => {
+    moduleOrderRef.current = moduleOrder;
+  }, [moduleOrder]);
+
+  useEffect(() => {
+    const rail = railRef.current;
+    if (!rail) {
+      return;
+    }
+
+    const updateAvailableHeight = () => {
+      setAvailableHeight(rail.clientHeight);
+    };
+
+    updateAvailableHeight();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateAvailableHeight);
+      return () => window.removeEventListener('resize', updateAvailableHeight);
+    }
+
+    const observer = new ResizeObserver(updateAvailableHeight);
+    observer.observe(rail);
+    window.addEventListener('resize', updateAvailableHeight);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateAvailableHeight);
+    };
+  }, []);
 
   const handleNavClick = (id: string, isLocked: boolean, requiredPlan?: string) => {
+    if (id === 'settings') {
+      onOpenSettings && onOpenSettings();
+      return;
+    }
+
     // Check if module is locked - show upgrade modal regardless of shift state
     if (isLocked && requiredPlan) {
       setSelectedLockedModule({ moduleId: id, requiredPlan });
@@ -268,6 +451,217 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     onOpenSettings && onOpenSettings();
   };
 
+  const persistNavigationOrder = (nextOrder: string[]) => {
+    try {
+      localStorage.setItem(navigationOrderStorageKey, JSON.stringify(nextOrder));
+    } catch (error) {
+      console.warn('[NavigationSidebar] Failed to save navigation order:', error);
+    }
+  };
+
+  const findModuleInsertIndex = (draggedModuleId: string, clientY: number) => {
+    const orderWithoutDragged = moduleOrderRef.current.filter((moduleId) => moduleId !== draggedModuleId);
+
+    for (let index = 0; index < orderWithoutDragged.length; index += 1) {
+      const moduleId = orderWithoutDragged[index];
+      const element = moduleButtonRefs.current[moduleId];
+      if (!element) {
+        continue;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const centerY = rect.top + rect.height / 2;
+
+      if (clientY < centerY) {
+        return index;
+      }
+    }
+
+    return orderWithoutDragged.length;
+  };
+
+  const clearDragHoldTimer = (session: NavigationDragSession) => {
+    if (session.holdTimer !== null) {
+      window.clearTimeout(session.holdTimer);
+      session.holdTimer = null;
+    }
+  };
+
+  const beginModuleDrag = (session: NavigationDragSession) => {
+    session.isDragging = true;
+    clearDragHoldTimer(session);
+    swipeStartRef.current = null;
+    setDraggingModuleId(session.moduleId);
+    session.insertIndex = findModuleInsertIndex(session.moduleId, session.startY);
+    setDragInsertIndex(session.insertIndex);
+    setDragPosition({
+      x: session.startX - session.offsetX,
+      y: session.startY - session.offsetY,
+    });
+  };
+
+  const handleModulePointerDown = (moduleId: string) => (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const session: NavigationDragSession = {
+      pointerId: event.pointerId,
+      moduleId,
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      insertIndex: moduleOrderRef.current.indexOf(moduleId),
+      holdTimer: null,
+      isDragging: false,
+      originalOrder: moduleOrderRef.current,
+    };
+
+    session.holdTimer = window.setTimeout(() => {
+      if (dragSessionRef.current === session) {
+        beginModuleDrag(session);
+      }
+    }, NAVIGATION_DRAG_HOLD_MS);
+
+    dragSessionRef.current = session;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleModulePointerMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const session = dragSessionRef.current;
+    if (!session || session.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (!session.isDragging) {
+      session.startX = event.clientX;
+      session.startY = event.clientY;
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const insertIndex = findModuleInsertIndex(session.moduleId, event.clientY);
+    session.insertIndex = insertIndex;
+    setDragInsertIndex(insertIndex);
+    setDragPosition({
+      x: event.clientX - session.offsetX,
+      y: event.clientY - session.offsetY,
+    });
+  };
+
+  const finishModuleDrag = (event: React.PointerEvent<HTMLButtonElement>, persistOrder: boolean) => {
+    const session = dragSessionRef.current;
+    if (!session || session.pointerId !== event.pointerId) {
+      return;
+    }
+
+    clearDragHoldTimer(session);
+
+    if (session.isDragging) {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressClickRef.current = true;
+      setDraggingModuleId(null);
+      setDragInsertIndex(null);
+      setDragPosition(null);
+
+      if (persistOrder) {
+        const nextOrder = moveNavigationIdToIndex(session.originalOrder, session.moduleId, session.insertIndex);
+        moduleOrderRef.current = nextOrder;
+        setModuleOrder(nextOrder);
+        persistNavigationOrder(nextOrder);
+      } else {
+        moduleOrderRef.current = session.originalOrder;
+        setModuleOrder(session.originalOrder);
+      }
+
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    }
+
+    dragSessionRef.current = null;
+
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be released by the browser.
+    }
+  };
+
+  const handleModulePointerUp = (event: React.PointerEvent<HTMLButtonElement>) => {
+    finishModuleDrag(event, true);
+  };
+
+  const handleModulePointerCancel = (event: React.PointerEvent<HTMLButtonElement>) => {
+    finishModuleDrag(event, false);
+  };
+
+  const finishSwipeGesture = (clientX: number, clientY: number) => {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+
+    if (!start) {
+      return;
+    }
+
+    const deltaX = clientX - start.x;
+    const deltaY = Math.abs(clientY - start.y);
+
+    if (deltaY > NAVIGATION_SWIPE_VERTICAL_LIMIT_PX || Math.abs(deltaX) < NAVIGATION_SWIPE_THRESHOLD_PX) {
+      return;
+    }
+
+    setIsCollapsed(deltaX < 0);
+    suppressClickRef.current = true;
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+  };
+
+  const handleSwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
+    }
+
+    swipeStartRef.current = { x: event.clientX, y: event.clientY };
+
+    const handleWindowPointerUp = (pointerEvent: PointerEvent) => {
+      finishSwipeGesture(pointerEvent.clientX, pointerEvent.clientY);
+      window.removeEventListener('pointercancel', handleWindowPointerCancel);
+    };
+
+    const handleWindowPointerCancel = () => {
+      swipeStartRef.current = null;
+      window.removeEventListener('pointerup', handleWindowPointerUp);
+    };
+
+    window.addEventListener('pointerup', handleWindowPointerUp, { once: true });
+    window.addEventListener('pointercancel', handleWindowPointerCancel, { once: true });
+  };
+
+  const handleSwipeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+    finishSwipeGesture(event.clientX, event.clientY);
+  };
+
+  const handleSwipeCancel = () => {
+    swipeStartRef.current = null;
+  };
+
+  const handleClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!suppressClickRef.current) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    suppressClickRef.current = false;
+  };
+
 
 
   const getNeonClass = (color: string, isActive: boolean, theme: string) => {
@@ -289,28 +683,44 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
 
   return (
-    <div className="fixed left-0 top-1/2 transform -translate-y-1/2 z-50 transition-all duration-300 max-h-[90vh]">
+    <div
+      ref={railRef}
+      className="pointer-events-none absolute left-0 top-4 z-50 h-[calc(100%-2rem)] transition-all duration-300 sm:top-6 sm:h-[calc(100%-3rem)] md:top-8 md:h-[calc(100%-4rem)] lg:top-12 lg:h-[calc(100%-6rem)]"
+    >
       {/* Theme-aware Sidebar */}
-      <div className={`${resolvedTheme === 'dark'
-        ? 'bg-black backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(59,130,246,0.4)] border-r border-blue-500/20'
-        : 'bg-white/90 backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(59,130,246,0.15)] border-r border-gray-200'} max-h-[85vh] overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-hide`}
-        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
-        <nav className="flex flex-col space-y-4">
-          {/* Divider */}
-          <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-blue-500/50 to-transparent"></div>
+      <div
+        className={`pointer-events-auto relative max-h-full transition-transform duration-300 ease-out will-change-transform ${isCollapsed ? '-translate-x-[calc(100%-0.75rem)]' : 'translate-x-0'}`}
+        style={{ maxHeight: availableHeight ?? undefined, touchAction: 'pan-y' }}
+        onPointerDown={handleSwipeStart}
+        onPointerUp={handleSwipeEnd}
+        onPointerCancel={handleSwipeCancel}
+        onClickCapture={handleClickCapture}
+      >
+        <div className={`${resolvedTheme === 'dark'
+          ? 'bg-black backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.6)] border-r border-amber-400/25'
+          : 'bg-white/90 backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.34)] border-r border-amber-200/70'} max-h-full overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-hide`}
+          style={{
+            maxHeight: availableHeight ?? undefined,
+            scrollbarWidth: 'none',
+            msOverflowStyle: 'none',
+            WebkitOverflowScrolling: 'touch',
+          }}>
+          <nav className="flex select-none flex-col gap-4">
+            {/* Divider */}
+            <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
 
           {/* Check In Button - Always shows staff list */}
           <button
             onClick={onStartShift}
             data-testid="check-in-btn"
-            className={`w-12 h-12 flex items-center justify-center transition-colors ${resolvedTheme === 'dark' ? 'text-white hover:text-blue-300' : 'text-black hover:text-blue-600'}`}
+            className={`w-12 h-12 flex items-center justify-center transition-colors ${resolvedTheme === 'dark' ? 'text-white hover:text-amber-300' : 'text-black hover:text-amber-600'}`}
             title={t('navigation.checkIn')}
           >
             <Clock className="w-5 h-5" strokeWidth={2} />
           </button>
 
           {/* Divider */}
-          <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-blue-500/50 to-transparent"></div>
+          <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
 
           {/* Navigation Items - Dynamic from ModuleContext */}
           {isLoading ? (
@@ -326,11 +736,13 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           ) : (
             <>
               {/* Navigation modules from context - precomputed, filtered, and sorted */}
-              {navigationModules.map((navModule) => {
+              {orderedNavigationModules.map((navModule) => {
                 const { module, isEnabled, isLocked, requiredPlan } = navModule;
                 const isActive = currentView === module.id;
                 const color = getModuleColor(module.id, module.category || 'other');
                 const isComingSoon = isModuleComingSoon(module.id);
+                const isDraggingThisModule = draggingModuleId === module.id;
+                const isDraggingAnotherModule = Boolean(draggingModuleId) && !isDraggingThisModule;
 
                 // Different titles for locked, coming soon, or unlocked modules
                 let title: string;
@@ -359,16 +771,41 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                 };
 
                 return (
+                  <React.Fragment key={module.id}>
+                  {dropSlotBeforeModuleId === module.id && (
+                    <div className="navigation-drop-slot -my-2 mx-auto h-1 w-8 rounded-full bg-amber-400/85 shadow-[0_0_12px_rgba(250,204,21,0.78)]" />
+                  )}
                   <button
-                    key={module.id}
+                    ref={(element) => {
+                      if (element) {
+                        moduleButtonRefs.current[module.id] = element;
+                      } else {
+                        delete moduleButtonRefs.current[module.id];
+                      }
+                    }}
                     onClick={handleClick}
+                    onPointerDown={handleModulePointerDown(module.id)}
+                    onPointerMove={handleModulePointerMove}
+                    onPointerUp={handleModulePointerUp}
+                    onPointerCancel={handleModulePointerCancel}
+                    onLostPointerCapture={handleModulePointerCancel}
+                    draggable={false}
+                    aria-grabbed={isDraggingThisModule}
                     disabled={isComingSoon}
-                    className={`relative w-12 h-12 flex items-center justify-center transition-colors ${isComingSoon
+                    className={`relative w-12 h-12 flex items-center justify-center transition-all duration-150 ease-out ${isComingSoon
                         ? `opacity-40 cursor-not-allowed ${resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-300'}`
                         : isLocked
                           ? `opacity-60 ${resolvedTheme === 'dark' ? 'text-gray-500' : 'text-gray-400'}`
                           : getNeonClass(color, isActive, resolvedTheme)
-                      }`}
+                      } ${isComingSoon
+                        ? ''
+                        : isDraggingThisModule
+                          ? resolvedTheme === 'dark'
+                            ? 'cursor-grabbing rounded-2xl bg-amber-400/10 opacity-25'
+                            : 'cursor-grabbing rounded-2xl bg-amber-100/60 opacity-25'
+                          : 'cursor-grab active:cursor-grabbing'
+                      } ${isDraggingAnotherModule ? 'duration-150 ease-out' : ''}`}
+                    style={{ touchAction: isComingSoon ? 'pan-y' : 'none' }}
                     title={title}
                   >
                     {getModuleIcon(module.icon || 'Package')}
@@ -385,8 +822,12 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                       </div>
                     )}
                   </button>
+                  </React.Fragment>
                 );
               })}
+              {dropSlotBeforeModuleId === '__navigation_drop_end__' && (
+                <div className="navigation-drop-slot -my-2 mx-auto h-1 w-8 rounded-full bg-amber-400/85 shadow-[0_0_12px_rgba(250,204,21,0.78)]" />
+              )}
             </>
           )}
 
@@ -412,23 +853,64 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           </button>
 
           {/* Divider */}
-          <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-blue-500/50 to-transparent"></div>
+          <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
 
           {/* Logout Button */}
           <button
             onClick={onLogout}
-            className={`${resolvedTheme === 'dark'
-              ? 'w-12 h-12 rounded-lg flex items-center justify-center transition-all duration-300 transform hover:scale-110 active:scale-95 bg-gray-800/40 border border-gray-700/50 text-gray-500 hover:bg-red-900/40 hover:border-red-700/50 hover:text-red-400 shadow-[0_2px_8px_0_rgba(59,130,246,0.15)] hover:shadow-[0_4px_16px_0_rgba(239,68,68,0.4)]'
-              : 'w-12 h-12 rounded-lg flex items-center justify-center transition-all duration-200 bg-transparent text-black/60 hover:text-red-500'}`}
+            className="w-12 h-12 rounded-lg flex items-center justify-center border border-red-500/70 bg-transparent text-red-500"
             title={t('navigation.logout')}>
-            <LogOut className={`w-5 h-5 ${resolvedTheme === 'dark' ? '' : 'text-black'}`} strokeWidth={2} />
+            <LogOut className="w-5 h-5 text-red-500" strokeWidth={2} />
           </button>
 
-
-
-
-        </nav>
+          </nav>
+        </div>
       </div>
+
+      {draggingModuleId && dragPosition && draggedNavigationModule && (() => {
+        const { module, isLocked } = draggedNavigationModule;
+        const color = getModuleColor(module.id, module.category || 'other');
+        const isActive = currentView === module.id;
+        const isComingSoon = isModuleComingSoon(module.id);
+
+        return (
+          <div
+            aria-hidden="true"
+            className={`navigation-dragging-icon pointer-events-none fixed z-[2147483000] flex h-12 w-12 items-center justify-center rounded-2xl border transition-none ${getNeonClass(color, isActive, resolvedTheme)} ${resolvedTheme === 'dark'
+              ? 'border-amber-300/45 bg-black/95 shadow-[0_0_24px_rgba(250,204,21,0.45)]'
+              : 'border-amber-300/70 bg-white/95 shadow-[0_0_24px_rgba(250,204,21,0.34)]'
+            }`}
+            style={{
+              left: dragPosition.x,
+              top: dragPosition.y,
+              touchAction: 'none',
+            }}
+          >
+            {getModuleIcon(module.icon || 'Package')}
+            {isComingSoon && (
+              <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-600/90 flex items-center justify-center">
+                <Hourglass className="w-2.5 h-2.5 text-white" />
+              </div>
+            )}
+            {isLocked && !isComingSoon && (
+              <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-gray-800/90 flex items-center justify-center">
+                <Lock className="w-2.5 h-2.5 text-yellow-500" />
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {isCollapsed && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-auto absolute left-0 top-0 z-10 h-full w-10 touch-pan-y"
+          style={{ touchAction: 'pan-y' }}
+          onPointerDown={handleSwipeStart}
+          onPointerUp={handleSwipeEnd}
+          onPointerCancel={handleSwipeCancel}
+        />
+      )}
 
       {/* Upgrade Prompt Modal */}
       <UpgradePromptModal

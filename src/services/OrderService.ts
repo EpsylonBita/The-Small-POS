@@ -858,6 +858,10 @@ export class OrderService {
         orderData.customer_id,
       );
       const tableMetadata = buildOrderServiceTableMetadata(orderData as any);
+      const normalizedRoomId =
+        normalizeText(orderDataAny.room_id) ||
+        normalizeText(orderDataAny.roomId) ||
+        null;
 
       const normalized: any = {
         // Include customerId for backend address fallback resolution
@@ -900,6 +904,8 @@ export class OrderService {
         estimatedTime: orderData.estimatedTime ?? orderData.estimated_time,
         paymentStatus: orderData.paymentStatus ?? orderData.payment_status,
         paymentMethod: orderData.paymentMethod ?? orderData.payment_method,
+        roomId: normalizedRoomId,
+        room_id: normalizedRoomId,
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
         initialPayment: normalizedInitialPayment,
         initial_payment: normalizedInitialPayment,
@@ -917,6 +923,7 @@ export class OrderService {
             ? await bridge.orders.createWithInitialPayment(normalized as any)
             : await bridge.orders.create(normalized as any);
           const ipcPayload = resp?.data ?? resp;
+          const roomCharge = ipcPayload?.roomCharge || resp?.roomCharge || resp?.data?.roomCharge;
           const orderId =
             ipcPayload?.orderId ||
             resp?.orderId ||
@@ -932,6 +939,7 @@ export class OrderService {
                 debugLogger.info('Created order via bridge', { orderId }, 'OrderService');
                 return {
                   ...(created as Order),
+                  ...(roomCharge ? { roomCharge } : {}),
                   clientRequestId: requestId as any,
                   client_request_id: requestId as any,
                   clientOrderId: requestId as any,
@@ -944,6 +952,7 @@ export class OrderService {
             }
             return {
               ...(resp?.order || {}),
+              ...(roomCharge ? { roomCharge } : {}),
               id: orderId,
               clientRequestId: requestId as any,
               client_request_id: requestId as any,
@@ -1004,6 +1013,7 @@ export class OrderService {
         orderType === 'dine-in' && !normalizedInitialPayment
           ? null
           : (orderData.payment_method ?? orderDataAny.paymentMethod ?? 'cash');
+      const isRoomChargeOrder = normalizedPaymentMethod === 'room_charge';
 
       // Try to resolve active cashier shift to attribute revenue properly
       let activeCashierShiftId: string | null = null;
@@ -1115,9 +1125,10 @@ export class OrderService {
         total_amount: orderData.total_amount || orderDataAny.totalAmount || 0,
         client_order_id: requestId,
         client_request_id: requestId,
-        initialPayment: normalizedInitialPayment,
-        initial_payment: normalizedInitialPayment,
+        initialPayment: isRoomChargeOrder ? null : normalizedInitialPayment,
+        initial_payment: isRoomChargeOrder ? null : normalizedInitialPayment,
         ...tableMetadata,
+        room_id: isRoomChargeOrder ? normalizedRoomId : null,
 
         // Optional fields - use ?? for numbers to handle 0 values correctly
         customer_id:
@@ -1216,6 +1227,9 @@ export class OrderService {
 
       const result = await response.json();
       const newOrder = result.data || result;
+      if (result.roomCharge) {
+        newOrder.roomCharge = result.roomCharge;
+      }
       debugLogger.info(`Created order via Admin API: ${newOrder.id}`, 'OrderService');
 
       // Sync the order to local SQLite so it appears in the POS order list

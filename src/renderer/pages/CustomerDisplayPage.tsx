@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import {
   CheckCircle2,
   Clock3,
@@ -7,7 +8,6 @@ import {
   Monitor,
   RefreshCw,
   ScreenShare,
-  Tv,
   Wifi,
   X,
 } from 'lucide-react';
@@ -22,6 +22,7 @@ import {
 } from '../../lib';
 import { useOrderStore } from '../hooks/useOrderStore';
 import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../utils/orderNumberUtils';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 type DisplayStatus = 'pending' | 'preparing' | 'ready';
 
@@ -298,7 +299,6 @@ const CustomerDisplayPage: React.FC = () => {
           detail: t('customerDisplay.descriptions.ready', 'Ready for pickup'),
           color: 'text-emerald-400',
           border: 'border-emerald-400/40',
-          bg: 'bg-emerald-500/10',
           Icon: CheckCircle2,
         };
       }
@@ -309,7 +309,6 @@ const CustomerDisplayPage: React.FC = () => {
           detail: t('customerDisplay.descriptions.preparing', 'Kitchen is working'),
           color: 'text-amber-400',
           border: 'border-amber-400/40',
-          bg: 'bg-amber-500/10',
           Icon: Clock3,
         };
       }
@@ -319,7 +318,6 @@ const CustomerDisplayPage: React.FC = () => {
         detail: t('customerDisplay.descriptions.received', 'Order received'),
         color: 'text-sky-400',
         border: 'border-sky-400/40',
-        bg: 'bg-sky-500/10',
         Icon: Clock3,
       };
     },
@@ -439,41 +437,43 @@ const CustomerDisplayPage: React.FC = () => {
   const availableMonitors = monitors.length > 1 ? monitors : monitors.slice(0, 1);
 
   return (
-    <div
+    <motion.div
+      initial="hidden"
+      animate="show"
+      variants={pageMotionContainer}
       className={`h-full min-h-0 overflow-hidden ${
         isDark ? 'text-white' : 'text-slate-950'
       } ${externalWindow ? 'p-0' : 'p-4 md:p-6'}`}
     >
-      <div
+      <motion.div
+        variants={pageMotionContainer}
         className={`mx-auto flex h-full min-h-0 flex-col gap-4 overflow-hidden ${
           externalWindow ? 'max-w-none p-8' : 'max-w-7xl'
         }`}
       >
-        <section
+        <motion.section
+          variants={pageMotionItem}
           className={`rounded-2xl border ${
             isDark ? 'border-zinc-800 bg-zinc-950' : 'border-slate-200 bg-white'
           } ${externalWindow ? 'px-8 py-6' : 'px-5 py-4'}`}
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div
-                className={`grid h-12 w-12 place-items-center rounded-xl border ${
-                  isDark ? 'border-zinc-700 bg-zinc-900' : 'border-slate-200 bg-slate-100'
-                }`}
+            <div className="min-w-0">
+              <h1
+                className={
+                  externalWindow
+                    ? 'truncate text-4xl font-black tracking-tight'
+                    : 'truncate text-3xl font-bold tracking-tight'
+                }
               >
-                <Tv className="h-6 w-6 text-cyan-400" />
-              </div>
-              <div>
-                <h1 className={externalWindow ? 'text-4xl font-black' : 'text-2xl font-black'}>
-                  {t('customerDisplay.title', 'Customer Display')}
-                </h1>
-                <p className={isDark ? 'text-zinc-400' : 'text-slate-600'}>
-                  {t(
-                    'customerDisplay.subtitle',
-                    'Live order phases for customer-facing screens'
-                  )}
-                </p>
-              </div>
+                {t('customerDisplay.title', 'Customer Display')}
+              </h1>
+              <p className={`mt-1 truncate ${isDark ? 'text-zinc-400' : 'text-slate-600'}`}>
+                {t(
+                  'customerDisplay.subtitle',
+                  'Live order phases for customer-facing screens'
+                )}
+              </p>
             </div>
 
             {!externalWindow && (
@@ -505,7 +505,7 @@ const CustomerDisplayPage: React.FC = () => {
                     type="button"
                     onClick={() => void openExternalDisplay(availableMonitors[1] || availableMonitors[0])}
                     disabled={isDisplayBusy}
-                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-300 transition hover:bg-cyan-500/20 disabled:opacity-60"
+                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/40 bg-transparent px-3 py-2 text-sm font-semibold text-white transition disabled:opacity-60"
                   >
                     <ScreenShare className="h-4 w-4" />
                     {t('customerDisplay.actions.externalDisplay', 'External Display')}
@@ -515,28 +515,30 @@ const CustomerDisplayPage: React.FC = () => {
                   type="button"
                   onClick={() => void handleRefresh()}
                   disabled={isRefreshing}
-                  className={`inline-flex h-10 w-10 items-center justify-center rounded-xl border transition ${
-                    isDark
-                      ? 'border-zinc-700 bg-zinc-900 hover:bg-zinc-800'
-                      : 'border-slate-200 bg-white hover:bg-slate-100'
-                  } disabled:opacity-60`}
+                  title={t('common.refresh', 'Refresh')}
                   aria-label={t('common.refresh', 'Refresh')}
+                  className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+                    isDark
+                      ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                      : 'border border-black bg-black text-white hover:bg-zinc-800'
+                  } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
                 >
-                  <RefreshCw className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
                 </button>
               </div>
             )}
           </div>
 
           {!externalWindow && (
-            <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <motion.div variants={pageMotionContainer} className="mt-4 grid gap-3 md:grid-cols-4">
               {(['pending', 'preparing', 'ready'] as DisplayStatus[]).map((phase) => {
                 const meta = getPhase(phase);
                 const Icon = meta.Icon;
                 return (
-                  <div
+                  <motion.div
+                    variants={pageMotionItem}
                     key={phase}
-                    className={`rounded-xl border px-4 py-3 ${meta.border} ${meta.bg}`}
+                    className={`rounded-xl border bg-transparent px-4 py-3 ${meta.border}`}
                   >
                     <div className="flex items-center gap-2">
                       <Icon className={`h-5 w-5 ${meta.color}`} />
@@ -545,12 +547,13 @@ const CustomerDisplayPage: React.FC = () => {
                       </span>
                     </div>
                     <div className="mt-2 text-2xl font-black">{phaseCounts[phase]}</div>
-                  </div>
+                  </motion.div>
                 );
               })}
-              <div
+              <motion.div
+                variants={pageMotionItem}
                 className={`rounded-xl border px-4 py-3 ${
-                  isDark ? 'border-zinc-800 bg-black' : 'border-slate-200 bg-slate-50'
+                  isDark ? 'border-zinc-800 bg-transparent' : 'border-slate-200 bg-transparent'
                 }`}
               >
                 <div className="flex items-center gap-2">
@@ -564,15 +567,16 @@ const CustomerDisplayPage: React.FC = () => {
                     ? t('customerDisplay.status.connected', 'Connected')
                     : displayStatus?.enabled
                       ? t('customerDisplay.status.enabled', 'Enabled')
-                      : t('customerDisplay.status.ready', 'Ready')}
+                    : t('customerDisplay.status.ready', 'Ready')}
                 </div>
-              </div>
-            </div>
+              </motion.div>
+            </motion.div>
           )}
-        </section>
+        </motion.section>
 
         {!externalWindow && monitors.length > 0 && (
-          <section
+          <motion.section
+            variants={pageMotionItem}
             className={`rounded-2xl border p-4 ${
               isDark ? 'border-zinc-800 bg-zinc-950' : 'border-slate-200 bg-white'
             }`}
@@ -583,9 +587,10 @@ const CustomerDisplayPage: React.FC = () => {
                 {t('customerDisplay.external.monitors', 'Connected monitors and TVs')}
               </h2>
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+            <motion.div variants={pageMotionContainer} className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
               {monitors.map((monitor) => (
-                <button
+                <motion.button
+                  variants={pageMotionItem}
                   key={monitor.index}
                   type="button"
                   onClick={() => void openExternalDisplay(monitor)}
@@ -600,20 +605,21 @@ const CustomerDisplayPage: React.FC = () => {
                   <div className={isDark ? 'text-sm text-zinc-400' : 'text-sm text-slate-600'}>
                     {monitor.size?.width || 0} x {monitor.size?.height || 0}
                   </div>
-                </button>
+                </motion.button>
               ))}
-            </div>
+            </motion.div>
             <p className={`mt-3 text-sm ${isDark ? 'text-zinc-400' : 'text-slate-600'}`}>
               {t(
                 'customerDisplay.external.help',
                 'Cable displays and OS-level wireless displays appear here. For Smart TVs without monitor mode, copy the TV link.'
               )}
             </p>
-          </section>
+          </motion.section>
         )}
 
         {(notice || error || displayStatus?.error || capabilities?.error) && !externalWindow && (
-          <div
+          <motion.div
+            variants={pageMotionItem}
             className={`rounded-xl border px-4 py-3 text-sm font-medium ${
               error || displayStatus?.error || capabilities?.error
                 ? 'border-red-500/40 bg-red-500/10 text-red-200'
@@ -621,27 +627,29 @@ const CustomerDisplayPage: React.FC = () => {
             }`}
           >
             {error || displayStatus?.error || capabilities?.error || notice}
-          </div>
+          </motion.div>
         )}
 
-        <section
+        <motion.section
+          variants={pageMotionItem}
           className={`min-h-0 flex-1 overflow-y-auto rounded-2xl border p-4 scrollbar-hide ${
             isDark ? 'border-zinc-800 bg-zinc-950' : 'border-slate-200 bg-white'
           } ${externalWindow ? 'p-8' : ''}`}
         >
           {!isLoading && displayOrders.length === 0 ? (
-            <div className="flex h-full min-h-[360px] items-center justify-center rounded-xl border border-dashed border-white/15 px-4 text-center text-lg">
+            <motion.div variants={pageMotionItem} className="flex h-full min-h-[360px] items-center justify-center rounded-xl border border-dashed border-white/15 px-4 text-center text-lg">
               {t(
                 'customerDisplay.empty',
                 'No active customer-display orders right now.'
               )}
-            </div>
+            </motion.div>
           ) : isLoading ? (
-            <div className="flex h-full min-h-[360px] items-center justify-center rounded-xl border border-dashed border-white/15 px-4 text-center text-lg">
+            <motion.div variants={pageMotionItem} className="flex h-full min-h-[360px] items-center justify-center rounded-xl border border-dashed border-white/15 px-4 text-center text-lg">
               {t('customerDisplay.loading', 'Loading customer display...')}
-            </div>
+            </motion.div>
           ) : (
-            <div
+            <motion.div
+              variants={pageMotionContainer}
               className={
                 externalWindow
                   ? 'grid grid-cols-1 gap-5 xl:grid-cols-2'
@@ -654,7 +662,8 @@ const CustomerDisplayPage: React.FC = () => {
                 const Icon = phase.Icon;
 
                 return (
-                  <div
+                  <motion.div
+                    variants={pageMotionItem}
                     key={order.order_id}
                     className={`rounded-2xl border px-5 py-4 ${phase.border} ${
                       isDark ? 'bg-black' : 'bg-slate-50'
@@ -681,21 +690,21 @@ const CustomerDisplayPage: React.FC = () => {
                         </div>
                       </div>
                       <div
-                        className={`grid shrink-0 place-items-center rounded-full ${phase.bg} ${
+                        className={`grid shrink-0 place-items-center rounded-full bg-transparent ${
                           externalWindow ? 'h-16 w-16' : 'h-12 w-12'
                         }`}
                       >
                         <Icon className={`${phase.color} ${externalWindow ? 'h-9 w-9' : 'h-6 w-6'}`} />
                       </div>
                     </div>
-                  </div>
+                  </motion.div>
                 );
               })}
-            </div>
+            </motion.div>
           )}
-        </section>
-      </div>
-    </div>
+        </motion.section>
+      </motion.div>
+    </motion.div>
   );
 };
 

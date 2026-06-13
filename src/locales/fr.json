@@ -2622,12 +2622,17 @@
       "cardFailed": "Échec du paiement par carte. Veuillez réessayer.",
       "loadingMethods": "Chargement des modes de paiement",
       "loadingMethodsHint": "Vérification de la configuration de paiement du terminal...",
-      "splitSimple": "SPLIT",
-      "enterCashReceived": "[NEEDS FR TRANSLATION] Μετρητά που Παραλήφθηκαν",
-      "insufficient": "[NEEDS FR TRANSLATION] Ανεπαρκή",
-      "completeCash": "[NEEDS FR TRANSLATION] Ολοκλήρωση",
-      "cashSimple": "[NEEDS FR TRANSLATION] ΜΕΤΡΗΤΑ",
-      "cardSimple": "[NEEDS FR TRANSLATION] ΚΑΡΤΑ"
+      "splitSimple": "PARTAGE",
+      "enterCashReceived": "Espèces reçues",
+      "insufficient": "Insuffisant",
+      "completeCash": "Terminer",
+      "cashSimple": "ESPÈCES",
+      "cardSimple": "CARTE",
+      "roomChargeSimple": "CHAMBRE",
+      "roomChargeRoom": "Chambre {{roomNumber}}",
+      "roomChargeLabel": "Facturer à la chambre",
+      "roomChargeSuccess": "Facturé à la chambre",
+      "roomChargeFallback": "La facturation à la chambre n'a pas été appliquée. Encaissez maintenant cette commande."
     },
     "customerSearch": {
       "title": "Rechercher un client",
@@ -2729,9 +2734,9 @@
       "transaction": "Transaction",
       "coveredItems": "Articles couverts",
       "item": "Article",
-      "address": "[NEEDS FR TRANSLATION] Διεύθυνση",
-      "noPhone": "[NEEDS FR TRANSLATION] Χωρίς τηλέφωνο",
-      "paymentMethod": "[NEEDS FR TRANSLATION] Τρόπος Πληρωμής"
+      "address": "Adresse",
+      "noPhone": "Aucun téléphone",
+      "paymentMethod": "Mode de paiement"
     },
     "simplePricing": {
       "title": "Définir les prix"
@@ -5928,13 +5933,93 @@
       "loadFailed": "[NEEDS FR TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
     }
   },
+  "roomsView": {
+    "noBranch": "Veuillez sélectionner un établissement pour afficher les chambres",
+    "status": {
+      "available": "Disponible",
+      "occupied": "Occupée",
+      "reserved": "Réservée",
+      "maintenance": "Maintenance",
+      "cleaning": "Nettoyage"
+    }
+  },
   "guestBilling": {
+    "room": "Chambre",
+    "folioDetails": "Détails du folio",
+    "ongoing": "En cours",
+    "totalCharges": "Total des frais",
+    "totalPayments": "Total des paiements",
+    "notes": "Notes",
+    "balance": "Solde",
+    "addCharge": "Ajouter des frais",
+    "payment": "Paiement",
+    "checkout": "Départ",
+    "printFolio": "Imprimer le folio",
+    "searchPlaceholder": "Rechercher un client ou une chambre...",
+    "outstandingBalanceLabel": "Solde dû",
+    "status": {
+      "active": "Actif",
+      "closed": "Clôturé",
+      "disputed": "Contesté"
+    },
     "empty": {
-      "title": "[NEEDS FR TRANSLATION] Δεν υπάρχουν λογαριασμοί επισκεπτών",
-      "description": "[NEEDS FR TRANSLATION] Οι λογαριασμοί επισκεπτών θα εμφανιστούν εδώ όταν δημιουργηθούν."
+      "title": "Aucun folio client",
+      "description": "Les folios clients apparaîtront ici une fois créés."
     },
     "stats": {
-      "openFolios": "[NEEDS FR TRANSLATION] Ανοιχτοί Λογαριασμοί"
+      "activeFolios": "Folios actifs",
+      "outstandingBalance": "Solde dû",
+      "disputed": "Contesté",
+      "openFolios": "Folios ouverts"
+    },
+    "fields": {
+      "chargeType": "Type de frais",
+      "description": "Description",
+      "paymentMethod": "Mode de paiement",
+      "amount": "Montant",
+      "quantity": "Quantité",
+      "reference": "Référence",
+      "notes": "Notes"
+    },
+    "chargeTypes": {
+      "room": "Chambre",
+      "food": "Nourriture",
+      "beverage": "Boisson",
+      "service": "Service",
+      "tax": "Taxe",
+      "other": "Autre"
+    },
+    "paymentMethods": {
+      "cash": "Espèces",
+      "card": "Carte",
+      "bankTransfer": "Virement bancaire",
+      "other": "Autre"
+    },
+    "chargeModal": {
+      "title": "Ajouter des frais",
+      "submit": "Publier les frais",
+      "success": "Frais publiés sur le folio"
+    },
+    "paymentModal": {
+      "title": "Ajouter un paiement",
+      "submit": "Publier le paiement",
+      "success": "Paiement publié sur le folio"
+    },
+    "checkoutModal": {
+      "success": "Client parti",
+      "outstanding": "Un solde de {{balance}} reste dû. Ajoutez un paiement avant le départ."
+    },
+    "errors": {
+      "moduleRequired": "La facturation client n'est pas activée pour ce terminal.",
+      "actionFailed": "Échec de la mise à jour du folio."
+    },
+    "error": {
+      "title": "Échec du chargement des folios clients"
+    },
+    "validation": {
+      "amount": "Saisissez un montant supérieur à zéro.",
+      "quantity": "La quantité doit être supérieure à zéro.",
+      "description": "La description est obligatoire."
     }
   },
   "filters": {

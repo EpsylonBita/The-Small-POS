@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
+import { motion } from 'framer-motion';
 import { useTheme } from '../contexts/theme-context';
-import { Info, Copy, Check, ExternalLink } from 'lucide-react';
+import { Copy, Check, ExternalLink } from 'lucide-react';
 import { getBridge, type DiagnosticsAboutInfo } from '../../lib';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 const AboutPage: React.FC = () => {
   const { resolvedTheme } = useTheme();
@@ -36,25 +38,22 @@ const AboutPage: React.FC = () => {
   };
 
   const Row: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-    <div className="flex justify-between items-center py-3 border-b border-white/10 last:border-b-0">
+    <motion.div variants={pageMotionItem} className="flex justify-between items-center py-3 border-b border-white/10 last:border-b-0">
       <span className={`text-sm font-medium ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
         {label}
       </span>
       <span className={`text-sm font-mono ${isDark ? 'text-white' : 'text-gray-900'}`}>
         {value}
       </span>
-    </div>
+    </motion.div>
   );
 
   return (
-    <div className="flex flex-col items-center justify-center h-full p-8">
-      <div className={`w-full max-w-lg rounded-2xl border ${isDark ? 'bg-gray-900/80 border-white/10' : 'bg-white border-gray-200'} shadow-xl`}>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="flex flex-col items-center justify-center h-full p-8">
+      <motion.div variants={pageMotionItem} className={`w-full max-w-lg rounded-2xl border ${isDark ? 'bg-gray-900/80 border-white/10' : 'bg-white border-gray-200'} shadow-xl`}>
         {/* Header */}
-        <div className="p-6 pb-4 text-center border-b border-white/10">
-          <div className={`inline-flex items-center justify-center w-16 h-16 rounded-2xl mb-4 ${isDark ? 'bg-blue-500/20' : 'bg-blue-50'}`}>
-            <Info className="w-8 h-8 text-blue-500" />
-          </div>
-          <h1 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+        <motion.div variants={pageMotionItem} className="p-6 pb-4 text-center border-b border-white/10">
+          <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
             The Small POS
           </h1>
           {about && (
@@ -65,10 +64,10 @@ const AboutPage: React.FC = () => {
           <p className={`text-sm mt-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
             Tauri v2 Desktop Application
           </p>
-        </div>
+        </motion.div>
 
         {/* Info rows */}
-        <div className="px-6 py-2">
+        <motion.div variants={pageMotionContainer} className="px-6 py-2">
           {about ? (
             <>
               <Row label="Version" value={`v${about.version}`} />
@@ -82,10 +81,10 @@ const AboutPage: React.FC = () => {
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto" />
             </div>
           )}
-        </div>
+        </motion.div>
 
         {/* Actions */}
-        <div className="p-4 border-t border-white/10 flex gap-3 justify-center">
+        <motion.div variants={pageMotionItem} className="p-4 border-t border-white/10 flex gap-3 justify-center">
           <button
             onClick={handleCopy}
             disabled={!about}
@@ -98,9 +97,9 @@ const AboutPage: React.FC = () => {
             {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
             {copied ? 'Copied!' : 'Copy Info'}
           </button>
-        </div>
-      </div>
-    </div>
+        </motion.div>
+      </motion.div>
+    </motion.div>
   );
 };
 

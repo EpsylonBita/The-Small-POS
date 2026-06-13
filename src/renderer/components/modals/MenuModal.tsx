@@ -7,7 +7,10 @@ import type { AppliedCoupon, AppliedLoyaltyRedemption } from '../menu/MenuCart';
 import { MenuItemModal } from '../menu/MenuItemModal';
 import { ComboChoiceModal } from '../menu/ComboChoiceModal';
 import type { ChosenComboItem } from '../menu/ComboChoiceModal';
-import { PaymentModal } from './PaymentModal';
+import {
+  PaymentModal,
+  type RoomChargeContext,
+} from './PaymentModal';
 import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
@@ -18,8 +21,9 @@ import { useKdsLiveDraftSync } from '../../hooks/useKdsLiveDraftSync';
 import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
-import { menuService, type MenuItem } from '../../services/MenuService';
+import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
 import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
+import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import type { MenuCombo } from '@shared/types/combo';
 import { getComboPrice } from '@shared/types/combo';
@@ -63,6 +67,243 @@ type MenuModalCartItem = MenuCartItem & {
   category?: { id?: string | null } | string | null;
 } & Partial<OfferRewardLineMetadata>;
 
+type IngredientLookup = Map<string, Ingredient>;
+type MenuItemLookup = Map<string, {
+  name: string;
+  categoryId: string;
+  categoryName: string;
+}>;
+
+const readCustomizationString = (...values: unknown[]): string => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const record = value as Record<string, unknown>;
+      const nested = readCustomizationString(
+        record.name,
+        record.name_en,
+        record.name_el,
+        record.base,
+        record.en,
+        record.el,
+        record.label,
+      );
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return '';
+};
+
+const readCustomizationNumber = (...values: unknown[]): number | undefined => {
+  for (const value of values) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+  return undefined;
+};
+
+const flattenCustomizationEntry = (entry: any, isWithout = false): any[] => {
+  if (!entry) return [];
+
+  if (typeof entry === 'string') {
+    return [{ name: entry, isWithout }];
+  }
+
+  if (Array.isArray(entry)) {
+    return entry.flatMap((value) => flattenCustomizationEntry(value, isWithout));
+  }
+
+  if (typeof entry !== 'object') {
+    return [];
+  }
+
+  if (Array.isArray(entry.ingredients) && !entry.ingredient && !entry.ingredient_id && !entry.ingredientId) {
+    return entry.ingredients.flatMap((ingredient: any) =>
+      flattenCustomizationEntry(
+        {
+          ...ingredient,
+          group_id: ingredient?.group_id ?? entry.id,
+          group_name: ingredient?.group_name ?? entry.name,
+        },
+        isWithout || entry.isWithout === true || entry.is_without === true,
+      ),
+    );
+  }
+
+  return [
+    {
+      ...entry,
+      isWithout: isWithout || entry.isWithout === true || entry.is_without === true,
+    },
+  ];
+};
+
+const parseCustomizationInputValue = (customizations: any): any => {
+  if (typeof customizations !== 'string') {
+    return customizations;
+  }
+
+  const trimmed = customizations.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+};
+
+const flattenCustomizationInput = (customizations: any): any[] => {
+  const parsed = parseCustomizationInputValue(customizations);
+  if (!parsed) return [];
+  if (Array.isArray(parsed)) {
+    return parsed.flatMap((entry) => flattenCustomizationEntry(entry));
+  }
+  if (typeof parsed !== 'object') return [];
+
+  const groupedEntries = [
+    parsed.added,
+    parsed.selected,
+    parsed.ingredients,
+    parsed.items,
+    parsed.groups,
+  ]
+    .filter(Array.isArray)
+    .flatMap((entries) => flattenCustomizationEntry(entries));
+
+  const removedEntries = Array.isArray(parsed.removed)
+    ? flattenCustomizationEntry(parsed.removed, true)
+    : [];
+
+  if (groupedEntries.length > 0 || removedEntries.length > 0) {
+    return [...groupedEntries, ...removedEntries];
+  }
+
+  return Object.values(parsed).flatMap((entry) => flattenCustomizationEntry(entry));
+};
+
+const buildIngredientLookup = (ingredients: Ingredient[]): IngredientLookup =>
+  new Map(ingredients.map((ingredient) => [String(ingredient.id), ingredient]));
+
+const buildMenuItemLookup = (
+  menuItems: MenuItem[],
+  menuCategories: MenuCategory[],
+): MenuItemLookup => {
+  const categoriesById = new Map(
+    menuCategories.map((category) => [
+      String(category.id),
+      readCustomizationString(category.name, category.name_en, category.name_el),
+    ]),
+  );
+
+  return new Map(
+    menuItems.map((item) => {
+      const categoryId = readCustomizationString(item.category_id, item.category);
+      return [
+        String(item.id),
+        {
+          name: readCustomizationString(item.name, item.name_en, item.name_el),
+          categoryId,
+          categoryName:
+            categoriesById.get(categoryId) ||
+            readCustomizationString((item as any).category_name, (item as any).categoryName),
+        },
+      ];
+    }),
+  );
+};
+
+const resolveCustomizationIngredient = (customization: any, ingredientLookup?: IngredientLookup) => {
+  const existingIngredient = customization?.ingredient || {};
+  const ingredientId = readCustomizationString(
+    existingIngredient.id,
+    customization?.ingredient_id,
+    customization?.ingredientId,
+    customization?.id,
+    customization?.customizationId,
+    customization?.optionId,
+  );
+  const catalogIngredient = ingredientId ? ingredientLookup?.get(ingredientId) : undefined;
+  const name =
+    readCustomizationString(
+      existingIngredient.name,
+      existingIngredient.name_en,
+      customization?.ingredient_name,
+      customization?.ingredientName,
+      customization?.name,
+      customization?.name_en,
+      customization?.optionName,
+      customization?.label,
+      catalogIngredient?.name,
+      catalogIngredient?.name_en,
+      catalogIngredient?.name_el,
+    ) || 'Unknown';
+
+  return {
+    ...catalogIngredient,
+    ...existingIngredient,
+    id: ingredientId || readCustomizationString(existingIngredient.id) || name,
+    name,
+    name_en:
+      readCustomizationString(
+        existingIngredient.name_en,
+        customization?.name_en,
+        catalogIngredient?.name_en,
+        catalogIngredient?.name,
+      ) || name,
+    name_el:
+      readCustomizationString(
+        existingIngredient.name_el,
+        customization?.name_el,
+        catalogIngredient?.name_el,
+      ) || '',
+    price: readCustomizationNumber(customization?.price, existingIngredient.price, catalogIngredient?.price) ?? 0,
+    pickup_price: readCustomizationNumber(
+      customization?.pickup_price,
+      existingIngredient.pickup_price,
+      catalogIngredient?.pickup_price,
+      customization?.price,
+      existingIngredient.price,
+      catalogIngredient?.price,
+    ),
+    delivery_price: readCustomizationNumber(
+      customization?.delivery_price,
+      existingIngredient.delivery_price,
+      catalogIngredient?.delivery_price,
+      customization?.price,
+      existingIngredient.price,
+      catalogIngredient?.price,
+    ),
+    dine_in_price: readCustomizationNumber(
+      customization?.dine_in_price,
+      existingIngredient.dine_in_price,
+      catalogIngredient?.dine_in_price,
+      customization?.price,
+      existingIngredient.price,
+      catalogIngredient?.price,
+    ),
+    category_name:
+      readCustomizationString(
+        existingIngredient.category_name,
+        customization?.category_name,
+        customization?.categoryName,
+        customization?.group_name,
+        customization?.groupName,
+        catalogIngredient?.category_name,
+      ) || undefined,
+  };
+};
+
 interface LoyaltySettingsState {
   is_active: boolean;
   redemption_rate: number;
@@ -84,6 +325,7 @@ interface MenuModalProps {
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   isProcessingOrder?: boolean;
   deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
+  roomChargeContext?: RoomChargeContext | null;
   onOrderComplete?: (orderData: {
     items: any[];
     total: number;
@@ -136,6 +378,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   orderType = 'delivery',
   isProcessingOrder = false,
   deliveryZoneInfo,
+  roomChargeContext = null,
   onOrderComplete,
   // Edit mode props
   editMode = false,
@@ -642,50 +885,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   }, [hasDeliveryPro, isOpen, orderType, editMode, staff?.branchId, effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount]);
 
   // Transform customizations from Supabase format to MenuCart format
-  const transformCustomizations = (customizations: any): any[] => {
-    if (!customizations) return [];
-    
-    // If already an array in the expected format, return as-is
-    if (Array.isArray(customizations)) {
-      // Check if it's already in the correct format
-      if (customizations.length > 0 && customizations[0]?.ingredient) {
-        return customizations;
-      }
-      // If it's an array but not in the right format, try to transform each item
-      return customizations.map(c => {
-        if (c?.ingredient) return c;
-        // Try to create the expected format
-        return {
-          ingredient: {
-            id: c?.id || c?.ingredient_id || '',
-            name: c?.name || c?.ingredient_name || 'Unknown',
-            name_en: c?.name_en || c?.name || '',
-            name_el: c?.name_el || '',
-          },
-          quantity: c?.quantity || 1,
-          isLittle: c?.isLittle || c?.is_little || false
-        };
-      });
-    }
-    
-    // If it's an object (keyed by ingredient ID or index), convert to array
-    if (typeof customizations === 'object') {
-      return Object.values(customizations).map((c: any) => {
-        if (c?.ingredient) return c;
-        return {
-          ingredient: {
-            id: c?.id || c?.ingredient_id || '',
-            name: c?.name || c?.ingredient_name || c?.ingredient?.name || 'Unknown',
-            name_en: c?.name_en || c?.ingredient?.name_en || c?.name || '',
-            name_el: c?.name_el || c?.ingredient?.name_el || '',
-          },
-          quantity: c?.quantity || 1,
-          isLittle: c?.isLittle || c?.is_little || false
-        };
-      });
-    }
-    
-    return [];
+  const transformCustomizations = (customizations: any, ingredientLookup?: IngredientLookup): any[] => {
+    return flattenCustomizationInput(customizations).map((c) => ({
+      ingredient: resolveCustomizationIngredient(c, ingredientLookup),
+      quantity: Math.max(1, Math.round(readCustomizationNumber(c?.quantity, c?.qty, c?.count, 1) ?? 1)),
+      isLittle: c?.isLittle === true || c?.is_little === true || c?.little === true,
+      isWithout: c?.isWithout === true || c?.is_without === true || c?.without === true,
+    }));
   };
 
   // Initialize cart items when in edit mode
@@ -710,17 +916,53 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // This handles the case where the modal is already open and we're loading a different order
         setCartItems([]);
 
+        let ingredientLookup: IngredientLookup = new Map();
+        let menuItemLookup: MenuItemLookup = new Map();
+        const [ingredientsResult, menuItemsResult, categoriesResult] = await Promise.allSettled([
+          menuService.getIngredients(),
+          menuService.getMenuItems(),
+          menuService.getMenuCategories(),
+        ]);
+
+        if (ingredientsResult.status === 'fulfilled') {
+          ingredientLookup = buildIngredientLookup(ingredientsResult.value);
+        }
+
+        if (menuItemsResult.status === 'fulfilled' && categoriesResult.status === 'fulfilled') {
+          menuItemLookup = buildMenuItemLookup(menuItemsResult.value, categoriesResult.value);
+        }
+
+        if (
+          ingredientsResult.status === 'rejected' ||
+          menuItemsResult.status === 'rejected' ||
+          categoriesResult.status === 'rejected'
+        ) {
+          console.warn('[MenuModal] Failed to load full catalog for edit order hydration:', {
+            ingredients: ingredientsResult.status,
+            menuItems: menuItemsResult.status,
+            categories: categoriesResult.status,
+          });
+        }
+
         // If we have initialCartItems, use them
         if (initialCartItems && initialCartItems.length > 0) {
           const transformedItems = initialCartItems.map((item, index) => {
             const normalizedItem = normalizePosOrderItem(item);
+            const menuItemId = normalizedItem.menuItemId ?? undefined;
+            const catalogMenuItem = menuItemId ? menuItemLookup.get(menuItemId) : undefined;
+            const rawCustomizations =
+              normalizedItem.customizations ??
+              item.customizations ??
+              item.selectedIngredients ??
+              item.modifiers ??
+              item.ingredients;
             return {
               id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-              menuItemId: normalizedItem.menuItemId ?? undefined,
-              name: normalizedItem.name || 'Unknown Item',
+              menuItemId,
+              name: normalizedItem.name || catalogMenuItem?.name || 'Unknown Item',
               price: normalizedItem.unit_price || normalizedItem.price || 0,
               quantity: normalizedItem.quantity || 1,
-              customizations: transformCustomizations(normalizedItem.customizations),
+              customizations: transformCustomizations(rawCustomizations, ingredientLookup),
               notes: normalizedItem.notes || '',
               totalPrice: normalizedItem.total_price || normalizedItem.totalPrice || ((normalizedItem.unit_price || normalizedItem.price || 0) * (normalizedItem.quantity || 1)),
               basePrice: normalizedItem.unit_price || normalizedItem.price || 0,
@@ -735,8 +977,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 normalizedItem.is_price_overridden === true ||
                 normalizedItem.isPriceOverridden === true,
               is_manual: normalizedItem.is_manual === true,
-              categoryName: normalizedItem.categoryName || normalizedItem.category_name || undefined,
-              category_id: normalizedItem.category_id || normalizedItem.categoryId || null,
+              categoryName: normalizedItem.categoryName || normalizedItem.category_name || catalogMenuItem?.categoryName || undefined,
+              category_id: normalizedItem.category_id || normalizedItem.categoryId || catalogMenuItem?.categoryId || null,
             };
           });
           setCartItems(transformedItems);
@@ -749,11 +991,19 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             if (fetchedItems.length > 0) {
               const transformedItems = fetchedItems.map((item, index) => {
                 const normalizedItem = normalizePosOrderItem(item);
-                const transformedCustomizations = transformCustomizations(item.customizations);
+                const menuItemId = normalizedItem.menuItemId ?? undefined;
+                const catalogMenuItem = menuItemId ? menuItemLookup.get(menuItemId) : undefined;
+                const rawCustomizations =
+                  normalizedItem.customizations ??
+                  item.customizations ??
+                  item.selectedIngredients ??
+                  item.modifiers ??
+                  item.ingredients;
+                const transformedCustomizations = transformCustomizations(rawCustomizations, ingredientLookup);
                 return {
                   id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-                  menuItemId: normalizedItem.menuItemId ?? undefined,
-                  name: normalizedItem.name || 'Unknown Item',
+                  menuItemId,
+                  name: normalizedItem.name || catalogMenuItem?.name || 'Unknown Item',
                   price: normalizedItem.unit_price || normalizedItem.price || 0,
                   quantity: normalizedItem.quantity || 1,
                   customizations: transformedCustomizations,
@@ -771,8 +1021,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                     normalizedItem.is_price_overridden === true ||
                     normalizedItem.isPriceOverridden === true,
                   is_manual: normalizedItem.is_manual === true,
-                  categoryName: normalizedItem.categoryName || normalizedItem.category_name || undefined,
-                  category_id: normalizedItem.category_id || normalizedItem.categoryId || null,
+                  categoryName: normalizedItem.categoryName || normalizedItem.category_name || catalogMenuItem?.categoryName || undefined,
+                  category_id: normalizedItem.category_id || normalizedItem.categoryId || catalogMenuItem?.categoryId || null,
                 };
               });
               setCartItems(transformedItems);
@@ -1929,7 +2179,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           ? t('orders.type.dine_in', 'Dine In')
           : t('modals.menu.pickup');
     if (editMode && editOrderNumber) {
-      return `${t('modals.menu.editOrder') || 'Edit Order'} #${editOrderNumber} - ${typeLabel}`;
+      return `${t('modals.menu.editOrder') || 'Edit Order'} ${formatCompactOrderNumberForDisplay(editOrderNumber)} - ${typeLabel}`;
     }
     return `${typeLabel} ${t('modals.menu.order')}`;
   };
@@ -1963,7 +2213,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   value={menuSearchQuery}
                   onChange={(e) => setMenuSearchQuery(e.target.value)}
                   placeholder={t('menu.search.placeholder', 'Search menu items...')}
-                  className="h-10 w-full rounded-xl border border-white/15 bg-white/[0.08] pl-9 pr-9 text-sm text-white placeholder-gray-400 backdrop-blur-md focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  className="h-10 w-full rounded-xl border border-white/15 bg-white/[0.08] pl-9 pr-9 text-sm text-white placeholder-gray-400 backdrop-blur-md focus:border-yellow-400/70 focus:outline-none focus:ring-1 focus:ring-yellow-400"
                 />
                 {menuSearchQuery && (
                   <button
@@ -1980,8 +2230,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 {/* Customer info chip or Add Customer button */}
                 <div>
                   {orderType === 'delivery' && selectedCustomer ? (
-                    <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm bg-blue-500/20 text-blue-300 border border-blue-500/30">
-                      <User className="w-3.5 h-3.5" />
+                    <span className="inline-flex items-center gap-2 rounded-full border border-blue-500/40 bg-transparent px-3 py-1.5 text-sm text-white">
+                      <User className="w-3.5 h-3.5 text-blue-400" />
                       {selectedCustomer.name}{selectedCustomer.phone_number || selectedCustomer.phone ? ` \u00B7 ${selectedCustomer.phone_number || selectedCustomer.phone}` : ''}
                     </span>
                   ) : hasCustomerInfo ? (
@@ -2189,6 +2439,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           onPaymentComplete={handlePaymentComplete}
           onSplitPayment={onOrderComplete ? handleSplitPayment : undefined}
           isProcessing={effectiveProcessing}
+          roomChargeContext={roomChargeContext}
         />
       )}
 

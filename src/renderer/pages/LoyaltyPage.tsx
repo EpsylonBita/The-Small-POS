@@ -92,10 +92,10 @@ const LoyaltyPage: React.FC = () => {
 
   const getTierColor = (tier: string) => {
     switch (tier?.toLowerCase()) {
-      case 'platinum': return 'text-purple-400 bg-purple-500/20 border-purple-500/30';
-      case 'gold': return 'text-yellow-400 bg-yellow-500/20 border-yellow-500/30';
-      case 'silver': return 'text-zinc-300 bg-zinc-400/20 border-zinc-400/30';
-      default: return 'text-amber-500 bg-amber-500/20 border-amber-500/30';
+      case 'platinum': return 'text-purple-400 border-purple-500/40';
+      case 'gold': return 'text-yellow-400 border-yellow-500/40';
+      case 'silver': return 'text-zinc-300 border-zinc-400/40';
+      default: return 'text-amber-500 border-amber-500/40';
     }
   };
 
@@ -193,7 +193,7 @@ const LoyaltyPage: React.FC = () => {
 
   if (!loading && !settings?.is_active) {
     return (
-      <div className={`h-full flex items-center justify-center p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-white text-gray-900'}`}>
+      <div className={`h-full flex items-center justify-center p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
         <div className={`p-8 rounded-2xl text-center max-w-md border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
           <Award className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
           <h2 className="text-xl font-bold mb-2">{t('loyalty.programInactive', 'Loyalty Program Inactive')}</h2>
@@ -206,36 +206,37 @@ const LoyaltyPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-white text-gray-900'}`}>
+    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
       {/* Header + Stats Card */}
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
-              <Award className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold">{t('loyalty.title', 'Loyalty Program')}</h1>
-              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-                {settings?.points_per_euro} {t('loyalty.pointsPerEuro', 'point per €1')} • {formatMoney(settings?.redemption_rate || 0.01)} {t('loyalty.perPoint', 'per point')}
-              </p>
-            </div>
+          <div className="min-w-0">
+            <h1 className="truncate text-3xl font-bold tracking-tight">
+              {t('loyalty.title', 'Loyalty Program')}
+            </h1>
+            <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+              {settings?.points_per_euro} {t('loyalty.pointsPerEuro', 'point per €1')} • {formatMoney(settings?.redemption_rate || 0.01)} {t('loyalty.perPoint', 'per point')}
+            </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               onClick={() => setShowScanPanel(true)}
-              className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
-                isDark
-                  ? 'bg-cyan-500/15 text-cyan-100 border border-cyan-500/40 hover:bg-cyan-500/25'
-                  : 'bg-cyan-50 text-cyan-800 border border-cyan-200 hover:bg-cyan-100'
-              }`}
+              className="h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 bg-transparent text-white border border-cyan-500/40"
             >
               <ScanLine className="w-4 h-4" />
               {t('loyalty.scan.button', 'Scan')}
             </button>
             <button
+              type="button"
               onClick={() => void fetchData()}
-              className={`h-10 w-10 inline-flex items-center justify-center rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+              disabled={loading}
+              title={t('common.refresh', 'Refresh')}
+              aria-label={t('common.refresh', 'Refresh')}
+              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+                isDark
+                  ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                  : 'border border-black bg-black text-white hover:bg-zinc-800'
+              } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
             >
               <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
             </button>
@@ -251,7 +252,7 @@ const LoyaltyPage: React.FC = () => {
           >
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <Users className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                <Users className="w-5 h-5 text-green-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('loyalty.members', 'Members')}</p>
@@ -267,7 +268,7 @@ const LoyaltyPage: React.FC = () => {
           >
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <Award className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                <Award className="w-5 h-5 text-yellow-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('loyalty.totalPoints', 'Total Points')}</p>
@@ -283,7 +284,7 @@ const LoyaltyPage: React.FC = () => {
           >
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <TrendingUp className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                <TrendingUp className="w-5 h-5 text-blue-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('loyalty.avgPoints', 'Avg Points')}</p>
@@ -338,7 +339,7 @@ const LoyaltyPage: React.FC = () => {
                     </p>
                   )}
                 </div>
-                <span className={`px-2 py-1 text-xs font-medium rounded border flex items-center gap-1 ${getTierColor(customer.tier)}`}>
+                <span className={`px-2 py-1 text-xs font-medium rounded border bg-transparent flex items-center gap-1 ${getTierColor(customer.tier)}`}>
                   {getTierIcon(customer.tier)}
                   {customer.tier || 'Bronze'}
                 </span>

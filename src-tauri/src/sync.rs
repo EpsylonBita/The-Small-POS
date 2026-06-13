@@ -12360,6 +12360,7 @@ fn normalize_payment_method_for_sync(raw_method: Option<&str>) -> Option<String>
         "cash" => "cash",
         "card" => "card",
         "digital_wallet" | "wallet" | "digital-wallet" => "digital_wallet",
+        "room_charge" | "room-charge" => "room_charge",
         _ => "other",
     };
     Some(normalized.to_string())
@@ -12780,6 +12781,7 @@ fn build_normalized_order_operation(
         "table_id": table_id,
         "table_session_id": table_session_id,
         "guest_count": guest_count,
+        "room_id": str_any(source, &["roomId", "room_id"]).or_else(|| str_any(&payload_data, &["roomId", "room_id"])),
         "estimated_ready_time": estimated_ready_time,
         "driver_id": driver_id,
         "created_at": str_any(source, &["createdAt", "created_at"]).or_else(|| str_any(&payload_data, &["createdAt", "created_at"])),
@@ -13092,12 +13094,13 @@ async fn sync_order_batch_via_direct_api(
         }
 
         // Normalize payment_method to match the Zod enum on the server:
-        // cash, card, digital_wallet, other. "pending" is not a valid payment
-        // method — map it to "cash" so the order can sync.
+        // cash, card, digital_wallet, other, room_charge. "pending" is not a
+        // valid payment method — map it to "cash" so the order can sync.
         let raw_payment_method =
             str_any(&data, &["payment_method"]).unwrap_or_else(|| "cash".to_string());
         let payment_method_normalized = match raw_payment_method.to_lowercase().as_str() {
-            "cash" | "card" | "digital_wallet" | "other" => raw_payment_method,
+            "cash" | "card" | "digital_wallet" | "other" | "room_charge" => raw_payment_method,
+            "room-charge" => "room_charge".to_string(),
             "pending" => "cash".to_string(),
             _ => "other".to_string(),
         };
@@ -13148,6 +13151,7 @@ async fn sync_order_batch_via_direct_api(
             "delivery_longitude": num_any(&data, &["delivery_longitude", "deliveryLongitude"]),
             "delivery_address_fingerprint": str_any(&data, &["delivery_address_fingerprint", "deliveryAddressFingerprint"]),
             "delivery_zone_id": str_any(&data, &["delivery_zone_id", "deliveryZoneId"]),
+            "room_id": str_any(&data, &["room_id", "roomId"]),
             "cancellation_reason": str_any(&data, &["cancellation_reason", "cancellationReason"]),
             "is_ghost": bool_any(&data, &["is_ghost"]).unwrap_or(false),
             "ghost_source": str_any(&data, &["ghost_source"]),

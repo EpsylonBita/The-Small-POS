@@ -8,6 +8,7 @@
 import React, { memo, useState, useMemo, useCallback, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useAcquiredModules } from '../../../hooks/useAcquiredModules';
@@ -47,6 +48,7 @@ import {
   refreshTerminalCredentialCache,
 } from '../../../services/terminal-credentials';
 import { offEvent, onEvent } from '../../../../lib';
+import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 type QuickFilter = 'today' | 'tomorrow' | 'week' | 'custom';
 type ViewMode = 'timeline' | 'list';
@@ -494,16 +496,16 @@ export const ReservationsView: React.FC = memo(() => {
 
   if (!branchId || !effectiveOrgId) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
         {t('reservationsView.noBranch', { defaultValue: 'Please select a branch to view reservations' })}
-      </div>
+      </motion.div>
     );
   }
 
   // Show message if neither module is acquired
   if (availableReservationTabs.length === 0) {
     return (
-      <div className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
         <Calendar className="w-16 h-16 mb-4 opacity-50" />
         <p className="text-lg font-medium mb-2">
           {t('reservationsView.noModules', { defaultValue: 'No reservation modules available' })}
@@ -511,15 +513,15 @@ export const ReservationsView: React.FC = memo(() => {
         <p className="text-sm text-center max-w-md">
           {t('reservationsView.noModulesHint', { defaultValue: 'Please acquire Tables, Rooms, or Services to manage reservations.' })}
         </p>
-      </div>
+      </motion.div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col p-4">
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col p-4">
       {/* Tabs - only show if both modules are available */}
       {availableReservationTabs.length > 1 && (
-        <div className={`flex gap-1 mb-4 p-1 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
+        <motion.div variants={pageMotionContainer} className={`flex gap-1 mb-4 p-1 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
           {availableReservationTabs.map((tab) => {
             const Icon = tab === 'rooms' ? BedDouble : tab === 'services' ? Scissors : UtensilsCrossed;
             const activeClass =
@@ -535,7 +537,8 @@ export const ReservationsView: React.FC = memo(() => {
                   ? appointments.length
                   : reservations.filter((r) => !r.roomId).length;
             return (
-              <button
+              <motion.button
+                variants={pageMotionItem}
                 key={tab}
                 onClick={() => setActiveTab(tab)}
                 className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium transition-all ${
@@ -557,15 +560,15 @@ export const ReservationsView: React.FC = memo(() => {
                 }`}>
                   {count}
                 </span>
-              </button>
+              </motion.button>
             );
           })}
-        </div>
+        </motion.div>
       )}
 
       {/* Single module header - show which type of reservations we're viewing */}
       {availableReservationTabs.length === 1 && (
-        <div className={`flex items-center gap-2 mb-4 ${isDark ? 'text-white' : 'text-gray-900'}`}>
+        <motion.div variants={pageMotionItem} className={`flex items-center gap-2 mb-4 ${isDark ? 'text-white' : 'text-gray-900'}`}>
           {activeTab === 'tables' ? (
             <>
               <UtensilsCrossed className="w-6 h-6 text-blue-500" />
@@ -582,43 +585,43 @@ export const ReservationsView: React.FC = memo(() => {
               <h2 className="text-xl font-semibold">{t('reservationsView.tabs.services', { defaultValue: 'Service Reservations' })}</h2>
             </>
           )}
-        </div>
+        </motion.div>
       )}
 
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex gap-4">
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
+        <motion.div variants={pageMotionContainer} className="flex gap-4">
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('reservationsView.stats.total', { defaultValue: 'Total' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.total}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-yellow-500`}>
               {t('reservationsView.stats.pending', { defaultValue: 'Pending' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.pending}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-blue-500`}>
               {t('reservationsView.stats.confirmed', { defaultValue: 'Confirmed' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.confirmed}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-green-500`}>
               {t('reservationsView.stats.seated', { defaultValue: 'Seated' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.seated}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-purple-500`}>
               {t('reservationsView.stats.guests', { defaultValue: 'Guests' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.totalGuests}</div>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
         <div className="flex gap-2">
           <button
             onClick={() => {
@@ -667,14 +670,15 @@ export const ReservationsView: React.FC = memo(() => {
             />
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Filters Row */}
-      <div className="flex items-center justify-between mb-4">
+      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
         {/* Quick Filters */}
-        <div className="flex gap-2">
+        <motion.div variants={pageMotionContainer} className="flex gap-2">
           {(['today', 'tomorrow', 'week'] as const).map(filter => (
-            <button
+            <motion.button
+              variants={pageMotionItem}
               key={filter}
               onClick={() => handleQuickFilter(filter)}
               className={`px-3 py-1.5 rounded-lg text-sm ${
@@ -684,9 +688,9 @@ export const ReservationsView: React.FC = memo(() => {
               }`}
             >
               {t(`reservationsView.filter.${filter}`, { defaultValue: filter.charAt(0).toUpperCase() + filter.slice(1) })}
-            </button>
+            </motion.button>
           ))}
-        </div>
+        </motion.div>
 
         {/* Date Navigation */}
         <div className="flex items-center gap-2">
@@ -726,33 +730,34 @@ export const ReservationsView: React.FC = memo(() => {
             {t('reservationsView.view.timeline', { defaultValue: 'Timeline' })}
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Pending Alert */}
       {visibleStats.pending > 0 && (
-        <div className={`mb-4 p-3 rounded-lg flex items-center gap-2 ${isDark ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-50 border border-yellow-200'}`}>
+        <motion.div variants={pageMotionItem} className={`mb-4 p-3 rounded-lg flex items-center gap-2 ${isDark ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-50 border border-yellow-200'}`}>
           <AlertTriangle className="w-5 h-5 text-yellow-500" />
           <span className="text-yellow-600 font-medium">
             {visibleStats.pending} {t('reservationsView.pendingAlert', { defaultValue: 'reservation(s) pending confirmation' })}
           </span>
-        </div>
+        </motion.div>
       )}
 
       {/* Loading State */}
       {isActiveLoading && (activeTab === 'services' ? appointments.length === 0 : reservations.length === 0) && (
-        <div className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           {t('reservationsView.loading', { defaultValue: 'Loading reservations...' })}
-        </div>
+        </motion.div>
       )}
 
       {/* Content */}
       {!isActiveLoading && (
-        <div className="flex-1 overflow-y-auto">
+        <motion.div variants={pageMotionItem} className="flex-1 overflow-y-auto">
           {activeTab === 'services' ? (
-            <div className="space-y-2">
+            <motion.div variants={pageMotionContainer} className="space-y-2">
               {appointments.map((appointment) => (
-                <div
+                <motion.div
+                  variants={pageMotionItem}
                   key={appointment.id}
                   className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}
                   style={{ borderLeft: `4px solid var(--${appointmentStatusColors[appointment.status]}-500, #6b7280)` }}
@@ -807,14 +812,15 @@ export const ReservationsView: React.FC = memo(() => {
                       ))}
                     </div>
                   </div>
-                </div>
+                </motion.div>
               ))}
-            </div>
+            </motion.div>
           ) : viewMode === 'list' ? (
             /* List View */
-            <div className="space-y-2">
+            <motion.div variants={pageMotionContainer} className="space-y-2">
               {filteredReservations.map(res => (
-                <div
+                <motion.div
+                  variants={pageMotionItem}
                   key={res.id}
                   className={`p-4 rounded-xl cursor-pointer ${isDark ? 'bg-gray-800 hover:bg-gray-700/80' : 'bg-white shadow-sm hover:bg-gray-50'}`}
                   style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
@@ -889,12 +895,12 @@ export const ReservationsView: React.FC = memo(() => {
                       ))}
                     </div>
                   </div>
-                </div>
+                </motion.div>
               ))}
-            </div>
+            </motion.div>
           ) : (
             /* Timeline View */
-            <div className="grid grid-cols-[60px_1fr] gap-2">
+            <motion.div variants={pageMotionContainer} className="grid grid-cols-[60px_1fr] gap-2">
               {timeSlots.map(hour => {
                 const hourReservations = reservationsByHour[hour] || [];
                 return (
@@ -905,7 +911,8 @@ export const ReservationsView: React.FC = memo(() => {
                     <div className={`min-h-[60px] p-2 rounded-lg ${isDark ? 'bg-gray-800/50' : 'bg-gray-50'}`}>
                       <div className="flex flex-wrap gap-2">
                         {hourReservations.map(res => (
-                        <div
+                        <motion.div
+                          variants={pageMotionItem}
                           key={res.id}
                           className={`px-3 py-2 rounded-lg cursor-pointer ${isDark ? 'bg-gray-700 hover:bg-gray-600/80' : 'bg-white shadow-sm hover:bg-gray-50'}`}
                           style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
@@ -946,18 +953,18 @@ export const ReservationsView: React.FC = memo(() => {
                                 </button>
                               ))}
                             </div>
-                          </div>
+                          </motion.div>
                         ))}
                       </div>
                     </div>
                   </React.Fragment>
                 );
               })}
-            </div>
+            </motion.div>
           )}
 
           {(activeTab === 'services' ? appointments.length === 0 : filteredReservations.length === 0) && !isActiveLoading && (
-            <div className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+            <motion.div variants={pageMotionItem} className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
               {activeTab === 'services'
                 ? <Scissors className="w-12 h-12 mx-auto mb-4 opacity-50" />
                 : <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />}
@@ -967,9 +974,9 @@ export const ReservationsView: React.FC = memo(() => {
               <p className="text-sm">
                 {t('reservationsView.noReservationsHint', { defaultValue: 'Try selecting a different date or adjusting your search' })}
               </p>
-            </div>
+            </motion.div>
           )}
-        </div>
+        </motion.div>
       )}
 
       {showCreateModal && (
@@ -1218,7 +1225,7 @@ export const ReservationsView: React.FC = memo(() => {
           </div>
         </div>
       )}
-    </div>
+    </motion.div>
   );
 });
 

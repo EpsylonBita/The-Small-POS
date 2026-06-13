@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
 use serde_json::Value;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing::info;
@@ -6,6 +9,13 @@ use crate::db;
 
 const MAX_CLIPBOARD_TEXT_LEN: usize = 1_000_000;
 const DISPLAY_WINDOW_PREFIX: &str = "external-display";
+const WINDOW_ZOOM_DEFAULT: f64 = 1.0;
+const WINDOW_ZOOM_STEP: f64 = 0.1;
+const WINDOW_ZOOM_MIN: f64 = 0.5;
+const WINDOW_ZOOM_MAX: f64 = 2.0;
+
+static WINDOW_ZOOM_LEVELS: LazyLock<Mutex<HashMap<String, f64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn value_to_text(value: Value) -> Option<String> {
     match value {
@@ -60,6 +70,33 @@ fn current_window_state(window: &tauri::Window) -> Value {
 
 fn emit_window_state_changed(window: &tauri::Window) {
     let _ = window.emit("window_state_changed", current_window_state(window));
+}
+
+fn current_webview_window(window: &tauri::Window) -> Result<tauri::WebviewWindow, String> {
+    window
+        .app_handle()
+        .get_webview_window(window.label())
+        .ok_or_else(|| format!("No webview window found for label {}", window.label()))
+}
+
+fn current_zoom_scale(window: &tauri::Window) -> f64 {
+    WINDOW_ZOOM_LEVELS
+        .lock()
+        .ok()
+        .and_then(|levels| levels.get(window.label()).copied())
+        .unwrap_or(WINDOW_ZOOM_DEFAULT)
+}
+
+fn set_window_zoom(window: &tauri::Window, scale: f64) -> Result<(), String> {
+    let clamped = scale.clamp(WINDOW_ZOOM_MIN, WINDOW_ZOOM_MAX);
+    let webview = current_webview_window(window)?;
+    webview.set_zoom(clamped).map_err(|e| e.to_string())?;
+
+    if let Ok(mut levels) = WINDOW_ZOOM_LEVELS.lock() {
+        levels.insert(window.label().to_string(), clamped);
+    }
+
+    Ok(())
 }
 
 fn display_content_type(arg0: Option<&Value>) -> String {
@@ -329,35 +366,52 @@ pub async fn window_toggle_fullscreen(window: tauri::Window) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub async fn window_reload(_window: tauri::Window) -> Result<(), String> {
-    Ok(())
+pub async fn window_reload(window: tauri::Window) -> Result<(), String> {
+    current_webview_window(&window)?
+        .reload()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn window_force_reload(_window: tauri::Window) -> Result<(), String> {
-    Ok(())
+pub async fn window_force_reload(window: tauri::Window) -> Result<(), String> {
+    current_webview_window(&window)?
+        .eval("window.location.reload();")
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn window_toggle_devtools() -> Result<(), String> {
-    // Devtools toggle is runtime-specific in Tauri v2 and may be disabled in
-    // production builds. Keep command parity without hard failure.
-    Ok(())
+pub async fn window_toggle_devtools(window: tauri::Window) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        let webview = current_webview_window(&window)?;
+        if webview.is_devtools_open() {
+            webview.close_devtools();
+        } else {
+            webview.open_devtools();
+        }
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = window;
+        Err("Developer tools are only available in debug builds".to_string())
+    }
 }
 
 #[tauri::command]
-pub async fn window_zoom_in(_window: tauri::Window) -> Result<(), String> {
-    Ok(())
+pub async fn window_zoom_in(window: tauri::Window) -> Result<(), String> {
+    set_window_zoom(&window, current_zoom_scale(&window) + WINDOW_ZOOM_STEP)
 }
 
 #[tauri::command]
-pub async fn window_zoom_out(_window: tauri::Window) -> Result<(), String> {
-    Ok(())
+pub async fn window_zoom_out(window: tauri::Window) -> Result<(), String> {
+    set_window_zoom(&window, current_zoom_scale(&window) - WINDOW_ZOOM_STEP)
 }
 
 #[tauri::command]
-pub async fn window_zoom_reset(_window: tauri::Window) -> Result<(), String> {
-    Ok(())
+pub async fn window_zoom_reset(window: tauri::Window) -> Result<(), String> {
+    set_window_zoom(&window, WINDOW_ZOOM_DEFAULT)
 }
 
 #[cfg(test)]

@@ -270,6 +270,13 @@ html.dark, html.dark body, html.dark #root {
   .dark .liquid-glass-modal-input:focus {
     background: rgba(0, 0, 0, 0.3);
   }
+
+  .customer-search-yellow-input:focus {
+    border-color: rgb(250, 204, 21);
+    box-shadow:
+      0 0 0 2px rgba(250, 204, 21, 0.45),
+      inset 0 2px 4px rgba(0, 0, 0, 0.05);
+  }
 }
 
 /* Utility classes */
@@ -359,6 +366,45 @@ html.dark, html.dark body, html.dark #root {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
     touch-action: pan-x;
+  }
+
+  .navigation-dragging-icon {
+    animation: navigation-drag-float 900ms ease-in-out infinite;
+  }
+
+  .navigation-drop-slot {
+    animation: navigation-drop-slot-pulse 900ms ease-in-out infinite;
+  }
+
+  @keyframes navigation-drag-float {
+    0%,
+    100% {
+      transform: translateY(0) scale(1.08);
+    }
+
+    50% {
+      transform: translateY(-2px) scale(1.11);
+    }
+  }
+
+  @keyframes navigation-drop-slot-pulse {
+    0%,
+    100% {
+      opacity: 0.55;
+      transform: scaleX(0.82);
+    }
+
+    50% {
+      opacity: 1;
+      transform: scaleX(1);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .navigation-dragging-icon,
+    .navigation-drop-slot {
+      animation: none;
+    }
   }
   
   /* Prevent accidental zoom */

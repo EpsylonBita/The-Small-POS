@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
-import { Package, Coffee, Eye, EyeOff, Search, RefreshCw } from 'lucide-react';
+import { Eye, EyeOff, Search, RefreshCw } from 'lucide-react';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 // Types
 interface MenuItem {
@@ -50,7 +52,7 @@ export const MenuManagementPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
   const language = i18n.language;
-  const [activeTab, setActiveTab] = useState<'categories' | 'subcategories' | 'ingredients' | 'combos'>('subcategories');
+  const [activeTab, setActiveTab] = useState<'categories' | 'subcategories' | 'ingredients' | 'combos'>('categories');
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -276,70 +278,53 @@ export const MenuManagementPage: React.FC = () => {
     (combo.name_el || '').toLowerCase().includes(searchLower)
   );
 
+  const getTabClass = (tab: typeof activeTab) => `px-4 py-2 rounded-lg transition-all ${
+    activeTab === tab
+      ? 'bg-yellow-500 text-black font-semibold border border-yellow-400'
+      : resolvedTheme === 'dark'
+        ? 'bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
+        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+  }`;
+
+  const gridCardClass = `p-4 rounded-xl border ${
+    resolvedTheme === 'dark'
+      ? 'bg-yellow-500/10 border-yellow-500/45'
+      : 'bg-yellow-50 border-yellow-200'
+  }`;
+  const refreshLabel = loading ? 'Refreshing menu' : 'Refresh menu';
+
   const renderTabs = () => (
-    <div className="flex gap-2 mb-6">
+    <motion.div variants={pageMotionItem} className="flex gap-2 mb-6">
       <button
         onClick={() => setActiveTab('categories')}
-        className={`px-4 py-2 rounded-lg transition-all ${
-          activeTab === 'categories'
-            ? resolvedTheme === 'dark'
-              ? 'bg-blue-500/30 text-blue-200 border border-blue-500/50'
-              : 'bg-blue-500 text-white'
-            : resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 text-gray-300 hover:bg-gray-700/50'
-              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-        }`}
+        className={getTabClass('categories')}
       >
         Categories
       </button>
       <button
         onClick={() => setActiveTab('subcategories')}
-        className={`px-4 py-2 rounded-lg transition-all ${
-          activeTab === 'subcategories'
-            ? resolvedTheme === 'dark'
-              ? 'bg-blue-500/30 text-blue-200 border border-blue-500/50'
-              : 'bg-blue-500 text-white'
-            : resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 text-gray-300 hover:bg-gray-700/50'
-              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-        }`}
+        className={getTabClass('subcategories')}
       >
         Subcategories
       </button>
       <button
         onClick={() => setActiveTab('ingredients')}
-        className={`px-4 py-2 rounded-lg transition-all ${
-          activeTab === 'ingredients'
-            ? resolvedTheme === 'dark'
-              ? 'bg-blue-500/30 text-blue-200 border border-blue-500/50'
-              : 'bg-blue-500 text-white'
-            : resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 text-gray-300 hover:bg-gray-700/50'
-              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-        }`}
+        className={getTabClass('ingredients')}
       >
         Ingredients
       </button>
       <button
         onClick={() => setActiveTab('combos')}
-        className={`px-4 py-2 rounded-lg transition-all ${
-          activeTab === 'combos'
-            ? resolvedTheme === 'dark'
-              ? 'bg-blue-500/30 text-blue-200 border border-blue-500/50'
-              : 'bg-blue-500 text-white'
-            : resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 text-gray-300 hover:bg-gray-700/50'
-              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-        }`}
+        className={getTabClass('combos')}
       >
         Offers
       </button>
-    </div>
+    </motion.div>
   );
 
   const renderSearchBar = () => (
-    <div className="mb-6 flex gap-4">
-      <div className="flex-1 relative">
+    <motion.div variants={pageMotionItem} className="mb-6">
+      <div className="relative">
         <Search className={`absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 ${
           resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
         }`} />
@@ -350,35 +335,21 @@ export const MenuManagementPage: React.FC = () => {
           onChange={(e) => setSearchTerm(e.target.value)}
           className={`w-full pl-10 pr-4 py-2 rounded-lg border ${
             resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 border-gray-700 text-white placeholder-gray-400'
-              : 'bg-white border-gray-300 text-gray-900 placeholder-gray-500'
-          } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+              ? 'bg-zinc-900 border-white text-white placeholder-zinc-400'
+              : 'bg-gray-100 border-white text-gray-900 placeholder-gray-500'
+          } focus:outline-none focus:ring-2 focus:ring-white/70`}
         />
       </div>
-      <button
-        onClick={loadData}
-        className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
-          resolvedTheme === 'dark'
-            ? 'bg-gray-800/50 text-gray-300 hover:bg-gray-700/50'
-            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-        }`}
-      >
-        <RefreshCw className="w-4 h-4" />
-        Refresh
-      </button>
-    </div>
+    </motion.div>
   );
 
   const renderCategories = () => (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    <motion.div key="categories" variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       {filteredCategories.map((category) => (
-        <div
+        <motion.div
           key={category.id}
-          className={`p-4 rounded-xl border ${
-            resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 border-gray-700'
-              : 'bg-white border-gray-200'
-          } ${!category.is_active ? 'opacity-60 grayscale' : ''}`}
+          variants={pageMotionItem}
+          className={`${gridCardClass} ${!category.is_active ? 'opacity-60 grayscale' : ''}`}
         >
           <div className="flex items-center justify-between">
             <div>
@@ -402,21 +373,18 @@ export const MenuManagementPage: React.FC = () => {
               {category.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
           </div>
-        </div>
+        </motion.div>
       ))}
-    </div>
+    </motion.div>
   );
 
   const renderMenuItems = () => (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    <motion.div key="subcategories" variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       {filteredMenuItems.map((item) => (
-        <div
+        <motion.div
           key={item.id}
-          className={`p-4 rounded-xl border ${
-            resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 border-gray-700'
-              : 'bg-white border-gray-200'
-          } ${!item.is_available ? 'opacity-60 grayscale' : ''}`}
+          variants={pageMotionItem}
+          className={`${gridCardClass} ${!item.is_available ? 'opacity-60 grayscale' : ''}`}
         >
           <div className="flex items-start justify-between mb-2">
             <div className="flex-1">
@@ -440,21 +408,18 @@ export const MenuManagementPage: React.FC = () => {
               {item.is_available ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
           </div>
-        </div>
+        </motion.div>
       ))}
-    </div>
+    </motion.div>
   );
 
   const renderIngredients = () => (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    <motion.div key="ingredients" variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       {filteredIngredients.map((ingredient) => (
-        <div
+        <motion.div
           key={ingredient.id}
-          className={`p-4 rounded-xl border ${
-            resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 border-gray-700'
-              : 'bg-white border-gray-200'
-          } ${!ingredient.is_available ? 'opacity-60 grayscale' : ''}`}
+          variants={pageMotionItem}
+          className={`${gridCardClass} ${!ingredient.is_available ? 'opacity-60 grayscale' : ''}`}
         >
           <div className="flex items-start justify-between mb-2">
             <div className="flex-1">
@@ -488,21 +453,18 @@ export const MenuManagementPage: React.FC = () => {
               {ingredient.is_available ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
           </div>
-        </div>
+        </motion.div>
       ))}
-    </div>
+    </motion.div>
   );
 
   const renderCombos = () => (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    <motion.div key="combos" variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       {filteredCombos.map((combo) => (
-        <div
+        <motion.div
           key={combo.id}
-          className={`p-4 rounded-xl border ${
-            resolvedTheme === 'dark'
-              ? 'bg-gray-800/50 border-gray-700'
-              : 'bg-white border-gray-200'
-          } ${!combo.is_active ? 'opacity-60 grayscale' : ''}`}
+          variants={pageMotionItem}
+          className={`${gridCardClass} ${!combo.is_active ? 'opacity-60 grayscale' : ''}`}
         >
           <div className="flex items-start justify-between mb-2">
             <div className="flex-1">
@@ -531,29 +493,40 @@ export const MenuManagementPage: React.FC = () => {
               {combo.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
           </div>
-        </div>
+        </motion.div>
       ))}
-    </div>
+    </motion.div>
   );
 
   return (
-    <div className="p-6">
-      <div className="mb-6">
-        <h1 className={`text-3xl font-bold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-          {t('menu.header')}
-        </h1>
-        <p className={`text-lg mt-2 ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
-          {t('menu.description')}
-        </p>
-      </div>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="p-6">
+      <motion.div variants={pageMotionItem} className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h1 className={`text-3xl font-bold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+            {t('menu.header')}
+          </h1>
+          <p className={`text-lg mt-2 ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
+            {t('menu.description')}
+          </p>
+        </div>
+        <button
+          onClick={loadData}
+          disabled={loading}
+          aria-label={refreshLabel}
+          title={refreshLabel}
+          className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${resolvedTheme === 'dark' ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+        >
+          <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+        </button>
+      </motion.div>
 
       {renderTabs()}
       {renderSearchBar()}
 
       {loading ? (
-        <div className="flex items-center justify-center py-12">
-          <RefreshCw className="w-8 h-8 animate-spin text-blue-500" />
-        </div>
+        <motion.div variants={pageMotionItem} className="flex items-center justify-center py-12">
+          <RefreshCw className="w-8 h-8 animate-spin text-yellow-400" />
+        </motion.div>
       ) : (
         <>
           {activeTab === 'categories' && renderCategories()}
@@ -562,7 +535,7 @@ export const MenuManagementPage: React.FC = () => {
           {activeTab === 'combos' && renderCombos()}
         </>
       )}
-    </div>
+    </motion.div>
   );
 };
 

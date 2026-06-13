@@ -11,7 +11,7 @@ export type PaymentStatus =
   | 'partially_paid'
   | 'failed'
   | 'refunded';
-export type PaymentMethod = 'cash' | 'card' | 'digital' | 'split';
+export type PaymentMethod = 'cash' | 'card' | 'digital' | 'split' | 'room_charge';
 export type SyncStatus = 'synced' | 'pending' | 'failed';
 
 /** Order plugin - where the order originated from */

@@ -124,18 +124,15 @@ const AnalyticsPage: React.FC = () => {
   const maxOrders = Math.max(...hourlyDistribution.map((entry) => entry.orders), 1);
 
   return (
-    <div className={`h-full overflow-auto p-4 ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+    <div className={`h-full overflow-auto p-4 ${isDark ? 'bg-gray-900' : 'bg-[#fdfaf5]'}`}>
       <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-xl bg-cyan-500/20">
-            <BarChart3 className="w-6 h-6 text-cyan-500" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold">{t('analytics.title', 'Analytics')}</h1>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-              {t('analytics.subtitle', 'Business performance insights')}
-            </p>
-          </div>
+        <div className="min-w-0">
+          <h1 className="truncate text-3xl font-bold tracking-tight">
+            {t('analytics.title', 'Analytics')}
+          </h1>
+          <p className={`mt-1 truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            {t('analytics.subtitle', 'Business performance insights')}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           {(['today', 'week', 'month'] as const).map((p) => (
@@ -152,10 +149,18 @@ const AnalyticsPage: React.FC = () => {
             </button>
           ))}
           <button
+            type="button"
             onClick={() => void fetchAnalytics()}
-            className={`p-2 rounded-lg ${isDark ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-100'}`}
+            disabled={loading}
+            title={t('common.refresh', 'Refresh')}
+            aria-label={t('common.refresh', 'Refresh')}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+              isDark
+                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                : 'border border-black bg-black text-white hover:bg-zinc-800'
+            } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
           >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>

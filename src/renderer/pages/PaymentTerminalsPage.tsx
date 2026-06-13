@@ -13,6 +13,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useMemo, memo } from 'react'
+import { motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { useTheme } from '../contexts/theme-context'
@@ -37,6 +38,7 @@ import { TerminalCard } from '../components/ecr/TerminalCard'
 import { TerminalDiscoveryModal } from '../components/ecr/TerminalDiscoveryModal'
 import { TerminalConfigModal } from '../components/ecr/TerminalConfigModal'
 import { PaymentDialog } from '../components/ecr/PaymentDialog'
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion'
 
 // ============================================================
 // TYPES
@@ -444,7 +446,7 @@ interface StatsCardProps {
 }
 
 const StatsCard = memo<StatsCardProps>(({ label, value, icon: Icon, color, isDark }) => (
-  <div className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}>
+  <motion.div variants={pageMotionItem} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}>
     <div className="flex items-center gap-3">
       <div
         className="w-10 h-10 rounded-lg flex items-center justify-center"
@@ -459,7 +461,7 @@ const StatsCard = memo<StatsCardProps>(({ label, value, icon: Icon, color, isDar
         <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{label}</p>
       </div>
     </div>
-  </div>
+  </motion.div>
 ))
 
 StatsCard.displayName = 'StatsCard'
@@ -825,27 +827,26 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
   }
 
   return (
-    <div className={`min-h-screen ${embedded ? 'bg-transparent' : isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+    <motion.div
+      initial="hidden"
+      animate="show"
+      variants={pageMotionContainer}
+      className={`min-h-screen ${embedded ? 'bg-transparent' : isDark ? 'bg-gray-900' : 'bg-[#fdfaf5]'}`}
+    >
       {/* Header */}
-      <div
+      <motion.div
+        variants={pageMotionItem}
         className={`sticky top-0 z-10 px-4 py-4 border-b ${embedded ? 'bg-transparent border-white/10 dark:border-white/10' : isDark ? 'bg-gray-900/95 border-white/10' : 'bg-white/95 border-gray-200'} backdrop-blur-sm`}
       >
         <div className="max-w-6xl mx-auto">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div
-                className={`w-12 h-12 rounded-xl flex items-center justify-center ${isDark ? 'bg-blue-500/20' : 'bg-blue-100'}`}
-              >
-                <CreditCard size={24} className="text-blue-500" />
-              </div>
-              <div>
-                <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                  {t('ecr.title', 'Payment Terminals')}
-                </h1>
-                <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                  {t('ecr.subtitle', 'Manage card payment terminals')}
-                </p>
-              </div>
+            <div className="min-w-0">
+              <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                {t('ecr.title', 'Payment Terminals')}
+              </h1>
+              <p className={`mt-1 truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                {t('ecr.subtitle', 'Manage card payment terminals')}
+              </p>
             </div>
 
             <div className="flex items-center gap-3">
@@ -869,9 +870,16 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
 
               {/* Refresh Button */}
               <button
+                type="button"
                 onClick={handleRefresh}
                 disabled={isRefreshing}
-                className={`p-2 rounded-lg transition-colors disabled:opacity-50 ${isDark ? 'hover:bg-white/10 text-gray-300' : 'hover:bg-gray-100 text-gray-600'}`}
+                title={t('common.refresh', 'Refresh')}
+                aria-label={t('common.refresh', 'Refresh')}
+                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+                  isDark
+                    ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                    : 'border border-black bg-black text-white hover:bg-zinc-800'
+                } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
               >
                 <RefreshCw size={20} className={isRefreshing ? 'animate-spin' : ''} />
               </button>
@@ -904,12 +912,12 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
             </div>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Content */}
-      <div className="max-w-6xl mx-auto p-4">
+      <motion.div variants={pageMotionContainer} className="max-w-6xl mx-auto p-4">
         {/* Stats Row */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <motion.div variants={pageMotionContainer} className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
           <StatsCard
             label={t('ecr.stats.total', 'Total')}
             value={stats.total}
@@ -938,11 +946,12 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
             color="#ef4444"
             isDark={isDark}
           />
-        </div>
+        </motion.div>
 
         {/* Empty State */}
         {devices.length === 0 && (
-          <div
+          <motion.div
+            variants={pageMotionItem}
             className={`text-center py-12 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}
           >
             <CreditCard
@@ -966,32 +975,34 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
               <Search size={18} />
               {t('ecr.discoverTerminals', 'Discover Terminals')}
             </button>
-          </div>
+          </motion.div>
         )}
 
         {/* Device List */}
         {devices.length > 0 && (
-          <div className="grid gap-4 sm:grid-cols-1 lg:grid-cols-2">
+          <motion.div variants={pageMotionContainer} className="grid gap-4 sm:grid-cols-1 lg:grid-cols-2">
             {devices.map((device) => (
-              <TerminalCard
-                key={device.id}
-                device={device}
-                status={statuses[device.id]}
-                onConnect={() => handleConnect(device.id)}
-                onDisconnect={() => handleDisconnect(device.id)}
-                onEdit={() => handleEdit(device)}
-                onDelete={() => handleDelete(device.id)}
-                onSetDefault={() => handleSetDefault(device.id)}
-                connectionActionsDisabled={connectAction.disabled}
-                connectionActionsDisabledReason={connectAction.message}
-              />
+              <motion.div key={device.id} variants={pageMotionItem}>
+                <TerminalCard
+                  device={device}
+                  status={statuses[device.id]}
+                  onConnect={() => handleConnect(device.id)}
+                  onDisconnect={() => handleDisconnect(device.id)}
+                  onEdit={() => handleEdit(device)}
+                  onDelete={() => handleDelete(device.id)}
+                  onSetDefault={() => handleSetDefault(device.id)}
+                  connectionActionsDisabled={connectAction.disabled}
+                  connectionActionsDisabledReason={connectAction.message}
+                />
+              </motion.div>
             ))}
-          </div>
+          </motion.div>
         )}
 
         {/* Test Payment Section */}
         {devices.length > 0 && (
-          <div
+          <motion.div
+            variants={pageMotionItem}
             className={`mt-6 p-6 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}
           >
             <h3
@@ -1020,9 +1031,9 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                   </button>
                 ))}
             </div>
-          </div>
+          </motion.div>
         )}
-      </div>
+      </motion.div>
 
       {/* Discovery Modal */}
       <TerminalDiscoveryModal
@@ -1067,7 +1078,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
           ecrAPI.processPayment(amount, { deviceId: paymentDeviceId })
         }
       />
-    </div>
+    </motion.div>
   )
 }
 

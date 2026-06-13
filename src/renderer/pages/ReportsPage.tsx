@@ -152,7 +152,7 @@ const ReportsPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div className={`min-h-screen p-6 ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+      <div className={`min-h-screen p-6 ${isDark ? 'bg-gray-900' : 'bg-[#fdfaf5]'}`}>
         <div className="max-w-7xl mx-auto">
           <div className="flex items-center justify-center h-96">
             <div className="text-center">
@@ -168,7 +168,7 @@ const ReportsPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-screen overflow-y-auto p-6 ${isDark ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`h-screen overflow-y-auto p-6 ${isDark ? 'bg-gray-900 text-white' : 'bg-[#fdfaf5] text-gray-900'}`}>
       <div className="max-w-7xl mx-auto pb-8">
         {/* Header */}
         <motion.div

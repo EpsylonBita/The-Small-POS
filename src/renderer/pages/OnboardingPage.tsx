@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { motion } from 'framer-motion';
 import { Toaster, toast } from 'react-hot-toast';
 import { Check } from 'lucide-react';
 import { useI18n } from '../contexts/i18n-context';
@@ -9,6 +10,7 @@ import {
     looksLikeRawApiKey,
     normalizeAdminDashboardUrl,
 } from '../utils/connection-code';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it';
 
@@ -83,21 +85,27 @@ const OnboardingPage: React.FC = () => {
     };
 
     return (
-        <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4 text-white">
-            <div className="w-full max-w-md bg-slate-800 rounded-2xl shadow-2xl p-8 border border-slate-700">
+        <motion.div
+            initial="hidden"
+            animate="show"
+            variants={pageMotionContainer}
+            className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4 text-white"
+        >
+            <motion.div variants={pageMotionItem} className="w-full max-w-md bg-slate-800 rounded-2xl shadow-2xl p-8 border border-slate-700">
 
                 {/* Header */}
-                <div className="text-center mb-8">
+                <motion.div variants={pageMotionItem} className="text-center mb-8">
                     <h1 className="text-3xl font-bold mb-2 text-blue-400">{t('onboarding.title', { defaultValue: 'POS Terminal Setup' })}</h1>
                     <p className="text-slate-400">{t('onboarding.step', { defaultValue: 'Step {{current}} of {{total}}', current: step, total: 2 })}</p>
-                </div>
+                </motion.div>
 
                 {/* Step 1: Language Selection */}
                 {step === 1 && (
-                    <div className="space-y-4">
-                        <h2 className="text-xl font-semibold text-center mb-6">{t('onboarding.selectLanguage', { defaultValue: 'Select Language' })}</h2>
-                        <div className="grid grid-cols-1 gap-4">
-                            <button
+                    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="space-y-4">
+                        <motion.h2 variants={pageMotionItem} className="text-xl font-semibold text-center mb-6">{t('onboarding.selectLanguage', { defaultValue: 'Select Language' })}</motion.h2>
+                        <motion.div variants={pageMotionContainer} className="grid grid-cols-1 gap-4">
+                            <motion.button
+                                variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('en')}
                                 className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'en'
                                     ? 'border-blue-500 bg-blue-500/10 text-blue-400'
@@ -106,8 +114,9 @@ const OnboardingPage: React.FC = () => {
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.english', { defaultValue: 'English' })}</span>
                                 {language === 'en' && <Check className="w-4 h-4" aria-hidden="true" />}
-                            </button>
-                            <button
+                            </motion.button>
+                            <motion.button
+                                variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('el')}
                                 className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'el'
                                     ? 'border-blue-500 bg-blue-500/10 text-blue-400'
@@ -116,8 +125,9 @@ const OnboardingPage: React.FC = () => {
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.greek', { defaultValue: 'Greek' })}</span>
                                 {language === 'el' && <Check className="w-4 h-4" aria-hidden="true" />}
-                            </button>
-                            <button
+                            </motion.button>
+                            <motion.button
+                                variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('de')}
                                 className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'de'
                                     ? 'border-blue-500 bg-blue-500/10 text-blue-400'
@@ -126,8 +136,9 @@ const OnboardingPage: React.FC = () => {
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.german', { defaultValue: 'Deutsch' })}</span>
                                 {language === 'de' && <Check className="w-4 h-4" aria-hidden="true" />}
-                            </button>
-                            <button
+                            </motion.button>
+                            <motion.button
+                                variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('fr')}
                                 className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'fr'
                                     ? 'border-blue-500 bg-blue-500/10 text-blue-400'
@@ -136,8 +147,9 @@ const OnboardingPage: React.FC = () => {
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.french', { defaultValue: 'Français' })}</span>
                                 {language === 'fr' && <Check className="w-4 h-4" aria-hidden="true" />}
-                            </button>
-                            <button
+                            </motion.button>
+                            <motion.button
+                                variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('it')}
                                 className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'it'
                                     ? 'border-blue-500 bg-blue-500/10 text-blue-400'
@@ -146,15 +158,15 @@ const OnboardingPage: React.FC = () => {
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.italian', { defaultValue: 'Italiano' })}</span>
                                 {language === 'it' && <Check className="w-4 h-4" aria-hidden="true" />}
-                            </button>
-                        </div>
-                    </div>
+                            </motion.button>
+                        </motion.div>
+                    </motion.div>
                 )}
 
                 {/* Step 2: Connection String */}
                 {step === 2 && (
-                    <form onSubmit={handleSubmit} className="space-y-6">
-                        <div>
+                    <motion.form initial="hidden" animate="show" variants={pageMotionContainer} onSubmit={handleSubmit} className="space-y-6">
+                        <motion.div variants={pageMotionItem}>
                             <label className="block text-sm font-medium text-slate-300 mb-2">
                                 {t('onboarding.connectionString', { defaultValue: 'Connection String' })}
                             </label>
@@ -169,24 +181,26 @@ const OnboardingPage: React.FC = () => {
                                 rows={3}
                                 required
                             />
-                        </div>
+                        </motion.div>
 
                         {error && (
-                            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+                            <motion.div variants={pageMotionItem} className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
                                 {error}
-                            </div>
+                            </motion.div>
                         )}
 
-                        <div className="flex gap-3 pt-4">
-                            <button
+                        <motion.div variants={pageMotionItem} className="flex gap-3 pt-4">
+                            <motion.button
+                                variants={pageMotionItem}
                                 type="button"
                                 onClick={() => setStep(1)}
                                 className="flex-1 px-4 py-3 rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
                                 disabled={isSubmitting}
                             >
                                 {t('common.back', { defaultValue: 'Back' })}
-                            </button>
-                            <button
+                            </motion.button>
+                            <motion.button
+                                variants={pageMotionItem}
                                 type="submit"
                                 disabled={isSubmitting}
                                 className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-medium py-3 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
@@ -196,21 +210,21 @@ const OnboardingPage: React.FC = () => {
                                 ) : (
                                     t('onboarding.connect', { defaultValue: 'Connect & Sync' })
                                 )}
-                            </button>
-                        </div>
-                    </form>
+                            </motion.button>
+                        </motion.div>
+                    </motion.form>
                 )}
-            </div>
+            </motion.div>
 
-            <div className="w-full max-w-md mt-4 bg-slate-800 rounded-2xl shadow-2xl p-6 border border-slate-700">
+            <motion.div variants={pageMotionItem} className="w-full max-w-md mt-4 bg-slate-800 rounded-2xl shadow-2xl p-6 border border-slate-700">
                 <RecoveryPanel compact />
-            </div>
+            </motion.div>
 
             <Toaster
                 position="top-center"
                 containerStyle={{ zIndex: 2147483647 }}
             />
-        </div>
+        </motion.div>
     );
 };
 

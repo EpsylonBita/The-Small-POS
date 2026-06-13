@@ -372,20 +372,18 @@ const InventoryPage: React.FC = () => {
     <div className={`min-h-screen p-6 ${isDark ? 'text-white' : 'text-gray-900'}`}>
       {/* Header */}
       <div className={`flex items-center justify-between mb-6 rounded-2xl border px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
-        <div className="flex items-center gap-3">
-          <div className={`p-3 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
-            <Package className={`w-8 h-8 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold">{t('inventory.title', 'Inventory')}</h1>
-            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-              {t('inventory.subtitle', 'Track stock levels and adjustments')}
-            </p>
-          </div>
+        <div className="min-w-0">
+          <h1 className="truncate text-3xl font-bold tracking-tight">{t('inventory.title', 'Inventory')}</h1>
+          <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+            {t('inventory.subtitle', 'Track stock levels and adjustments')}
+          </p>
         </div>
         <button
+          type="button"
           onClick={fetchInventory}
-          className={`p-3 rounded-xl transition-all border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+          title={t('common.refresh', 'Refresh')}
+          aria-label={t('common.refresh', 'Refresh')}
+          className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -417,7 +415,7 @@ const InventoryPage: React.FC = () => {
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-blue-400' : 'bg-white border-gray-200 border-t-blue-500'}`}>
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${isDark ? 'bg-blue-500/20' : 'bg-blue-100'}`}><Boxes className={`w-5 h-5 ${isDark ? 'text-blue-300' : 'text-blue-600'}`} /></div>
+            <Boxes className={`w-5 h-5 shrink-0 ${isDark ? 'text-blue-300' : 'text-blue-600'}`} />
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.totalItems', 'Total Items')}</p>
               <p className="text-xl font-bold">{stats.total}</p>
@@ -426,7 +424,7 @@ const InventoryPage: React.FC = () => {
         </motion.div>
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-red-400' : 'bg-white border-gray-200 border-t-red-500'}`}>
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${isDark ? 'bg-red-500/20' : 'bg-red-100'}`}><XCircle className={`w-5 h-5 ${isDark ? 'text-red-300' : 'text-red-500'}`} /></div>
+            <XCircle className={`w-5 h-5 shrink-0 ${isDark ? 'text-red-300' : 'text-red-500'}`} />
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.critical', 'Critical')}</p>
               <p className={`text-xl font-bold ${isDark ? 'text-red-300' : 'text-red-500'}`}>{stats.critical}</p>
@@ -435,7 +433,7 @@ const InventoryPage: React.FC = () => {
         </motion.div>
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500'}`}>
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${isDark ? 'bg-amber-500/20' : 'bg-yellow-100'}`}><AlertTriangle className={`w-5 h-5 ${isDark ? 'text-amber-300' : 'text-yellow-500'}`} /></div>
+            <AlertTriangle className={`w-5 h-5 shrink-0 ${isDark ? 'text-amber-300' : 'text-yellow-500'}`} />
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.lowStock', 'Low Stock')}</p>
               <p className={`text-xl font-bold ${isDark ? 'text-amber-300' : 'text-yellow-500'}`}>{stats.low}</p>
@@ -444,7 +442,7 @@ const InventoryPage: React.FC = () => {
         </motion.div>
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500'}`}>
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${isDark ? 'bg-emerald-500/20' : 'bg-green-100'}`}><CheckCircle className={`w-5 h-5 ${isDark ? 'text-emerald-300' : 'text-green-500'}`} /></div>
+            <CheckCircle className={`w-5 h-5 shrink-0 ${isDark ? 'text-emerald-300' : 'text-green-500'}`} />
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.inStock', 'In Stock')}</p>
               <p className={`text-xl font-bold ${isDark ? 'text-emerald-300' : 'text-green-500'}`}>{stats.good}</p>
@@ -453,7 +451,7 @@ const InventoryPage: React.FC = () => {
         </motion.div>
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-cyan-400' : 'bg-white border-gray-200 border-t-cyan-500'}`}>
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${isDark ? 'bg-cyan-500/20' : 'bg-cyan-100'}`}><BarChart3 className={`w-5 h-5 ${isDark ? 'text-cyan-300' : 'text-cyan-600'}`} /></div>
+            <BarChart3 className={`w-5 h-5 shrink-0 ${isDark ? 'text-cyan-300' : 'text-cyan-600'}`} />
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.totalValue', 'Total Value')}</p>
               <p className="text-lg font-bold">{formatMoney(stats.totalValue)}</p>

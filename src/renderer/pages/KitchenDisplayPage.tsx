@@ -364,18 +364,17 @@ const KitchenDisplayPage: React.FC = () => {
     return key ? t(key, type) : type;  // fallback to raw type if no translation
   };
 
-  // Get badge color for order type
-  const getOrderTypeBadgeColor = (type: string): string => {
+  const getOrderTypeTextColor = (type: string): string => {
     const colors: Record<string, string> = {
-      'dine-in': 'bg-blue-500/20 text-blue-500',
-      'dine_in': 'bg-blue-500/20 text-blue-500',
-      'pickup': 'bg-amber-500/20 text-amber-500',
-      'takeaway': 'bg-green-500/20 text-green-500',
-      'delivery': 'bg-purple-500/20 text-purple-500',
-      'drive-through': 'bg-cyan-500/20 text-cyan-500',
-      'room_service': 'bg-indigo-500/20 text-indigo-500',
+      'dine-in': 'text-blue-500',
+      'dine_in': 'text-blue-500',
+      'pickup': 'text-amber-500',
+      'takeaway': 'text-green-500',
+      'delivery': 'text-purple-500',
+      'drive-through': 'text-cyan-500',
+      'room_service': 'text-indigo-500',
     };
-    return colors[type] || 'bg-gray-500/20 text-gray-500';
+    return colors[type] || 'text-gray-500';
   };
 
   const fetchOrders = useCallback(async (showLoading = true) => {
@@ -858,11 +857,11 @@ const KitchenDisplayPage: React.FC = () => {
             <span className="min-w-0 break-words text-xl font-bold leading-tight">
               {orderLabel}
             </span>
-            <span className={`px-2 py-1 rounded-full text-xs font-medium ${getOrderTypeBadgeColor(order.order_type)}`}>
+            <span className={`text-xs font-medium ${getOrderTypeTextColor(order.order_type)}`}>
               {formatOrderType(order.order_type)}
             </span>
             {isLiveDraft && (
-              <span className={`px-2 py-1 rounded-full text-xs font-medium ${isDark ? 'bg-cyan-500/20 text-cyan-300' : 'bg-cyan-100 text-cyan-700'}`}>
+              <span className="text-xs font-medium text-cyan-400">
                 {t('kitchen.liveDraft.subtitle', 'Live cart in progress')}
               </span>
             )}
@@ -911,23 +910,20 @@ const KitchenDisplayPage: React.FC = () => {
   };
 
   return (
-    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${externalWindow || isDark ? 'bg-black text-zinc-100' : 'bg-white text-gray-900'} ${externalWindow ? 'h-screen' : ''}`}>
+    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${externalWindow || isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'} ${externalWindow ? 'h-screen' : ''}`}>
       {/* Header + Stats Card */}
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <div className={`p-2 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
-            <ChefHat className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold">{t('kitchen.title', 'Kitchen Display')}</h1>
-            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-              {t('kitchen.subtitle', 'Real-time order preparation')}
-              {autoRefresh
-                ? ` • ${isRealtimeConnected ? t('common.live', 'Live') : t('kitchen.pollingFallback', 'Polling fallback')}`
-                : ''}
-            </p>
-          </div>
+        <div className="min-w-0">
+          <h1 className="truncate text-3xl font-bold tracking-tight">
+            {t('kitchen.title', 'Kitchen Display')}
+          </h1>
+          <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+            {t('kitchen.subtitle', 'Real-time order preparation')}
+            {autoRefresh
+              ? ` • ${isRealtimeConnected ? t('common.live', 'Live') : t('kitchen.pollingFallback', 'Polling fallback')}`
+              : ''}
+          </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           {!externalWindow && (
@@ -957,7 +953,7 @@ const KitchenDisplayPage: React.FC = () => {
                   type="button"
                   onClick={() => void openExternalDisplay(connectedDisplays[1] || connectedDisplays[0])}
                   disabled={isDisplayBusy}
-                  className="p-3 rounded-xl border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-60"
+                  className="p-3 rounded-xl border border-cyan-500/40 bg-transparent text-white disabled:opacity-60"
                   title={t('kitchen.externalDisplay.open', 'Open on connected display')}
                   aria-label={t('kitchen.externalDisplay.open', 'Open on connected display')}
                 >
@@ -976,6 +972,7 @@ const KitchenDisplayPage: React.FC = () => {
             {autoRefresh ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
           </button>
           <button
+            type="button"
             onClick={() => {
               if (isIdentityReady) {
                 void fetchOrders(true);
@@ -983,7 +980,14 @@ const KitchenDisplayPage: React.FC = () => {
               }
               void refreshIdentity();
             }}
-            className={`p-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+            disabled={loading}
+            title={t('common.refresh', 'Refresh')}
+            aria-label={t('common.refresh', 'Refresh')}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+              isDark
+                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                : 'border border-black bg-black text-white hover:bg-zinc-800'
+            } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -994,7 +998,7 @@ const KitchenDisplayPage: React.FC = () => {
       <div className="grid grid-cols-4 gap-3">
         <div className={`p-4 rounded-xl ${isDark ? 'bg-black border border-zinc-800' : 'bg-white border border-gray-200'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-yellow-500/20"><AlertTriangle className="w-5 h-5 text-yellow-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}><AlertTriangle className="w-5 h-5 text-yellow-500" /></div>
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('kitchen.pending', 'Pending')}</p>
               <p className="text-2xl font-bold">{stats.pending}</p>
@@ -1003,7 +1007,7 @@ const KitchenDisplayPage: React.FC = () => {
         </div>
         <div className={`p-4 rounded-xl ${isDark ? 'bg-black border border-zinc-800' : 'bg-white border border-gray-200'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-blue-500/20"><ChefHat className="w-5 h-5 text-blue-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}><ChefHat className="w-5 h-5 text-blue-500" /></div>
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('kitchen.preparing', 'Preparing')}</p>
               <p className="text-2xl font-bold">{stats.preparing}</p>
@@ -1012,7 +1016,7 @@ const KitchenDisplayPage: React.FC = () => {
         </div>
         <div className={`p-4 rounded-xl ${isDark ? 'bg-black border border-zinc-800' : 'bg-white border border-gray-200'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-green-500/20"><CheckCircle className="w-5 h-5 text-green-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}><CheckCircle className="w-5 h-5 text-green-500" /></div>
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('kitchen.total', 'Total')}</p>
               <p className="text-2xl font-bold">{stats.total}</p>
@@ -1021,7 +1025,7 @@ const KitchenDisplayPage: React.FC = () => {
         </div>
         <div className={`p-4 rounded-xl ${isDark ? 'bg-black border border-zinc-800' : 'bg-white border border-gray-200'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-cyan-500/20"><Timer className="w-5 h-5 text-cyan-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}><Timer className="w-5 h-5 text-cyan-500" /></div>
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('kitchen.avgTime', 'Avg Time')}</p>
               <p className="text-2xl font-bold">{stats.avgTime} {t('kitchen.min', 'min')}</p>
@@ -1086,7 +1090,7 @@ const KitchenDisplayPage: React.FC = () => {
           <button
             key={station.id}
             onClick={() => setStationFilter(station.id === 'all' ? 'all' : station.id)}
-            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-all border ${stationFilter === (station.id === 'all' ? 'all' : station.id) ? 'bg-cyan-500 text-white border-cyan-500' : isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-800' : 'bg-white text-gray-600 border-gray-200'}`}
+            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-all border ${stationFilter === (station.id === 'all' ? 'all' : station.id) ? 'bg-yellow-400 text-black border-yellow-400' : isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-800' : 'bg-white text-gray-600 border-gray-200'}`}
           >
             {station.id === 'all' ? t('kitchen.allStations', 'All') : station.name}
           </button>

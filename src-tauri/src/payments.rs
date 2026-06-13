@@ -545,6 +545,7 @@ pub(crate) fn normalize_external_payment_method(method: &str) -> Option<String> 
     match method.trim().to_ascii_lowercase().as_str() {
         "cash" => Some("cash".to_string()),
         "card" => Some("card".to_string()),
+        "room_charge" | "room-charge" => Some("room_charge".to_string()),
         "other" | "online" | "digital_wallet" | "digital-wallet" | "wallet" | "split" | "mixed"
         | "pending" => Some("other".to_string()),
         _ => None,
@@ -560,9 +561,10 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         "cash" => "cash".to_string(),
         "card" => "card".to_string(),
         "other" => "other".to_string(),
+        "room_charge" | "room-charge" => "room_charge".to_string(),
         _ => {
             return Err(format!(
-                "Invalid method: {raw_method}. Must be cash, card, or other"
+                "Invalid method: {raw_method}. Must be cash, card, room_charge, or other"
             ));
         }
     };
@@ -1247,8 +1249,10 @@ pub(crate) fn record_payment_in_connection(
 #[allow(clippy::type_complexity)]
 pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     let input = build_payment_record_input(payload)?;
-    if input.method != "cash" && input.method != "card" {
-        return Err("Only cash and card payments can be recorded locally".to_string());
+    if input.method != "cash" && input.method != "card" && input.method != "room_charge" {
+        return Err(
+            "Only cash, card, and room_charge payments can be recorded locally".to_string(),
+        );
     }
     let mut options = PaymentInsertOptions::local();
     if matches!(input.collected_by.as_deref(), Some("cashier_drawer")) {

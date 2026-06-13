@@ -5,7 +5,10 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, FileText, History, Banknote, Smartphone, RotateCcw, Split } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
-import { getVisibleOrderNumber } from '../../utils/orderNumberUtils';
+import {
+  formatCompactOrderNumberForDisplay,
+  getVisibleOrderNumber,
+} from '../../utils/orderNumberUtils';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { normalizeOrderTypeForDisplay } from '../../utils/orderDisplay';
 import RefundVoidModal from './RefundVoidModal';
@@ -13,6 +16,7 @@ import { SplitPaymentModal } from './SplitPaymentModal';
 import type { SplitPaymentResult } from './SplitPaymentModal';
 import { getBridge } from '../../../lib';
 import { buildSplitPaymentItems } from '../../utils/splitPaymentItems';
+import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -41,6 +45,177 @@ function unwrapBridgeArray<T>(result: any): T[] {
   return [];
 }
 
+function isSystemGeneratedServiceNote(note: string): boolean {
+  return /^kiosk source\s*:/i.test(note);
+}
+
+interface OrderCatalogLookups {
+  menuItemsById: Map<string, {
+    name: string;
+    categoryId: string;
+    categoryName: string;
+  }>;
+  categoriesById: Map<string, string>;
+  ingredientsById: Map<string, Ingredient>;
+}
+
+function createEmptyOrderCatalogLookups(): OrderCatalogLookups {
+  return {
+    menuItemsById: new Map(),
+    categoriesById: new Map(),
+    ingredientsById: new Map(),
+  };
+}
+
+function readOrderDetailsString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const record = value as Record<string, unknown>;
+      const nested = readOrderDetailsString(
+        record.name,
+        record.name_en,
+        record.name_el,
+        record.base,
+        record.en,
+        record.el,
+        record.label,
+      );
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return '';
+}
+
+function readOrderDetailsNumber(...values: unknown[]): number {
+  for (const value of values) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+  return 0;
+}
+
+function buildOrderCatalogLookups(
+  menuItems: MenuItem[],
+  menuCategories: MenuCategory[],
+  ingredients: Ingredient[],
+): OrderCatalogLookups {
+  const categoriesById = new Map(
+    menuCategories.map((category) => [
+      String(category.id),
+      readOrderDetailsString(category.name, category.name_en, category.name_el),
+    ]),
+  );
+
+  return {
+    categoriesById,
+    menuItemsById: new Map(
+      menuItems.map((item) => {
+        const categoryId = readOrderDetailsString(item.category_id, item.category);
+        return [
+          String(item.id),
+          {
+            name: readOrderDetailsString(item.name, item.name_en, item.name_el),
+            categoryId,
+            categoryName:
+              categoriesById.get(categoryId) ||
+              readOrderDetailsString((item as any).category_name, (item as any).categoryName),
+          },
+        ];
+      }),
+    ),
+    ingredientsById: new Map(ingredients.map((ingredient) => [String(ingredient.id), ingredient])),
+  };
+}
+
+function getOrderItemMenuItemId(item: any): string {
+  return readOrderDetailsString(
+    item?.menu_item_id,
+    item?.menuItemId,
+    item?.menu_item?.id,
+    item?.menuItem?.id,
+    item?.subcategory_id,
+  );
+}
+
+function parseOrderCustomizationCandidate(customizations: any): any {
+  if (typeof customizations !== 'string') {
+    return customizations;
+  }
+
+  const trimmed = customizations.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function flattenOrderCustomizationEntry(entry: any, isWithout = false): any[] {
+  if (!entry) return [];
+  if (typeof entry === 'string') return [{ name: entry, isWithout }];
+  if (Array.isArray(entry)) return entry.flatMap((value) => flattenOrderCustomizationEntry(value, isWithout));
+  if (typeof entry !== 'object') return [];
+
+  if (Array.isArray(entry.ingredients) && !entry.ingredient && !entry.ingredient_id && !entry.ingredientId) {
+    return entry.ingredients.flatMap((ingredient: any) =>
+      flattenOrderCustomizationEntry(
+        {
+          ...ingredient,
+          group_id: ingredient?.group_id ?? entry.id,
+          group_name: ingredient?.group_name ?? entry.name,
+        },
+        isWithout || entry.isWithout === true || entry.is_without === true,
+      ),
+    );
+  }
+
+  return [
+    {
+      ...entry,
+      isWithout: isWithout || entry.isWithout === true || entry.is_without === true,
+    },
+  ];
+}
+
+function flattenOrderCustomizationInput(customizations: any): any[] {
+  const parsed = parseOrderCustomizationCandidate(customizations);
+  if (!parsed) return [];
+  if (Array.isArray(parsed)) return parsed.flatMap((entry) => flattenOrderCustomizationEntry(entry));
+  if (typeof parsed !== 'object') return [];
+
+  const groupedEntries = [
+    parsed.added,
+    parsed.selected,
+    parsed.ingredients,
+    parsed.items,
+    parsed.groups,
+  ]
+    .filter(Array.isArray)
+    .flatMap((entries) => flattenOrderCustomizationEntry(entries));
+  const removedEntries = Array.isArray(parsed.removed)
+    ? flattenOrderCustomizationEntry(parsed.removed, true)
+    : [];
+
+  if (groupedEntries.length > 0 || removedEntries.length > 0) {
+    return [...groupedEntries, ...removedEntries];
+  }
+
+  return Object.values(parsed).flatMap((entry) => flattenOrderCustomizationEntry(entry));
+}
+
 const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   isOpen,
   orderId,
@@ -60,6 +235,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [showSplitPaymentModal, setShowSplitPaymentModal] = useState(false);
+  const [catalogLookups, setCatalogLookups] = useState<OrderCatalogLookups>(() => createEmptyOrderCatalogLookups());
   const paymentAutoOpenKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -87,6 +263,53 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       void loadOrderData(orderId);
     }
   }, [isOpen, orderId, order]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setCatalogLookups(createEmptyOrderCatalogLookups());
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadCatalogLookups = async () => {
+      const [menuItemsResult, categoriesResult, ingredientsResult] = await Promise.allSettled([
+        menuService.getMenuItems(),
+        menuService.getMenuCategories(),
+        menuService.getIngredients(),
+      ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      setCatalogLookups(
+        buildOrderCatalogLookups(
+          menuItemsResult.status === 'fulfilled' ? menuItemsResult.value : [],
+          categoriesResult.status === 'fulfilled' ? categoriesResult.value : [],
+          ingredientsResult.status === 'fulfilled' ? ingredientsResult.value : [],
+        ),
+      );
+
+      if (
+        menuItemsResult.status === 'rejected' ||
+        categoriesResult.status === 'rejected' ||
+        ingredientsResult.status === 'rejected'
+      ) {
+        console.warn('[OrderDetailsModal] Failed to load one or more menu lookup sources', {
+          menuItems: menuItemsResult.status,
+          categories: categoriesResult.status,
+          ingredients: ingredientsResult.status,
+        });
+      }
+    };
+
+    void loadCatalogLookups();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
 
   const loadOrderData = async (targetOrderId = orderId) => {
     if (!targetOrderId) {
@@ -195,6 +418,23 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       case 'digital':
       case 'digital_wallet': return t('modals.orderDetails.digital', { defaultValue: 'Digital' });
       default: return method || t('modals.orderDetails.pending', { defaultValue: 'Pending' });
+    }
+  };
+
+  const getPaymentStatusLabel = (value: string) => {
+    switch (value?.toLowerCase()) {
+      case 'paid':
+        return t('modals.orderDetails.paid', { defaultValue: 'Paid' });
+      case 'completed':
+        return t('modals.orderDetails.completed', { defaultValue: 'Completed' });
+      case 'partially_paid':
+        return t('payment.split.partiallyPaid', { defaultValue: 'Partially Paid' });
+      case 'cancelled':
+      case 'canceled':
+        return t('modals.orderDetails.cancelled', { defaultValue: 'Cancelled' });
+      case 'pending':
+      default:
+        return t('modals.orderDetails.pending', { defaultValue: 'Pending' });
     }
   };
 
@@ -472,15 +712,26 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const hasDriverAssignment = !!(displayOrder.driver_id || displayOrder.driverId || driverName);
   const isDelivered = status?.toLowerCase() === 'completed' || status?.toLowerCase() === 'delivered';
   const isDeliveryOrder = orderType?.toLowerCase() === 'delivery';
-  const displayOrderNumber = getVisibleOrderNumber(displayOrder) || orderId;
+  const rawDisplayOrderNumber = getVisibleOrderNumber(displayOrder) || orderId;
+  const displayOrderNumber = formatCompactOrderNumberForDisplay(
+    rawDisplayOrderNumber,
+    displayOrder.created_at || displayOrder.createdAt,
+  );
   const createdDateTimeLabel = `${formatDate(createdAt)} ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}`;
   const primaryAddressLine = deliveryAddress.address || t('modals.orderDetails.noAddress', { defaultValue: 'No address' });
   const totalItemCount = items.reduce((sum: number, item: any) => sum + Number(item?.quantity || 1), 0);
-  const serviceNotes = [displayOrder.special_instructions, displayOrder.specialInstructions, displayOrder.notes]
+  const serviceNotes = [
+    displayOrder.notes,
+    displayOrder.customer_notes,
+    displayOrder.customerNotes,
+    displayOrder.special_instructions,
+    displayOrder.specialInstructions,
+  ]
     .map((note) => normalizeText(note))
     .filter(
       (note, index, array) =>
         Boolean(note) &&
+        !isSystemGeneratedServiceNote(note) &&
         array.findIndex((existing) => existing.toLowerCase() === note.toLowerCase()) === index,
     );
   const isDarkTheme = resolvedTheme === 'dark';
@@ -496,23 +747,29 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   // - Returns empty array when customizations is null/undefined
   // - Handles malformed JSON strings gracefully without crashing
   const parseCustomizations = (customizations: any): { name: string; price: number; isWithout?: boolean; isLittle?: boolean }[] => {
-    // Handle null/undefined - return empty array (Requirement 5.3)
-    if (customizations === null || customizations === undefined) return [];
+    const customizationEntries = flattenOrderCustomizationInput(customizations);
+    if (customizationEntries.length === 0) return [];
 
-    const parsePrice = (val: any): number => {
-      if (val === null || val === undefined) return 0;
-      const num = typeof val === 'string' ? parseFloat(val) : Number(val);
-      return isNaN(num) ? 0 : num;
+    const getCatalogIngredient = (c: any): Ingredient | undefined => {
+      const ingredientId = readOrderDetailsString(
+        c?.ingredient?.id,
+        c?.ingredient_id,
+        c?.ingredientId,
+        c?.id,
+        c?.customizationId,
+        c?.optionId,
+      );
+      return ingredientId ? catalogLookups.ingredientsById.get(ingredientId) : undefined;
     };
 
     const extractPrice = (c: any): number => {
       // Check ingredient object first
       if (c.ingredient) {
         const ing = c.ingredient;
-        const pickupPrice = parsePrice(ing.pickup_price);
-        const deliveryPrice = parsePrice(ing.delivery_price);
-        const price = parsePrice(ing.price);
-        const basePrice = parsePrice(ing.base_price);
+        const pickupPrice = readOrderDetailsNumber(ing.pickup_price);
+        const deliveryPrice = readOrderDetailsNumber(ing.delivery_price);
+        const price = readOrderDetailsNumber(ing.price);
+        const basePrice = readOrderDetailsNumber(ing.base_price);
 
         // Return appropriate price based on order type
         if (orderType === 'delivery' && deliveryPrice > 0) return deliveryPrice;
@@ -521,10 +778,23 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         if (basePrice > 0) return basePrice;
       }
 
+      const catalogIngredient = getCatalogIngredient(c);
+      if (catalogIngredient) {
+        const pickupPrice = readOrderDetailsNumber(catalogIngredient.pickup_price);
+        const deliveryPrice = readOrderDetailsNumber(catalogIngredient.delivery_price);
+        const dineInPrice = readOrderDetailsNumber(catalogIngredient.dine_in_price);
+        const price = readOrderDetailsNumber(catalogIngredient.price);
+
+        if (orderType === 'delivery' && deliveryPrice > 0) return deliveryPrice;
+        if (orderType === 'pickup' && pickupPrice > 0) return pickupPrice;
+        if (orderType === 'dine-in' && dineInPrice > 0) return dineInPrice;
+        if (price > 0) return price;
+      }
+
       // Check direct price fields
-      const directPrice = parsePrice(c.price);
-      const additionalPrice = parsePrice(c.additionalPrice);
-      const extraPrice = parsePrice(c.extra_price);
+      const directPrice = readOrderDetailsNumber(c.price);
+      const additionalPrice = readOrderDetailsNumber(c.additionalPrice);
+      const extraPrice = readOrderDetailsNumber(c.extra_price);
 
       if (directPrice > 0) return directPrice;
       if (additionalPrice > 0) return additionalPrice;
@@ -534,15 +804,24 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     };
 
     const extractName = (c: any): string => {
-      if (c.ingredient?.name) return c.ingredient.name;
-      if (c.ingredient?.name_en) return c.ingredient.name_en;
-      if (c.ingredient?.name_el) return c.ingredient.name_el;
-      if (c.name) return c.name;
-      if (c.name_en) return c.name_en;
-      if (c.name_el) return c.name_el;
-      if (c.optionName) return c.optionName;
-      if (c.label) return c.label;
-      return 'Unknown';
+      const catalogIngredient = getCatalogIngredient(c);
+      return (
+        readOrderDetailsString(
+          c.ingredient?.name,
+          c.ingredient?.name_en,
+          c.ingredient?.name_el,
+          c.ingredient_name,
+          c.ingredientName,
+          c.name,
+          c.name_en,
+          c.name_el,
+          c.optionName,
+          c.label,
+          catalogIngredient?.name,
+          catalogIngredient?.name_en,
+          catalogIngredient?.name_el,
+        ) || 'Unknown'
+      );
     };
 
     // Check if item is "without" (removed ingredient)
@@ -553,43 +832,19 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       return c.isLittle === true || c.is_little === true || c.little === true;
     };
 
-    // Handle JSON string format - parse it first (Requirement 5.5)
-    let parsedCustomizations = customizations;
-    if (typeof customizations === 'string') {
-      const trimmed = customizations.trim();
-      if (!trimmed) return [];
-      try {
-        parsedCustomizations = JSON.parse(trimmed);
-      } catch {
-        // Malformed JSON - return empty array without crashing
-        return [];
-      }
-    }
-
-    if (Array.isArray(parsedCustomizations)) {
-      return parsedCustomizations
-        .filter((c: any) => c && (c.ingredient || c.name || c.name_en))
-        .map((c: any) => ({
-          name: extractName(c),
-          price: isWithoutItem(c) ? 0 : extractPrice(c),
-          isWithout: isWithoutItem(c),
-          isLittle: isLittleItem(c)
-        }));
-    }
-    if (typeof parsedCustomizations === 'object' && parsedCustomizations !== null) {
-      return Object.values(parsedCustomizations)
-        .filter((c: any) => c && (c.ingredient || c.name || c.name_en))
-        .map((c: any) => ({
-          name: extractName(c),
-          price: isWithoutItem(c) ? 0 : extractPrice(c),
-          isWithout: isWithoutItem(c),
-          isLittle: isLittleItem(c)
-        }));
-    }
-    return [];
+    return customizationEntries
+      .filter((c: any) => c && extractName(c) !== 'Unknown')
+      .map((c: any) => ({
+        name: extractName(c),
+        price: isWithoutItem(c) ? 0 : extractPrice(c),
+        isWithout: isWithoutItem(c),
+        isLittle: isLittleItem(c)
+      }));
   };
 
   const resolveCategoryPath = (item: any): string => {
+    const menuItemId = getOrderItemMenuItemId(item);
+    const catalogMenuItem = menuItemId ? catalogLookups.menuItemsById.get(menuItemId) : undefined;
     const explicitPath =
       (typeof item?.category_path === 'string' && item.category_path.trim()) ||
       (typeof item?.categoryPath === 'string' && item.categoryPath.trim()) ||
@@ -607,6 +862,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       item?.category?.name ||
       item?.menu_item?.category_name ||
       item?.menu_item?.categoryName ||
+      catalogMenuItem?.categoryName ||
+      catalogLookups.categoriesById.get(readOrderDetailsString(item?.category_id, item?.categoryId)) ||
       '';
     const normalizedCategory = typeof category === 'string' ? category.trim() : '';
     if (normalizedCategory) return normalizedCategory;
@@ -616,8 +873,25 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       item?.subcategoryName ||
       item?.sub_category_name ||
       item?.subCategoryName ||
+      catalogMenuItem?.name ||
       '';
     return typeof fallbackSubcategory === 'string' ? fallbackSubcategory.trim() : '';
+  };
+
+  const resolveItemName = (item: any): string => {
+    const menuItemId = getOrderItemMenuItemId(item);
+    const catalogMenuItem = menuItemId ? catalogLookups.menuItemsById.get(menuItemId) : undefined;
+    return (
+      readOrderDetailsString(
+        item?.name,
+        item?.item_name,
+        item?.menu_item_name,
+        item?.menuItemName,
+        item?.menu_item?.name,
+        item?.menuItem?.name,
+        catalogMenuItem?.name,
+      ) || 'Item'
+    );
   };
 
   const resolveItemNotes = (item: any): string => {
@@ -781,13 +1055,13 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <div className={`${insetPanelClass} px-4 py-4`}>
                   <div className="flex items-center gap-3">
-                    <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+                    <span className={`flex h-5 w-5 shrink-0 items-center justify-center ${
                       isDeliveryOrder
-                        ? 'bg-orange-500/15 text-orange-500 dark:bg-orange-500/20 dark:text-orange-300'
-                        : 'bg-blue-500/15 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300'
+                        ? 'text-orange-500 dark:text-orange-300'
+                        : 'text-blue-600 dark:text-blue-300'
                     }`}>
                       {isDeliveryOrder ? <Truck className="h-5 w-5" /> : <Clock className="h-5 w-5" />}
-                    </div>
+                    </span>
                     <div className="min-w-0">
                       <div className={mutedEyebrowClass}>{t('modals.orderDetails.orderType', { defaultValue: 'Order Type' })}</div>
                       <div className="mt-1 text-lg font-semibold liquid-glass-modal-text">{getOrderTypeLabel(orderType)}</div>
@@ -797,9 +1071,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
                 <div className={`${insetPanelClass} px-4 py-4`}>
                   <div className="flex items-center gap-3">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-sky-500/15 text-sky-600 dark:bg-sky-500/20 dark:text-sky-300">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center text-sky-600 dark:text-sky-300">
                       <Clock className="h-5 w-5" />
-                    </div>
+                    </span>
                     <div className="min-w-0">
                       <div className={mutedEyebrowClass}>{t('modals.orderDetails.createdAt', { defaultValue: 'Created' })}</div>
                       <div className="mt-1 text-base font-semibold liquid-glass-modal-text">{createdDateTimeLabel}</div>
@@ -809,14 +1083,14 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
                 <div className={`${insetPanelClass} px-4 py-4`}>
                   <div className="flex items-center gap-3">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center text-emerald-600 dark:text-emerald-300">
                       {getPaymentMethodIcon(paymentMethodPresentation)}
-                    </div>
+                    </span>
                     <div className="min-w-0">
                       <div className={mutedEyebrowClass}>{t('modals.orderDetails.paymentMethod', { defaultValue: 'Payment Method' })}</div>
                       <div className="mt-1 text-lg font-semibold liquid-glass-modal-text">{getPaymentMethodLabel(paymentMethodPresentation)}</div>
                       <div className="text-sm capitalize liquid-glass-modal-text-muted">
-                        {t('modals.orderDetails.paymentStatus', { defaultValue: 'Payment status' })}: {paymentStatus.replace(/_/g, ' ')}
+                        {t('modals.orderDetails.paymentStatus', { defaultValue: 'Payment status' })}: {getPaymentStatusLabel(paymentStatus)}
                       </div>
                     </div>
                   </div>
@@ -824,9 +1098,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
                 <div className={`${insetPanelClass} px-4 py-4`}>
                   <div className="flex items-center gap-3">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-violet-500/15 text-violet-600 dark:bg-violet-500/20 dark:text-violet-300">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center text-violet-600 dark:text-violet-300">
                       <Package className="h-5 w-5" />
-                    </div>
+                    </span>
                     <div className="min-w-0">
                       <div className={mutedEyebrowClass}>{t('modals.orderDetails.total', { defaultValue: 'Total' })}</div>
                       <div className="mt-1 text-2xl font-bold tracking-tight liquid-glass-modal-text">{formatCurrency(total)}</div>
@@ -935,7 +1209,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
                     {items.length > 0 ? (
                       items.map((item: any, index: number) => {
-                        const customizations = parseCustomizations(item.customizations);
+                        const customizations = parseCustomizations(
+                          item.customizations ?? item.modifiers ?? item.ingredients ?? item.selectedIngredients
+                        );
                         const categoryPath = resolveCategoryPath(item);
                         const itemNotes = resolveItemNotes(item);
                         const itemIndex = item.itemIndex ?? item.item_index ?? index;
@@ -961,7 +1237,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             {/* Item Header */}
                             <div className="flex items-start justify-between mb-2">
                               <div className="flex items-start gap-3 flex-1">
-                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-orange-300/60 bg-orange-50 text-sm font-bold text-orange-700 dark:border-orange-500/25 dark:bg-orange-500/10 dark:text-orange-200">
+                                <div className="min-w-8 shrink-0 pt-0.5 text-sm font-bold text-orange-600 dark:text-orange-200">
                                   {item.quantity || 1}x
                                 </div>
                                 <div className="flex-1">
@@ -973,7 +1249,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                   )}
                                   {/* Item name (subcategory) */}
                                   <div className="text-lg font-semibold liquid-glass-modal-text">
-                                    {item.name || item.item_name || item.menu_item_name || item.menu_item?.name || 'Item'}
+                                    {resolveItemName(item)}
                                   </div>
                                   {shouldShowItemPaymentState && (
                                     <div className="mt-1 space-y-1.5">
@@ -1028,14 +1304,14 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                   {formatCurrency(item.total_price || item.price || 0)}
                                 </div>
                                 <div className="text-xs liquid-glass-modal-text-muted">
-                                  @ {formatCurrency(item.unit_price || item.price || 0)}
+                                  {formatCurrency(item.unit_price || item.price || 0)}
                                 </div>
                               </div>
                             </div>
 
                             {/* Customizations/Ingredients */}
                             {customizations.length > 0 && (
-                              <div className="ml-14 mt-3 space-y-2">
+                              <div className="ml-11 mt-3 space-y-2">
                                 {/* Added ingredients */}
                                 {customizations.filter(c => !c.isWithout).length > 0 && (
                                   <div className="space-y-1 rounded-2xl border border-emerald-200/70 bg-emerald-50/70 px-3 py-3 dark:border-emerald-500/15 dark:bg-emerald-500/[0.06]">
@@ -1067,7 +1343,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
                             {/* Item Notes */}
                             {itemNotes && (
-                              <div className="ml-14 mt-3 flex items-center gap-1 text-xs italic liquid-glass-modal-text-muted">
+                              <div className="ml-11 mt-3 flex items-center gap-1 text-xs italic liquid-glass-modal-text-muted">
                                 <FileText className="w-3 h-3" />
                                 <span>{itemNotes}</span>
                               </div>
@@ -1118,7 +1394,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       <span className="text-lg font-bold liquid-glass-modal-text">
                         {t('modals.orderDetails.total') || 'Total'}
                       </span>
-                      <span className="text-3xl font-bold tracking-tight text-blue-600 dark:text-blue-300">
+                      <span className="text-3xl font-bold tracking-tight text-yellow-500 dark:text-yellow-300">
                         {formatCurrency(total)}
                       </span>
                     </div>
@@ -1137,7 +1413,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                 {historyLoading ? (
                   <div className="h-4 w-4 animate-spin rounded-full border border-zinc-300 border-t-zinc-700 dark:border-zinc-700 dark:border-t-zinc-200" />
                 ) : normalizedCustomerPhone ? (
-                  <span className="rounded-full border border-emerald-300/70 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-200">
+                  <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-300">
                     {t('modals.orderDetails.customerOrderIndex', {
                       count: repeatOrderCount || 1,
                       defaultValue: 'Order #{{count}}',

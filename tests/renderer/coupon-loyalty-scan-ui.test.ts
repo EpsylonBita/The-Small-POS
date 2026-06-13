@@ -34,6 +34,17 @@ test('CouponsPage exposes scanner action and routes scanned codes into coupon se
   assert.match(page, /coupon\.code\.toUpperCase\(\) === scannedCode/);
   assert.match(page, /coupons\.scan\.button/);
   assert.match(page, /scrollbar-hide/);
+  assert.match(page, /bg-transparent text-white border border-cyan-500\/40/);
+  assert.match(page, /<CheckCircle className="w-5 h-5 text-green-500" \/>/);
+  assert.match(page, /<Ticket className="w-5 h-5 text-yellow-500" \/>/);
+  assert.match(page, /text-xs font-semibold text-green-500 inline-flex items-center gap-1/);
+  assert.match(page, /text-xs font-semibold text-red-400 inline-flex items-center gap-1/);
+  assert.match(page, /bg-transparent text-amber-300 border border-amber-500\/40/);
+  assert.doesNotMatch(page, /bg-cyan-500\/15 text-cyan-100/);
+  assert.doesNotMatch(page, /bg-cyan-50 text-cyan-800/);
+  assert.doesNotMatch(page, /px-2 py-0\.5 text-xs rounded-lg inline-flex items-center gap-1/);
+  assert.doesNotMatch(page, /px-2 py-0\.5 text-xs bg-red-500\/20 text-red-400 rounded-lg/);
+  assert.doesNotMatch(page, /bg-amber-500\/20 text-amber-300 border border-amber-500\/30/);
 });
 
 test('LoyaltyPage exposes scanner action and supports card, phone, and member-code lookup', () => {
@@ -48,6 +59,21 @@ test('LoyaltyPage exposes scanner action and supports card, phone, and member-co
   assert.match(page, /customer_phone\?\.replace/);
   assert.match(page, /loyalty\.scan\.button/);
   assert.match(page, /scrollbar-hide/);
+  assert.match(page, /bg-transparent text-white border border-cyan-500\/40/);
+  assert.match(page, /<Users className="w-5 h-5 text-green-500" \/>/);
+  assert.match(page, /<Award className="w-5 h-5 text-yellow-500" \/>/);
+  assert.match(page, /<TrendingUp className="w-5 h-5 text-blue-500" \/>/);
+  assert.match(page, /px-2 py-1 text-xs font-medium rounded border bg-transparent flex items-center gap-1/);
+  assert.match(page, /text-purple-400 border-purple-500\/40/);
+  assert.match(page, /text-yellow-400 border-yellow-500\/40/);
+  assert.match(page, /text-zinc-300 border-zinc-400\/40/);
+  assert.match(page, /text-amber-500 border-amber-500\/40/);
+  assert.doesNotMatch(page, /bg-cyan-500\/15 text-cyan-100/);
+  assert.doesNotMatch(page, /bg-cyan-50 text-cyan-800/);
+  assert.doesNotMatch(page, /bg-purple-500\/20/);
+  assert.doesNotMatch(page, /bg-yellow-500\/20/);
+  assert.doesNotMatch(page, /bg-zinc-400\/20/);
+  assert.doesNotMatch(page, /bg-amber-500\/20/);
 });
 
 test('ScanDevicePanel detects camera/scanner availability and supports all scan entry paths', () => {

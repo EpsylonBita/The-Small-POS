@@ -6,6 +6,7 @@ interface FullscreenAwareLayoutProps {
   children: React.ReactNode;
   updateAvailable?: boolean;
   onCheckForUpdates?: () => void;
+  onOpenSettings?: () => void;
   className?: string;
 }
 
@@ -18,6 +19,7 @@ export const FullscreenAwareLayout: React.FC<FullscreenAwareLayoutProps> = ({
   children,
   updateAvailable = false,
   onCheckForUpdates,
+  onOpenSettings,
   className = '',
 }) => {
   const { isFullScreen } = useWindowState();
@@ -28,6 +30,7 @@ export const FullscreenAwareLayout: React.FC<FullscreenAwareLayoutProps> = ({
       <CustomTitleBar
         updateAvailable={updateAvailable}
         onCheckForUpdates={onCheckForUpdates}
+        onOpenSettings={onOpenSettings}
       />
       {/* Content area - No padding in fullscreen mode */}
       <div className={`flex-1 flex flex-col ${isFullScreen ? '' : 'pt-8'}`}>

@@ -1,5 +1,6 @@
 import React, { memo, useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import { useTheme } from '../../../contexts/theme-context';
 import {
   AlertCircle,
@@ -27,6 +28,7 @@ import {
   STAFF_SCHEDULE_IMPORT_ACCEPT,
   type ImportedScheduleShift,
 } from '../../../utils/staff-schedule-import';
+import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 interface StaffMember {
   id: string;
@@ -86,6 +88,14 @@ interface ApiResponse {
   error?: string;
 }
 
+interface PosIntegrationPayload {
+  id?: string;
+  plugin_id?: string | null;
+  provider?: string | null;
+  is_purchased?: boolean;
+  is_enabled?: boolean;
+}
+
 interface WeeklyShift {
   id: string;
   staffId: string;
@@ -123,6 +133,7 @@ const ROLE_COLORS: Record<string, string> = {
 
 const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
 const SHIFT_STATUS_KEYS = new Set(['scheduled', 'active', 'completed', 'cancelled', 'no_show']);
+const ERGANI_PLUGIN_ID = 'ergani_digital_schedule';
 const TIME_PRESETS = [
   { key: 'morning', startHour: '09', startMinute: '00', endHour: '17', endMinute: '00' },
   { key: 'evening', startHour: '12', startMinute: '00', endHour: '20', endMinute: '00' },
@@ -183,6 +194,9 @@ const getRoleColor = (roleName: string | undefined): string => {
   return ROLE_COLORS[roleName] || ROLE_COLORS.staff;
 };
 
+const isErganiIntegration = (integration: PosIntegrationPayload): boolean =>
+  [integration.plugin_id, integration.provider, integration.id].some(value => value === ERGANI_PLUGIN_ID);
+
 const getShiftStart = (shift: ScheduleShift): Date | null =>
   parseDate(shift.startTime || shift.start_time || shift.scheduled_start || shift.check_in_time);
 
@@ -226,6 +240,7 @@ export const StaffScheduleView: React.FC = memo(() => {
   const [createNotes, setCreateNotes] = useState('');
   const [creatingShift, setCreatingShift] = useState(false);
   const [publishingErgani, setPublishingErgani] = useState(false);
+  const [hasErganiPlugin, setHasErganiPlugin] = useState(false);
   const [erganiPublishStatus, setErganiPublishStatus] = useState<string | null>(null);
   const [importingSchedule, setImportingSchedule] = useState(false);
   const [previewWeekOpen, setPreviewWeekOpen] = useState(false);
@@ -296,6 +311,54 @@ export const StaffScheduleView: React.FC = memo(() => {
   useEffect(() => {
     fetchStaffData();
   }, [fetchStaffData]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchErganiPluginEntitlement = async () => {
+      setHasErganiPlugin(false);
+      setErganiPublishStatus(null);
+
+      if (!branchId) {
+        return;
+      }
+
+      try {
+        const response = await posApiGet<{ integrations?: PosIntegrationPayload[] }>(
+          `/pos/integrations?provider=${ERGANI_PLUGIN_ID}`,
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!response.success) {
+          setHasErganiPlugin(false);
+          return;
+        }
+
+        const integrations = response.data?.integrations || [];
+        setHasErganiPlugin(
+          integrations.some(
+            integration =>
+              isErganiIntegration(integration) &&
+              integration.is_purchased === true &&
+              integration.is_enabled !== false,
+          ),
+        );
+      } catch {
+        if (!cancelled) {
+          setHasErganiPlugin(false);
+        }
+      }
+    };
+
+    void fetchErganiPluginEntitlement();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [branchId]);
 
   const staffMap = useMemo(() => {
     const map = new Map<string, StaffMember>();
@@ -765,7 +828,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     ? 'bg-zinc-900/70 border-zinc-800'
     : 'bg-slate-50 border-slate-200';
   const mutedTextClass = isDark ? 'text-zinc-400' : 'text-slate-600';
-  const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${
+  const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-none transition-colors focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/25 ${
     isDark
       ? 'bg-zinc-900 border-zinc-700 text-zinc-100'
       : 'bg-white border-slate-300 text-slate-950'
@@ -775,7 +838,7 @@ export const StaffScheduleView: React.FC = memo(() => {
       ? 'bg-zinc-900 border-zinc-700 text-zinc-100 hover:bg-zinc-800'
       : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
   }`;
-  const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500 disabled:bg-blue-500/60';
+  const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-yellow-400 px-4 py-3 text-sm font-semibold text-black transition-colors hover:bg-yellow-300 disabled:bg-yellow-400/60 disabled:text-black/60';
   const secondaryButtonClass = `inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold transition-colors disabled:opacity-60 ${
     isDark
       ? 'bg-zinc-900 border-zinc-700 text-zinc-100 hover:bg-zinc-800'
@@ -784,21 +847,21 @@ export const StaffScheduleView: React.FC = memo(() => {
 
   if (loading) {
     return (
-      <div className="h-full flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex items-center justify-center">
+        <motion.div variants={pageMotionItem} className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 border-4 border-yellow-400 border-t-transparent rounded-full animate-spin" />
           <p className={isDark ? 'text-zinc-400' : 'text-gray-600'}>
             {t('staffSchedule.loading', 'Loading staff schedule...')}
           </p>
-        </div>
-      </div>
+        </motion.div>
+      </motion.div>
     );
   }
 
   if (error) {
     return (
-      <div className="h-full flex items-center justify-center p-6">
-        <div className={`w-full max-w-xl flex flex-col items-center gap-4 p-6 rounded-2xl border ${
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex items-center justify-center p-6">
+        <motion.div variants={pageMotionItem} className={`w-full max-w-xl flex flex-col items-center gap-4 p-6 rounded-2xl border ${
           isDark ? 'bg-red-950/20 border-red-900/40' : 'bg-red-50 border-red-200'
         }`}>
           <AlertCircle className="w-10 h-10 text-red-500" />
@@ -810,13 +873,13 @@ export const StaffScheduleView: React.FC = memo(() => {
             <RefreshCw className="w-4 h-4" />
             {t('common.actions.retry', 'Retry')}
           </button>
-        </div>
-      </div>
+        </motion.div>
+      </motion.div>
     );
   }
 
   return (
-    <div className={`h-full min-h-0 overflow-hidden ${isDark ? 'text-zinc-100' : 'text-slate-950'}`}>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full min-h-0 overflow-hidden ${isDark ? 'text-zinc-100' : 'text-slate-950'}`}>
       <input
         ref={importFileInputRef}
         type="file"
@@ -829,8 +892,8 @@ export const StaffScheduleView: React.FC = memo(() => {
           }
         }}
       />
-      <div className="mx-auto flex h-full w-full max-w-screen-2xl flex-col gap-4 p-4 md:p-5 xl:p-6">
-        <section className={`rounded-2xl border p-4 md:p-5 ${panelClass}`}>
+      <motion.div variants={pageMotionContainer} className="mx-auto flex h-full w-full max-w-screen-2xl flex-col gap-4 p-4 md:p-5 xl:p-6">
+        <motion.section variants={pageMotionItem} className={`rounded-2xl border p-4 md:p-5 ${panelClass}`}>
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div className="space-y-1">
               <h2 className="text-2xl font-bold md:text-3xl">
@@ -854,7 +917,7 @@ export const StaffScheduleView: React.FC = memo(() => {
               <div className={`inline-flex h-11 items-center gap-2 rounded-xl border px-4 text-sm font-semibold ${
                 isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-slate-300'
               }`}>
-                <Calendar className="h-4 w-4 text-blue-500" />
+                <Calendar className="h-4 w-4 text-yellow-400" />
                 {weekLabel}
               </div>
               <button
@@ -877,14 +940,6 @@ export const StaffScheduleView: React.FC = memo(() => {
               </button>
               <button
                 type="button"
-                onClick={() => openCreateModal(defaultCreateDate)}
-                className={primaryButtonClass}
-              >
-                <Plus className="h-4 w-4" />
-                {t('staffSchedule.actions.addShift', 'Add shift')}
-              </button>
-              <button
-                type="button"
                 onClick={() => importFileInputRef.current?.click()}
                 disabled={importingSchedule}
                 className={secondaryButtonClass}
@@ -902,94 +957,97 @@ export const StaffScheduleView: React.FC = memo(() => {
                 <Eye className="h-4 w-4" />
                 {t('staffSchedule.previewWeek.action', 'Preview week')}
               </button>
-              <button
-                type="button"
-                onClick={() => void handlePublishToErgani()}
-                disabled={publishingErgani || weeklyShifts.length === 0}
-                className={primaryButtonClass}
-              >
-                <FileText className="h-4 w-4" />
-                {publishingErgani
-                  ? t('staffSchedule.ergani.publishing', 'Publishing...')
-                  : t('staffSchedule.ergani.publish', 'Publish to ERGANI')}
-              </button>
+              {hasErganiPlugin ? (
+                <button
+                  type="button"
+                  onClick={() => void handlePublishToErgani()}
+                  disabled={publishingErgani || weeklyShifts.length === 0}
+                  className={primaryButtonClass}
+                >
+                  <FileText className="h-4 w-4" />
+                  {publishingErgani
+                    ? t('staffSchedule.ergani.publishing', 'Publishing...')
+                    : t('staffSchedule.ergani.publish', 'Publish to ERGANI')}
+                </button>
+              ) : null}
             </div>
           </div>
 
-          {erganiPublishStatus ? (
+          {hasErganiPlugin && erganiPublishStatus ? (
             <p className={`mt-3 text-xs ${mutedTextClass}`}>
               {t('staffSchedule.ergani.lastStatus', 'ERGANI status')}: {erganiPublishStatus}
             </p>
           ) : null}
 
-          <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <div className={`rounded-xl border p-3 ${softPanelClass}`}>
+          <motion.div variants={pageMotionContainer} className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <motion.div variants={pageMotionItem} className={`rounded-xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.totalStaff', 'Total Staff')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
-                <Users className="h-5 w-5 text-blue-500" />
+                <Users className="h-5 w-5 text-yellow-400" />
                 {filteredStaff.length}
               </p>
-            </div>
-            <div className={`rounded-xl border p-3 ${softPanelClass}`}>
+            </motion.div>
+            <motion.div variants={pageMotionItem} className={`rounded-xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.scheduledThisWeek', 'Scheduled This Week')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
                 <UserCheck className="h-5 w-5 text-emerald-500" />
                 {scheduledStaffCount}
               </p>
-            </div>
-            <div className={`rounded-xl border p-3 ${softPanelClass}`}>
+            </motion.div>
+            <motion.div variants={pageMotionItem} className={`rounded-xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.todayShifts', 'Today Shifts')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
                 <Clock className="h-5 w-5 text-amber-500" />
                 {todayShiftsCount}
               </p>
-            </div>
-            <div className={`rounded-xl border p-3 ${softPanelClass}`}>
+            </motion.div>
+            <motion.div variants={pageMotionItem} className={`rounded-xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.unscheduled', 'Unscheduled')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
                 <Briefcase className="h-5 w-5 text-fuchsia-500" />
                 {unscheduledStaff.length}
               </p>
-            </div>
-          </div>
+            </motion.div>
+          </motion.div>
 
-          <div className="mt-4 flex gap-2 overflow-x-auto scrollbar-hide pb-1">
-            <button
+          <motion.div variants={pageMotionContainer} className="mt-4 flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+            <motion.button
+              variants={pageMotionItem}
               type="button"
               onClick={() => setRoleFilter('all')}
               className={`shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold transition-colors ${
                 roleFilter === 'all'
-                  ? 'bg-blue-600 border-blue-500 text-white'
+                  ? 'bg-yellow-400 border-yellow-400 text-black'
                   : isDark
                     ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800'
                     : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
               }`}
             >
               {t('staffSchedule.filters.all', 'All roles')}
-            </button>
+            </motion.button>
             {availableRoles.map(role => (
-              <button
+              <motion.button
+                variants={pageMotionItem}
                 key={role}
                 type="button"
                 onClick={() => setRoleFilter(role)}
                 className={`shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold capitalize transition-colors ${
                   roleFilter === role
-                    ? 'text-white'
+                    ? 'bg-yellow-400 border-yellow-400 text-black'
                     : isDark
                       ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800'
                       : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
                 }`}
-                style={roleFilter === role ? { backgroundColor: getRoleColor(role), borderColor: getRoleColor(role) } : undefined}
               >
                 {getRoleLabel(role)}
-              </button>
+              </motion.button>
             ))}
-          </div>
-        </section>
+          </motion.div>
+        </motion.section>
 
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide">
-          <div className="space-y-4 pb-1">
-            <section className={`rounded-2xl border p-3 md:p-4 ${panelClass}`}>
+        <motion.div variants={pageMotionItem} className="min-h-0 flex-1 overflow-y-auto scrollbar-hide">
+          <motion.div variants={pageMotionContainer} className="space-y-4 pb-1">
+            <motion.section variants={pageMotionItem} className={`rounded-2xl border p-3 md:p-4 ${panelClass}`}>
               <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                   <h3 className="text-lg font-semibold">{t('staffSchedule.scheduleTitle', 'This week')}</h3>
@@ -997,31 +1055,32 @@ export const StaffScheduleView: React.FC = memo(() => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-7">
+              <motion.div variants={pageMotionContainer} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-7">
                 {weekDays.map(day => {
                   const dayKey = localDateKey(day);
                   const dayShifts = shiftsByDay[dayKey] || [];
                   const today = dayKey === todayKey;
 
                   return (
-                    <article
+                    <motion.article
+                      variants={pageMotionItem}
                       key={dayKey}
                       className={`flex min-h-64 overflow-hidden flex-col rounded-xl border transition-colors ${
                         today
                           ? isDark
-                            ? 'bg-blue-950/20 border-blue-600 shadow-[0_0_0_1px_rgba(37,99,235,0.35)]'
-                            : 'bg-blue-50 border-blue-300 shadow-[0_0_0_1px_rgba(59,130,246,0.2)]'
+                            ? 'bg-yellow-950/20 border-yellow-500 shadow-[0_0_0_1px_rgba(250,204,21,0.35)]'
+                            : 'bg-yellow-50 border-yellow-300 shadow-[0_0_0_1px_rgba(250,204,21,0.24)]'
                           : softPanelClass
                       }`}
                     >
-                      <div className={`border-b px-3 py-3 ${today ? (isDark ? 'border-blue-800' : 'border-blue-200') : (isDark ? 'border-zinc-800' : 'border-slate-200')}`}>
+                      <div className={`border-b px-3 py-3 ${today ? (isDark ? 'border-yellow-700/70' : 'border-yellow-200') : (isDark ? 'border-zinc-800' : 'border-slate-200')}`}>
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <p className="text-base font-bold">{getDayLabel(day)}</p>
                               {today && (
                                 <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                                  isDark ? 'bg-blue-600/20 border-blue-500/50 text-blue-200' : 'bg-blue-100 border-blue-200 text-blue-700'
+                                  isDark ? 'bg-yellow-400/20 border-yellow-400/50 text-yellow-100' : 'bg-yellow-100 border-yellow-200 text-yellow-800'
                                 }`}>
                                   {t('staffSchedule.today', 'Today')}
                                 </span>
@@ -1063,8 +1122,8 @@ export const StaffScheduleView: React.FC = memo(() => {
                             onClick={() => openCreateModal(day)}
                             className={`flex h-full min-h-28 w-full flex-col items-center justify-center rounded-xl border border-dashed px-3 py-6 text-center text-sm transition-colors ${
                               isDark
-                                ? 'border-zinc-700 text-zinc-500 hover:border-blue-600 hover:text-blue-300'
-                                : 'border-slate-300 text-slate-500 hover:border-blue-300 hover:text-blue-700'
+                                ? 'border-zinc-700 text-zinc-500 hover:border-yellow-500 hover:text-yellow-200'
+                                : 'border-slate-300 text-slate-500 hover:border-yellow-300 hover:text-yellow-700'
                             }`}
                           >
                             <Plus className="mb-2 h-5 w-5" />
@@ -1073,7 +1132,8 @@ export const StaffScheduleView: React.FC = memo(() => {
                           </button>
                         ) : (
                           dayShifts.map(shift => (
-                            <div
+                            <motion.div
+                              variants={pageMotionItem}
                               key={shift.id}
                               className={`rounded-xl border-l-4 border px-3 py-2 ${
                                 isDark ? 'bg-black/30 border-zinc-800' : 'bg-white border-slate-200'
@@ -1089,17 +1149,17 @@ export const StaffScheduleView: React.FC = memo(() => {
                                 <Clock className="h-4 w-4" />
                                 {formatTimeRange(shift.start, shift.end)}
                               </p>
-                            </div>
+                            </motion.div>
                           ))
                         )}
                       </div>
-                    </article>
+                    </motion.article>
                   );
                 })}
-              </div>
-            </section>
+              </motion.div>
+            </motion.section>
 
-            <section className={`rounded-2xl border p-4 ${panelClass}`}>
+            <motion.section variants={pageMotionItem} className={`rounded-2xl border p-4 ${panelClass}`}>
               <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h3 className="text-base font-semibold">
@@ -1108,12 +1168,13 @@ export const StaffScheduleView: React.FC = memo(() => {
                   <p className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.unscheduledHint', 'Tap a name to create their next shift quickly.')}</p>
                 </div>
               </div>
-              <div className="mt-3 flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+              <motion.div variants={pageMotionContainer} className="mt-3 flex gap-2 overflow-x-auto scrollbar-hide pb-1">
                 {unscheduledStaff.length === 0 ? (
                   <span className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.everyoneScheduled', 'Everyone has at least one shift this week.')}</span>
                 ) : (
                   unscheduledStaff.map(member => (
-                    <button
+                    <motion.button
+                      variants={pageMotionItem}
                       key={member.id}
                       type="button"
                       onClick={() => openCreateModal(defaultCreateDate, member.id)}
@@ -1124,14 +1185,14 @@ export const StaffScheduleView: React.FC = memo(() => {
                     >
                       <Plus className="h-3.5 w-3.5" />
                       {member.name}
-                    </button>
+                    </motion.button>
                   ))
                 )}
-              </div>
-            </section>
-          </div>
-        </div>
-      </div>
+              </motion.div>
+            </motion.section>
+          </motion.div>
+        </motion.div>
+      </motion.div>
 
       {previewWeekOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -1179,7 +1240,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                         return (
                           <div
                             key={`preview-header-${dayKey}`}
-                            className={`border-r p-3 last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${isToday ? (isDark ? 'text-blue-300' : 'text-blue-700') : ''}`}
+                            className={`border-r p-3 last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${isToday ? (isDark ? 'text-yellow-200' : 'text-yellow-700') : ''}`}
                           >
                             <div>{getDayLabel(day)}</div>
                             <div className="mt-0.5 font-normal normal-case">
@@ -1438,7 +1499,7 @@ export const StaffScheduleView: React.FC = memo(() => {
           </div>
         </div>
       )}
-    </div>
+    </motion.div>
   );
 });
 

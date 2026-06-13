@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -18,8 +18,20 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
 }) => {
   const { t } = useTranslation();
   const [cancelReason, setCancelReason] = useState('');
+  const reasonInputRef = useRef<HTMLTextAreaElement | null>(null);
 
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
 
+    const focusTimer = window.setTimeout(() => {
+      reasonInputRef.current?.focus();
+      reasonInputRef.current?.select();
+    }, 75);
+
+    return () => window.clearTimeout(focusTimer);
+  }, [isOpen]);
 
   const handleConfirm = () => {
     if (!cancelReason.trim()) {
@@ -44,6 +56,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
       className="!max-w-lg"
       closeOnBackdrop={true}
       closeOnEscape={true}
+      initialFocusRef={reasonInputRef}
     >
       <p className="liquid-glass-modal-text-muted mb-6">
         {t('modals.orderCancellation.message', { count: orderCount })}
@@ -54,6 +67,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           {t('modals.orderCancellation.reasonLabel')}
         </label>
         <textarea
+          ref={reasonInputRef}
           value={cancelReason}
           onChange={(e) => setCancelReason(e.target.value)}
           placeholder={t('modals.orderCancellation.reasonPlaceholder')}

@@ -54,6 +54,12 @@ interface AddressSelectionDetails {
   fromSuggestion?: boolean;
 }
 
+const editCustomerInputClass =
+  'w-full px-4 py-2 rounded-lg border bg-gray-100 dark:bg-zinc-800/80 border-gray-300 dark:border-zinc-600 text-gray-900 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-400/60 dark:focus:ring-white/30 focus:border-gray-500 dark:focus:border-white/50';
+
+const editCustomerSaveButtonClass =
+  'flex-1 px-4 py-3 bg-yellow-400 hover:bg-yellow-300 disabled:bg-gray-500/10 disabled:cursor-not-allowed !text-black disabled:!text-gray-500 font-medium rounded-xl border border-yellow-400 hover:border-yellow-300 disabled:border-gray-500/20 transition-all';
+
 export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   isOpen,
   orderCount,
@@ -507,7 +513,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               value={customerInfo.name}
               onChange={(e) => handleInputChange('name', e.target.value)}
               placeholder={t('modals.editCustomer.customerNamePlaceholder')}
-              className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={editCustomerInputClass}
             />
           </div>
 
@@ -520,7 +526,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               value={customerInfo.phone}
               onChange={(e) => handleInputChange('phone', e.target.value)}
               placeholder={t('modals.editCustomer.phoneNumberPlaceholder')}
-              className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={editCustomerInputClass}
             />
           </div>
 
@@ -529,7 +535,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               {t('modals.editCustomer.address')}
             </label>
             <div className="relative">
-              <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+              <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-green-400" />
               <input
                 type="text"
                 value={customerInfo.address}
@@ -539,7 +545,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                     ? t('modals.editCustomer.addressPlaceholder')
                     : t('modals.editCustomer.manualAddressPlaceholder', 'Enter address manually')
                 }
-                className="w-full px-4 py-2 pl-10 pr-4 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className={`${editCustomerInputClass} pl-10 pr-4`}
               />
               {hasDeliveryPro && isLoadingAddresses && (
                 <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
@@ -632,7 +638,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                     onChange={(e) => setOverrideReason(e.target.value)}
                     placeholder={t('modals.addCustomer.overrideReasonPlaceholder', 'Add override reason (minimum 6 characters)')}
                     rows={2}
-                    className="w-full px-3 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                    className={`${editCustomerInputClass} px-3 resize-none`}
                   />
                 </div>
               )}
@@ -651,7 +657,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               value={customerInfo.postal_code || ''}
               onChange={(e) => handleInputChange('postal_code', e.target.value)}
               placeholder={t('modals.editCustomer.postalCodePlaceholder')}
-              className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={editCustomerInputClass}
             />
           </div>
 
@@ -665,7 +671,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                 value={customerInfo.delivery_floor || ''}
                 onChange={(e) => handleInputChange('delivery_floor', e.target.value)}
                 placeholder={t('modals.addCustomer.floorPlaceholder')}
-                className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className={editCustomerInputClass}
               />
             </div>
 
@@ -678,7 +684,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                 value={customerInfo.name_on_ringer || ''}
                 onChange={(e) => handleInputChange('name_on_ringer', e.target.value)}
                 placeholder={t('modals.addCustomer.nameOnRingerPlaceholder')}
-                className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className={editCustomerInputClass}
               />
             </div>
           </div>
@@ -692,7 +698,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               onChange={(e) => handleInputChange('notes', e.target.value)}
               placeholder={t('modals.editCustomer.specialNotesPlaceholder')}
               rows={3}
-              className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+              className={`${editCustomerInputClass} resize-none`}
             />
           </div>
         </div>
@@ -709,7 +715,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             type="button"
             onClick={handleSave}
             disabled={isSaving}
-            className="flex-1 px-4 py-3 bg-blue-500/20 hover:bg-blue-500/30 disabled:bg-gray-500/10 disabled:cursor-not-allowed text-blue-600 dark:text-blue-400 disabled:text-gray-500 font-medium rounded-xl border border-blue-500/30 disabled:border-gray-500/20 transition-all"
+            className={editCustomerSaveButtonClass}
           >
             {isSaving ? t('modals.editCustomer.saving') : t('modals.editCustomer.saveChanges')}
           </button>

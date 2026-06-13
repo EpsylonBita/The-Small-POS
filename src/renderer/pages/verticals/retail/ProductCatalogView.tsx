@@ -9,6 +9,7 @@
  */
 
 import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { motion } from 'framer-motion';
 import { useOrderStore } from '../../../hooks/useOrderStore';
 import { OrderDashboard } from '../../../components/OrderDashboard';
 import OrderFlow from '../../../components/OrderFlow';
@@ -21,6 +22,7 @@ import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from '../../../services/terminal-credentials';
+import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 export const ProductCatalogView: React.FC = memo(() => {
   const { conflicts, resolveConflict } = useOrderStore();
@@ -100,23 +102,27 @@ export const ProductCatalogView: React.FC = memo(() => {
   }, [resolveConflict]);
 
   return (
-    <div className="p-6">
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="p-6">
       {/* Conflict Banner */}
       {conflicts.length > 0 && (
-        <div className="mb-4">
+        <motion.div variants={pageMotionItem} className="mb-4">
           <OrderConflictBanner
             conflicts={conflicts}
             onResolve={handleResolveConflict}
           />
-        </div>
+        </motion.div>
       )}
 
       {/* Orders Dashboard with tabs for Active/Delivered/Canceled */}
-      <OrderDashboard className="mb-6" orderFilter={orderFilter} />
+      <motion.div variants={pageMotionItem}>
+        <OrderDashboard className="mb-6" orderFilter={orderFilter} />
+      </motion.div>
 
       {/* Order Flow with forceRetailMode to show ProductCatalogModal instead of MenuModal */}
-      <OrderFlow forceRetailMode={true} />
-    </div>
+      <motion.div variants={pageMotionItem}>
+        <OrderFlow forceRetailMode={true} />
+      </motion.div>
+    </motion.div>
   );
 });
 

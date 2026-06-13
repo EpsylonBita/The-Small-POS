@@ -7,6 +7,7 @@ import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useWindowState } from '../hooks/useWindowState';
 import { getBridge } from '../../lib';
 import { getResetStartingMessage, startResetAction } from '../utils/reset-actions';
+import { openExternalUrl } from '../utils/external-url';
 import {
   Minus,
   Square,
@@ -51,9 +52,85 @@ interface MenuItemType {
 interface CustomTitleBarProps {
   updateAvailable?: boolean;
   onCheckForUpdates?: () => void;
+  onOpenSettings?: () => void;
 }
 
-const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false, onCheckForUpdates }) => {
+type EditRole = NonNullable<MenuItemType['role']>;
+type TextEditElement = HTMLInputElement | HTMLTextAreaElement;
+
+const HELP_LINKS = {
+  documentation: 'https://github.com/EpsylonBita/The-Small-POS/tree/main/docs',
+  community: 'https://github.com/EpsylonBita/The-Small-POS/discussions',
+  issue: 'https://github.com/EpsylonBita/The-Small-POS/issues/new/choose',
+} as const;
+
+const EDITABLE_INPUT_TYPES = new Set([
+  'email',
+  'number',
+  'password',
+  'search',
+  'tel',
+  'text',
+  'url',
+]);
+
+const isTextEditElement = (element: Element | null): element is TextEditElement => {
+  if (element instanceof HTMLTextAreaElement) {
+    return !element.disabled && !element.readOnly;
+  }
+
+  if (element instanceof HTMLInputElement) {
+    const inputType = element.type ? element.type.toLowerCase() : 'text';
+    return !element.disabled && !element.readOnly && EDITABLE_INPUT_TYPES.has(inputType);
+  }
+
+  return false;
+};
+
+const getEditableRoot = (): TextEditElement | HTMLElement | null => {
+  const activeElement = document.activeElement;
+
+  if (isTextEditElement(activeElement)) {
+    return activeElement;
+  }
+
+  if (activeElement instanceof HTMLElement && activeElement.isContentEditable) {
+    return activeElement;
+  }
+
+  return null;
+};
+
+const dispatchEditableInput = (element: Element, inputType: string) => {
+  element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType }));
+};
+
+const replaceTextSelection = (element: TextEditElement, replacement: string, inputType: string) => {
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? start;
+
+  element.setRangeText(replacement, start, end, 'end');
+  dispatchEditableInput(element, inputType);
+};
+
+const getEditableSelection = (element: HTMLElement): Selection | null => {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+  const container = range.commonAncestorContainer;
+  return element.contains(container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement)
+    ? selection
+    : null;
+};
+
+const CustomTitleBar: React.FC<CustomTitleBarProps> = ({
+  updateAvailable = false,
+  onCheckForUpdates,
+  onOpenSettings,
+}) => {
   const { resolvedTheme } = useTheme();
   const { t } = useTranslation();
   const isDark = resolvedTheme === 'dark';
@@ -62,6 +139,8 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [isWindows, setIsWindows] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const editHistoryRef = useRef(new WeakMap<TextEditElement, { undoStack: string[]; redoStack: string[]; lastValue: string }>());
+  const applyingHistoryRef = useRef(false);
   const [showResetDialog, setShowResetDialog] = useState(false);
   const [resetConfirmText, setResetConfirmText] = useState('');
   const [isResetting, setIsResetting] = useState(false);
@@ -122,36 +201,218 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
     setActiveMenu(activeMenu === menuName ? null : menuName);
   };
 
+  const ensureEditHistory = (element: TextEditElement) => {
+    const existing = editHistoryRef.current.get(element);
+    if (existing) {
+      return existing;
+    }
+
+    const created = {
+      undoStack: [] as string[],
+      redoStack: [] as string[],
+      lastValue: element.value,
+    };
+    editHistoryRef.current.set(element, created);
+    return created;
+  };
+
+  useEffect(() => {
+    const captureFocusedInput = (event: FocusEvent) => {
+      if (isTextEditElement(event.target as Element | null)) {
+        ensureEditHistory(event.target as TextEditElement);
+      }
+    };
+
+    const captureInputHistory = (event: Event) => {
+      if (applyingHistoryRef.current || !isTextEditElement(event.target as Element | null)) {
+        return;
+      }
+
+      const element = event.target as TextEditElement;
+      const history = ensureEditHistory(element);
+      if (history.lastValue === element.value) {
+        return;
+      }
+
+      history.undoStack.push(history.lastValue);
+      if (history.undoStack.length > 100) {
+        history.undoStack.shift();
+      }
+      history.redoStack = [];
+      history.lastValue = element.value;
+    };
+
+    document.addEventListener('focusin', captureFocusedInput, true);
+    document.addEventListener('input', captureInputHistory, true);
+
+    return () => {
+      document.removeEventListener('focusin', captureFocusedInput, true);
+      document.removeEventListener('input', captureInputHistory, true);
+    };
+  }, []);
+
+  const applyHistoryValue = (element: TextEditElement, value: string) => {
+    applyingHistoryRef.current = true;
+    element.value = value;
+    element.setSelectionRange(value.length, value.length);
+    dispatchEditableInput(element, 'historyUndo');
+    applyingHistoryRef.current = false;
+  };
+
+  const performEditCommand = async (role: EditRole): Promise<boolean> => {
+    const appCommandEvent = new CustomEvent('pos:edit-command', {
+      cancelable: true,
+      detail: { role },
+    });
+    if (!window.dispatchEvent(appCommandEvent)) {
+      return true;
+    }
+
+    const editable = getEditableRoot();
+    if (!editable) {
+      return false;
+    }
+
+    if (isTextEditElement(editable)) {
+      const history = ensureEditHistory(editable);
+      const start = editable.selectionStart ?? editable.value.length;
+      const end = editable.selectionEnd ?? start;
+      const selectedText = editable.value.slice(start, end);
+
+      if (role === 'undo') {
+        const previous = history.undoStack.pop();
+        if (previous === undefined) return false;
+        history.redoStack.push(editable.value);
+        history.lastValue = previous;
+        applyHistoryValue(editable, previous);
+        return true;
+      }
+
+      if (role === 'redo') {
+        const next = history.redoStack.pop();
+        if (next === undefined) return false;
+        history.undoStack.push(editable.value);
+        history.lastValue = next;
+        applyHistoryValue(editable, next);
+        return true;
+      }
+
+      if (role === 'selectAll') {
+        editable.select();
+        return true;
+      }
+
+      if (role === 'copy' || role === 'cut') {
+        await bridge.clipboard.writeText(selectedText);
+        if (role === 'cut' && selectedText) {
+          replaceTextSelection(editable, '', 'deleteByCut');
+        }
+        return true;
+      }
+
+      if (role === 'paste') {
+        const clipboardText = await bridge.clipboard.readText();
+        replaceTextSelection(editable, clipboardText, 'insertFromPaste');
+        return true;
+      }
+
+      if (role === 'delete') {
+        if (start === end && start < editable.value.length) {
+          editable.setSelectionRange(start, start + 1);
+        }
+        replaceTextSelection(editable, '', 'deleteContentForward');
+        return true;
+      }
+    }
+
+    const selection = getEditableSelection(editable);
+    if (!selection) {
+      return false;
+    }
+
+    if (role === 'selectAll') {
+      const range = document.createRange();
+      range.selectNodeContents(editable);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    }
+
+    if (role === 'copy' || role === 'cut') {
+      const selectedText = selection.toString();
+      await bridge.clipboard.writeText(selectedText);
+      if (role === 'cut' && selectedText) {
+        selection.deleteFromDocument();
+        dispatchEditableInput(editable, 'deleteByCut');
+      }
+      return true;
+    }
+
+    if (role === 'paste') {
+      const clipboardText = await bridge.clipboard.readText();
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+      const textNode = document.createTextNode(clipboardText);
+      range.insertNode(textNode);
+      range.setStartAfter(textNode);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      dispatchEditableInput(editable, 'insertFromPaste');
+      return true;
+    }
+
+    if (role === 'delete') {
+      selection.deleteFromDocument();
+      dispatchEditableInput(editable, 'deleteContentForward');
+      return true;
+    }
+
+    return false;
+  };
+
+  useEffect(() => {
+    const handleEditShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      const role: EditRole | null =
+        key === 'z' && !event.shiftKey ? 'undo'
+          : (key === 'y' || (key === 'z' && event.shiftKey)) ? 'redo'
+            : key === 'x' ? 'cut'
+              : key === 'c' ? 'copy'
+                : key === 'v' ? 'paste'
+                  : key === 'a' ? 'selectAll'
+                    : null;
+
+      if (!role) {
+        return;
+      }
+
+      event.preventDefault();
+      void performEditCommand(role);
+    };
+
+    window.addEventListener('keydown', handleEditShortcut, true);
+    return () => window.removeEventListener('keydown', handleEditShortcut, true);
+  }, [performEditCommand]);
+
+  const openHelpLink = async (url: string) => {
+    const opened = await openExternalUrl(url);
+    if (!opened) {
+      toast.error(t('common.openLinkFailed', 'Could not open link'));
+    }
+  };
+
   const handleMenuItemClick = async (item: MenuItemType) => {
     setActiveMenu(null);
 
     if (item.action) {
       await item.action();
     } else if (item.role) {
-      // Handle built-in roles via document commands
-      switch (item.role) {
-        case 'undo':
-          document.execCommand('undo');
-          break;
-        case 'redo':
-          document.execCommand('redo');
-          break;
-        case 'cut':
-          document.execCommand('cut');
-          break;
-        case 'copy':
-          document.execCommand('copy');
-          break;
-        case 'paste':
-          document.execCommand('paste');
-          break;
-        case 'selectAll':
-          document.execCommand('selectAll');
-          break;
-        case 'delete':
-          document.execCommand('delete');
-          break;
-      }
+      await performEditCommand(item.role);
     }
   };
 
@@ -161,8 +422,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
         label: 'Settings',
         accelerator: 'Ctrl+,',
         action: async () => {
-          // Open settings modal - we'll need to emit an event or use global state
-          console.log('Open settings');
+          onOpenSettings?.();
         },
       },
       { type: 'separator' },
@@ -280,23 +540,20 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
       {
         label: 'Documentation',
         action: async () => {
-          // Open documentation in external browser
-          console.log('Open documentation');
+          await openHelpLink(HELP_LINKS.documentation);
         },
       },
       {
         label: 'Community',
         action: async () => {
-          // Open community link
-          console.log('Open community');
+          await openHelpLink(HELP_LINKS.community);
         },
       },
       { type: 'separator' },
       {
         label: 'Report Issue',
         action: async () => {
-          // Open issue tracker
-          console.log('Report issue');
+          await openHelpLink(HELP_LINKS.issue);
         },
       },
       { type: 'separator' },
@@ -334,7 +591,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
 
   return (
     <div
-      className={`flex items-center justify-between h-8 select-none fixed top-0 left-0 right-0 z-30 transition-colors ${
+      className={`flex items-center justify-between h-8 select-none fixed top-0 left-0 right-0 z-[2147483646] transition-colors ${
         isDark
           ? 'bg-black border-b border-gray-900'
           : 'bg-white border-b border-gray-200'
@@ -368,7 +625,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
               {activeMenu === menuName && (
                 <div
                   className={`
-                    absolute top-full left-0 mt-0 min-w-[200px] py-1 shadow-lg rounded-md z-50
+                    absolute top-full left-0 mt-0 min-w-[200px] py-1 shadow-lg rounded-md z-[2147483647]
                     ${isDark
                       ? 'bg-[#1a1a1a] border border-gray-800'
                       : 'bg-white border border-gray-200'
@@ -459,7 +716,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
 
       {/* Emergency Reset Confirmation Dialog */}
       {showResetDialog && createPortal(
-        <div className="fixed inset-0 z-[99999] flex items-center justify-center">
+        <div className="fixed inset-0 z-[2147483647] flex items-center justify-center">
           {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/60 backdrop-blur-sm"

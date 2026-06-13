@@ -9,6 +9,7 @@
 
 import React, { memo, useState, useMemo, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
@@ -24,6 +25,7 @@ import {
   refreshTerminalCredentialCache,
 } from '../../../services/terminal-credentials';
 import { posApiGet } from '../../../utils/api-helpers';
+import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 type ViewMode = 'timeline' | 'list';
 type QuickFilter = 'today' | 'tomorrow' | 'week';
@@ -446,34 +448,34 @@ export const AppointmentsView: React.FC = memo(() => {
 
   if (!branchId || !effectiveOrgId) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-gray-50 text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-[#fdfaf5] text-gray-500'}`}>
         {t('appointments.selectBranch', 'Please select a branch to view appointments')}
-      </div>
+      </motion.div>
     );
   }
 
   return (
-    <div className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex gap-4">
-          <div className={`px-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
+      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
+        <motion.div variants={pageMotionContainer} className="flex gap-4">
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('appointments.stats.total', 'Total')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.total}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500 shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500 shadow-sm'}`}>
             <div className="text-sm text-green-500">{t('appointments.stats.confirmed', 'Confirmed')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.confirmed}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500 shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500 shadow-sm'}`}>
             <div className="text-sm text-yellow-500">{t('appointments.stats.inProgress', 'In Progress')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.inProgress}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
             <div className="text-sm text-gray-500">{t('appointments.stats.completed', 'Completed')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.completed}</div>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
 
         <div className="flex gap-2">
           <button
@@ -493,13 +495,14 @@ export const AppointmentsView: React.FC = memo(() => {
             />
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Filters Row */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex gap-2">
+      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
+        <motion.div variants={pageMotionContainer} className="flex gap-2">
           {(['today', 'tomorrow', 'week'] as QuickFilter[]).map(filter => (
-            <button
+            <motion.button
+              variants={pageMotionItem}
               key={filter}
               onClick={() => handleQuickFilter(filter)}
               className={`px-3 py-1.5 rounded-lg text-sm ${
@@ -509,9 +512,9 @@ export const AppointmentsView: React.FC = memo(() => {
               }`}
             >
               {t(`appointments.filters.${filter}`, filter.charAt(0).toUpperCase() + filter.slice(1))}
-            </button>
+            </motion.button>
           ))}
-        </div>
+        </motion.div>
 
         <div className="flex items-center gap-2">
           <button onClick={() => navigateDate('prev')} className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}>
@@ -557,21 +560,21 @@ export const AppointmentsView: React.FC = memo(() => {
             ))}
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Loading State */}
       {isLoading && appointments.length === 0 && (
-        <div className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           {t('appointments.loading', 'Loading appointments...')}
-        </div>
+        </motion.div>
       )}
 
       {/* Content */}
       {!isLoading && (
-        <div className="flex-1 overflow-hidden">
+        <motion.div variants={pageMotionItem} className="flex-1 overflow-hidden">
           {viewMode === 'timeline' ? (
-            <div className="h-full overflow-y-auto">
+            <motion.div variants={pageMotionContainer} className="h-full overflow-y-auto">
               <div className="grid grid-cols-[60px_1fr] gap-2">
                 {timeSlots.map(hour => {
                   const hourAppointments = appointmentsByHour[hour] || [];
@@ -583,7 +586,8 @@ export const AppointmentsView: React.FC = memo(() => {
                       <div className={`min-h-[60px] p-2 rounded-lg ${isDark ? 'bg-gray-800/50' : 'bg-gray-50'}`}>
                         <div className="flex flex-wrap gap-2">
                           {hourAppointments.map(apt => (
-                            <div
+                            <motion.div
+                              variants={pageMotionItem}
                               key={apt.id}
                               className={`px-3 py-2 rounded-lg border-l-4 border-${statusConfig[apt.status].color}-500 ${
                                 isDark ? 'bg-gray-700' : 'bg-white shadow-sm'
@@ -620,7 +624,7 @@ export const AppointmentsView: React.FC = memo(() => {
                                   );
                                 })}
                               </div>
-                            </div>
+                            </motion.div>
                           ))}
                         </div>
                       </div>
@@ -628,11 +632,12 @@ export const AppointmentsView: React.FC = memo(() => {
                   );
                 })}
               </div>
-            </div>
+            </motion.div>
           ) : (
-            <div className="h-full overflow-y-auto space-y-2">
+            <motion.div variants={pageMotionContainer} className="h-full overflow-y-auto space-y-2">
               {appointments.map(apt => (
-                <div
+                <motion.div
+                  variants={pageMotionItem}
                   key={apt.id}
                   className={`p-4 rounded-xl border-l-4 border-${statusConfig[apt.status].color}-500 ${
                     isDark ? 'bg-gray-800' : 'bg-white shadow-sm'
@@ -682,19 +687,19 @@ export const AppointmentsView: React.FC = memo(() => {
                       })}
                     </div>
                   </div>
-                </div>
+                </motion.div>
               ))}
-            </div>
+            </motion.div>
           )}
 
           {appointments.length === 0 && !isLoading && (
-            <div className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+            <motion.div variants={pageMotionItem} className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
               <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />
               <p className="text-lg font-medium mb-2">No appointments found</p>
               <p className="text-sm">Try selecting a different date or adjusting your filters</p>
-            </div>
+            </motion.div>
           )}
-        </div>
+        </motion.div>
       )}
 
       {/* Floating Action Button */}
@@ -751,7 +756,7 @@ export const AppointmentsView: React.FC = memo(() => {
           setShowCustomerSearch(false);
         }}
       />
-    </div>
+    </motion.div>
   );
 });
 

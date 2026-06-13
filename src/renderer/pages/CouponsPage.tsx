@@ -487,28 +487,21 @@ const CouponsPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-white text-gray-900'}`}>
+    <div className={`h-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <div className="flex items-center gap-3">
-          <div className={`p-2 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
-            <Ticket className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold">{t('coupons.title', 'Coupons')}</h1>
-            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-              {t('coupons.subtitle', 'Manage discount codes for this branch')}
-            </p>
-          </div>
+        <div className="min-w-0">
+          <h1 className="truncate text-3xl font-bold tracking-tight">
+            {t('coupons.title', 'Coupons')}
+          </h1>
+          <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+            {t('coupons.subtitle', 'Manage discount codes for this branch')}
+          </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             onClick={() => setShowScanPanel(true)}
-            className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
-              isDark
-                ? 'bg-cyan-500/15 text-cyan-100 border border-cyan-500/40 hover:bg-cyan-500/25'
-                : 'bg-cyan-50 text-cyan-800 border border-cyan-200 hover:bg-cyan-100'
-            }`}
+            className="h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 bg-transparent text-white border border-cyan-500/40"
           >
             <ScanLine className="w-4 h-4" />
             {t('coupons.scan.button', 'Scan')}
@@ -539,8 +532,16 @@ const CouponsPage: React.FC = () => {
             {t('coupons.activeOnly', 'Active Only')}
           </button>
           <button
-            onClick={fetchCoupons}
-            className={`h-10 w-10 inline-flex items-center justify-center rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+            type="button"
+            onClick={() => void fetchCoupons()}
+            disabled={loading}
+            title={t('common.refresh', 'Refresh')}
+            aria-label={t('common.refresh', 'Refresh')}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+              isDark
+                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                : 'border border-black bg-black text-white hover:bg-zinc-800'
+            } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -555,7 +556,7 @@ const CouponsPage: React.FC = () => {
         >
           <div className="flex items-center gap-3">
             <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-              <CheckCircle className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+              <CheckCircle className="w-5 h-5 text-green-500" />
             </div>
             <div>
               <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
@@ -573,7 +574,7 @@ const CouponsPage: React.FC = () => {
         >
           <div className="flex items-center gap-3">
             <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-              <Ticket className={`w-5 h-5 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`} />
+              <Ticket className="w-5 h-5 text-yellow-500" />
             </div>
             <div>
               <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
@@ -636,14 +637,12 @@ const CouponsPage: React.FC = () => {
                         )}
                       </button>
                       {isValid ? (
-                        <span className={`px-2 py-0.5 text-xs rounded-lg inline-flex items-center gap-1 ${
-                          isDark ? 'bg-zinc-900 text-zinc-200 border border-zinc-700' : 'bg-gray-100 text-gray-900 border border-gray-300'
-                        }`}>
+                        <span className="text-xs font-semibold text-green-500 inline-flex items-center gap-1">
                           <CheckCircle className="w-3 h-3" />
                           {t('common.active', 'Active')}
                         </span>
                       ) : (
-                        <span className="px-2 py-0.5 text-xs bg-red-500/20 text-red-400 rounded-lg inline-flex items-center gap-1">
+                        <span className="text-xs font-semibold text-red-400 inline-flex items-center gap-1">
                           <XCircle className="w-3 h-3" />
                           {expired ? t('coupons.expired', 'Expired') : usedUp ? t('coupons.usedUp', 'Used Up') : t('common.inactive', 'Inactive')}
                         </span>
@@ -714,7 +713,7 @@ const CouponsPage: React.FC = () => {
                       title={toggleAction.message || (coupon.is_active ? t('common.deactivate', 'Deactivate') : t('common.activate', 'Activate'))}
                       className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
                         coupon.is_active
-                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                          ? 'bg-transparent text-amber-300 border border-amber-500/40'
                           : isDark
                             ? 'bg-zinc-900 text-zinc-100 border border-zinc-700 hover:bg-zinc-800'
                             : 'bg-white text-black border border-gray-300 hover:bg-gray-100'

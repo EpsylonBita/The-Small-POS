@@ -2623,11 +2623,16 @@
       "loadingMethods": "Loading payment methods",
       "loadingMethodsHint": "Checking terminal payment configuration...",
       "splitSimple": "SPLIT",
-      "enterCashReceived": "[NEEDS EN TRANSLATION] Μετρητά που Παραλήφθηκαν",
-      "insufficient": "[NEEDS EN TRANSLATION] Ανεπαρκή",
-      "completeCash": "[NEEDS EN TRANSLATION] Ολοκλήρωση",
-      "cashSimple": "[NEEDS EN TRANSLATION] ΜΕΤΡΗΤΑ",
-      "cardSimple": "[NEEDS EN TRANSLATION] ΚΑΡΤΑ"
+      "enterCashReceived": "Cash Received",
+      "insufficient": "Insufficient",
+      "completeCash": "Complete",
+      "cashSimple": "CASH",
+      "cardSimple": "CARD",
+      "roomChargeSimple": "ROOM",
+      "roomChargeRoom": "Room {{roomNumber}}",
+      "roomChargeLabel": "Charge to room",
+      "roomChargeSuccess": "Charged to room",
+      "roomChargeFallback": "Room charge was not applied. Complete payment now for this order."
     },
     "customerSearch": {
       "title": "Search Customer",
@@ -2729,9 +2734,9 @@
       "transaction": "Transaction",
       "coveredItems": "Covered Items",
       "item": "Item",
-      "address": "[NEEDS EN TRANSLATION] Διεύθυνση",
-      "noPhone": "[NEEDS EN TRANSLATION] Χωρίς τηλέφωνο",
-      "paymentMethod": "[NEEDS EN TRANSLATION] Τρόπος Πληρωμής"
+      "address": "Address",
+      "noPhone": "No phone",
+      "paymentMethod": "Payment Method"
     },
     "simplePricing": {
       "title": "Set Pricing"
@@ -5928,13 +5933,93 @@
       "loadFailed": "[NEEDS EN TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
     }
   },
+  "roomsView": {
+    "noBranch": "Please select a branch to view rooms",
+    "status": {
+      "available": "Available",
+      "occupied": "Occupied",
+      "reserved": "Reserved",
+      "maintenance": "Maintenance",
+      "cleaning": "Cleaning"
+    }
+  },
   "guestBilling": {
+    "room": "Room",
+    "folioDetails": "Folio Details",
+    "ongoing": "Ongoing",
+    "totalCharges": "Total Charges",
+    "totalPayments": "Total Payments",
+    "notes": "Notes",
+    "balance": "Balance",
+    "addCharge": "Add Charge",
+    "payment": "Payment",
+    "checkout": "Checkout",
+    "printFolio": "Print Folio",
+    "searchPlaceholder": "Search guest or room...",
+    "outstandingBalanceLabel": "Outstanding balance",
+    "status": {
+      "active": "Active",
+      "closed": "Closed",
+      "disputed": "Disputed"
+    },
     "empty": {
-      "title": "[NEEDS EN TRANSLATION] Δεν υπάρχουν λογαριασμοί επισκεπτών",
-      "description": "[NEEDS EN TRANSLATION] Οι λογαριασμοί επισκεπτών θα εμφανιστούν εδώ όταν δημιουργηθούν."
+      "title": "No guest folios",
+      "description": "Guest folios will appear here when created."
     },
     "stats": {
-      "openFolios": "[NEEDS EN TRANSLATION] Ανοιχτοί Λογαριασμοί"
+      "activeFolios": "Active Folios",
+      "outstandingBalance": "Outstanding Balance",
+      "disputed": "Disputed",
+      "openFolios": "Open Folios"
+    },
+    "fields": {
+      "chargeType": "Charge Type",
+      "description": "Description",
+      "paymentMethod": "Payment Method",
+      "amount": "Amount",
+      "quantity": "Quantity",
+      "reference": "Reference",
+      "notes": "Notes"
+    },
+    "chargeTypes": {
+      "room": "Room",
+      "food": "Food",
+      "beverage": "Beverage",
+      "service": "Service",
+      "tax": "Tax",
+      "other": "Other"
+    },
+    "paymentMethods": {
+      "cash": "Cash",
+      "card": "Card",
+      "bankTransfer": "Bank Transfer",
+      "other": "Other"
+    },
+    "chargeModal": {
+      "title": "Add Charge",
+      "submit": "Post Charge",
+      "success": "Charge posted to folio"
+    },
+    "paymentModal": {
+      "title": "Add Payment",
+      "submit": "Post Payment",
+      "success": "Payment posted to folio"
+    },
+    "checkoutModal": {
+      "success": "Guest checked out",
+      "outstanding": "Outstanding balance {{balance}} remains. Add a payment before checkout."
+    },
+    "errors": {
+      "moduleRequired": "Guest billing is not enabled for this terminal.",
+      "actionFailed": "Failed to update the folio."
+    },
+    "error": {
+      "title": "Failed to load guest folios"
+    },
+    "validation": {
+      "amount": "Enter an amount greater than zero.",
+      "quantity": "Quantity must be greater than zero.",
+      "description": "Description is required."
     }
   },
   "filters": {

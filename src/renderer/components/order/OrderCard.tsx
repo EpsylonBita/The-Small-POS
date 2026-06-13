@@ -35,6 +35,38 @@ interface OrderCardProps {
   storeMapOrigin?: StoreMapOrigin | null;
 }
 
+const KIOSK_ORDER_NUMBER_PATTERN = /^#?[A-Za-z]+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\d+$/;
+const KIOSK_SHORT_ORDER_NUMBER_PATTERN = /^#?K[A-Za-z]*-\d+$/i;
+
+function readFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function resolveOrderTotalAmount(order: unknown): number {
+  const record = (order ?? {}) as Record<string, unknown>;
+  const cents =
+    readFiniteNumber(record.total_amount_cents) ??
+    readFiniteNumber(record.totalAmountCents);
+  if (cents !== null) {
+    return cents / 100;
+  }
+
+  return (
+    readFiniteNumber(record.total_amount) ??
+    readFiniteNumber(record.totalAmount) ??
+    0
+  );
+}
+
 export const OrderCard = memo<OrderCardProps>(({
   order,
   isSelected,
@@ -93,6 +125,16 @@ export const OrderCard = memo<OrderCardProps>(({
         return compactFallbackNumber.startsWith('#')
           ? compactFallbackNumber
           : `#${compactFallbackNumber}`;
+      }
+
+      if (
+        KIOSK_ORDER_NUMBER_PATTERN.test(trimmedOrderNum) ||
+        KIOSK_SHORT_ORDER_NUMBER_PATTERN.test(trimmedOrderNum)
+      ) {
+        return formatCompactOrderNumberForDisplay(
+          trimmedOrderNum,
+          order.created_at || order.createdAt,
+        );
       }
 
       // If it's already formatted like "POS-20251212-0001", extract the last part
@@ -281,7 +323,7 @@ export const OrderCard = memo<OrderCardProps>(({
     return parts[0];
   };
   const requestedRef = useRef(false);
-  const totalNormalized = typeof order.totalAmount === 'number' ? order.totalAmount : (typeof order.total_amount === 'number' ? order.total_amount : 0);
+  const totalNormalized = resolveOrderTotalAmount(order);
 
   // Normalize plugin field (could be plugin/order_plugin or legacy platform)
   const orderPlugin = order.plugin || order.order_plugin || order.platform || order.order_platform || '';
@@ -371,7 +413,7 @@ export const OrderCard = memo<OrderCardProps>(({
   return (
     <div
       className={`relative rounded-2xl sm:rounded-full py-3 sm:py-3 px-3 sm:px-6 cursor-pointer transform transition-all duration-300 backdrop-blur-sm touch-feedback ${resolvedTheme === 'light'
-        ? 'bg-gray-50/90 border border-gray-200/60 hover:bg-gray-100/90 hover:border-gray-300/60 shadow-sm hover:shadow-lg active:bg-gray-200/90'
+        ? 'bg-[#fffaf1]/90 border border-amber-100/80 hover:bg-[#fff6e8]/95 hover:border-amber-200/80 shadow-sm hover:shadow-lg active:bg-[#f8ecd9]/95'
         : 'bg-white/10 border border-white/20 hover:bg-white/15 hover:border-white/30 shadow-lg hover:shadow-xl active:bg-white/20'
         } ${deliveryOlderThan40
           ? 'border-red-500/60 shadow-[inset_0_0_15px_rgba(239,68,68,0.6),inset_0_0_30px_rgba(239,68,68,0.4),inset_0_0_50px_rgba(239,68,68,0.25),inset_0_0_80px_rgba(239,68,68,0.15)] animate-pulse'
@@ -536,7 +578,7 @@ export const OrderCard = memo<OrderCardProps>(({
 
       {/* Quick Actions - Order Status Controls */}
       {showQuickActions && onStatusChange && onDriverAssign && (
-        <div className={`mt-4 pt-4 border-t ${resolvedTheme === 'light' ? 'border-gray-200' : 'border-white/10'
+        <div className={`mt-4 pt-4 border-t ${resolvedTheme === 'light' ? 'border-amber-100/80' : 'border-white/10'
           }`}>
           <OrderStatusControls
             order={order}

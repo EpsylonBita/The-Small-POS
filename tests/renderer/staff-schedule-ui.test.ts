@@ -22,7 +22,6 @@ const branchDataPath = path.join(
 );
 const localesDir = path.join(projectRoot, 'src', 'locales');
 const requiredStaffScheduleKeys = [
-  'actions.addShift',
   'actions.close',
   'actions.nextWeek',
   'actions.previousWeek',
@@ -114,6 +113,39 @@ test('StaffScheduleView uses a responsive calendar without visible scrollbars', 
     /h-9 w-9/,
     'day-card add buttons should fit inside seven-column cards',
   );
+});
+
+test('StaffScheduleView uses yellow accents for selected controls instead of blue chrome', () => {
+  const source = readScheduleSource();
+
+  assert.match(source, /focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400\/25/);
+  assert.match(source, /bg-yellow-400 px-4 py-3 text-sm font-semibold text-black/);
+  assert.match(source, /bg-yellow-400 border-yellow-400 text-black/);
+  assert.match(source, /bg-yellow-950\/20 border-yellow-500/);
+  assert.match(source, /bg-yellow-100 border-yellow-200 text-yellow-800/);
+  assert.match(source, /hover:border-yellow-500 hover:text-yellow-200/);
+  assert.doesNotMatch(source, /staffSchedule\.actions\.addShift/);
+  assert.match(source, /staffSchedule\.addShiftForDay/);
+  assert.doesNotMatch(source, /focus:border-blue-500/);
+  assert.doesNotMatch(source, /bg-blue-600/);
+  assert.doesNotMatch(source, /border-blue-500/);
+  assert.doesNotMatch(source, /border-blue-600/);
+  assert.doesNotMatch(source, /text-blue-/);
+  assert.doesNotMatch(source, /rgba\(37,99,235/);
+  assert.doesNotMatch(source, /rgba\(59,130,246/);
+  assert.doesNotMatch(source, /style=\{roleFilter === role \?/);
+});
+
+test('StaffScheduleView only shows ERGANI publish when the plugin is acquired', () => {
+  const source = readScheduleSource();
+
+  assert.match(source, /const ERGANI_PLUGIN_ID = 'ergani_digital_schedule'/);
+  assert.match(source, /posApiGet<\{ integrations\?: PosIntegrationPayload\[\] \}>/);
+  assert.match(source, /\/pos\/integrations\?provider=\$\{ERGANI_PLUGIN_ID\}/);
+  assert.match(source, /integration\.is_purchased === true/);
+  assert.match(source, /integration\.is_enabled !== false/);
+  assert.match(source, /\{hasErganiPlugin \? \(\s*<button[\s\S]*Publish to ERGANI/);
+  assert.match(source, /\{hasErganiPlugin && erganiPublishStatus \? \(/);
 });
 
 test('StaffScheduleView passes role filters through the admin staff-schedule sync path', () => {

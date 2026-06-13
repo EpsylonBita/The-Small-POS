@@ -1,11 +1,41 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { CreditCard, Banknote, AlertTriangle, Split } from 'lucide-react';
+import { CreditCard, Banknote, AlertTriangle, Split, BedDouble } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../../hooks/useFeatures';
+import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { ActivityTracker } from '../../services/ActivityTracker';
+
+export interface RoomChargeContext {
+  roomId: string;
+  roomNumber?: string | null;
+  guestName?: string | null;
+  activeFolioId?: string | null;
+}
+
+export interface RoomChargeFallbackPrompt {
+  roomChargeApplied: false;
+  orderId: string;
+  orderNumber?: string;
+  amount?: number;
+  reason?: string;
+}
+
+export type PaymentMethodSelection = 'cash' | 'card' | 'room_charge';
+
+export type PaymentCompletionResult = void | boolean | RoomChargeFallbackPrompt;
+
+export const isRoomChargeFallbackPrompt = (
+  value: PaymentCompletionResult,
+): value is RoomChargeFallbackPrompt =>
+  Boolean(
+    value &&
+      typeof value === 'object' &&
+      (value as RoomChargeFallbackPrompt).roomChargeApplied === false &&
+      typeof (value as RoomChargeFallbackPrompt).orderId === 'string',
+  );
 
 interface PaymentModalProps {
   isOpen: boolean;
@@ -17,15 +47,22 @@ interface PaymentModalProps {
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   minimumOrderAmount?: number; // From delivery zone settings in admin dashboard
   onPaymentComplete: (paymentData: {
-    method: 'cash' | 'card';
+    method: PaymentMethodSelection;
     amount: number;
     transactionId?: string;
     driverId?: string;
     cashReceived?: number;
     change?: number;
-  }) => void | Promise<void | boolean>;
+    roomId?: string;
+    room_id?: string;
+    roomCharge?: RoomChargeContext;
+    existingOrderId?: string;
+    existingOrderNumber?: string;
+    roomChargeFallback?: boolean;
+  }) => PaymentCompletionResult | Promise<PaymentCompletionResult>;
   /** When provided, a "Split" button is rendered alongside Cash/Card in the payment selection step. */
   onSplitPayment?: () => void;
+  roomChargeContext?: RoomChargeContext | null;
 }
 
 type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input';
@@ -40,17 +77,34 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   orderType,
   minimumOrderAmount = 0, // Default to 0 (no minimum) if not provided
   onPaymentComplete,
-  onSplitPayment
+  onSplitPayment,
+  roomChargeContext = null,
 }) => {
   const { t } = useTranslation();
   const { isFeatureEnabled, isMobileWaiter, loading: isFeatureLoading } = useFeatures();
+  const { hasModule } = useAcquiredModules();
   const canUseCash = isFeatureEnabled('cashPayments');
   const canUseCard = isFeatureEnabled('cardPayments');
-  const hasAnyPaymentMethod = canUseCash || canUseCard;
   const [isProcessingPayment, setIsProcessingPayment] = useState(isProcessing);
   const [cashReceived, setCashReceived] = useState<string>('');
-  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'cash' | 'card' | null>(null);
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethodSelection | null>(null);
+  const [roomChargeFallback, setRoomChargeFallback] = useState<RoomChargeFallbackPrompt | null>(null);
   const cashInputRef = useRef<HTMLInputElement | null>(null);
+  const canUseRoomCharge =
+    !roomChargeFallback &&
+    Boolean(roomChargeContext?.roomId && roomChargeContext?.activeFolioId) &&
+    hasModule(MODULE_IDS.ROOMS) &&
+    hasModule(MODULE_IDS.ORDERS) &&
+    hasModule('guest_billing');
+  const hasAnyPaymentMethod = canUseCash || canUseCard || canUseRoomCharge;
+  const paymentOptionCount =
+    2 + (onSplitPayment ? 1 : 0) + (canUseRoomCharge ? 1 : 0);
+  const paymentGridClass =
+    paymentOptionCount >= 4
+      ? 'grid-cols-2 xl:grid-cols-4'
+      : paymentOptionCount === 3
+        ? 'grid-cols-3'
+        : 'grid-cols-2';
 
   // Check if order is below minimum (only if a minimum is set)
   const isBelowMinimum = minimumOrderAmount > 0 && orderTotal < minimumOrderAmount;
@@ -75,6 +129,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setIsProcessingPayment(isProcessing);
       setCashReceived('');
       setSelectedPaymentMethod(null);
+      setRoomChargeFallback(null);
     }
   }, [isOpen, isProcessing, isBelowMinimum]);
 
@@ -89,11 +144,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   }, [isOpen, currentStep]);
 
   // Handle payment method selection
-  const handlePaymentMethodSelect = (method: 'cash' | 'card') => {
+  const handlePaymentMethodSelect = (method: PaymentMethodSelection) => {
+    if (method === 'room_charge' && !canUseRoomCharge) return;
     setSelectedPaymentMethod(method);
 
-    // For delivery orders or card payment, process immediately
-    if (orderType === 'delivery' || method === 'card') {
+    // For delivery orders, card payment, and charge-to-room, process immediately
+    if (orderType === 'delivery' || method === 'card' || method === 'room_charge') {
       handleSimplePayment(method);
     } else {
       // For pickup/in-store with cash, show cash input
@@ -102,7 +158,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   };
 
   // Simple payment handler - just method, no amount input needed
-  const handleSimplePayment = async (method: 'cash' | 'card') => {
+  const handleSimplePayment = async (method: PaymentMethodSelection) => {
     setIsProcessingPayment(true);
     try {
       // Intentional 500ms delay: gives the user visible feedback that the
@@ -111,16 +167,66 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       // button did nothing because the modal dismisses instantly.
       await new Promise(resolve => setTimeout(resolve, 500));
 
-      const txId = `${method.toUpperCase()}-${Date.now()}`;
+      const txId = `${method.toUpperCase().replace('_', '-')}-${Date.now()}`;
 
-      const completionResult = await onPaymentComplete({
+      const paymentPayload = {
         method,
         amount: orderTotal,
         transactionId: txId,
         driverId: undefined,
         cashReceived: method === 'cash' ? (cashAmount || orderTotal) : undefined,
-        change: method === 'cash' ? (changeAmount > 0 ? changeAmount : 0) : undefined
-      });
+        change: method === 'cash' ? (changeAmount > 0 ? changeAmount : 0) : undefined,
+        ...(method === 'room_charge' && roomChargeContext
+          ? {
+              roomId: roomChargeContext.roomId,
+              room_id: roomChargeContext.roomId,
+              roomCharge: roomChargeContext,
+            }
+          : {}),
+        ...(roomChargeFallback && method !== 'room_charge'
+          ? {
+              existingOrderId: roomChargeFallback.orderId,
+              existingOrderNumber: roomChargeFallback.orderNumber,
+              roomChargeFallback: true,
+            }
+          : {}),
+      };
+
+      const completionResult = await onPaymentComplete(paymentPayload);
+
+      if (isRoomChargeFallbackPrompt(completionResult)) {
+        setRoomChargeFallback(completionResult);
+        setSelectedPaymentMethod(null);
+        toast.error(
+          t(
+            'modals.payment.roomChargeFallback',
+            'Room charge was not applied. Collect cash or card payment for this order.',
+          ),
+        );
+        return;
+      }
+
+      if (
+        method === 'room_charge' &&
+        completionResult === false &&
+        paymentPayload.existingOrderId
+      ) {
+        setRoomChargeFallback({
+          roomChargeApplied: false,
+          orderId: paymentPayload.existingOrderId,
+          orderNumber: paymentPayload.existingOrderNumber,
+          amount: orderTotal,
+          reason: 'room_charge_not_applied',
+        });
+        setSelectedPaymentMethod(null);
+        toast.error(
+          t(
+            'modals.payment.roomChargeFallback',
+            'Room charge was not applied. Collect cash or card payment for this order.',
+          ),
+        );
+        return;
+      }
 
       if (completionResult === false) {
         return;
@@ -130,7 +236,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         ActivityTracker.trackPaymentCompleted(orderTotal, method, txId, undefined);
       } catch { }
 
-      toast.success(t(`modals.payment.${method}Success`));
+      toast.success(
+        method === 'room_charge'
+          ? t('modals.payment.roomChargeSuccess', 'Charged to room')
+          : t(`modals.payment.${method}Success`),
+      );
       onClose();
     } catch (error) {
       toast.error(t('modals.payment.paymentFailed'));
@@ -157,6 +267,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setIsProcessingPayment(false);
     setCashReceived('');
     setSelectedPaymentMethod(null);
+    setRoomChargeFallback(null);
   };
 
   const handleBackToPaymentSelection = () => {
@@ -316,7 +427,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 </div>
               </div>
             ) : (
-              <div className={`grid gap-6 ${onSplitPayment ? 'grid-cols-3' : 'grid-cols-2'}`}>
+              <div className={`grid gap-6 ${paymentGridClass}`}>
                 {/* Cash Option */}
                 <button
                   onClick={() => canUseCash && handlePaymentMethodSelect('cash')}
@@ -375,6 +486,35 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   )}
                 </button>
 
+                {canUseRoomCharge && roomChargeContext && (
+                  <button
+                    onClick={() => handlePaymentMethodSelect('room_charge')}
+                    disabled={isProcessingPayment}
+                    className={`group relative flex flex-col items-center justify-center p-10 rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                      ${isProcessingPayment
+                        ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
+                        : 'border-amber-400/30 bg-gradient-to-br from-amber-500/10 to-amber-600/5 hover:from-amber-500/20 hover:to-amber-600/10 hover:border-amber-400/50 hover:scale-105 hover:shadow-xl hover:shadow-amber-500/20 active:scale-100'
+                      }`}
+                  >
+                    <BedDouble
+                      className={`w-20 h-20 mb-3 transition-all duration-300 group-hover:scale-110
+                        ${isProcessingPayment ? 'text-gray-400' : 'text-amber-400 group-hover:text-amber-300'}`}
+                      strokeWidth={1.5}
+                    />
+
+                    <span className={`text-2xl font-bold tracking-wide uppercase transition-colors duration-300
+                      ${isProcessingPayment ? 'text-gray-400' : 'text-amber-400 group-hover:text-amber-300'}`}
+                    >
+                      {t('modals.payment.roomChargeSimple', 'ROOM')}
+                    </span>
+                    <p className="mt-2 max-w-36 truncate text-center text-xs liquid-glass-modal-text-muted">
+                      {roomChargeContext.roomNumber
+                        ? t('modals.payment.roomChargeRoom', 'Room {{roomNumber}}', { roomNumber: roomChargeContext.roomNumber })
+                        : t('modals.payment.roomChargeLabel', 'Charge to room')}
+                    </p>
+                  </button>
+                )}
+
                 {/* Split Option — shown only when onSplitPayment callback is provided */}
                 {onSplitPayment && (
                   <button
@@ -407,6 +547,18 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               <div className="mt-4 text-center">
                 <p className="text-sm liquid-glass-modal-text-muted animate-pulse">
                   {t('modals.payment.processing')}
+                </p>
+              </div>
+            )}
+
+            {roomChargeFallback && !isProcessingPayment && (
+              <div className="mt-4 flex items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+                <AlertTriangle className="h-5 w-5 flex-shrink-0 text-amber-400" />
+                <p className="text-sm text-amber-300">
+                  {t(
+                    'modals.payment.roomChargeFallback',
+                    'Room charge was not applied. Collect cash or card payment for this order.',
+                  )}
                 </p>
               </div>
             )}

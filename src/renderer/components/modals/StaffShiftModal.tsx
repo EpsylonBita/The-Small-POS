@@ -12,6 +12,7 @@ import { VarianceBadge } from '../ui/VarianceBadge';
 import { formatTime, formatCurrency } from '../../utils/format';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import { toLocalDateString } from '../../utils/date';
+import { posApiGet } from '../../utils/api-helpers';
 import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
@@ -103,8 +104,18 @@ interface StaffAuthCachePayload {
   staff: StaffMember[];
 }
 
+interface PosIntegrationPayload {
+  id?: string;
+  plugin_id?: string | null;
+  provider?: string | null;
+  is_purchased?: boolean;
+  is_enabled?: boolean;
+  is_active?: boolean;
+}
+
 const STAFF_AUTH_CACHE_CATEGORY = 'staff_auth_cache';
 const STAFF_AUTH_CACHE_VERSION = 1;
+const ERGANI_PLUGIN_ID = 'ergani_digital_schedule';
 
 type CheckInStep = 'select-staff' | 'enter-pin' | 'select-role' | 'enter-cash';
 type StaffShiftRole = 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
@@ -124,66 +135,75 @@ interface RolePresentation {
 const FALLBACK_ROLE_PRESENTATION: RolePresentation = {
   badgeFilled: 'border-slate-400/40 bg-slate-500/12 text-slate-700 dark:border-slate-400/30 dark:bg-slate-500/14 dark:text-slate-200',
   badgeOutline: 'border-slate-400/40 bg-transparent text-slate-600 dark:border-white/10 dark:bg-transparent dark:text-slate-300',
-  iconSurface: 'border-slate-200/90 bg-slate-100/90 dark:border-white/10 dark:bg-white/[0.05]',
+  iconSurface: 'border-slate-300/80 bg-transparent dark:border-white/10 dark:bg-transparent',
   iconColor: 'text-slate-600 dark:text-slate-200',
   accentText: 'text-slate-700 dark:text-slate-100',
   accentSurface: 'bg-slate-100/90 dark:bg-white/[0.05]',
   accentBorder: 'border-slate-200/90 dark:border-white/10',
-  buttonSurface: 'border-slate-200/90 bg-white/90 text-slate-700 hover:border-slate-300 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]',
+  buttonSurface: 'border-slate-300/80 bg-transparent text-slate-700 hover:border-slate-400 hover:bg-transparent dark:border-white/10 dark:bg-transparent dark:text-slate-100 dark:hover:bg-transparent',
 };
 
 const ROLE_PRESENTATIONS: Record<StaffShiftRole, RolePresentation> = {
   cashier: {
     badgeFilled: 'border-amber-400/45 bg-amber-500/12 text-amber-700 dark:border-amber-400/35 dark:bg-amber-500/14 dark:text-amber-200',
     badgeOutline: 'border-amber-400/45 bg-transparent text-amber-700 dark:border-amber-400/30 dark:bg-transparent dark:text-amber-200',
-    iconSurface: 'border-amber-200 bg-amber-50/90 dark:border-amber-400/30 dark:bg-amber-500/10',
+    iconSurface: 'border-amber-400/45 bg-transparent dark:border-amber-400/35 dark:bg-transparent',
     iconColor: 'text-amber-600 dark:text-amber-200',
     accentText: 'text-amber-700 dark:text-amber-200',
     accentSurface: 'bg-amber-50/90 dark:bg-amber-500/10',
     accentBorder: 'border-amber-200/90 dark:border-amber-400/30',
-    buttonSurface: 'border-amber-200 bg-white text-amber-700 hover:border-amber-300 hover:bg-amber-50 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100 dark:hover:bg-amber-500/16',
+    buttonSurface: 'border-amber-400/45 bg-transparent text-amber-700 hover:border-amber-400 hover:bg-transparent dark:border-amber-400/30 dark:bg-transparent dark:text-amber-100 dark:hover:bg-transparent',
   },
   driver: {
     badgeFilled: 'border-cyan-400/45 bg-cyan-500/12 text-cyan-700 dark:border-cyan-400/35 dark:bg-cyan-500/14 dark:text-cyan-200',
     badgeOutline: 'border-cyan-400/45 bg-transparent text-cyan-700 dark:border-cyan-400/30 dark:bg-transparent dark:text-cyan-200',
-    iconSurface: 'border-cyan-200 bg-cyan-50/90 dark:border-cyan-400/30 dark:bg-cyan-500/10',
+    iconSurface: 'border-cyan-400/45 bg-transparent dark:border-cyan-400/35 dark:bg-transparent',
     iconColor: 'text-cyan-600 dark:text-cyan-200',
     accentText: 'text-cyan-700 dark:text-cyan-200',
     accentSurface: 'bg-cyan-50/90 dark:bg-cyan-500/10',
     accentBorder: 'border-cyan-200/90 dark:border-cyan-400/30',
-    buttonSurface: 'border-cyan-200 bg-white text-cyan-700 hover:border-cyan-300 hover:bg-cyan-50 dark:border-cyan-400/30 dark:bg-cyan-500/10 dark:text-cyan-100 dark:hover:bg-cyan-500/16',
+    buttonSurface: 'border-cyan-400/45 bg-transparent text-cyan-700 hover:border-cyan-400 hover:bg-transparent dark:border-cyan-400/30 dark:bg-transparent dark:text-cyan-100 dark:hover:bg-transparent',
   },
   kitchen: {
     badgeFilled: 'border-rose-400/45 bg-rose-500/12 text-rose-700 dark:border-rose-400/35 dark:bg-rose-500/14 dark:text-rose-200',
     badgeOutline: 'border-rose-400/45 bg-transparent text-rose-700 dark:border-rose-400/30 dark:bg-transparent dark:text-rose-200',
-    iconSurface: 'border-rose-200 bg-rose-50/90 dark:border-rose-400/30 dark:bg-rose-500/10',
+    iconSurface: 'border-rose-400/45 bg-transparent dark:border-rose-400/35 dark:bg-transparent',
     iconColor: 'text-rose-600 dark:text-rose-200',
     accentText: 'text-rose-700 dark:text-rose-200',
     accentSurface: 'bg-rose-50/90 dark:bg-rose-500/10',
     accentBorder: 'border-rose-200/90 dark:border-rose-400/30',
-    buttonSurface: 'border-rose-200 bg-white text-rose-700 hover:border-rose-300 hover:bg-rose-50 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100 dark:hover:bg-rose-500/16',
+    buttonSurface: 'border-rose-400/45 bg-transparent text-rose-700 hover:border-rose-400 hover:bg-transparent dark:border-rose-400/30 dark:bg-transparent dark:text-rose-100 dark:hover:bg-transparent',
   },
   server: {
     badgeFilled: 'border-indigo-400/45 bg-indigo-500/12 text-indigo-700 dark:border-indigo-400/35 dark:bg-indigo-500/14 dark:text-indigo-200',
     badgeOutline: 'border-indigo-400/45 bg-transparent text-indigo-700 dark:border-indigo-400/30 dark:bg-transparent dark:text-indigo-200',
-    iconSurface: 'border-indigo-200 bg-indigo-50/90 dark:border-indigo-400/30 dark:bg-indigo-500/10',
+    iconSurface: 'border-indigo-400/45 bg-transparent dark:border-indigo-400/35 dark:bg-transparent',
     iconColor: 'text-indigo-600 dark:text-indigo-200',
     accentText: 'text-indigo-700 dark:text-indigo-200',
     accentSurface: 'bg-indigo-50/90 dark:bg-indigo-500/10',
     accentBorder: 'border-indigo-200/90 dark:border-indigo-400/30',
-    buttonSurface: 'border-indigo-200 bg-white text-indigo-700 hover:border-indigo-300 hover:bg-indigo-50 dark:border-indigo-400/30 dark:bg-indigo-500/10 dark:text-indigo-100 dark:hover:bg-indigo-500/16',
+    buttonSurface: 'border-indigo-400/45 bg-transparent text-indigo-700 hover:border-indigo-400 hover:bg-transparent dark:border-indigo-400/30 dark:bg-transparent dark:text-indigo-100 dark:hover:bg-transparent',
   },
   manager: {
     badgeFilled: 'border-emerald-400/45 bg-emerald-500/12 text-emerald-700 dark:border-emerald-400/35 dark:bg-emerald-500/14 dark:text-emerald-200',
     badgeOutline: 'border-emerald-400/45 bg-transparent text-emerald-700 dark:border-emerald-400/30 dark:bg-transparent dark:text-emerald-200',
-    iconSurface: 'border-emerald-200 bg-emerald-50/90 dark:border-emerald-400/30 dark:bg-emerald-500/10',
+    iconSurface: 'border-emerald-400/45 bg-transparent dark:border-emerald-400/35 dark:bg-transparent',
     iconColor: 'text-emerald-600 dark:text-emerald-200',
     accentText: 'text-emerald-700 dark:text-emerald-200',
     accentSurface: 'bg-emerald-50/90 dark:bg-emerald-500/10',
     accentBorder: 'border-emerald-200/90 dark:border-emerald-400/30',
-    buttonSurface: 'border-emerald-200 bg-white text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:hover:bg-emerald-500/16',
+    buttonSurface: 'border-emerald-400/45 bg-transparent text-emerald-700 hover:border-emerald-400 hover:bg-transparent dark:border-emerald-400/30 dark:bg-transparent dark:text-emerald-100 dark:hover:bg-transparent',
   },
 };
+
+const isErganiIntegration = (integration: PosIntegrationPayload): boolean =>
+  [integration.plugin_id, integration.provider, integration.id].some(value => value === ERGANI_PLUGIN_ID);
+
+const isActiveErganiIntegration = (integration: PosIntegrationPayload): boolean =>
+  isErganiIntegration(integration) &&
+  integration.is_purchased === true &&
+  integration.is_enabled === true &&
+  integration.is_active === true;
 
 const CHECKIN_STEP_ORDER: Record<CheckInStep, number> = {
   'select-staff': 0,
@@ -438,6 +458,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [enteredPin, setEnteredPin] = useState('');
   const [staffQrCode, setStaffQrCode] = useState('');
   const [resolvingStaffQr, setResolvingStaffQr] = useState(false);
+  const [hasActiveErganiPlugin, setHasActiveErganiPlugin] = useState(false);
   const [roleType, setRoleType] = useState<StaffShiftRole>('cashier');
   const [staffAuthMetadataStatus, setStaffAuthMetadataStatus] = useState<'available' | 'missing'>('available');
 
@@ -990,6 +1011,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setEnteredPin('');
       setStaffQrCode('');
       setResolvingStaffQr(false);
+      setHasActiveErganiPlugin(false);
       setRoleType('cashier');
       setOpeningCash('');
       setDriverStartingAmount(''); // Reset driver starting amount
@@ -1007,6 +1029,58 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setError('');
       setSuccess('');
     }
+  }, [isOpen, mode]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchErganiPluginEntitlement = async () => {
+      setHasActiveErganiPlugin(false);
+
+      if (!isOpen || mode !== 'checkin') {
+        setStaffQrCode('');
+        setResolvingStaffQr(false);
+        return;
+      }
+
+      try {
+        const response = await posApiGet<{ integrations?: PosIntegrationPayload[] }>(
+          `/pos/integrations?provider=${ERGANI_PLUGIN_ID}`,
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!response.success) {
+          setHasActiveErganiPlugin(false);
+          setStaffQrCode('');
+          setResolvingStaffQr(false);
+          return;
+        }
+
+        const integrations = response.data?.integrations || [];
+        const hasEntitlement = integrations.some(isActiveErganiIntegration);
+        setHasActiveErganiPlugin(hasEntitlement);
+
+        if (!hasEntitlement) {
+          setStaffQrCode('');
+          setResolvingStaffQr(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setHasActiveErganiPlugin(false);
+          setStaffQrCode('');
+          setResolvingStaffQr(false);
+        }
+      }
+    };
+
+    void fetchErganiPluginEntitlement();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, mode]);
 
   // Load expenses and staff payments when in checkout mode (prop or local override)
@@ -1715,6 +1789,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const handleStaffQrResolve = async () => {
     const qrCode = staffQrCode.trim();
     if (!qrCode || resolvingStaffQr) {
+      return;
+    }
+
+    if (!hasActiveErganiPlugin) {
+      setError(t(
+        'modals.staffShift.qrRequiresErgani',
+        'Staff QR check-in requires an acquired and active ERGANI plugin.',
+      ));
+      setStaffQrCode('');
       return;
     }
 
@@ -3189,7 +3272,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const checkoutSurfaceClass = 'rounded-[28px] border border-slate-200/80 bg-white/90 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
   const checkoutInsetSurfaceClass = 'rounded-[24px] border border-slate-200/80 bg-slate-50/90 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/25 dark:shadow-none';
-  const checkoutActionButtonClass = 'inline-grid min-h-[70px] w-full shrink-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_6px_18px_rgba(37,99,235,0.28)] transition-all hover:bg-blue-700 sm:w-[176px]';
+  const checkoutActionButtonClass = 'flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-yellow-400 text-black shadow-[0_8px_22px_rgba(250,204,21,0.24)] transition-all hover:bg-yellow-300';
   const checkoutMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
   const checkInSurfaceClass = 'rounded-[28px] border border-slate-200/80 bg-white/92 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
   const checkInInsetSurfaceClass = 'rounded-[24px] border border-slate-200/80 bg-slate-50/88 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/25 dark:shadow-none';
@@ -3256,13 +3339,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           </div>
           {canRecordInlineExpenses && (
             <button
+              type="button"
               onClick={() => setShowExpenseForm(!showExpenseForm)}
-              className={`mt-3 ${checkoutActionButtonClass}`}
+              aria-label={t('modals.staffShift.addExpense')}
+              title={t('modals.staffShift.addExpense')}
+              className={`mt-3 ml-auto ${checkoutActionButtonClass}`}
             >
-              <Plus className="h-4 w-4 justify-self-center" />
-              <span className="min-w-0 text-center leading-tight whitespace-normal">
-                {t('modals.staffShift.addExpense')}
-              </span>
+              <Plus className="h-6 w-6" strokeWidth={3} />
             </button>
           )}
         </div>
@@ -3417,6 +3500,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           </div>
 
           <button
+            type="button"
             onClick={() => {
               if (showStaffPaymentForm) {
                 resetStaffPaymentForm();
@@ -3424,12 +3508,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 void openStaffPaymentForm();
               }
             }}
+            aria-label={t('modals.staffShift.addPayment', 'Add Payment')}
+            title={t('modals.staffShift.addPayment', 'Add Payment')}
             className={checkoutActionButtonClass}
           >
-            <Plus className="h-4 w-4 justify-self-center" />
-            <span className="min-w-0 text-center leading-tight whitespace-normal">
-              {t('modals.staffShift.addPayment', 'Add Payment')}
-            </span>
+            <Plus className="h-6 w-6" strokeWidth={3} />
           </button>
         </div>
 
@@ -4655,8 +4738,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     highlightedRoleName,
   }: {
     helper: string;
-    statusLabel: string;
-    statusClass: string;
+    statusLabel?: string;
+    statusClass?: string;
     highlightedRoleName?: string;
   }) => {
     if (!selectedStaff) {
@@ -4677,26 +4760,24 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <p className={`mt-2 ${checkInMutedTextClass}`}>{helper}</p>
           </div>
 
-          <span className={`inline-flex shrink-0 items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusClass}`}>
-            {statusLabel}
-          </span>
+          {statusLabel && statusClass && (
+            <span className={`inline-flex shrink-0 items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusClass}`}>
+              {statusLabel}
+            </span>
+          )}
         </div>
 
-        <div
-          className={`mt-5 rounded-[24px] border p-4 ${summaryPresentation.accentBorder} ${summaryPresentation.accentSurface}`}
-        >
-          <div className="flex items-center gap-4">
-            <div
-              className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-[20px] border ${summaryPresentation.iconSurface}`}
-            >
-              <User className={`h-8 w-8 ${summaryPresentation.iconColor}`} strokeWidth={1.8} />
-            </div>
+        <div className="mt-5 flex items-center gap-4">
+          <div
+            className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-[20px] border ${summaryPresentation.iconSurface}`}
+          >
+            <User className={`h-8 w-8 ${summaryPresentation.iconColor}`} strokeWidth={1.8} />
+          </div>
 
-            <div className="min-w-0">
-              <div className={checkInEyebrowClass}>{t('modals.staffShift.currentRoleLabel')}</div>
-              <div className={`mt-2 text-lg font-black ${summaryPresentation.accentText}`}>
-                {translateRoleName(summaryRoleName)}
-              </div>
+          <div className="min-w-0">
+            <div className={checkInEyebrowClass}>{t('modals.staffShift.currentRoleLabel')}</div>
+            <div className={`mt-2 text-lg font-black ${summaryPresentation.accentText}`}>
+              {translateRoleName(summaryRoleName)}
             </div>
           </div>
         </div>
@@ -4733,42 +4814,44 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             </p>
           </div>
 
-          <div className="rounded-[24px] border border-slate-200/90 bg-white/90 p-4 shadow-[0_12px_28px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none">
-            <label className={`block ${checkInEyebrowClass}`}>
-              {t('modals.staffShift.staffQrBadge', 'Staff QR badge')}
-            </label>
-            <div className="mt-3 flex flex-col gap-3 sm:flex-row">
-              <div className="relative flex-1">
-                <QrCode className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
-                <input
-                  value={staffQrCode}
-                  onChange={(event) => setStaffQrCode(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault();
-                      void handleStaffQrResolve();
-                    }
-                  }}
-                  placeholder={t('modals.staffShift.staffQrPlaceholder', 'Scan or paste staff QR badge')}
-                  className="min-h-[48px] w-full rounded-2xl border border-slate-200/90 bg-white/95 py-3 pl-12 pr-4 text-sm font-semibold text-slate-900 outline-none transition-colors focus:border-cyan-300 dark:border-white/10 dark:bg-black/20 dark:text-white dark:focus:border-cyan-400/40"
-                />
+          {hasActiveErganiPlugin && (
+            <div className="rounded-[24px] border border-slate-200/90 bg-white/90 p-4 shadow-[0_12px_28px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none">
+              <label className={`block ${checkInEyebrowClass}`}>
+                {t('modals.staffShift.staffQrBadge', 'Staff QR badge')}
+              </label>
+              <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+                <div className="relative flex-1">
+                  <QrCode className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+                  <input
+                    value={staffQrCode}
+                    onChange={(event) => setStaffQrCode(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void handleStaffQrResolve();
+                      }
+                    }}
+                    placeholder={t('modals.staffShift.staffQrPlaceholder', 'Scan or paste staff QR badge')}
+                    className="min-h-[48px] w-full rounded-2xl border border-slate-200/90 bg-white/95 py-3 pl-12 pr-4 text-sm font-semibold text-slate-900 outline-none transition-colors focus:border-cyan-300 dark:border-white/10 dark:bg-black/20 dark:text-white dark:focus:border-cyan-400/40"
+                  />
+                </div>
+                <motion.button
+                  type="button"
+                  onClick={() => void handleStaffQrResolve()}
+                  disabled={resolvingStaffQr || staffQrCode.trim().length === 0}
+                  className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-yellow-400 px-5 py-3 text-sm font-bold text-black shadow-[0_12px_28px_rgba(250,204,21,0.22)] transition-colors hover:bg-yellow-300 disabled:cursor-not-allowed disabled:opacity-50"
+                  {...getInteractiveMotion('primary', resolvingStaffQr || staffQrCode.trim().length === 0)}
+                >
+                  {resolvingStaffQr ? (
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  ) : (
+                    <QrCode className="h-4 w-4" />
+                  )}
+                  {t('modals.staffShift.resolveQr', 'Scan QR')}
+                </motion.button>
               </div>
-              <motion.button
-                type="button"
-                onClick={() => void handleStaffQrResolve()}
-                disabled={resolvingStaffQr || staffQrCode.trim().length === 0}
-                className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-cyan-600 px-5 py-3 text-sm font-bold text-white shadow-[0_12px_28px_rgba(8,145,178,0.22)] transition-colors hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
-                {...getInteractiveMotion('primary', resolvingStaffQr || staffQrCode.trim().length === 0)}
-              >
-                {resolvingStaffQr ? (
-                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                ) : (
-                  <QrCode className="h-4 w-4" />
-                )}
-                {t('modals.staffShift.resolveQr', 'Use QR')}
-              </motion.button>
             </div>
-          </div>
+          )}
 
           {loading ? (
             <div className={`${checkInSurfaceClass} py-14 text-center`}>
@@ -4795,7 +4878,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {t('modals.staffShift.checkedInNowHelper')}
                     </p>
                   </div>
-                  <span className="inline-flex items-center rounded-full border border-emerald-200/90 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200">
+                  <span className="inline-flex items-center rounded-full border border-emerald-400/45 bg-transparent px-3 py-1 text-xs font-semibold text-emerald-600 dark:border-emerald-400/30 dark:bg-transparent dark:text-emerald-200">
                     {activeCheckInStaff.length}
                   </span>
                 </div>
@@ -4820,7 +4903,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                             <div className="flex min-w-0 items-start gap-4">
                               <div
-                                className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-[20px] border ${activePresentation.iconSurface}`}
+                                className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-[20px] border bg-black/45 dark:bg-black/45 ${activePresentation.accentBorder}`}
                               >
                                 <User className={`h-8 w-8 ${activePresentation.iconColor}`} strokeWidth={1.8} />
                               </div>
@@ -4830,9 +4913,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                   <span className="truncate text-lg font-black liquid-glass-modal-text">
                                     {staffMember.name}
                                   </span>
-                                  <span
-                                    className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold ${activePresentation.badgeFilled}`}
-                                  >
+                                  <span className="inline-flex items-center gap-1 rounded-full border border-white/20 bg-black/45 px-3 py-1 text-xs font-semibold text-white dark:border-white/20 dark:bg-black/45 dark:text-white">
                                     <CheckCircle className="h-3.5 w-3.5" />
                                     {translateRoleName(activeRoleName)}
                                   </span>
@@ -4847,16 +4928,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                         : t('shift.labels.active', 'Active'),
                                     })}
                                   </span>
-                                  <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-300">
-                                    <CheckCircle className="h-4 w-4" />
-                                    {t('shift.labels.active', 'Active')}
-                                  </span>
                                 </div>
                               </div>
                             </div>
 
                             <span
-                              className={`inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition-all group-hover:translate-x-0.5 ${activePresentation.buttonSurface}`}
+                              className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-black/45 px-4 py-2 text-sm font-semibold text-white transition-all hover:border-white/35 hover:bg-black/55 group-hover:translate-x-0.5 dark:border-white/20 dark:bg-black/45 dark:text-white dark:hover:bg-black/55"
                             >
                               {t('modals.staffShift.manageActiveShift')}
                               <ChevronRight className="h-4 w-4" />
@@ -4918,7 +4995,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           >
                             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                               <div className="flex min-w-0 items-start gap-4">
-                                <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[20px] border border-slate-200/70 bg-slate-100/60 dark:border-white/10 dark:bg-white/[0.04]">
+                                <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[20px] border border-slate-200/70 bg-transparent dark:border-white/10 dark:bg-transparent">
                                   <User className="h-8 w-8 text-slate-400 dark:text-slate-500" strokeWidth={1.8} />
                                 </div>
 
@@ -5006,9 +5083,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           <div className="grid gap-6 xl:grid-cols-[minmax(280px,0.9fr)_minmax(0,1.1fr)]">
             {renderSelectedStaffSummary({
               helper: t('modals.staffShift.enterPinHelper'),
-              statusLabel: t('modals.staffShift.readyToStart'),
-              statusClass:
-                'border-cyan-200/90 bg-cyan-50 text-cyan-700 dark:border-cyan-400/30 dark:bg-cyan-500/10 dark:text-cyan-200',
             })}
 
             <div className={checkInSurfaceClass}>
@@ -5062,7 +5136,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   void handlePinSubmit();
                 }}
                 disabled={loading || enteredPin.length !== 4}
-                className="inline-flex items-center justify-center gap-3 rounded-xl bg-blue-600 px-6 py-3.5 text-base font-bold text-white shadow-[0_12px_28px_rgba(37,99,235,0.28)] transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none sm:min-w-[220px]"
+                className="inline-flex items-center justify-center gap-3 rounded-xl bg-yellow-400 px-6 py-3.5 text-base font-bold text-black shadow-[0_12px_28px_rgba(250,204,21,0.28)] transition-all hover:bg-yellow-300 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none sm:min-w-[220px]"
                 {...getInteractiveMotion('primary', loading || enteredPin.length !== 4)}
               >
                 {loading ? (
@@ -5102,9 +5176,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               <p className={`mt-2 ${checkInMutedTextClass}`}>{t('modals.staffShift.roleSelectionHelper')}</p>
 
               {cashierFirstGateActive && (
-                <div className="mt-6 rounded-[22px] border border-amber-300/70 bg-amber-50/90 p-4 text-sm text-amber-900 shadow-[0_12px_24px_rgba(245,158,11,0.12)] dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100">
+                <div className="mt-6 rounded-[22px] border border-amber-300/70 bg-amber-50/90 p-4 text-sm text-white shadow-[0_12px_24px_rgba(245,158,11,0.12)] dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-white">
                   <div className="flex items-start gap-3">
-                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-200" />
+                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-white" />
                     <div className="space-y-1">
                       <p className="font-semibold">
                         {t(
@@ -5112,7 +5186,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           'The first check-in for this business day must be a cashier.',
                         )}
                       </p>
-                      <p className="text-amber-800/90 dark:text-amber-100/80">
+                      <p className="text-white">
                         {selectedStaffHasCashierRole
                           ? t(
                               'modals.staffShift.cashierFirstCheckInHelper',
@@ -5171,10 +5245,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               {translateRoleName(role.role_name)}
                             </span>
                             <span
-                              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${
-                                role.is_primary
-                                  ? rolePresentation.badgeFilled
-                                  : rolePresentation.badgeOutline
+                              className={`text-xs font-semibold ${
+                                role.is_primary ? rolePresentation.accentText : rolePresentation.iconColor
                               }`}
                             >
                               {role.is_primary
@@ -5182,7 +5254,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                 : t('modals.staffShift.secondaryRole')}
                             </span>
                             {isRoleLockedByCashierFirstGate && (
-                              <span className="inline-flex items-center rounded-full border border-amber-300/80 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200">
+                              <span className="text-xs font-semibold text-amber-600 dark:text-amber-200">
                                 {t('modals.staffShift.roleLockedUntilCashier', 'Locked until cashier starts')}
                               </span>
                             )}
@@ -5255,11 +5327,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <label className={`block ${checkInEyebrowClass}`}>{cashTitle}</label>
 
                 <div className="mt-4 flex items-center gap-4">
-                  <div
-                    className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-[20px] border ${selectedRolePresentation.iconSurface}`}
-                  >
-                    <Euro className={`h-8 w-8 ${selectedRolePresentation.iconColor}`} />
-                  </div>
+                  <Euro
+                    className={`h-14 w-14 shrink-0 ${selectedRolePresentation.iconColor}`}
+                    strokeWidth={3}
+                  />
 
                   <input
                     type="text"
@@ -5917,11 +5988,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     <h3 className="text-xl font-bold liquid-glass-modal-text mb-4">{t('modals.staffShift.expenses')}</h3>
                     {canRecordInlineExpenses && (
                       <button
+                        type="button"
                         onClick={() => setShowExpenseForm(!showExpenseForm)}
-                        className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-[0_2px_8px_0_rgba(59,130,246,0.4)] transition-all duration-300"
+                        aria-label={t('modals.staffShift.addExpense')}
+                        title={t('modals.staffShift.addExpense')}
+                        className={`ml-auto ${checkoutActionButtonClass}`}
                       >
-                        <Plus className="w-4 h-4" />
-                        {t('modals.staffShift.addExpense')}
+                        <Plus className="h-6 w-6" strokeWidth={3} />
                       </button>
                     )}
                   </div>
@@ -6682,6 +6755,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   <div className="flex items-center justify-between">
                     <h3 className="text-lg font-bold text-slate-800 dark:text-white">{t('modals.staffShift.recordStaffPayments', 'Record Staff Payments')}</h3>
                     <button
+                      type="button"
                       onClick={() => {
                         if (showStaffPaymentForm) {
                           resetStaffPaymentForm();
@@ -6689,9 +6763,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           void openStaffPaymentForm();
                         }
                       }}
-                      className="text-sm font-semibold text-blue-500 hover:text-blue-400 flex items-center gap-1"
+                      aria-label={t('modals.staffShift.addPayment', 'Add Payment')}
+                      title={t('modals.staffShift.addPayment', 'Add Payment')}
+                      className={checkoutActionButtonClass}
                     >
-                      <Plus className="w-4 h-4" /> {t('modals.staffShift.addPayment', 'Add Payment')}
+                      <Plus className="h-6 w-6" strokeWidth={3} />
                     </button>
                   </div>
 

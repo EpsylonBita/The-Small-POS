@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { motion } from "framer-motion";
 import { useI18n } from "../contexts/i18n-context";
 import { useTheme } from "../contexts/theme-context";
 import AnimatedBackground from "../components/AnimatedBackground";
@@ -8,6 +9,7 @@ import logoBlack from "../assets/logo-black.png";
 import logoWhite from "../assets/logo-white.png";
 import { AlertTriangle, Delete as DeleteIcon, Lock } from "lucide-react";
 import { getBridge, offEvent, onEvent } from "../../lib";
+import { pageMotionContainer, pageMotionItem } from "../components/ui/page-motion";
 
 interface LoginPageProps {
     onLogin: (pin: string) => Promise<boolean>;
@@ -298,17 +300,22 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
 
 
     return (
-        <div className="min-h-screen min-h-[100dvh] relative flex items-center justify-center overflow-hidden p-4 sm:p-6">
+        <motion.div
+            initial="hidden"
+            animate="show"
+            variants={pageMotionContainer}
+            className="min-h-screen min-h-[100dvh] relative flex items-center justify-center overflow-hidden p-4 sm:p-6"
+        >
             <AnimatedBackground />
 
             <div className="fixed top-3 right-3 sm:top-6 sm:right-6 z-50">
                 <ThemeToggle />
             </div>
 
-            <div className={`relative z-20 pos-login-card p-4 sm:p-6 md:p-8 pt-20 sm:pt-24 w-full max-w-[95vw] sm:max-w-md mx-auto ${isDark ? 'text-white' : 'text-slate-900'}`}>
+            <motion.div variants={pageMotionItem} className={`relative z-20 pos-login-card p-4 sm:p-6 md:p-8 pt-20 sm:pt-24 w-full max-w-[95vw] sm:max-w-md mx-auto ${isDark ? 'text-white' : 'text-slate-900'}`}>
                 <div className="pos-login-glow" />
 
-                <div className="absolute inset-x-0 -top-10 sm:-top-14 z-20 flex justify-center">
+                <motion.div variants={pageMotionItem} className="absolute inset-x-0 -top-10 sm:-top-14 z-20 flex justify-center">
                     <img
                         src={logoWhite}
                         alt="The Small"
@@ -319,14 +326,14 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                         alt="The Small"
                         className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl hidden dark:block"
                     />
-                </div>
+                </motion.div>
 
-                <div className="text-center mt-2 sm:mt-4 mb-4 sm:mb-8 relative z-10">
+                <motion.div variants={pageMotionItem} className="text-center mt-2 sm:mt-4 mb-4 sm:mb-8 relative z-10">
                     <h1 className="text-xl sm:text-2xl md:text-3xl font-bold mb-1 sm:mb-2">{t('login.title')}</h1>
                     <p className={`text-sm sm:text-base ${isDark ? 'text-white/80' : 'text-slate-600'}`}>{t('login.subtitle')}</p>
-                </div>
+                </motion.div>
 
-                <div className="mb-4 sm:mb-6 relative z-10">
+                <motion.div variants={pageMotionItem} className="mb-4 sm:mb-6 relative z-10">
                     <div className="bg-white/10 border border-white/20 rounded-xl p-3 sm:p-4 text-center">
                         <div className={`text-xl sm:text-2xl font-mono tracking-widest ${isDark ? 'text-white' : 'text-slate-900'}`}>
                             {pin ? maskChar.repeat(pin.length) : emptyPin}
@@ -335,12 +342,13 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     {error && (
                         <p className={`text-xs sm:text-sm mt-2 text-center ${isDark ? 'text-red-300' : 'text-red-600'}`}>{error}</p>
                     )}
-                </div>
+                </motion.div>
 
-                <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-4 sm:mb-6 relative z-10">
+                <motion.div variants={pageMotionContainer} className="grid grid-cols-3 gap-2 sm:gap-3 mb-4 sm:mb-6 relative z-10">
                     {keypadKeys.map((item) => (
-                        <button
+                        <motion.button
                             key={item}
+                            variants={pageMotionItem}
                             onClick={() => {
                                 if (item === clearKey) {
                                     handleClear();
@@ -381,26 +389,28 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                             ) : (
                                 item
                             )}
-                        </button>
+                        </motion.button>
                     ))}
-                </div>
+                </motion.div>
 
-                <button
+                <motion.button
+                    variants={pageMotionItem}
                     onClick={handleLoginClick}
                     disabled={!pin || isLoading || pinResetRequired}
                     className={`w-full bg-blue-600/80 hover:bg-blue-600 active:bg-blue-700 disabled:bg-white/10 ${isDark ? 'text-white' : 'text-slate-900'} px-4 sm:px-6 py-3 sm:py-4 rounded-xl border border-blue-400/40 transition-all duration-300 disabled:cursor-not-allowed font-semibold text-base sm:text-lg touch-manipulation select-none`}
                 >
                     {isLoading ? t('login.loggingIn') : t('login.loginButton')}
-                </button>
+                </motion.button>
 
                 {noPinSet && (
-                    <button
+                    <motion.button
+                        variants={pageMotionItem}
                         onClick={() => setShowPinSetup(true)}
                         disabled={isLoading}
                         className={`w-full mt-2 sm:mt-3 bg-green-600/80 hover:bg-green-600 active:bg-green-700 disabled:bg-white/10 ${isDark ? 'text-white' : 'text-slate-900'} px-4 sm:px-6 py-3 sm:py-4 rounded-xl border border-green-400/40 transition-all duration-300 disabled:cursor-not-allowed font-semibold text-base sm:text-lg touch-manipulation select-none`}
                     >
                         {t('login.createPin', 'Create PIN')}
-                    </button>
+                    </motion.button>
                 )}
 
                 {/* PIN Setup Modal — portalled to document.body so it escapes
@@ -553,7 +563,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     document.body
                 )}
 
-                <div className="mt-4 sm:mt-6 text-center relative z-10">
+                <motion.div variants={pageMotionItem} className="mt-4 sm:mt-6 text-center relative z-10">
                     {pinResetRequired ? (
                         <p className={`text-xs sm:text-sm mb-2 flex items-center justify-center gap-2 ${isDark ? 'text-red-300' : 'text-red-700'}`}>
                             <AlertTriangle size={14} aria-hidden="true" />
@@ -569,8 +579,8 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                         {t('login.footer')}
                         {appVersion && <span className={`ml-2 ${isDark ? 'text-white/50' : 'text-slate-500'}`}>v{appVersion}</span>}
                     </p>
-                </div>
-            </div>
-        </div>
+                </motion.div>
+            </motion.div>
+        </motion.div>
     );
 }

@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { motion } from 'framer-motion';
 import { DeliveryValidationComponent } from '../components/delivery/DeliveryValidationComponent';
 import { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 export function DeliveryValidationTestPage() {
   const [validationResult, setValidationResult] = useState<DeliveryBoundaryValidationResponse | null>(null);
@@ -51,14 +53,14 @@ export function DeliveryValidationTestPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-6">
-      <div className="max-w-4xl mx-auto">
-        <h1 className="text-3xl font-bold text-white mb-8 text-center">
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-6">
+      <motion.div variants={pageMotionContainer} className="max-w-4xl mx-auto">
+        <motion.h1 variants={pageMotionItem} className="text-3xl font-bold text-white mb-8 text-center">
           Delivery Zone Boundary Validation Test
-        </h1>
+        </motion.h1>
 
         {/* Test Controls */}
-        <div className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mb-6">
+        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mb-6">
           <h2 className="text-xl font-semibold text-white mb-4">Test Controls</h2>
           
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
@@ -106,9 +108,10 @@ export function DeliveryValidationTestPage() {
             <label className="block text-sm font-medium text-white/90 mb-2">
               Quick Test Addresses
             </label>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <motion.div variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 gap-2">
               {testAddresses.map((testAddr, index) => (
-                <button
+                <motion.button
+                  variants={pageMotionItem}
                   key={index}
                   onClick={() => loadTestAddress(testAddr)}
                   className="p-3 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-400/30 rounded text-white text-left transition-colors"
@@ -118,14 +121,14 @@ export function DeliveryValidationTestPage() {
                   <div className="text-xs text-white/50">
                     {testAddr.coordinates.lat}, {testAddr.coordinates.lng}
                   </div>
-                </button>
+                </motion.button>
               ))}
-            </div>
+            </motion.div>
           </div>
-        </div>
+        </motion.div>
 
         {/* Delivery Validation Component */}
-        <div className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mb-6">
+        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mb-6">
           <h2 className="text-xl font-semibold text-white mb-4">Delivery Validation</h2>
           
           <DeliveryValidationComponent
@@ -136,11 +139,11 @@ export function DeliveryValidationTestPage() {
             staffRole={staffRole}
             className="bg-white/5 border border-white/10 rounded-lg p-4"
           />
-        </div>
+        </motion.div>
 
         {/* Validation Results */}
         {validationResult && (
-          <div className="bg-white/10 backdrop-blur-sm rounded-lg p-6">
+          <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-lg p-6">
             <h2 className="text-xl font-semibold text-white mb-4">Validation Results</h2>
             
             <div className="space-y-4">
@@ -226,11 +229,11 @@ export function DeliveryValidationTestPage() {
                 </pre>
               </details>
             </div>
-          </div>
+          </motion.div>
         )}
 
         {/* Instructions */}
-        <div className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mt-6">
+        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mt-6">
           <h2 className="text-xl font-semibold text-white mb-4">Testing Instructions</h2>
           <div className="space-y-2 text-white/80">
             <p>1. <strong>Test Valid Addresses:</strong> Use "City Center" or "Residential Area" buttons to test addresses within delivery zones.</p>
@@ -240,8 +243,8 @@ export function DeliveryValidationTestPage() {
             <p>5. <strong>Test Manual Entry:</strong> Type addresses manually to test real-time validation.</p>
             <p>6. <strong>Test Override:</strong> When validation fails, use the override button to test bypass functionality.</p>
           </div>
-        </div>
-      </div>
-    </div>
+        </motion.div>
+      </motion.div>
+    </motion.div>
   );
 }

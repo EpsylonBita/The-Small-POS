@@ -1,8 +1,10 @@
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
+use reqwest::header;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
@@ -10,6 +12,9 @@ use crate::{db, UpdaterRuntimeState};
 
 const UPDATER_ARTIFACT_DIR: &str = "updater";
 const UPDATER_PUBKEY_PLACEHOLDER: &str = "__TAURI_UPDATER_PUBKEY__";
+const GITHUB_RELEASE_API_BASE: &str =
+    "https://api.github.com/repos/EpsylonBita/The-Small-POS/releases/tags/";
+const GITHUB_RELEASE_NOTES_TIMEOUT_SECS: u64 = 5;
 
 fn parse_update_channel_payload(arg0: Option<serde_json::Value>) -> String {
     let raw = match arg0 {
@@ -104,6 +109,179 @@ fn set_state_value(state: &mut serde_json::Value, key: &str, value: serde_json::
     if let Some(obj) = state.as_object_mut() {
         obj.insert(key.to_string(), value);
     }
+}
+
+fn update_info_version(update_info: &serde_json::Value) -> Option<String> {
+    update_info
+        .get("version")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn update_info_release_notes_text(update_info: &serde_json::Value) -> Option<String> {
+    update_info
+        .get("releaseNotes")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn release_notes_are_generic(notes: &str, version: Option<&str>) -> bool {
+    let normalized = notes.trim().trim_end_matches('.').trim();
+    if normalized.is_empty() {
+        return true;
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    if lower == "bug fixes and improvements" {
+        return true;
+    }
+
+    let Some(version) = version.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+
+    let without_v = version.trim_start_matches(['v', 'V']);
+    let version_candidates = [
+        version.to_string(),
+        without_v.to_string(),
+        format!("v{without_v}"),
+    ];
+
+    version_candidates.iter().any(|candidate| {
+        let candidate = candidate.trim();
+        !candidate.is_empty()
+            && (normalized == format!("Release {candidate}")
+                || normalized == format!("Release {candidate} (Tauri POS desktop)"))
+    })
+}
+
+fn release_notes_need_remote_fallback(update_info: &serde_json::Value) -> bool {
+    let version = update_info_version(update_info);
+    match update_info_release_notes_text(update_info) {
+        Some(notes) => release_notes_are_generic(&notes, version.as_deref()),
+        None => true,
+    }
+}
+
+fn github_release_tag_candidates(version: &str) -> Vec<String> {
+    let version = version.trim();
+    if version.is_empty() {
+        return Vec::new();
+    }
+
+    let without_v = version.trim_start_matches(['v', 'V']);
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push_candidate = |candidate: String| {
+        if !candidate.is_empty() && !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
+
+    if !without_v.is_empty() {
+        push_candidate(version.to_string());
+        push_candidate(format!("v{without_v}"));
+        push_candidate(without_v.to_string());
+    }
+
+    candidates
+}
+
+fn github_release_api_url(tag: &str) -> String {
+    format!("{GITHUB_RELEASE_API_BASE}{tag}")
+}
+
+fn release_notes_from_github_payload(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("body")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+async fn fetch_github_release_notes(version: &str) -> Option<String> {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(GITHUB_RELEASE_NOTES_TIMEOUT_SECS))
+        .user_agent(format!("The-Small-POS/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!("Failed to build release-notes HTTP client: {error}");
+            return None;
+        }
+    };
+
+    for tag in github_release_tag_candidates(version) {
+        let url = github_release_api_url(&tag);
+        let response = match client
+            .get(&url)
+            .header(header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("Failed to fetch release notes for tag {tag}: {error}");
+                continue;
+            }
+        };
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+
+        if !response.status().is_success() {
+            tracing::warn!(
+                "GitHub release notes request for tag {tag} returned {}",
+                response.status()
+            );
+            continue;
+        }
+
+        match response.json::<serde_json::Value>().await {
+            Ok(payload) => {
+                if let Some(notes) = release_notes_from_github_payload(&payload) {
+                    return Some(notes);
+                }
+            }
+            Err(error) => {
+                tracing::warn!("Failed to parse release notes for tag {tag}: {error}");
+            }
+        }
+    }
+
+    None
+}
+
+async fn enrich_update_info_with_release_notes(
+    mut update_info: serde_json::Value,
+) -> serde_json::Value {
+    if !release_notes_need_remote_fallback(&update_info) {
+        return update_info;
+    }
+
+    let Some(version) = update_info_version(&update_info) else {
+        return update_info;
+    };
+
+    let Some(notes) = fetch_github_release_notes(&version).await else {
+        return update_info;
+    };
+
+    if let Some(obj) = update_info.as_object_mut() {
+        obj.insert("releaseNotes".to_string(), serde_json::json!(notes));
+        obj.insert(
+            "releaseNotesSource".to_string(),
+            serde_json::json!("github_release"),
+        );
+    }
+
+    update_info
 }
 
 fn set_downloading_state(state: &mut serde_json::Value) {
@@ -389,17 +567,24 @@ pub async fn reconcile_update_state_on_startup(app: AppHandle) {
         return;
     };
 
+    let update_info =
+        enrich_update_info_with_release_notes(crate::update_info_from_release(&update)).await;
+
     {
         let updater_runtime = app.state::<UpdaterRuntimeState>();
         if let Ok(bytes) = rehydrate_downloaded_bytes(&updater_runtime, &artifact_path) {
-            let update_info = crate::update_info_from_release(&update);
             if install_pending {
                 set_installing_state(&mut state, &version);
                 let db = app.state::<db::DbState>();
                 let _ = crate::write_update_state(&db, &state);
                 if let Err(error) = update.install(bytes) {
                     let message = format!("Failed to install update: {error}");
-                    set_download_ready_state(&mut state, update_info, &version, &artifact_path);
+                    set_download_ready_state(
+                        &mut state,
+                        update_info.clone(),
+                        &version,
+                        &artifact_path,
+                    );
                     set_state_value(&mut state, "error", serde_json::json!(message.clone()));
                     let _ = crate::write_update_state(&db, &state);
                     let _ = app.emit("update_error", serde_json::json!({ "message": message }));
@@ -483,7 +668,9 @@ pub async fn update_check(
 
     match updater.check().await {
         Ok(Some(update)) => {
-            let update_info = crate::update_info_from_release(&update);
+            let update_info =
+                enrich_update_info_with_release_notes(crate::update_info_from_release(&update))
+                    .await;
             {
                 let mut pending = updater_runtime
                     .pending_update
@@ -638,10 +825,17 @@ pub async fn update_download(
                 *downloaded = Some(bytes);
             }
 
-            let update_info = state
+            let update_info = match state
                 .get("updateInfo")
                 .cloned()
-                .unwrap_or_else(|| crate::update_info_from_release(&update));
+                .filter(|value| !value.is_null())
+            {
+                Some(update_info) => enrich_update_info_with_release_notes(update_info).await,
+                None => {
+                    enrich_update_info_with_release_notes(crate::update_info_from_release(&update))
+                        .await
+                }
+            };
 
             set_download_ready_state(
                 &mut state,
@@ -779,10 +973,17 @@ pub async fn update_install(
         Ok(_) => Ok(serde_json::json!({ "success": true })),
         Err(error) => {
             let message = format!("Failed to install update: {error}");
-            let update_info = state
+            let update_info = match state
                 .get("updateInfo")
                 .cloned()
-                .unwrap_or_else(|| crate::update_info_from_release(&update));
+                .filter(|value| !value.is_null())
+            {
+                Some(update_info) => enrich_update_info_with_release_notes(update_info).await,
+                None => {
+                    enrich_update_info_with_release_notes(crate::update_info_from_release(&update))
+                        .await
+                }
+            };
             set_download_ready_state(&mut state, update_info, &version, &artifact_path);
             set_state_value(&mut state, "error", serde_json::json!(message.clone()));
             crate::write_update_state(&db, &state)?;
@@ -855,5 +1056,51 @@ mod dto_tests {
         let result =
             validate_updater_configuration(false, Some("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu"));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn github_release_tag_candidates_try_plain_and_v_prefixed_versions() {
+        assert_eq!(
+            github_release_tag_candidates("1.2.3"),
+            vec!["1.2.3".to_string(), "v1.2.3".to_string()]
+        );
+        assert_eq!(
+            github_release_tag_candidates("v1.2.3"),
+            vec!["v1.2.3".to_string(), "1.2.3".to_string()]
+        );
+    }
+
+    #[test]
+    fn release_notes_need_remote_fallback_for_empty_or_generic_notes() {
+        let empty_notes = serde_json::json!({
+            "version": "1.2.3",
+            "releaseNotes": ""
+        });
+        let generic_notes = serde_json::json!({
+            "version": "1.2.3",
+            "releaseNotes": "Release v1.2.3 (Tauri POS desktop)."
+        });
+        let real_notes = serde_json::json!({
+            "version": "1.2.3",
+            "releaseNotes": "### Fixed\n- Drawer reconciliation now persists correctly."
+        });
+
+        assert!(release_notes_need_remote_fallback(&empty_notes));
+        assert!(release_notes_need_remote_fallback(&generic_notes));
+        assert!(!release_notes_need_remote_fallback(&real_notes));
+    }
+
+    #[test]
+    fn release_notes_from_github_payload_uses_non_empty_body() {
+        let payload = serde_json::json!({
+            "body": "\n### Fixed\n- Update dialog changelog rendering.\n"
+        });
+        let empty_payload = serde_json::json!({ "body": "   " });
+
+        assert_eq!(
+            release_notes_from_github_payload(&payload).as_deref(),
+            Some("### Fixed\n- Update dialog changelog rendering.")
+        );
+        assert!(release_notes_from_github_payload(&empty_payload).is_none());
     }
 }

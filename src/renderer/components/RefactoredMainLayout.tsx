@@ -1,4 +1,5 @@
 import React, { memo, useEffect, useRef, lazy, Suspense, useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { ReceiptText } from 'lucide-react';
 
@@ -7,6 +8,7 @@ import { NavigationProvider } from '../contexts/navigation-context';
 import NavigationSidebar from './NavigationSidebar';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import ContentContainer from './ui/ContentContainer';
+import PageLoadMotion from './ui/PageLoadMotion';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { useModules, useModuleAccess, getModuleAccessStatic } from '../contexts/module-context';
@@ -29,7 +31,6 @@ import KitchenDisplayPage from '../pages/KitchenDisplayPage';
 import CustomerDisplayPage from '../pages/CustomerDisplayPage';
 import KioskManagementPage from '../pages/KioskManagementPage';
 import IntegrationsPage from '../pages/IntegrationsPage';
-import SettingsPage from '../pages/SettingsPage';
 import { getBridge } from '../../lib';
 import { clearSecureSession } from '../lib/secure-session-cache';
 import { getOfflinePageBanner } from '../services/offline-page-capabilities';
@@ -214,6 +215,15 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   // This provides centralized access checking for the current view
   const currentViewAccess = useModuleAccess(currentView as any);
 
+  useEffect(() => {
+    if (currentView !== 'settings') {
+      return;
+    }
+
+    setCurrentView('dashboard');
+    onOpenConnectionSettings?.(null);
+  }, [currentView, onOpenConnectionSettings]);
+
   // Route guard useEffect: Redirect to dashboard if currentView is a module
   // view the org has not acquired. This catches cases where currentView is
   // set externally (persisted state, deep-links, programmatic changes).
@@ -244,6 +254,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   // Attempting to access shows upgrade prompt and redirects to dashboard
   const handleViewChange = (view: string) => {
     console.log('🔄 View change requested:', view);
+
+    if (view === 'settings') {
+      onOpenConnectionSettings?.(null);
+      return;
+    }
 
     // Fail-closed module check (THE-315): deny any module-backed view whose
     // module is not in the enabled list — locked-with-plan AND absent-from-
@@ -280,7 +295,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     return () => {
       window.removeEventListener('pos:navigate-view', handleNavigateView as EventListener);
     };
-  }, [enabledModules, lockedModules, isShiftActive]);
+  }, [enabledModules, lockedModules, isShiftActive, onOpenConnectionSettings]);
 
   useEffect(() => {
     if (!isShiftActive) {
@@ -288,10 +303,20 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     }
 
     const pendingView = consumePendingPostLoginIntent();
-    if (pendingView && pendingView !== currentView) {
-      setCurrentView(pendingView);
+    if (!pendingView || pendingView === currentView) {
+      return;
     }
-  }, [currentView, isShiftActive]);
+
+    if (pendingView === 'settings') {
+      onOpenConnectionSettings?.(null);
+      if (currentView !== 'dashboard') {
+        setCurrentView('dashboard');
+      }
+      return;
+    }
+
+    setCurrentView(pendingView);
+  }, [currentView, isShiftActive, onOpenConnectionSettings]);
 
   useEffect(() => {
     const handleNetworkState = () => {
@@ -364,9 +389,6 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     menu: MenuView,
     users: CustomersView,
     customers: CustomersView, // alias for users/staff management
-    // Settings page (full view alongside the modal)
-    settings: () => <SettingsPage />,
-
     // Restaurant vertical (lazy-loaded)
     tables: TablesView,
     reservations: ReservationsView,
@@ -423,6 +445,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     // Note: Route guard logic has been moved to useEffect to avoid state updates during render.
     // The useEffect observes currentView and currentViewAccess to handle locked module redirects.
     // This function now only handles view component selection and Suspense wrapping.
+    if (currentView === 'settings') {
+      return <DashboardView />;
+    }
 
     const ViewComponent = VIEW_COMPONENTS[currentView];
 
@@ -454,7 +479,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
 
   return (
     <NavigationProvider currentView={currentView} onViewChange={handleViewChange}>
-      <div className={`flex h-screen h-[100dvh] transition-all duration-300 overflow-hidden safe-area-all ${resolvedTheme === 'light'
+      <div className={`relative flex h-screen h-[100dvh] transition-all duration-300 overflow-hidden safe-area-all ${resolvedTheme === 'light'
           ? 'bg-gray-50'
           : 'bg-black'
         } ${className}`}>
@@ -505,9 +530,15 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
                 )}
               </div>
             )}
-            <div className="h-full min-h-[400px] sm:min-h-[500px] md:min-h-[600px]">
-              {renderCurrentView()}
-            </div>
+            <AnimatePresence mode="wait">
+              <PageLoadMotion
+                key={currentView}
+                animationKey={currentView}
+                className="h-full min-h-[400px] sm:min-h-[500px] md:min-h-[600px]"
+              >
+                {renderCurrentView()}
+              </PageLoadMotion>
+            </AnimatePresence>
 
           {/* Shift required overlay when no active shift */}
           {!isShiftActive && isPendingLocalSubmit && (

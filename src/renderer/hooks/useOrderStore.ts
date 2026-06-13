@@ -52,6 +52,13 @@ interface UpdateOrderStatusDetailedResult {
   paymentIntegrityPayload?: PaymentIntegrityErrorPayload | null;
 }
 
+interface RoomChargeOrderResult {
+  applied: boolean;
+  code?: string;
+  error?: string;
+  folioChargeId?: string;
+}
+
 interface UpdateOrderStatusOptions {
   cancellationReason?: string;
   cancelledAt?: string;
@@ -115,7 +122,7 @@ interface OrderStore {
     options?: UpdateOrderStatusOptions,
   ) => Promise<UpdateOrderStatusDetailedResult>;
   returnCancelledToPending: (orderId: string) => Promise<boolean>;
-  createOrder: (orderData: Partial<Order>) => Promise<{ success: boolean; orderId?: string; orderNumber?: string; error?: string; savedForRetry?: boolean }>;
+  createOrder: (orderData: Partial<Order>) => Promise<{ success: boolean; orderId?: string; orderNumber?: string; error?: string; savedForRetry?: boolean; roomCharge?: RoomChargeOrderResult }>;
   setSelectedOrder: (order: Order | null) => void;
   setFilter: (filter: Partial<OrderStore['filter']>) => void;
   getFilteredOrders: () => Order[];
@@ -1037,6 +1044,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           orderId: newOrder.id,
           orderNumber: getVisibleOrderNumber(newOrder) || newOrder.id,
           savedForRetry: Boolean((newOrder as any).savedForRetry),
+          roomCharge: (newOrder as any).roomCharge,
         };
       } catch (error) {
         // Handle error

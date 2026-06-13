@@ -6,7 +6,6 @@ import { posApiDelete, posApiFetch, posApiGet } from '../../utils/api-helpers';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useTheme } from '../../contexts/theme-context';
-import { inputBase } from '../../styles/designSystem';
 import { formatDate } from '../../utils/format';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 import {
@@ -608,7 +607,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             onChange={handleSearchChange}
             onKeyDown={handleKeyPress}
             placeholder={t('modals.customerSearch.searchPlaceholder', 'Enter phone or name...')}
-            className={`${inputBase(resolvedTheme)} pl-10`}
+            className="customer-search-yellow-input liquid-glass-modal-input w-full rounded-xl px-3 py-3 pl-10 transition-all focus:outline-none"
             autoFocus
           />
           {/* Real-time search indicator */}
@@ -642,11 +641,15 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             {customers.map((c) => (
               <div
                 key={c.id}
-                className={`liquid-glass-modal-card cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800/30 transition-all mb-3 relative group ${c.is_banned ? 'border-red-500/50 bg-red-500/5' : ''}`}
+                className={`relative mb-3 cursor-pointer rounded-2xl border p-4 transition-all ${
+                  c.is_banned
+                    ? 'border-red-500/50 bg-red-500/5'
+                    : 'border-zinc-300/70 bg-zinc-100/85 hover:bg-zinc-200/80 dark:border-zinc-700/70 dark:bg-zinc-800/80 dark:hover:bg-zinc-700/70'
+                }`}
                 onClick={() => handleSelectFromList(c)}
               >
                 <div className="flex items-center gap-3">
-                  <User className={`w-4 h-4 ${c.is_banned ? 'text-red-500' : 'text-blue-600 dark:text-blue-400'}`} />
+                  <User className={`h-6 w-6 shrink-0 ${c.is_banned ? 'text-red-500' : 'text-blue-600 dark:text-blue-400'}`} />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <p className={`font-medium truncate ${c.is_banned ? 'text-red-500' : 'liquid-glass-modal-text'}`}>{c.name}</p>
@@ -657,7 +660,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                         </span>
                       )}
                     </div>
-                    <p className="text-sm liquid-glass-modal-text-muted">📞 {c.phone}</p>
+                    <p className="mt-1 flex items-center gap-1.5 text-sm liquid-glass-modal-text-muted">
+                      <Phone className="h-4 w-4 shrink-0 text-yellow-500 dark:text-yellow-300" />
+                      <span>{c.phone}</span>
+                    </p>
                     {c.is_banned && c.ban_reason && (
                       <p className="text-xs text-red-400 mt-1 flex items-center gap-1">
                         <AlertTriangle className="w-3 h-3" />
@@ -673,7 +679,11 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       )}
 
       {customer && (
-        <div className={`mb-6 liquid-glass-modal-card ${customer.is_banned ? 'border-red-500/50' : ''}`}>
+        <div className={`mb-6 rounded-2xl border p-4 ${
+          customer.is_banned
+            ? 'border-red-500/50 bg-red-500/5'
+            : 'border-zinc-300/70 bg-zinc-100/85 dark:border-zinc-700/70 dark:bg-zinc-800/80'
+        }`}>
           {/* Banned Customer Warning Banner */}
           {customer.is_banned && (
             <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-xl">
@@ -697,11 +707,11 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             </div>
           )}
 
-          <div className="flex items-start gap-3">
-            <User className={`w-5 h-5 mt-1 ${customer.is_banned ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`} />
-            <div className="flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <h3 className={`font-medium ${customer.is_banned ? 'text-red-500' : 'liquid-glass-modal-text'}`}>
+          <div className="flex items-center gap-3">
+            <User className={`h-7 w-7 shrink-0 ${customer.is_banned ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`} />
+            <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <h3 className={`max-w-full truncate font-medium ${customer.is_banned ? 'text-red-500' : 'liquid-glass-modal-text'}`}>
                   {customer.name}
                 </h3>
                 {customer.is_banned && (
@@ -711,165 +721,167 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                   </span>
                 )}
               </div>
-              <p className="text-sm liquid-glass-modal-text-muted mb-1">
-                📞 {customer.phone}
+              <p className="flex items-center gap-1.5 text-sm liquid-glass-modal-text-muted">
+                <Phone className="h-4 w-4 shrink-0 text-yellow-500 dark:text-yellow-300" />
+                <span>{customer.phone}</span>
               </p>
-              {customer.addresses && customer.addresses.length > 0 ? (
-                // Multiple addresses - show a card for EACH address
-                <div className="mt-2 space-y-2">
-                  <p
-                    className="text-xs font-semibold uppercase tracking-wider mb-1"
-                    style={{ color: resolvedTheme === 'dark' ? 'rgba(96, 165, 250, 0.8)' : '#2563eb' }}
-                  >
-                    {t('modals.customerSearch.addresses', 'Addresses')}
-                  </p>
-                  {customer.addresses.map((addr) => {
-                    const isSelected = selectedAddressId === addr.id;
-                    return (
-                      <div
-                        key={addr.id}
-                        onClick={() => setSelectedAddressId(addr.id)}
-                        className={`p-2 rounded-lg cursor-pointer transition-all ${isSelected
-                          ? 'bg-green-500/10 border-2 border-green-500/30 shadow-[0_0_15px_rgba(34,197,94,0.1)]'
-                          : 'bg-gray-50 dark:bg-white/5 hover:bg-gray-100 dark:hover:bg-white/10 border border-gray-200 dark:border-white/10 hover:border-gray-300 dark:hover:border-white/20'
-                          }`}
-                      >
-                        <div className="flex items-start gap-2">
-                          {/* Checkmark or MapPin icon */}
-                          {isSelected ? (
-                            <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0 mt-0.5">
-                              <Check className="w-3 h-3 text-white" />
-                            </div>
-                          ) : (
-                            <MapPin className="w-4 h-4 text-gray-500 dark:text-blue-500 mt-0.5 flex-shrink-0" />
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <p className={`text-sm font-medium ${isSelected ? 'text-green-400' : 'liquid-glass-modal-text'}`}>
-                              {resolveAddressStreet(addr)}
-                            </p>
-                            <p className="text-xs liquid-glass-modal-text-muted">
-                              {[addr.city, addr.postal_code].filter(Boolean).join(', ')}
-                            </p>
-                            {addr.floor_number && (
-                              <p className="text-xs liquid-glass-modal-text-muted">
-                                {t('modals.customerSearch.floor')}: {addr.floor_number}
-                              </p>
-                            )}
-                          </div>
-                          {/* Edit and Delete buttons */}
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (onEditCustomer) {
-                                  onEditCustomer({ ...customer, editAddressId: addr.id } as any);
-                                }
-                              }}
-                              className="p-1.5 text-amber-500 hover:bg-amber-500/20 rounded-md transition-colors"
-                              title={t('common.edit', 'Edit')}
-                            >
-                              <Edit className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                // Use toast confirmation for address deletion
-      toast((toastInstance) => (
-                                  <div className="flex flex-col gap-3">
-                                    <p className="text-sm font-medium">{t('modals.customerSearch.confirmDeleteAddress', 'Delete this address?')}</p>
-                                    <div className="flex gap-2">
-                                      <button
-                                        onClick={async () => {
-                                          toast.dismiss(toastInstance.id);
-                                          try {
-                                            const result = await posApiFetch<any>(`pos/customers/${customer.id}/addresses/${addr.id}`, {
-                                              method: 'DELETE',
-                                              headers: { 'Content-Type': 'application/json' },
-                                            });
-                                            if (result.success && result.data?.success !== false) {
-                                              setCustomer(prev => prev ? {
-                                                ...prev,
-                                                addresses: prev.addresses?.filter(a => a.id !== addr.id)
-                                              } : null);
-                                              if (isSelected) {
-                                                const remaining = customer.addresses?.filter(a => a.id !== addr.id);
-                                                setSelectedAddressId(remaining?.[0]?.id || null);
-                                              }
-                                              toast.success(t('modals.customerSearch.deleteAddressSuccess', 'Address deleted'));
-                                            } else {
-                                              toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
-                                            }
-                                          } catch (err) {
-                                            console.error('Error deleting address:', err);
-                                            toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
-                                          }
-                                        }}
-                                        className="px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors"
-                                      >
-                                        {t('common.delete', 'Delete')}
-                                      </button>
-                                      <button
-                                        onClick={() => toast.dismiss(toastInstance.id)}
-                                        className="px-3 py-1.5 text-xs font-medium bg-gray-500 text-white rounded-md hover:bg-gray-600 transition-colors"
-                                      >
-                                        {t('common.cancel', 'Cancel')}
-                                      </button>
-                                    </div>
-                                  </div>
-                                ), { duration: 10000 });
-                              }}
-                              className="p-1.5 text-red-500 hover:bg-red-500/20 rounded-md transition-colors"
-                              title={t('common.delete', 'Delete')}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                // Single or no addresses - show full details as originally
-                <>
-                  {customer.email && (
-                    <p className="text-sm liquid-glass-modal-text-muted mb-1 flex items-center gap-2">
-                      <Mail className="w-4 h-4" aria-hidden="true" />
-                      <span>{customer.email}</span>
-                    </p>
-                  )}
-                  {customer.address && (
-                    <p className="text-sm liquid-glass-modal-text-muted flex items-start gap-1">
-                      <MapPin className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                      <span>
-                        {customer.address}
-                        {customer.postal_code && ` (${customer.postal_code})`}
-                        {customer.floor_number && `, ${t('modals.customerSearch.floor')}: ${customer.floor_number}`}
-                      </span>
-                    </p>
-                  )}
-                  {customer.name_on_ringer && (
-                    <p className="text-sm liquid-glass-modal-text-muted mt-1">
-                      🔔 {t('modals.customerSearch.nameOnRinger')}: {customer.name_on_ringer}
-                    </p>
-                  )}
-                  {customer.notes && (
-                    <p className="text-sm liquid-glass-modal-text-muted mt-1">
-                      📝 {customer.notes}
-                    </p>
-                  )}
-                </>
-              )}
             </div>
           </div>
+
+          {customer.addresses && customer.addresses.length > 0 ? (
+            // Multiple addresses - show a card for EACH address
+            <div className="mt-3 space-y-2">
+              <p
+                className="mb-1 text-xs font-semibold uppercase tracking-wider"
+                style={{ color: resolvedTheme === 'dark' ? 'rgba(96, 165, 250, 0.8)' : '#2563eb' }}
+              >
+                {t('modals.customerSearch.addresses', 'Addresses')}
+              </p>
+              {customer.addresses.map((addr) => {
+                const isSelected = selectedAddressId === addr.id;
+                return (
+                  <div
+                    key={addr.id}
+                    onClick={() => setSelectedAddressId(addr.id)}
+                    className={`w-full cursor-pointer rounded-lg p-2 transition-all ${isSelected
+                      ? 'border-2 border-green-500/60 bg-transparent'
+                      : 'border border-gray-200 bg-transparent hover:border-gray-300 dark:border-white/10 dark:hover:border-white/20'
+                      }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      {/* Checkmark or MapPin icon */}
+                      {isSelected ? (
+                        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <Check className="w-3 h-3 text-white" />
+                        </div>
+                      ) : (
+                        <MapPin className="w-4 h-4 text-gray-500 dark:text-blue-500 mt-0.5 flex-shrink-0" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-sm font-medium ${isSelected ? 'text-green-400' : 'liquid-glass-modal-text'}`}>
+                          {resolveAddressStreet(addr)}
+                        </p>
+                        <p className="text-xs liquid-glass-modal-text-muted">
+                          {[addr.city, addr.postal_code].filter(Boolean).join(', ')}
+                        </p>
+                        {addr.floor_number && (
+                          <p className="text-xs liquid-glass-modal-text-muted">
+                            {t('modals.customerSearch.floor')}: {addr.floor_number}
+                          </p>
+                        )}
+                      </div>
+                      {/* Edit and Delete buttons */}
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onEditCustomer) {
+                              onEditCustomer({ ...customer, editAddressId: addr.id } as any);
+                            }
+                          }}
+                          className="p-1.5 text-amber-500 hover:bg-amber-500/20 rounded-md transition-colors"
+                          title={t('common.edit', 'Edit')}
+                        >
+                          <Edit className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            // Use toast confirmation for address deletion
+                            toast((toastInstance) => (
+                              <div className="flex flex-col gap-3">
+                                <p className="text-sm font-medium">{t('modals.customerSearch.confirmDeleteAddress', 'Delete this address?')}</p>
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={async () => {
+                                      toast.dismiss(toastInstance.id);
+                                      try {
+                                        const result = await posApiFetch<any>(`pos/customers/${customer.id}/addresses/${addr.id}`, {
+                                          method: 'DELETE',
+                                          headers: { 'Content-Type': 'application/json' },
+                                        });
+                                        if (result.success && result.data?.success !== false) {
+                                          setCustomer(prev => prev ? {
+                                            ...prev,
+                                            addresses: prev.addresses?.filter(a => a.id !== addr.id)
+                                          } : null);
+                                          if (isSelected) {
+                                            const remaining = customer.addresses?.filter(a => a.id !== addr.id);
+                                            setSelectedAddressId(remaining?.[0]?.id || null);
+                                          }
+                                          toast.success(t('modals.customerSearch.deleteAddressSuccess', 'Address deleted'));
+                                        } else {
+                                          toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
+                                        }
+                                      } catch (err) {
+                                        console.error('Error deleting address:', err);
+                                        toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
+                                      }
+                                    }}
+                                    className="px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors"
+                                  >
+                                    {t('common.delete', 'Delete')}
+                                  </button>
+                                  <button
+                                    onClick={() => toast.dismiss(toastInstance.id)}
+                                    className="px-3 py-1.5 text-xs font-medium bg-gray-500 text-white rounded-md hover:bg-gray-600 transition-colors"
+                                  >
+                                    {t('common.cancel', 'Cancel')}
+                                  </button>
+                                </div>
+                              </div>
+                            ), { duration: 10000 });
+                          }}
+                          className="p-1.5 text-red-500 hover:bg-red-500/20 rounded-md transition-colors"
+                          title={t('common.delete', 'Delete')}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            // Single or no addresses - show full details as originally
+            <div className="mt-3 space-y-1">
+              {customer.email && (
+                <p className="text-sm liquid-glass-modal-text-muted flex items-center gap-2">
+                  <Mail className="w-4 h-4" aria-hidden="true" />
+                  <span>{customer.email}</span>
+                </p>
+              )}
+              {customer.address && (
+                <p className="text-sm liquid-glass-modal-text-muted flex items-start gap-1">
+                  <MapPin className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <span>
+                    {customer.address}
+                    {customer.postal_code && ` (${customer.postal_code})`}
+                    {customer.floor_number && `, ${t('modals.customerSearch.floor')}: ${customer.floor_number}`}
+                  </span>
+                </p>
+              )}
+              {customer.name_on_ringer && (
+                <p className="text-sm liquid-glass-modal-text-muted">
+                  🔔 {t('modals.customerSearch.nameOnRinger')}: {customer.name_on_ringer}
+                </p>
+              )}
+              {customer.notes && (
+                <p className="text-sm liquid-glass-modal-text-muted">
+                  📝 {customer.notes}
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Continue Button - prominent, shows selected address */}
           <button
             onClick={handleSelectCustomer}
             style={{
-              backgroundColor: resolvedTheme === 'dark' ? 'rgba(22, 163, 74, 0.2)' : '#16a34a',
-              color: resolvedTheme === 'dark' ? 'rgb(74, 222, 128)' : '#ffffff',
-              borderColor: resolvedTheme === 'dark' ? 'rgba(34, 197, 94, 0.3)' : '#16a34a'
+              backgroundColor: '#16a34a',
+              color: '#ffffff',
+              borderColor: '#16a34a'
             }}
             className="w-full mt-4 py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border hover:bg-green-700 dark:hover:bg-green-600/30"
           >
@@ -891,13 +903,13 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               <button
                 onClick={handleAddNewAddress}
                 style={{
-                  backgroundColor: resolvedTheme === 'dark' ? 'rgba(59, 130, 246, 0.2)' : '#2563eb',
-                  color: resolvedTheme === 'dark' ? 'rgb(96, 165, 250)' : '#ffffff',
+                  backgroundColor: 'transparent',
+                  color: resolvedTheme === 'dark' ? '#ffffff' : '#111827',
                   borderColor: resolvedTheme === 'dark' ? 'rgba(59, 130, 246, 0.3)' : '#2563eb'
                 }}
-                className="flex-1 py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border hover:bg-blue-700 dark:hover:bg-blue-500/30 gap-1"
+                className="flex-1 py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border gap-1"
               >
-                <MapPin className="w-4 h-4" />
+                <MapPin className="w-4 h-4 text-blue-500 dark:text-blue-400" />
                 {t('modals.customerSearch.addNewAddress')}
               </button>
             )}
@@ -906,13 +918,13 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               <button
                 onClick={handleEditCustomer}
                 style={{
-                  backgroundColor: resolvedTheme === 'dark' ? 'rgba(245, 158, 11, 0.2)' : '#d97706',
-                  color: resolvedTheme === 'dark' ? 'rgb(251, 191, 36)' : '#ffffff',
+                  backgroundColor: 'transparent',
+                  color: resolvedTheme === 'dark' ? '#ffffff' : '#111827',
                   borderColor: resolvedTheme === 'dark' ? 'rgba(245, 158, 11, 0.3)' : '#d97706'
                 }}
-                className="flex-1 py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border hover:bg-amber-700 dark:hover:bg-amber-500/30 gap-1"
+                className="flex-1 py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border gap-1"
               >
-                <Edit className="w-4 h-4" />
+                <Edit className="w-4 h-4 text-amber-500 dark:text-amber-300" />
                 {t('modals.customerSearch.editCustomer')}
               </button>
             )}
@@ -920,14 +932,14 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             <button
               onClick={handleDeleteCustomer}
               style={{
-                backgroundColor: resolvedTheme === 'dark' ? 'rgba(239, 68, 68, 0.2)' : '#dc2626',
-                color: resolvedTheme === 'dark' ? 'rgb(248, 113, 113)' : '#ffffff',
+                backgroundColor: 'transparent',
+                color: resolvedTheme === 'dark' ? '#ffffff' : '#111827',
                 borderColor: resolvedTheme === 'dark' ? 'rgba(239, 68, 68, 0.3)' : '#dc2626'
               }}
-              className="py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border hover:bg-red-700 dark:hover:bg-red-500/30 gap-1"
+              className="py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border gap-1"
               title={t('modals.customerSearch.deleteCustomer')}
             >
-              <Trash2 className="w-4 h-4" />
+              <Trash2 className="w-4 h-4 text-red-500 dark:text-red-400" />
             </button>
           </div>
         </div>
@@ -935,7 +947,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       {/* Add New Customer Option - Show when customer not found OR when customer is found (for different person with same phone) */}
       {searchQuery.length >= 3 && !isSearching && (customer || error === t('modals.customerSearch.customerNotFound')) && (
-        <div className="p-4 bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 rounded-xl">
+        <div className="p-4 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/20 rounded-xl">
           <p className="text-sm liquid-glass-modal-text-muted mb-3">
             {customer
               ? t('modals.customerSearch.differentPersonPrompt')
@@ -945,11 +957,11 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           <button
             onClick={handleAddNewCustomer}
             style={{
-              backgroundColor: resolvedTheme === 'dark' ? 'rgba(59, 130, 246, 0.2)' : '#2563eb',
-              color: resolvedTheme === 'dark' ? 'rgb(96, 165, 250)' : '#ffffff',
-              borderColor: resolvedTheme === 'dark' ? 'rgba(59, 130, 246, 0.3)' : '#2563eb'
+              backgroundColor: '#facc15',
+              color: '#111827',
+              borderColor: '#facc15'
             }}
-            className="w-full py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border hover:bg-blue-700 dark:hover:bg-blue-500/30"
+            className="w-full py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border hover:bg-yellow-400 dark:hover:bg-yellow-400"
           >
             {t('modals.customerSearch.addNewCustomer')}
           </button>

@@ -28,6 +28,10 @@ test('SuppliersPage is a hidden-scrollbar supplier workbench', () => {
   assert.match(source, /overflow-y-auto scrollbar-hide/);
   assert.match(source, /aria-label=\{t\('common.refresh'/);
   assert.match(source, /h-12 w-12/);
+  assert.match(source, /border border-white\/80 bg-white text-black hover:bg-zinc-200/);
+  assert.match(source, /border border-black bg-black text-white hover:bg-zinc-800/);
+  assert.match(source, /hover:scale-\[1\.03\]/);
+  assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
 });
 
 test('SuppliersPage supports POS-only scan and review-first import actions', () => {
@@ -48,6 +52,23 @@ test('SuppliersPage supports POS-only scan and review-first import actions', () 
   assert.doesNotMatch(source, /DollarSign/);
   assert.match(source, /saveAfterPreview/);
   assert.match(source, /endpointUnavailable/);
+});
+
+test('SuppliersPage uses unwrapped icons and yellow transparent selection chrome', () => {
+  const source = suppliersPageSource();
+
+  assert.match(source, /<h1 className="truncate text-3xl font-bold tracking-tight">\{t\('suppliers\.title', 'Suppliers'\)\}<\/h1>/);
+  assert.match(source, /<Icon className=\{`h-5 w-5 shrink-0 \$\{stat\.iconClass\}`\}/);
+  assert.match(source, /<span className=\{`w-5 shrink-0 text-center text-lg font-bold leading-none \$\{stat\.iconClass\}`\}/);
+  assert.match(source, /border-yellow-400\/70 text-white hover:bg-yellow-400\/10/);
+  assert.match(source, /border-yellow-400 bg-transparent text-white/);
+  assert.match(source, /shrink-0 text-xs font-semibold \$\{supplier\.is_active/);
+  assert.match(source, /<div className="text-yellow-400">\{icon\}<\/div>/);
+  assert.doesNotMatch(source, /<Truck className/);
+  assert.doesNotMatch(source, /flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border[\s\S]*<Truck/);
+  assert.doesNotMatch(source, /flex h-9 w-9 items-center justify-center rounded-lg \$\{stat\.iconClass\}/);
+  assert.doesNotMatch(source, /border-blue-500 bg-blue-500\/10/);
+  assert.doesNotMatch(source, /shrink-0 rounded-full border px-2 py-1 text-xs font-semibold \$\{supplier\.is_active/);
 });
 
 test('SuppliersPage supplier translation keys exist in every POS locale', () => {

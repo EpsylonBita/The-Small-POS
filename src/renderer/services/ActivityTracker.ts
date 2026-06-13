@@ -141,7 +141,7 @@ class ActivityTrackerClass {
     this.track({ type: 'discount', action: 'apply', result: 'success', metadata: { amount, percent } })
   }
 
-  trackPaymentCompleted(amount: number, method: 'cash' | 'card', transactionId?: string, driverId?: string) {
+  trackPaymentCompleted(amount: number, method: 'cash' | 'card' | 'room_charge', transactionId?: string, driverId?: string) {
     this.track({ type: 'payment', action: 'complete', result: 'success', metadata: { amount, method, transactionId, driverId } })
   }
 
@@ -155,4 +155,3 @@ class ActivityTrackerClass {
 }
 
 export const ActivityTracker = ActivityTrackerClass.instance
-

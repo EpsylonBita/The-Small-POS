@@ -7,6 +7,7 @@ export interface UpdateInfo {
   version: string;
   releaseDate?: string;
   releaseNotes?: string | UpdateReleaseNote[];
+  releaseNotesSource?: 'github_release' | 'updater_manifest';
 }
 
 export interface ProgressInfo {

@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BadgeDollarSign,
+  Banknote,
+  Check,
+  ChevronDown,
   ClipboardList,
   Euro,
   FileText,
@@ -82,6 +85,13 @@ interface DeleteExpenseTarget {
 interface DeletePaymentTarget {
   id: string;
   description: string;
+}
+
+type DrawerDropdownKey = 'expenseType' | 'staffMember' | 'paymentType';
+
+interface DrawerDropdownOption {
+  value: string;
+  label: string;
 }
 
 const EXPENSE_TYPES: ExpenseType[] = ['supplies', 'maintenance', 'petty_cash', 'refund', 'other'];
@@ -339,6 +349,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   const [paymentToDelete, setPaymentToDelete] = useState<DeletePaymentTarget | null>(null);
   const [deletingPaymentId, setDeletingPaymentId] = useState<string | null>(null);
   const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
+  const [openDropdown, setOpenDropdown] = useState<DrawerDropdownKey | null>(null);
   const [expenseDraft, setExpenseDraft] = useState({
     expenseType: 'other' as ExpenseType,
     amount: '',
@@ -506,6 +517,53 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     [expenses, staffPayments, t],
   );
 
+  const expenseTypeOptions = useMemo<DrawerDropdownOption[]>(
+    () =>
+      EXPENSE_TYPES.map((expenseType) => ({
+        value: expenseType,
+        label: t(`modals.expense.expenseTypes.${expenseType}`, expenseType),
+      })),
+    [t],
+  );
+
+  const staffDropdownOptions = useMemo<DrawerDropdownOption[]>(() => {
+    const options: DrawerDropdownOption[] = [
+      {
+        value: '',
+        label: t('modals.expense.staffPlaceholder', 'Select a staff member'),
+      },
+    ];
+
+    if (
+      editingPayment &&
+      paymentDraft.paidToStaffId &&
+      !staffOptions.some((option) => option.id === paymentDraft.paidToStaffId)
+    ) {
+      options.push({
+        value: paymentDraft.paidToStaffId,
+        label: editingPayment.staff_name || t('common.unknown', 'Unknown'),
+      });
+    }
+
+    options.push(
+      ...staffOptions.map((option) => ({
+        value: option.id,
+        label: `${option.name} - ${option.role}`,
+      })),
+    );
+
+    return options;
+  }, [editingPayment, paymentDraft.paidToStaffId, staffOptions, t]);
+
+  const staffPaymentTypeOptions = useMemo<DrawerDropdownOption[]>(
+    () =>
+      STAFF_PAYMENT_TYPES.map((paymentType) => ({
+        value: paymentType,
+        label: t(`modals.expense.paymentTypes.${paymentType}`, paymentType),
+      })),
+    [t],
+  );
+
   useEffect(() => {
     if (!isOpen) return;
     setActiveTab('expenses');
@@ -514,6 +572,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     setPaymentToDelete(null);
     setDeletingPaymentId(null);
     setEditingPaymentId(null);
+    setOpenDropdown(null);
     setExpenseDraft({ expenseType: 'other', amount: '', description: '', receiptNumber: '' });
     setPaymentDraft({ paidToStaffId: '', amount: '', paymentType: 'wage', notes: '' });
     void refreshModalData();
@@ -1081,13 +1140,103 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     }
   };
 
+  const drawerSummaryCardClass = 'rounded-3xl border border-neutral-700/70 bg-black/50 p-4 shadow-[0_12px_36px_rgba(0,0,0,0.24)] backdrop-blur-xl dark:border-neutral-700/60 dark:bg-black/50 dark:shadow-[0_18px_48px_rgba(0,0,0,0.34)]';
+  const drawerPanelClass = 'rounded-[28px] border border-neutral-700/70 bg-neutral-950/80 p-6 shadow-[0_18px_50px_rgba(0,0,0,0.24)] dark:border-neutral-700/60 dark:bg-neutral-950/80';
+  const drawerSidePanelClass = 'rounded-[28px] border border-neutral-700/70 bg-neutral-950/80 p-5 shadow-[0_16px_42px_rgba(0,0,0,0.22)] dark:border-neutral-700/60 dark:bg-neutral-950/80';
+  const drawerListItemClass = 'rounded-2xl border border-neutral-700/70 bg-black/35 px-4 py-3 dark:border-neutral-700/60 dark:bg-black/35';
+  const drawerActivityItemClass = 'flex items-start justify-between gap-4 rounded-2xl border border-neutral-700/70 bg-black/35 px-4 py-3 shadow-[0_10px_26px_rgba(0,0,0,0.22)] dark:border-neutral-700/60 dark:bg-black/35';
+  const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-neutral-700/70 bg-neutral-900/70 px-6 py-10 text-center dark:border-neutral-700/70 dark:bg-neutral-900/70';
+  const drawerEmptyIconClass = 'mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-neutral-800 text-neutral-400 shadow-[0_10px_25px_rgba(0,0,0,0.24)] dark:bg-neutral-800 dark:text-neutral-400';
+  const drawerInputClass = 'w-full rounded-2xl border border-neutral-700/80 bg-black px-4 py-3 text-white shadow-inner outline-none transition-colors placeholder:text-neutral-500 focus:border-yellow-400/70 focus:ring-2 focus:ring-yellow-400/15 disabled:cursor-not-allowed disabled:opacity-60';
+  const drawerExpenseSubmitClass = '!border-neutral-700/60 !bg-transparent !font-bold !text-emerald-400 !shadow-none hover:!border-neutral-500 hover:!bg-transparent disabled:!text-emerald-400 disabled:!opacity-100';
+  const drawerStaffPaymentSubmitClass = '!border-neutral-700/60 !bg-transparent !font-bold !text-yellow-400 !shadow-none hover:!border-neutral-500 hover:!bg-transparent disabled:!text-yellow-400 disabled:!opacity-100';
+  const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-neutral-700/80 bg-neutral-950 shadow-[0_18px_44px_rgba(0,0,0,0.42)]';
+  const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-white transition-colors hover:bg-neutral-800 focus:bg-neutral-800 focus:outline-none';
+
+  const renderDrawerDropdown = ({
+    dropdownKey,
+    value,
+    options,
+    disabled,
+    onChange,
+  }: {
+    dropdownKey: DrawerDropdownKey;
+    value: string;
+    options: DrawerDropdownOption[];
+    disabled?: boolean;
+    onChange: (value: string) => void;
+  }) => {
+    const isOpenDropdown = openDropdown === dropdownKey;
+    const selectedOption = options.find((option) => option.value === value) || options[0];
+
+    return (
+      <div
+        className="relative"
+        onBlur={(event) => {
+          const nextFocus = event.relatedTarget;
+          if (!(nextFocus instanceof Node) || !event.currentTarget.contains(nextFocus)) {
+            setOpenDropdown(null);
+          }
+        }}
+      >
+        <button
+          type="button"
+          disabled={disabled}
+          aria-haspopup="listbox"
+          aria-expanded={isOpenDropdown}
+          onClick={() => setOpenDropdown((current) => (current === dropdownKey ? null : dropdownKey))}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              setOpenDropdown(null);
+            }
+          }}
+          className={`${drawerInputClass} flex items-center justify-between gap-3 text-left ${
+            isOpenDropdown ? 'border-yellow-400/80 ring-2 ring-yellow-400/15' : ''
+          }`}
+        >
+          <span className={selectedOption?.value ? 'truncate' : 'truncate text-neutral-500'}>
+            {selectedOption?.label}
+          </span>
+          <ChevronDown
+            className={`h-5 w-5 shrink-0 text-neutral-300 transition-transform ${isOpenDropdown ? 'rotate-180 text-yellow-300' : ''}`}
+          />
+        </button>
+
+        {isOpenDropdown && (
+          <div className={drawerDropdownMenuClass} role="listbox">
+            {options.map((option) => {
+              const selected = option.value === value;
+              return (
+                <button
+                  key={`${dropdownKey}-${option.value || 'empty'}`}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    onChange(option.value);
+                    setOpenDropdown(null);
+                  }}
+                  className={`${drawerDropdownOptionClass} ${selected ? 'bg-neutral-800 text-yellow-300' : ''}`}
+                >
+                  <span className="truncate">{option.label}</span>
+                  {selected && <Check className="h-4 w-4 shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderSummaryCard = (
     label: string,
     value: string,
     helper: string,
     accentClass: string,
   ) => (
-    <div className="rounded-3xl border border-slate-200/70 bg-white/70 p-4 shadow-[0_12px_36px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/65 dark:shadow-[0_18px_48px_rgba(2,6,23,0.38)]">
+    <div className={drawerSummaryCardClass}>
       <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
         {label}
       </p>
@@ -1096,11 +1245,18 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     </div>
   );
 
-  const renderEmptyState = (icon: React.ReactNode, title: string, description: string) => (
-    <div className="rounded-3xl border border-dashed border-slate-300/90 bg-slate-50/90 px-6 py-10 text-center dark:border-white/12 dark:bg-slate-950/35">
-      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-white text-slate-400 shadow-[0_10px_25px_rgba(15,23,42,0.09)] dark:bg-slate-900/70 dark:text-slate-500">
-        {icon}
-      </div>
+  const renderEmptyState = (
+    icon: React.ReactNode,
+    title: string,
+    description: string,
+    options?: { wrapIcon?: boolean },
+  ) => (
+    <div className={drawerEmptyStateClass}>
+      {options?.wrapIcon === false ? icon : (
+        <div className={drawerEmptyIconClass}>
+          {icon}
+        </div>
+      )}
       <h4 className="mt-4 text-lg font-semibold text-slate-900 dark:text-white">{title}</h4>
       <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{description}</p>
     </div>
@@ -1113,7 +1269,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     return (
       <div
         key={item.id}
-        className="flex items-start justify-between gap-4 rounded-2xl border border-slate-200/70 bg-white/75 px-4 py-3 shadow-[0_10px_26px_rgba(15,23,42,0.07)] dark:border-white/10 dark:bg-slate-900/55"
+        className={drawerActivityItemClass}
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -1278,8 +1434,8 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               onClick={() => setActiveTab(tab.key)}
               className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-all ${
                 active
-                  ? 'border-blue-500/60 bg-blue-600 text-white shadow-[0_14px_34px_rgba(37,99,235,0.28)]'
-                  : 'border-slate-200/70 bg-white/75 text-slate-700 hover:border-blue-300 hover:text-blue-700 dark:border-white/10 dark:bg-slate-900/55 dark:text-slate-200 dark:hover:border-blue-500/30 dark:hover:text-blue-300'
+                  ? 'border-yellow-400 bg-yellow-400 text-black shadow-[0_14px_34px_rgba(250,204,21,0.24)]'
+                  : 'border-neutral-700/60 bg-neutral-950/55 text-neutral-200 hover:border-neutral-500 hover:bg-neutral-900 dark:border-neutral-700/60 dark:bg-neutral-950/55 dark:text-neutral-200 dark:hover:border-neutral-500 dark:hover:bg-neutral-900'
               }`}
             >
               {tab.icon}
@@ -1306,7 +1462,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
       {activeTab === 'expenses' && (
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.18fr)_360px]">
-          <section className="rounded-[28px] border border-slate-200/70 bg-white/78 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-slate-900/65">
+          <section className={drawerPanelClass}>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
@@ -1319,7 +1475,6 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   {t('modals.expense.chargedToDrawer', 'This outflow is charged directly to the active cashier drawer.')}
                 </p>
               </div>
-              <POSGlassBadge variant="error">{formatCurrency(totalExpenses)}</POSGlassBadge>
             </div>
 
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -1327,18 +1482,14 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
                   {t('modals.expense.expenseType', 'Expense type')}
                 </label>
-                <select
-                  value={expenseDraft.expenseType}
-                  onChange={(event) => setExpenseDraft((current) => ({ ...current, expenseType: event.target.value as ExpenseType }))}
-                  disabled={!canRecord}
-                  className="liquid-glass-modal-input w-full"
-                >
-                  {EXPENSE_TYPES.map((expenseType) => (
-                    <option key={expenseType} value={expenseType}>
-                      {t(`modals.expense.expenseTypes.${expenseType}`, expenseType)}
-                    </option>
-                  ))}
-                </select>
+                {renderDrawerDropdown({
+                  dropdownKey: 'expenseType',
+                  value: expenseDraft.expenseType,
+                  options: expenseTypeOptions,
+                  disabled: !canRecord,
+                  onChange: (value) =>
+                    setExpenseDraft((current) => ({ ...current, expenseType: value as ExpenseType })),
+                })}
               </div>
 
               <div>
@@ -1353,7 +1504,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     onChange={(event) => setExpenseDraft((current) => ({ ...current, amount: formatMoneyInputWithCents(event.target.value) }))}
                     placeholder="0,00"
                     disabled={!canRecord}
-                    className="liquid-glass-modal-input w-full !pl-10 text-lg font-bold"
+                    className={`${drawerInputClass} !pl-10 text-lg font-bold`}
                   />
                   <Euro className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
                 </div>
@@ -1370,7 +1521,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 onChange={(event) => setExpenseDraft((current) => ({ ...current, description: event.target.value }))}
                 placeholder={t('modals.expense.justificationPlaceholder', 'Explain what left the drawer and why it was needed.')}
                 disabled={!canRecord}
-                className="liquid-glass-modal-input min-h-[150px] w-full resize-none"
+                className={`${drawerInputClass} min-h-[150px] resize-none`}
               />
             </div>
 
@@ -1385,7 +1536,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   onChange={(event) => setExpenseDraft((current) => ({ ...current, receiptNumber: event.target.value }))}
                   placeholder={t('modals.expense.receiptPlaceholder', 'Invoice, receipt, or reference number')}
                   disabled={!canRecord}
-                  className="liquid-glass-modal-input w-full !pl-10"
+                  className={`${drawerInputClass} !pl-10`}
                 />
                 <FileText className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               </div>
@@ -1399,6 +1550,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 disabled={!canRecord || parseMoneyInputValue(expenseDraft.amount) <= 0 || !expenseDraft.description.trim()}
                 onClick={() => { void handleRecordExpense(); }}
                 icon={<Receipt className="h-4 w-4" />}
+                className={drawerExpenseSubmitClass}
               >
                 {t('modals.expense.recordExpense', 'Record expense')}
               </POSGlassButton>
@@ -1422,7 +1574,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               'text-emerald-500 dark:text-emerald-300',
             )}
 
-            <div className="rounded-[28px] border border-slate-200/70 bg-white/78 p-5 shadow-[0_16px_42px_rgba(15,23,42,0.07)] dark:border-white/10 dark:bg-slate-900/60">
+            <div className={drawerSidePanelClass}>
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
@@ -1432,7 +1584,6 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     {t('modals.expense.latestEntries', 'Latest entries')}
                   </h4>
                 </div>
-                <Receipt className="h-5 w-5 text-rose-500 dark:text-rose-300" />
               </div>
 
               <div className="mt-4 space-y-3">
@@ -1445,7 +1596,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   ].filter(Boolean);
 
                   return (
-                    <div key={expense.id} className="rounded-2xl border border-slate-200/70 bg-white/80 px-4 py-3 dark:border-white/10 dark:bg-slate-950/35">
+                    <div key={expense.id} className={drawerListItemClass}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
                           <div className="truncate font-semibold text-slate-900 dark:text-white">{expenseTitle}</div>
@@ -1483,9 +1634,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     </div>
                   );
                 }) : renderEmptyState(
-                  <Receipt className="h-6 w-6" />,
+                  <Banknote className="mx-auto block h-10 w-10 text-emerald-400" strokeWidth={2.2} />,
                   t('modals.expense.noExpenses', 'No expenses recorded yet'),
                   t('modals.expense.noExpensesDetail', 'Recorded expenses will appear here immediately after saving.'),
+                  { wrapIcon: false },
                 )}
               </div>
             </div>
@@ -1495,7 +1647,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
       {activeTab === 'staffPayments' && (
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.18fr)_360px]">
-          <section className="rounded-[28px] border border-slate-200/70 bg-white/78 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-slate-900/65">
+          <section className={drawerPanelClass}>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
@@ -1514,7 +1666,6 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   )}
                 </p>
               </div>
-              <POSGlassBadge variant="warning">{formatCurrency(totalStaffPayments)}</POSGlassBadge>
             </div>
 
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -1522,42 +1673,28 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
                   {t('modals.expense.selectStaff', 'Pay to staff')}
                 </label>
-                <select
-                  value={paymentDraft.paidToStaffId}
-                  onChange={(event) => setPaymentDraft((current) => ({ ...current, paidToStaffId: event.target.value }))}
-                  disabled={!canRecord}
-                  className="liquid-glass-modal-input w-full"
-                >
-                  <option value="">{t('modals.expense.staffPlaceholder', 'Select a staff member')}</option>
-                  {editingPayment && paymentDraft.paidToStaffId && !staffOptions.some((option) => option.id === paymentDraft.paidToStaffId) && (
-                    <option value={paymentDraft.paidToStaffId}>
-                      {editingPayment.staff_name || t('common.unknown', 'Unknown')}
-                    </option>
-                  )}
-                  {staffOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.name} - {option.role}
-                    </option>
-                  ))}
-                </select>
+                {renderDrawerDropdown({
+                  dropdownKey: 'staffMember',
+                  value: paymentDraft.paidToStaffId,
+                  options: staffDropdownOptions,
+                  disabled: !canRecord,
+                  onChange: (value) =>
+                    setPaymentDraft((current) => ({ ...current, paidToStaffId: value })),
+                })}
               </div>
 
               <div>
                 <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
                   {t('modals.expense.paymentType', 'Payment type')}
                 </label>
-                <select
-                  value={paymentDraft.paymentType}
-                  onChange={(event) => setPaymentDraft((current) => ({ ...current, paymentType: event.target.value as StaffPaymentType }))}
-                  disabled={!canRecord}
-                  className="liquid-glass-modal-input w-full"
-                >
-                  {STAFF_PAYMENT_TYPES.map((paymentType) => (
-                    <option key={paymentType} value={paymentType}>
-                      {t(`modals.expense.paymentTypes.${paymentType}`, paymentType)}
-                    </option>
-                  ))}
-                </select>
+                {renderDrawerDropdown({
+                  dropdownKey: 'paymentType',
+                  value: paymentDraft.paymentType,
+                  options: staffPaymentTypeOptions,
+                  disabled: !canRecord,
+                  onChange: (value) =>
+                    setPaymentDraft((current) => ({ ...current, paymentType: value as StaffPaymentType })),
+                })}
               </div>
             </div>
 
@@ -1573,7 +1710,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   onChange={(event) => setPaymentDraft((current) => ({ ...current, amount: formatMoneyInputWithCents(event.target.value) }))}
                   placeholder="0,00"
                   disabled={!canRecord}
-                  className="liquid-glass-modal-input w-full !pl-10 text-lg font-bold"
+                  className={`${drawerInputClass} !pl-10 text-lg font-bold`}
                 />
                 <Euro className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
               </div>
@@ -1589,7 +1726,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 onChange={(event) => setPaymentDraft((current) => ({ ...current, notes: event.target.value }))}
                 placeholder={t('modals.expense.notesPlaceholder', 'Optional note for payroll, tip settlement, advance, or bonus.')}
                 disabled={!canRecord}
-                className="liquid-glass-modal-input min-h-[150px] w-full resize-none"
+                className={`${drawerInputClass} min-h-[150px] resize-none`}
               />
             </div>
 
@@ -1616,6 +1753,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 disabled={!canRecord || !paymentDraft.paidToStaffId || parseMoneyInputValue(paymentDraft.amount) <= 0}
                 onClick={() => { void handleRecordStaffPayment(); }}
                 icon={<BadgeDollarSign className="h-4 w-4" />}
+                className={drawerStaffPaymentSubmitClass}
               >
                 {t(
                   editingPaymentId ? 'modals.expense.saveStaffPaymentChanges' : 'modals.expense.recordStaffPayment',
@@ -1645,7 +1783,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               'text-emerald-500 dark:text-emerald-300',
             )}
 
-            <div className="rounded-[28px] border border-slate-200/70 bg-white/78 p-5 shadow-[0_16px_42px_rgba(15,23,42,0.07)] dark:border-white/10 dark:bg-slate-900/60">
+            <div className={drawerSidePanelClass}>
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
@@ -1660,7 +1798,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
               <div className="mt-4 space-y-3">
                 {recentPayments.length > 0 ? recentPayments.map((payment) => (
-                  <div key={payment.id} className="rounded-2xl border border-slate-200/70 bg-white/80 px-4 py-3 dark:border-white/10 dark:bg-slate-950/35">
+                  <div key={payment.id} className={drawerListItemClass}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="truncate font-semibold text-slate-900 dark:text-white">
@@ -1740,7 +1878,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             )}
           </div>
 
-          <div className="rounded-[28px] border border-slate-200/70 bg-white/78 p-5 shadow-[0_16px_42px_rgba(15,23,42,0.07)] dark:border-white/10 dark:bg-slate-900/60">
+          <div className={drawerSidePanelClass}>
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
@@ -1750,7 +1888,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   {t('modals.expense.activitySubtitle', 'Expenses and staff payments recorded on this cashier shift')}
                 </h4>
               </div>
-              <ClipboardList className="h-5 w-5 text-blue-500 dark:text-blue-300" />
+              <ClipboardList className="h-5 w-5 text-neutral-500 dark:text-neutral-300" />
             </div>
 
             <div className="mt-4 space-y-3">

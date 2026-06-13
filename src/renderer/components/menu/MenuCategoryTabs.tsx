@@ -176,12 +176,12 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
   };
 
   return (
-    <div className="border-b border-gray-200/20">
+    <div className="border-b border-gray-200/20 pb-1">
       {/* Main Categories */}
-      <div className="p-2 sm:p-3 relative">
+      <div className="relative px-2 py-3 sm:px-3 sm:py-4">
         <div
           ref={scrollContainerRef}
-          className="flex gap-1.5 sm:gap-2 overflow-x-auto scrollbar-hide cursor-grab select-none touch-pan-x"
+          className="flex gap-1.5 overflow-x-auto scrollbar-hide cursor-grab select-none touch-pan-x py-1.5 sm:gap-2"
           data-testid="menu-categories"
           onMouseDown={handleMouseDown}
           onMouseLeave={handleMouseLeave}
@@ -196,8 +196,8 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
               className={`min-h-[38px] flex-shrink-0 whitespace-nowrap rounded-xl border px-3.5 py-2 text-sm font-semibold antialiased shadow-sm backdrop-blur-md transition-all duration-200 touch-feedback hover:-translate-y-0.5 active:translate-y-0 active:scale-95 sm:px-4 ${
                 selectedCategory === category.id
                   ? resolvedTheme === 'dark'
-                    ? 'border-blue-300/45 bg-blue-500/85 text-white shadow-none ring-1 ring-blue-200/20'
-                    : 'border-blue-400/50 bg-blue-500 text-white shadow-none ring-1 ring-blue-200/30'
+                    ? 'border-yellow-300/55 bg-yellow-400 text-black shadow-none ring-1 ring-yellow-200/25'
+                    : 'border-yellow-500/60 bg-yellow-400 text-black shadow-none ring-1 ring-yellow-200/35'
                   : resolvedTheme === 'dark'
                     ? 'border-white/12 bg-white/[0.08] text-zinc-100 shadow-black/20 hover:border-white/25 hover:bg-white/[0.14]'
                     : 'border-white/70 bg-white/75 text-gray-800 shadow-gray-900/5 hover:border-blue-200 hover:bg-white'
@@ -211,8 +211,8 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
 
       {/* Subcategories - only show if there are subcategories */}
       {subcategories.length > 0 && (
-        <div className="px-2 sm:px-4 pb-3 sm:pb-4">
-          <div className="flex space-x-2 overflow-x-auto scrollbar-hide touch-pan-x" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
+        <div className="px-2 pb-4 pt-1 sm:px-4 sm:pb-5">
+          <div className="flex space-x-2 overflow-x-auto scrollbar-hide touch-pan-x py-1.5" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
             {subcategories.map((subcategory) => (
               <button
                 key={subcategory.id}

@@ -20,15 +20,17 @@ export const ContentContainer = memo<ContentContainerProps>(({ children, classNa
         relative
         transition-all duration-300
         ${resolvedTheme === 'light'
-          ? 'bg-white shadow-lg border border-gray-200'
-          : 'bg-black shadow-[0_0_80px_rgba(59,130,246,0.4),0_0_120px_rgba(59,130,246,0.2)] border border-blue-500/20'
+          ? 'bg-[#fdfaf5] shadow-[0_0_64px_rgba(255,221,0,0.34),0_10px_36px_rgba(15,23,42,0.08)] border border-amber-200/70'
+          : 'bg-black shadow-[0_0_80px_rgba(255,221,0,0.58),0_0_120px_rgba(255,238,88,0.36)] border border-amber-400/25'
         }
         ${className}
       `}>
-        {/* Blue Backlight Glow Effect - positioned behind the container */}
-        {resolvedTheme === 'dark' && (
-          <div className="absolute -inset-4 -z-10 bg-blue-500/15 blur-2xl rounded-3xl"></div>
-        )}
+        {/* Yellow Backlight Glow Effect - positioned behind the container */}
+        <div
+          className={`absolute -inset-4 -z-10 blur-2xl rounded-3xl ${
+            resolvedTheme === 'dark' ? 'bg-yellow-300/30' : 'bg-yellow-300/35'
+          }`}
+        />
         {/* Content */}
         <div className="relative h-full overflow-y-auto scrollbar-hide">
           {children}
@@ -40,4 +42,4 @@ export const ContentContainer = memo<ContentContainerProps>(({ children, classNa
 
 ContentContainer.displayName = 'ContentContainer';
 
-export default ContentContainer; 
+export default ContentContainer;

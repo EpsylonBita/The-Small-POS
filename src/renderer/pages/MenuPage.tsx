@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useDeferredValue, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { useOrderStore } from '../hooks/useOrderStore';
@@ -19,6 +20,7 @@ import { getMenuItemPrice, type OrderType } from '../../shared/services/PricingS
 import { normalizePosOrderItems } from '../../shared/utils/pos-order-items';
 import { Utensils } from 'lucide-react';
 import { getBridge } from '../../lib';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -495,11 +497,11 @@ const MenuPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
-      <div className="max-w-7xl mx-auto">
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="min-h-screen bg-gray-50 p-4">
+      <motion.div variants={pageMotionContainer} className="max-w-7xl mx-auto">
         {/* Header */}
-        <div className="mb-6">
-          <div className="flex items-center justify-between">
+        <motion.div variants={pageMotionItem} className="mb-6">
+          <motion.div variants={pageMotionItem} className="flex items-center justify-between">
             <h1 className="text-2xl font-bold text-gray-900">{t('menu.title')}</h1>
             <button
               onClick={() => navigate('/orders')}
@@ -507,10 +509,10 @@ const MenuPage: React.FC = () => {
             >
               {t('orders.viewOrders')}
             </button>
-          </div>
+          </motion.div>
 
           {/* Order Type Display */}
-          <div className="mt-4 flex items-center justify-between">
+          <motion.div variants={pageMotionItem} className="mt-4 flex items-center justify-between">
             <div className="flex items-center space-x-4">
               <span className="text-sm font-medium text-gray-700">{t('orders.fields.orderType')}</span>
               <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">
@@ -522,27 +524,29 @@ const MenuPage: React.FC = () => {
                 {cartItems.length === 1 ? t('menu.cart.oneItem') : t('menu.cart.multipleItems', { count: cartItems.length })}
               </div>
             )}
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
 
         {/* Main Content */}
         {(isLoadingMenu && !hasLoadedMenu) ? (
-          <MenuPageSkeleton />
+          <motion.div variants={pageMotionItem}>
+            <MenuPageSkeleton />
+          </motion.div>
         ) : menuError ? (
-          <div className="lg:col-span-2">
+          <motion.div variants={pageMotionItem} className="lg:col-span-2">
             <ErrorDisplay
               error={menuError}
               onRetry={handleSyncMenu}
               showDetails={process.env.NODE_ENV === 'development'}
             />
-          </div>
+          </motion.div>
         ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <motion.div variants={pageMotionContainer} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Menu Items */}
-          <div className="lg:col-span-2">
+          <motion.div variants={pageMotionItem} className="lg:col-span-2">
             {menuItems.length === 0 ? (
-              <div className="flex items-center justify-center h-64">
-                <div className="text-center">
+              <motion.div variants={pageMotionItem} className="flex items-center justify-center h-64">
+                <motion.div variants={pageMotionItem} className="text-center">
                   <Utensils className="w-12 h-12 text-gray-400 mx-auto mb-4" />
                   <h3 className={`text-xl font-semibold mb-2 ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
                     {t('menu.emptyState.title')}
@@ -556,10 +560,10 @@ const MenuPage: React.FC = () => {
                   >
                     {t('menu.sync.syncNow')}
                   </button>
-                </div>
-              </div>
+                </motion.div>
+              </motion.div>
             ) : (
-              <div className={`rounded-lg shadow-lg overflow-hidden ${
+              <motion.div variants={pageMotionItem} className={`rounded-lg shadow-lg overflow-hidden ${
                 resolvedTheme === 'dark' ? 'bg-gray-800' : 'bg-white'
               }`}>
                 {/* Category Tabs */}
@@ -583,12 +587,12 @@ const MenuPage: React.FC = () => {
                   hideCategoryButtons={true}
                   orderType={orderType === 'delivery' ? 'delivery' : 'pickup'}
                 />
-              </div>
+              </motion.div>
             )}
-          </div>
+          </motion.div>
 
           {/* Cart Summary */}
-          <div className="lg:col-span-1">
+          <motion.div variants={pageMotionItem} className="lg:col-span-1">
             <CartSummary
               cartItems={cartItems}
               orderType={orderType}
@@ -600,10 +604,10 @@ const MenuPage: React.FC = () => {
               isPlacingOrder={isPlacingOrder}
               deliveryFee={deliveryFeeFromZone}
             />
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
         )}
-      </div>
+      </motion.div>
 
       {/* Modals */}
       <MenuItemModal
@@ -621,7 +625,7 @@ const MenuPage: React.FC = () => {
         initialData={customerInfo}
         orderType={orderType}
       />
-    </div>
+    </motion.div>
   );
 };
 

@@ -107,6 +107,19 @@ export function offlineUpdateRoomStatus(payload: Record<string, unknown>) {
   )
 }
 
+export function offlineRoomCheckin(payload: Record<string, unknown>) {
+  return invokeOffline<{
+    room?: Record<string, unknown>
+    clientRequestId: string
+    queueId: string
+    queued: boolean
+  }>(
+    'offline:room-checkin',
+    payload,
+    'Failed to queue room check-in offline',
+  )
+}
+
 export function offlineUpdateHousekeepingStatus(payload: Record<string, unknown>) {
   return invokeOffline<{ task?: Record<string, unknown>; queueId: string; queued: boolean }>(
     'offline:housekeeping-update-status',

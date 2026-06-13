@@ -129,23 +129,21 @@ const DeliveryZonesPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-full overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`h-full overflow-y-auto overflow-x-hidden scrollbar-hide p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
       <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
-              <MapPin className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold">{t('deliveryZones.title', 'Delivery Zones')}</h1>
-              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-                {t('deliveryZones.subtitle', 'Live delivery zone performance and coverage')}
-              </p>
-            </div>
+          <div className="min-w-0">
+            <h1 className="truncate text-3xl font-bold tracking-tight">{t('deliveryZones.title', 'Delivery Zones')}</h1>
+            <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+              {t('deliveryZones.subtitle', 'Live delivery zone performance and coverage')}
+            </p>
           </div>
           <button
+            type="button"
             onClick={() => void fetchData()}
-            className={`h-10 w-10 inline-flex items-center justify-center rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+            title={t('common.refresh', 'Refresh')}
+            aria-label={t('common.refresh', 'Refresh')}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -159,7 +157,7 @@ const DeliveryZonesPage: React.FC = () => {
           >
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <CheckCircle className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                <CheckCircle className="w-5 h-5 text-green-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.activeZones', 'Active Zones')}</p>
@@ -175,7 +173,7 @@ const DeliveryZonesPage: React.FC = () => {
           >
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <Activity className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                <Activity className="w-5 h-5 text-yellow-400" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.validations', 'Validations')}</p>
@@ -191,7 +189,7 @@ const DeliveryZonesPage: React.FC = () => {
           >
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <Truck className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                <Truck className="w-5 h-5 text-blue-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.successRate', 'Success Rate')}</p>
@@ -207,7 +205,7 @@ const DeliveryZonesPage: React.FC = () => {
           >
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <Flame className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                <Flame className="w-5 h-5 text-red-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.hotspots', 'Hotspots')}</p>
@@ -255,10 +253,10 @@ const DeliveryZonesPage: React.FC = () => {
                       />
                       <h3 className="font-semibold text-lg">{zone.name}</h3>
                     </div>
-                    <span className={`px-2.5 py-1 text-xs rounded-lg ${
+                    <span className={`text-xs font-semibold ${
                       zone.is_active
-                        ? isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-200' : 'bg-gray-100 border border-gray-300 text-gray-700'
-                        : isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-400' : 'bg-gray-100 border border-gray-300 text-gray-500'
+                        ? 'text-green-500'
+                        : isDark ? 'text-zinc-500' : 'text-gray-500'
                     }`}>
                       {zone.is_active ? t('common.active', 'Active') : t('common.inactive', 'Inactive')}
                     </span>
@@ -267,21 +265,21 @@ const DeliveryZonesPage: React.FC = () => {
                   <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
                     <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="flex items-center gap-2">
-                        <DollarSign className="w-4 h-4 text-gray-400" />
+                        <DollarSign className="w-4 h-4 text-green-500" />
                         <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.fee', 'Delivery Fee')}</p>
                       </div>
                       <p className="font-semibold mt-1">{zone.delivery_fee === 0 ? t('common.free', 'Free') : formatMoney(zone.delivery_fee)}</p>
                     </div>
                     <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="flex items-center gap-2">
-                        <Activity className="w-4 h-4 text-gray-400" />
+                        <Activity className="w-4 h-4 text-yellow-400" />
                         <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.validations', 'Validations')}</p>
                       </div>
                       <p className="font-semibold mt-1">{zoneAnalytics?.totalValidations || 0}</p>
                     </div>
                     <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="flex items-center gap-2">
-                        <Clock className="w-4 h-4 text-gray-400" />
+                        <Clock className="w-4 h-4 text-blue-500" />
                         <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.estimatedTime', 'Est. Time')}</p>
                       </div>
                       <p className="font-semibold mt-1">
@@ -312,7 +310,7 @@ const DeliveryZonesPage: React.FC = () => {
                   {zone.description && (
                     <div className={`mt-3 pt-3 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
                       <div className="flex items-start gap-2">
-                        <Info className="w-4 h-4 text-gray-400 mt-0.5" />
+                        <Info className="w-4 h-4 text-red-500 mt-0.5" />
                         <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{zone.description}</p>
                       </div>
                     </div>
@@ -328,7 +326,7 @@ const DeliveryZonesPage: React.FC = () => {
             className={`h-fit rounded-xl border p-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-2 mb-4">
-              <MapPin className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+              <MapPin className="w-5 h-5 text-green-500" />
               <h3 className="font-semibold">
                 {selectedZone?.name || t('deliveryZones.zoneDetails', 'Zone Details')}
               </h3>
@@ -397,7 +395,7 @@ const DeliveryZonesPage: React.FC = () => {
         className={`mt-6 p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
       >
         <div className="flex items-start gap-3">
-          <Info className={`w-5 h-5 mt-0.5 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`} />
+          <Info className="w-5 h-5 mt-0.5 text-blue-500" />
           <div>
             <p className={`font-medium ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{t('deliveryZones.infoTitle', 'Delivery Zone Analytics')}</p>
             <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>

@@ -9,6 +9,7 @@
 
 import React, { memo, useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useDriveThru } from '../../../hooks/useDriveThru';
@@ -19,6 +20,7 @@ import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from '../../../services/terminal-credentials';
+import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 const STAGES: DriveThruOrderStatus[] = ['waiting', 'preparing', 'ready', 'served'];
 
@@ -128,36 +130,36 @@ export const DriveThruView: React.FC = memo(() => {
 
   if (!branchId || !organizationId) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
         Please select a branch to view drive-through
-      </div>
+      </motion.div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col p-4">
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col p-4">
       {/* Header Stats */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex gap-6">
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-6">
+        <motion.div variants={pageMotionContainer} className="flex gap-6">
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Active Orders</div>
             <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {stats.ordersInQueue}
             </div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Avg Wait Time</div>
             <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {Math.round(stats.averageWaitTimeSeconds / 60)} min
             </div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Active Lanes</div>
             <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {stats.activeLanes}/{stats.totalLanes}
             </div>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
         <div className="flex gap-2">
           <button
             onClick={() => refetch()}
@@ -181,26 +183,26 @@ export const DriveThruView: React.FC = memo(() => {
             )}
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Loading State */}
       {isLoading && orders.length === 0 && (
-        <div className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           Loading drive-through data...
-        </div>
+        </motion.div>
       )}
 
       {/* Stage Columns */}
       {!isLoading && (
-        <div className="flex-1 grid grid-cols-4 gap-4 overflow-hidden">
+        <motion.div variants={pageMotionContainer} className="flex-1 grid grid-cols-4 gap-4 overflow-hidden">
           {STAGES.filter(s => s !== 'served').map(stage => {
             const config = stageConfig[stage];
             const Icon = config.icon;
             const stageOrders = getOrdersByStatus(stage);
 
             return (
-              <div key={stage} className="flex flex-col min-h-0">
+              <motion.div key={stage} variants={pageMotionItem} className="flex flex-col min-h-0">
                 {/* Stage Header */}
                 <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-xl ${
                   isDark ? 'bg-gray-800' : 'bg-white shadow-sm'
@@ -217,9 +219,10 @@ export const DriveThruView: React.FC = memo(() => {
                 </div>
 
                 {/* Orders List */}
-                <div className="flex-1 overflow-y-auto space-y-2">
+                <motion.div variants={pageMotionContainer} className="flex-1 overflow-y-auto space-y-2">
                   {stageOrders.map(order => (
-                    <div
+                    <motion.div
+                      variants={pageMotionItem}
                       key={order.id}
                       className={`p-3 rounded-xl transition-all ${
                         isDark
@@ -263,21 +266,21 @@ export const DriveThruView: React.FC = memo(() => {
                           {stage === 'ready' ? 'Complete' : 'Next →'}
                         </button>
                       </div>
-                    </div>
+                    </motion.div>
                   ))}
 
                   {stageOrders.length === 0 && (
-                    <div className={`text-center py-8 ${isDark ? 'text-gray-600' : 'text-gray-400'}`}>
+                    <motion.div variants={pageMotionItem} className={`text-center py-8 ${isDark ? 'text-gray-600' : 'text-gray-400'}`}>
                       No orders
-                    </div>
+                    </motion.div>
                   )}
-                </div>
-              </div>
+                </motion.div>
+              </motion.div>
             );
           })}
 
           {/* Completed Column */}
-          <div className="flex flex-col min-h-0">
+          <motion.div variants={pageMotionItem} className="flex flex-col min-h-0">
             <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-xl ${
               isDark ? 'bg-gray-800' : 'bg-white shadow-sm'
             }`}>
@@ -297,21 +300,21 @@ export const DriveThruView: React.FC = memo(() => {
                 <p className="text-sm">{stats.ordersServedToday} orders served today</p>
               </div>
             </div>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
       )}
 
       {/* Empty State */}
       {!isLoading && orders.length === 0 && (
-        <div className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
           <div className="text-center">
             <Car className="w-16 h-16 mx-auto mb-4 opacity-50" />
             <p className="text-lg font-medium mb-2">No active orders</p>
             <p className="text-sm">Orders will appear here when customers arrive</p>
           </div>
-        </div>
+        </motion.div>
       )}
-    </div>
+    </motion.div>
   );
 });
 

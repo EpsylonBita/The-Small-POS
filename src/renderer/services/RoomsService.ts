@@ -13,6 +13,14 @@ import { offlineUpdateRoomStatus } from './offline-mutations';
 export type RoomStatus = 'available' | 'occupied' | 'cleaning' | 'maintenance' | 'reserved';
 export type RoomType = 'standard' | 'deluxe' | 'suite' | 'penthouse' | 'accessible';
 
+export interface RoomActiveFolio {
+  id: string;
+  guestName: string | null;
+  checkInDate: string | null;
+  balance: number;
+  balanceCents: number;
+}
+
 export interface Room {
   id: string;
   organizationId: string;
@@ -28,6 +36,8 @@ export interface Room {
   currentGuestId: string | null;
   currentGuestName: string | null;
   checkoutDate: string | null;
+  effectiveStatus: RoomStatus | null;
+  activeFolio: RoomActiveFolio | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -65,8 +75,33 @@ interface RoomFromAPI {
   current_guest_id?: string | null;
   current_guest_name?: string | null;
   checkout_date?: string | null;
+  effective_status?: RoomStatus | null;
+  active_folio?: {
+    id?: string | null;
+    guest_name?: string | null;
+    check_in_date?: string | null;
+    balance?: number | string | null;
+    balance_cents?: number | string | null;
+  } | null;
   created_at: string;
   updated_at: string;
+}
+
+function transformActiveFolio(data: RoomFromAPI['active_folio']): RoomActiveFolio | null {
+  if (!data || typeof data.id !== 'string') {
+    return null;
+  }
+
+  const balance = Number(data.balance ?? 0);
+  const balanceCents = Number(data.balance_cents ?? Math.round((Number.isFinite(balance) ? balance : 0) * 100));
+
+  return {
+    id: data.id,
+    guestName: data.guest_name || null,
+    checkInDate: data.check_in_date || null,
+    balance: Number.isFinite(balance) ? balance : 0,
+    balanceCents: Number.isFinite(balanceCents) ? balanceCents : 0,
+  };
 }
 
 function transformFromAPI(data: RoomFromAPI): Room {
@@ -85,6 +120,8 @@ function transformFromAPI(data: RoomFromAPI): Room {
     currentGuestId: data.current_guest_id || null,
     currentGuestName: data.current_guest_name || null,
     checkoutDate: data.checkout_date || null,
+    effectiveStatus: data.effective_status || null,
+    activeFolio: transformActiveFolio(data.active_folio),
     createdAt: data.created_at,
     updatedAt: data.updated_at,
   };

@@ -9,6 +9,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-hot-toast';
 import {
@@ -31,6 +32,7 @@ import { formatCurrency, formatTime } from '../utils/format';
 import { getBridge } from '../../lib';
 import { openExternalUrl } from '../utils/external-url';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 interface KioskOrder {
   id: string;
@@ -184,21 +186,21 @@ const KioskManagementPage: React.FC = () => {
   }
 
   return (
-    <div className={`p-6 h-full overflow-auto ${isDark ? 'text-white' : 'text-gray-900'}`}>
+    <motion.div
+      initial="hidden"
+      animate="show"
+      variants={pageMotionContainer}
+      className={`p-6 h-full overflow-auto ${isDark ? 'text-white' : 'text-gray-900'}`}
+    >
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <div className={`p-2 rounded-lg ${isDark ? 'bg-green-900/30' : 'bg-green-100'}`}>
-            <Monitor className={`w-6 h-6 ${isDark ? 'text-green-400' : 'text-green-600'}`} />
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold">
-              {t('modules.kiosk.title', { defaultValue: 'Kiosk Management' })}
-            </h1>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {t('modules.kiosk.description', { defaultValue: 'Manage self-service kiosk ordering' })}
-            </p>
-          </div>
+      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-6">
+        <div className="min-w-0">
+          <h1 className="truncate text-3xl font-bold tracking-tight">
+            {t('modules.kiosk.title', { defaultValue: 'Kiosk Management' })}
+          </h1>
+          <p className={`mt-1 truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            {t('modules.kiosk.description', { defaultValue: 'Manage self-service kiosk ordering' })}
+          </p>
         </div>
 
         <div className="flex items-center gap-3">
@@ -213,30 +215,33 @@ const KioskManagementPage: React.FC = () => {
             </span>
           </div>
           <button
-            onClick={fetchKioskData}
-            className={`p-2 rounded-lg transition-colors ${
+            type="button"
+            onClick={() => void fetchKioskData()}
+            disabled={isLoading}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
               isDark
-                ? 'hover:bg-gray-800 text-gray-400'
-                : 'hover:bg-gray-100 text-gray-600'
-            }`}
+                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                : 'border border-black bg-black text-white hover:bg-zinc-800'
+            } ${isLoading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
             title={t('common.refresh', { defaultValue: 'Refresh' })}
+            aria-label={t('common.refresh', { defaultValue: 'Refresh' })}
           >
             <RefreshCw className="w-5 h-5" />
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {error && (
-        <div className={`mb-6 p-4 rounded-lg flex items-center gap-3 ${
+        <motion.div variants={pageMotionItem} className={`mb-6 p-4 rounded-lg flex items-center gap-3 ${
           isDark ? 'bg-red-900/20 border border-red-800' : 'bg-red-50 border border-red-200'
         }`}>
           <AlertCircle className="w-5 h-5 text-red-500" />
           <p className={isDark ? 'text-red-400' : 'text-red-700'}>{error}</p>
-        </div>
+        </motion.div>
       )}
 
       {/* Kiosk Status Card */}
-      <div className={`mb-6 p-6 rounded-xl ${
+      <motion.div variants={pageMotionItem} className={`mb-6 p-6 rounded-xl ${
         isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
       }`}>
         <div className="flex items-center justify-between">
@@ -300,10 +305,10 @@ const KioskManagementPage: React.FC = () => {
             </button>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <motion.div variants={pageMotionContainer} className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <StatCard
           icon={<ShoppingBag className="w-5 h-5" />}
           label={t('modules.kiosk.todayOrders', { defaultValue: "Today's Orders" })}
@@ -332,10 +337,10 @@ const KioskManagementPage: React.FC = () => {
           color="purple"
           isDark={isDark}
         />
-      </div>
+      </motion.div>
 
       {/* QR Code Info */}
-      <div className={`mb-6 p-6 rounded-xl ${
+      <motion.div variants={pageMotionItem} className={`mb-6 p-6 rounded-xl ${
         isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
       }`}>
         <div className="flex items-center gap-4 mb-4">
@@ -356,10 +361,10 @@ const KioskManagementPage: React.FC = () => {
             defaultValue: 'Create and manage QR codes for kiosk ordering in the admin dashboard. Customers scan QR codes to place orders directly from their phones.'
           })}
         </p>
-      </div>
+      </motion.div>
 
       {/* Recent Kiosk Orders */}
-      <div className={`rounded-xl ${
+      <motion.div variants={pageMotionItem} className={`rounded-xl ${
         isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
       }`}>
         <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -376,10 +381,11 @@ const KioskManagementPage: React.FC = () => {
             </p>
           </div>
         ) : (
-          <div className="divide-y divide-gray-200 dark:divide-gray-700">
+          <motion.div variants={pageMotionContainer} className="divide-y divide-gray-200 dark:divide-gray-700">
             {recentOrders.map((order) => (
-              <div
+              <motion.div
                 key={order.id}
+                variants={pageMotionItem}
                 className={`px-6 py-4 flex items-center justify-between ${
                   isDark ? 'hover:bg-gray-700/50' : 'hover:bg-gray-50'
                 } transition-colors`}
@@ -413,12 +419,12 @@ const KioskManagementPage: React.FC = () => {
                   </span>
                   <span className="font-semibold">{formatCurrency(order.total)}</span>
                 </div>
-              </div>
+              </motion.div>
             ))}
-          </div>
+          </motion.div>
         )}
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };
 
@@ -440,7 +446,7 @@ function StatCard({ icon, label, value, color, isDark }: StatCardProps) {
   };
 
   return (
-    <div className={`p-4 rounded-xl ${
+    <motion.div variants={pageMotionItem} className={`p-4 rounded-xl ${
       isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
     }`}>
       <div className={`inline-flex p-2 rounded-lg ${colorClasses[color]} mb-3`}>
@@ -448,7 +454,7 @@ function StatCard({ icon, label, value, color, isDark }: StatCardProps) {
       </div>
       <div className="text-2xl font-bold">{value}</div>
       <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{label}</div>
-    </div>
+    </motion.div>
   );
 }
 

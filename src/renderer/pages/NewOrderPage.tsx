@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import { MenuModal } from '../components/modals/MenuModal';
@@ -38,6 +39,7 @@ import {
 } from '../../shared/utils/pos-order-items';
 import { AlertTriangle } from 'lucide-react';
 import { getBridge } from '../../lib';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 interface Customer {
   id: string;
@@ -469,13 +471,26 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           ? Math.round((subtotalAfterDiscount - (subtotalAfterDiscount / taxDivisor)) * 100) / 100
           : 0;
       const totalAmount = subtotalAfterDiscount + deliveryFee;
+      const paymentMethod = typeof orderData.paymentData?.method === 'string'
+        ? orderData.paymentData.method
+        : null;
+      const isRoomChargePayment = paymentMethod === 'room_charge';
+      const roomId =
+        orderData.paymentData?.roomId ||
+        orderData.paymentData?.room_id ||
+        orderData.roomId ||
+        orderData.room_id ||
+        null;
       const initialPayment =
-        !isGhostOrder && !isSplitPayment && (orderData.paymentData?.method === 'cash' || orderData.paymentData?.method === 'card')
+        !isGhostOrder &&
+        !isSplitPayment &&
+        (paymentMethod === 'cash' || paymentMethod === 'card' || paymentMethod === 'room_charge')
           ? {
-              method: orderData.paymentData.method,
+              method: paymentMethod,
+              payment_method: paymentMethod,
               amount: totalAmount,
-              cashReceived: orderData.paymentData.method === 'cash' ? orderData.paymentData.cashReceived : undefined,
-              changeGiven: orderData.paymentData.method === 'cash' ? orderData.paymentData.change : undefined,
+              cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
+              changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
               transactionRef: orderData.paymentData.transactionId,
               staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
               staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
@@ -521,6 +536,36 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         return false;
       }
 
+      const existingOrderId = orderData.paymentData?.existingOrderId;
+      if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card')) {
+        const paymentResult: any = await bridge.payments.recordPayment({
+          orderId: existingOrderId,
+          method: paymentMethod,
+          amount: totalAmount,
+          cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
+          changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
+          transactionRef: orderData.paymentData.transactionId,
+          staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
+          staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
+        });
+        if (paymentResult?.success === false) {
+          throw new Error(paymentResult.error || 'Failed to record payment');
+        }
+        await silentRefresh().catch(() => {});
+        void finalizeCreatedOrderPayment(existingOrderId, isGhostOrder).catch((printError: any) => {
+          const stage = printError?.stage;
+          if (isGhostOrder || stage === 'receipt') {
+            console.error('[NewOrderPage] Fallback receipt print error:', printError);
+            toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' }));
+            return undefined;
+          }
+
+          console.warn('[NewOrderPage] Fallback fiscal print error (non-blocking):', printError);
+          toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' }));
+        });
+        return true;
+      }
+
       const clientRequestId =
         globalThis.crypto?.randomUUID?.() ??
         `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -541,7 +586,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         country_code: 'GR',
         pricing_mode: 'tax_inclusive',
         status: 'pending' as const,
-        payment_method: isGhostOrder ? null : (orderData.paymentData?.method || null),
+        payment_method: isGhostOrder ? null : (paymentMethod || null),
+        room_id: isRoomChargePayment ? roomId : null,
+        roomId: isRoomChargePayment ? roomId : null,
         initialPayment,
         is_ghost: isGhostOrder,
         ghost_source: ghostSource,
@@ -589,6 +636,17 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         return false;
       }
 
+      const roomCharge = (result as any).roomCharge;
+      if (isRoomChargePayment && roomCharge?.applied === false) {
+        await silentRefresh().catch(() => {});
+        orderData.paymentData.existingOrderId = result.orderId;
+        orderData.paymentData.existingOrderNumber = result.orderNumber;
+        orderData.paymentData.roomChargeFallback = true;
+        orderData.paymentData.roomChargeFallbackReason =
+          roomCharge.code || roomCharge.error || 'room_charge_not_applied';
+        return false;
+      }
+
       const displayOrderNumber = result.orderNumber || result.orderId || '';
       toast.success(t('orderFlow.orderCreated', { orderNumber: displayOrderNumber }));
 
@@ -632,7 +690,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         if (isGhostOrder || stage === 'receipt') {
           console.error('[NewOrderPage] Ghost receipt print error:', printError);
           toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' }));
-          return;
+          return undefined;
         }
 
         console.warn('[NewOrderPage] Cash register print error (non-blocking):', printError);
@@ -832,12 +890,17 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   if (isInitializing) return <NewOrderPageSkeleton />;
 
   return (
-    <div className={`min-h-screen relative ${resolvedTheme === 'dark'
+    <motion.div
+      initial="hidden"
+      animate="show"
+      variants={pageMotionContainer}
+      className={`min-h-screen relative ${resolvedTheme === 'dark'
       ? 'bg-gradient-to-br from-gray-900 via-blue-900/20 to-purple-900/20'
       : 'bg-gradient-to-br from-blue-50 via-purple-50/30 to-pink-50/20'
-      }`}>
+      }`}
+    >
       {/* Header with glassmorphism */}
-      <div className={`backdrop-blur-xl border-b shadow-lg ${resolvedTheme === 'dark'
+      <motion.div variants={pageMotionItem} className={`backdrop-blur-xl border-b shadow-lg ${resolvedTheme === 'dark'
         ? 'bg-gray-800/30 border-gray-700/50'
         : 'bg-white/30 border-white/50'
         }`}>
@@ -873,38 +936,39 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
             </div>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Conflict Banner */}
       {conflicts.length > 0 && (
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+        <motion.div variants={pageMotionItem} className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
           <OrderConflictBanner
             conflicts={conflicts}
             onResolve={handleResolveConflict}
           />
-        </div>
+        </motion.div>
       )}
 
       {/* Main Content with glassmorphism */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+      <motion.div variants={pageMotionItem} className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <div className="flex flex-col items-center">
-          <div className={`backdrop-blur-xl rounded-3xl shadow-2xl border p-12 w-full max-w-4xl ${resolvedTheme === 'dark'
+          <motion.div variants={pageMotionItem} className={`backdrop-blur-xl rounded-3xl shadow-2xl border p-12 w-full max-w-4xl ${resolvedTheme === 'dark'
             ? 'bg-gray-800/20 border-gray-700/30'
             : 'bg-white/20 border-white/30'
             }`}>
-            <h2 className={`text-3xl font-bold text-center mb-4 ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
+            <motion.h2 variants={pageMotionItem} className={`text-3xl font-bold text-center mb-4 ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
               }`}>
               {t('modals.orderTypeSelection.title')}
-            </h2>
+            </motion.h2>
 
-            <p className={`text-lg mb-12 text-center ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
+            <motion.p variants={pageMotionItem} className={`text-lg mb-12 text-center ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
               }`}>
               {t('modals.orderTypeSelection.subtitle')}
-            </p>
+            </motion.p>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <motion.div variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 gap-8">
               {/* Pickup Option */}
-              <button
+              <motion.button
+                variants={pageMotionItem}
                 onClick={() => handleOrderTypeSelect("pickup")}
                 className={`border-2 border-blue-500 rounded-2xl p-10 flex flex-col items-center transition-all duration-300 shadow-xl hover:scale-105 transform active:scale-95 backdrop-blur-sm ${resolvedTheme === 'dark'
                   ? 'bg-gray-800/40 hover:bg-gray-700/50 hover:border-blue-400 hover:shadow-blue-500/25'
@@ -936,11 +1000,12 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
                   }`}>
                   {t('modals.orderTypeSelection.pickupDescription')}
                 </p>
-              </button>
+              </motion.button>
 
               {/* Delivery Option - Only shown when delivery module is acquired (Requirement 10.2, 10.3) */}
               {hasDeliveryModule && (
-                <button
+                <motion.button
+                  variants={pageMotionItem}
                   onClick={() => handleOrderTypeSelect("delivery")}
                   className={`border-2 border-emerald-500 rounded-2xl p-10 flex flex-col items-center transition-all duration-300 shadow-xl hover:scale-105 transform active:scale-95 backdrop-blur-sm ${resolvedTheme === 'dark'
                     ? 'bg-gray-800/40 hover:bg-gray-700/50 hover:border-emerald-400 hover:shadow-emerald-500/25'
@@ -972,12 +1037,12 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
                     }`}>
                     {t('modals.orderTypeSelection.deliveryDescription')}
                   </p>
-                </button>
+                </motion.button>
               )}
-            </div>
-          </div>
+            </motion.div>
+          </motion.div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Phone Lookup Modal */}
       {showPhoneLookupModal && (
@@ -1077,7 +1142,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           onSplitComplete={handleSplitComplete}
         />
       )}
-    </div>
+    </motion.div>
   );
 };
 

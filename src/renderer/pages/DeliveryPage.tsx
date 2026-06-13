@@ -13,6 +13,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
@@ -25,6 +26,7 @@ import {
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 import { openExternalUrl } from '../utils/external-url';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 import {
   Truck,
   MapPin,
@@ -274,7 +276,8 @@ const DeliveryCard = memo<DeliveryCardProps>(({
   };
 
   return (
-    <div
+    <motion.div
+      variants={pageMotionItem}
       className={`rounded-xl border overflow-hidden ${
         isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'
       }`}
@@ -378,7 +381,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({
           </button>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 });
 
@@ -779,33 +782,28 @@ const DeliveryPage: React.FC = () => {
   // Loading state
   if (isLoading) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
-        <div className="text-center">
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'bg-black' : 'bg-[#fdfaf5]'}`}>
+        <motion.div variants={pageMotionItem} className="text-center">
           <div className={`animate-spin w-12 h-12 border-4 border-t-transparent rounded-full mx-auto mb-4 ${isDark ? 'border-zinc-300' : 'border-gray-700'}`} />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
             {t('delivery.loading', 'Loading deliveries...')}
           </p>
-        </div>
-      </div>
+        </motion.div>
+      </motion.div>
     );
   }
 
   return (
-    <div className={`h-full flex flex-col ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col ${isDark ? 'bg-black' : 'bg-[#fdfaf5]'}`}>
       {/* Header */}
-      <div className={`mx-6 mt-4 mb-4 px-4 py-4 rounded-2xl border flex items-center justify-between ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
-        <div className="flex items-center gap-4">
-          <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
-            <Truck className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
-          </div>
-          <div>
-            <h1 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              {t('delivery.title', 'Deliveries')}
-            </h1>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {stats.pending} {t('delivery.pending', 'pending')} • {stats.inTransit} {t('delivery.inTransit', 'in transit')}
-            </p>
-          </div>
+      <motion.div variants={pageMotionItem} className={`mx-6 mt-4 mb-4 px-4 py-4 rounded-2xl border flex items-center justify-between ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+        <div className="min-w-0">
+          <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
+            {t('delivery.title', 'Deliveries')}
+          </h1>
+          <p className={`mt-1 truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            {stats.pending} {t('delivery.pending', 'pending')} • {stats.inTransit} {t('delivery.inTransit', 'in transit')}
+          </p>
         </div>
 
         {/* Actions */}
@@ -826,44 +824,50 @@ const DeliveryPage: React.FC = () => {
 
           {/* Refresh */}
           <button
+            type="button"
             onClick={handleRefresh}
             disabled={isRefreshing}
-            className={`p-2.5 rounded-xl ${isDark ? 'bg-zinc-900 hover:bg-zinc-800' : 'bg-white hover:bg-gray-50'} border ${
-              isDark ? 'border-zinc-700' : 'border-gray-200'
-            } transition-colors disabled:opacity-50`}
+            title={t('common.refresh', 'Refresh')}
+            aria-label={t('common.refresh', 'Refresh')}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+              isDark
+                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                : 'border border-black bg-black text-white hover:bg-zinc-800'
+            } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
           >
-            <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''} ${isDark ? 'text-gray-300' : 'text-gray-600'}`} />
+            <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Stats Row */}
-      <div className="px-6 pb-4">
-        <div className="flex gap-3 overflow-x-auto scrollbar-hide">
-          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+      <motion.div variants={pageMotionItem} className="px-6 pb-4">
+        <motion.div variants={pageMotionContainer} className="flex gap-3 overflow-x-auto scrollbar-hide">
+          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.total', 'Total')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.total}</div>
-          </div>
-          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.pending', 'Pending')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.pending}</div>
-          </div>
-          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.inTransit', 'In Transit')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.inTransit}</div>
-          </div>
-          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.availableDrivers', 'Available Drivers')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.availableDrivers}</div>
-          </div>
-        </div>
-      </div>
+          </motion.div>
+        </motion.div>
+      </motion.div>
 
       {/* Filter Tabs */}
-      <div className="px-6 pb-4">
-        <div className={`flex gap-1 p-1 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-100'}`}>
+      <motion.div variants={pageMotionItem} className="px-6 pb-4">
+        <motion.div variants={pageMotionContainer} className={`flex gap-1 p-1 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-100'}`}>
           {FILTER_TABS.map(tab => (
-            <button
+            <motion.button
+              variants={pageMotionItem}
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
@@ -875,23 +879,23 @@ const DeliveryPage: React.FC = () => {
               }`}
             >
               {t(`delivery.filter.${tab.id}`, tab.label)}
-            </button>
+            </motion.button>
           ))}
-        </div>
-      </div>
+        </motion.div>
+      </motion.div>
 
       {/* Error Banner */}
       {error && (
-        <div className="mx-6 mb-4 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
+        <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
           <AlertTriangle className="w-5 h-5 text-red-500" />
           <p className="text-red-500 text-sm">{error}</p>
-        </div>
+        </motion.div>
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-auto px-6 pb-6">
+      <motion.div variants={pageMotionItem} className="flex-1 overflow-auto px-6 pb-6">
         {filteredDeliveries.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16">
+          <motion.div variants={pageMotionItem} className="flex flex-col items-center justify-center py-16">
             <Truck className={`w-16 h-16 mb-4 ${isDark ? 'text-zinc-600' : 'text-gray-300'}`} />
             <p className={`text-lg font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('delivery.noDeliveries', 'No deliveries found')}
@@ -899,9 +903,9 @@ const DeliveryPage: React.FC = () => {
             <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
               {t('delivery.noDeliveriesHint', 'Deliveries will appear here when orders are placed')}
             </p>
-          </div>
+          </motion.div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <motion.div variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredDeliveries.map(delivery => (
               <DeliveryCard
                 key={delivery.id}
@@ -913,9 +917,9 @@ const DeliveryPage: React.FC = () => {
                 isDark={isDark}
               />
             ))}
-          </div>
+          </motion.div>
         )}
-      </div>
+      </motion.div>
 
       {/* Driver Assignment Modal */}
       <DriverAssignmentModal
@@ -929,7 +933,7 @@ const DeliveryPage: React.FC = () => {
         onAssign={handleAssignDriver}
         isDark={isDark}
       />
-    </div>
+    </motion.div>
   );
 };
 

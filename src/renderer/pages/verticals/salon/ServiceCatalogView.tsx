@@ -1,5 +1,6 @@
 import React, { memo, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useServices } from '../../../hooks/useServices';
@@ -11,6 +12,7 @@ import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from '../../../services/terminal-credentials';
+import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 export const ServiceCatalogView: React.FC = memo(() => {
   const { t } = useTranslation();
@@ -109,38 +111,38 @@ export const ServiceCatalogView: React.FC = memo(() => {
   // Show loading or error state
   if (!branchId || !effectiveOrgId) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-gray-50 text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-[#fdfaf5] text-gray-500'}`}>
         {t('serviceCatalog.selectBranch', { defaultValue: 'Please select a branch to view services' })}
-      </div>
+      </motion.div>
     );
   }
 
   return (
-    <div className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
       {/* Header */}
-      <div className={`rounded-2xl border p-4 mb-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+      <motion.div variants={pageMotionItem} className={`rounded-2xl border p-4 mb-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           {/* Stats */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-zinc-500' : 'bg-white border-gray-200 border-t-zinc-400'}`}>
+          <motion.div variants={pageMotionContainer} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-zinc-500' : 'bg-white border-gray-200 border-t-zinc-400'}`}>
               <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
                 {t('serviceCatalog.stats.totalServices', { defaultValue: 'Total Services' })}
               </div>
               <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.totalServices}</div>
-            </div>
-            <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500'}`}>
+            </motion.div>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500'}`}>
               <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
                 {t('serviceCatalog.stats.activeServices', { defaultValue: 'Active' })}
               </div>
               <div className={`text-xl font-bold ${isDark ? 'text-emerald-300' : 'text-emerald-600'}`}>{stats.activeServices}</div>
-            </div>
-            <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500'}`}>
+            </motion.div>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500'}`}>
               <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
                 {t('serviceCatalog.stats.avgPrice', { defaultValue: 'Avg Price' })}
               </div>
               <div className={`text-xl font-bold ${isDark ? 'text-amber-300' : 'text-amber-600'}`}>{formatPrice(stats.avgPrice)}</div>
-            </div>
-          </div>
+            </motion.div>
+          </motion.div>
 
           {/* Actions */}
           <div className="flex flex-wrap gap-2 items-center">
@@ -171,12 +173,13 @@ export const ServiceCatalogView: React.FC = memo(() => {
             </button>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Category Tabs */}
-      <div className={`flex gap-1 p-1 rounded-xl mb-4 overflow-x-auto border ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-100 border-gray-200'}`}>
+      <motion.div variants={pageMotionContainer} className={`flex gap-1 p-1 rounded-xl mb-4 overflow-x-auto border ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-100 border-gray-200'}`}>
         {tabs.map(tab => (
-          <button
+          <motion.button
+            variants={pageMotionItem}
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`flex-shrink-0 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
@@ -193,20 +196,20 @@ export const ServiceCatalogView: React.FC = memo(() => {
             }`}>
               {getCategoryCount(tab.id)}
             </span>
-          </button>
+          </motion.button>
         ))}
-      </div>
+      </motion.div>
 
       {/* Loading State */}
       {isLoading && (
-        <div className="flex-1 flex items-center justify-center">
+        <motion.div variants={pageMotionItem} className="flex-1 flex items-center justify-center">
           <Loader2 className={`w-8 h-8 animate-spin ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
-        </div>
+        </motion.div>
       )}
 
       {/* Error State */}
       {error && !isLoading && (
-        <div className={`flex-1 flex flex-col items-center justify-center ${isDark ? 'text-red-400' : 'text-red-500'}`}>
+        <motion.div variants={pageMotionItem} className={`flex-1 flex flex-col items-center justify-center ${isDark ? 'text-red-400' : 'text-red-500'}`}>
           <p>{error}</p>
           <button
             onClick={() => refetch()}
@@ -216,15 +219,16 @@ export const ServiceCatalogView: React.FC = memo(() => {
           >
             {t('common.actions.retry', { defaultValue: 'Retry' })}
           </button>
-        </div>
+        </motion.div>
       )}
 
       {/* Services Grid */}
       {!isLoading && !error && (
-        <div className="flex-1 overflow-y-auto">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <motion.div variants={pageMotionItem} className="flex-1 overflow-y-auto">
+          <motion.div variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredServices.map(service => (
-              <div
+              <motion.div
+                variants={pageMotionItem}
                 key={service.id}
                 onClick={() => setSelectedService(service)}
                 className={`p-4 rounded-xl cursor-pointer transition-all border ${
@@ -282,22 +286,22 @@ export const ServiceCatalogView: React.FC = memo(() => {
                   <button className={`py-1.5 px-3 rounded-lg text-sm flex items-center justify-center text-red-500 ${
                     isDark ? 'bg-red-500/10 hover:bg-red-500/20' : 'bg-red-50 hover:bg-red-100'
                   }`}>
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
+                  <Trash2 className="w-3 h-3" />
+                </button>
               </div>
+              </motion.div>
             ))}
-          </div>
+          </motion.div>
 
           {filteredServices.length === 0 && (
-            <div className={`text-center py-12 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800 text-zinc-500' : 'bg-white border-gray-200 text-gray-400'}`}>
+            <motion.div variants={pageMotionItem} className={`text-center py-12 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800 text-zinc-500' : 'bg-white border-gray-200 text-gray-400'}`}>
               <Scissors className="w-10 h-10 mx-auto mb-3 opacity-60" />
               <p>{t('serviceCatalog.noServices', { defaultValue: 'No services found' })}</p>
-            </div>
+            </motion.div>
           )}
-        </div>
+        </motion.div>
       )}
-    </div>
+    </motion.div>
   );
 });
 

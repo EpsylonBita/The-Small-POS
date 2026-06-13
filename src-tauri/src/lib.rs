@@ -86,6 +86,7 @@ const ALLOWED_EXTERNAL_HOSTS: &[&str] = &[
     "google.com",
     "www.google.com",
     "maps.google.com",
+    "github.com",
     "thesmall.app",
     "admin.thesmall.app",
 ];
@@ -869,6 +870,7 @@ pub fn run() {
             commands::offline_mutations::offline_staff_shift_create,
             commands::offline_mutations::offline_drive_thru_update_status,
             commands::offline_mutations::offline_room_update_status,
+            commands::offline_mutations::offline_room_checkin,
             commands::offline_mutations::offline_housekeeping_update_status,
             commands::offline_mutations::offline_housekeeping_assign_staff,
             commands::offline_mutations::offline_product_update_quantity,

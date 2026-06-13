@@ -1,6 +1,7 @@
 import React, { memo, useMemo, useState, useEffect, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import { Clock, User, Filter, RefreshCw, WifiOff } from 'lucide-react';
 import { useTheme } from '../../../contexts/theme-context';
 import { useSystemClock } from '../../../hooks/useSystemClock';
@@ -12,6 +13,7 @@ import {
 } from '../../../services/offline-mutations';
 import { toLocalDateString } from '../../../utils/date';
 import { offEvent, onEvent } from '../../../../lib';
+import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'verified' | 'cancelled';
 type Priority = 'urgent' | 'high' | 'normal' | 'low';
@@ -313,16 +315,16 @@ export const HousekeepingView: React.FC = memo(() => {
 
   if (isLoading) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
         <RefreshCw className="w-5 h-5 animate-spin mr-2" />
         {t('housekeepingView.loading', { defaultValue: 'Loading housekeeping tasks...' })}
-      </div>
+      </motion.div>
     );
   }
 
   if (error) {
     return (
-      <div className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
         <WifiOff className="w-10 h-10 mb-3" />
         <p className="font-semibold mb-2">{t('housekeepingView.errorTitle', { defaultValue: 'Unable to load housekeeping tasks' })}</p>
         <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{error}</p>
@@ -332,33 +334,33 @@ export const HousekeepingView: React.FC = memo(() => {
         >
           {t('common.retry', { defaultValue: 'Retry' })}
         </button>
-      </div>
+      </motion.div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col p-4">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex gap-4">
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col p-4">
+      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
+        <motion.div variants={pageMotionContainer} className="flex gap-4">
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('housekeepingView.stats.totalTasks', { defaultValue: 'Total Tasks' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredTasks.length}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('housekeepingView.stats.completedToday', { defaultValue: 'Completed Today' })}
             </div>
             <div className="text-xl font-bold text-green-500">{completedToday}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          </motion.div>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('housekeepingView.stats.avgTime', { defaultValue: 'Avg Time' })}
             </div>
             <div className="text-xl font-bold text-blue-500">{avgCompletionTime}min</div>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
         <button
           onClick={handleRefresh}
           className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
@@ -367,9 +369,9 @@ export const HousekeepingView: React.FC = memo(() => {
         >
           <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
         </button>
-      </div>
+      </motion.div>
 
-      <div className="flex gap-2 mb-4 flex-wrap items-center">
+      <motion.div variants={pageMotionItem} className="flex gap-2 mb-4 flex-wrap items-center">
         <Filter className={`w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
         <select
           value={floorFilter}
@@ -415,26 +417,26 @@ export const HousekeepingView: React.FC = memo(() => {
             <option key={name} value={name}>{name}</option>
           ))}
         </select>
-      </div>
+      </motion.div>
 
-      <div className="flex-1 grid grid-cols-2 xl:grid-cols-4 gap-4 overflow-hidden">
+      <motion.div variants={pageMotionContainer} className="flex-1 grid grid-cols-2 xl:grid-cols-4 gap-4 overflow-hidden">
         {columns.map((column) => {
           const columnTasks = filteredTasks.filter((task) => task.status === column.status);
           return (
-            <div key={column.status} className="flex flex-col min-h-0">
+            <motion.div key={column.status} variants={pageMotionItem} className="flex flex-col min-h-0">
               <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
                 <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{column.label}</span>
                 <span className={`ml-auto px-2 py-0.5 rounded-full text-sm ${isDark ? 'bg-gray-700 text-gray-100' : 'bg-gray-100 text-gray-800'}`}>
                   {columnTasks.length}
                 </span>
               </div>
-              <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              <motion.div variants={pageMotionContainer} className="flex-1 overflow-y-auto space-y-2 pr-1">
                 {columnTasks.map((task) => {
                   const priorityColor = priorityColors[task.priority] || priorityColors.normal;
                   const isUpdating = updatingTaskId === task.id;
                   const availableStaff = staff.length > 0 ? staff : [];
                   return (
-                    <div key={task.id} className={`p-3 rounded-xl ${isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white shadow-sm'}`}>
+                    <motion.div key={task.id} variants={pageMotionItem} className={`p-3 rounded-xl ${isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white shadow-sm'}`}>
                       <div className="flex items-center justify-between mb-2 gap-2">
                         <span className={`font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
                           {t('housekeepingView.room', { defaultValue: 'Room' })} {task.room_number || task.room_id || '-'}
@@ -501,15 +503,15 @@ export const HousekeepingView: React.FC = memo(() => {
                           {t('housekeepingView.action.verify', { defaultValue: 'Verify' })}
                         </button>
                       )}
-                    </div>
+                    </motion.div>
                   );
                 })}
-              </div>
-            </div>
+              </motion.div>
+            </motion.div>
           );
         })}
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 });
 

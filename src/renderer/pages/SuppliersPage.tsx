@@ -24,7 +24,6 @@ import {
   Save,
   Search,
   Trash2,
-  Truck,
   Upload,
   Wallet,
   X,
@@ -732,19 +731,14 @@ const SuppliersPage: React.FC = () => {
       <div className="flex h-full min-h-0 flex-col gap-4">
         <section className={`shrink-0 rounded-2xl border p-4 md:p-5 ${panelClass}`}>
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border ${isDark ? 'border-zinc-800 bg-zinc-900' : 'border-gray-200 bg-gray-100'}`}>
-                <Truck className="h-6 w-6" />
-              </div>
-              <div className="min-w-0">
-                <h1 className="truncate text-2xl font-bold">{t('suppliers.title', 'Suppliers')}</h1>
-                <p className={`truncate text-sm ${subtleClass}`}>{t('suppliers.subtitle', 'Manage suppliers, invoices, and imported inventory')}</p>
-              </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-3xl font-bold tracking-tight">{t('suppliers.title', 'Suppliers')}</h1>
+              <p className={`mt-1 truncate text-sm ${subtleClass}`}>{t('suppliers.subtitle', 'Manage suppliers, invoices, and imported inventory')}</p>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setImportOpen(true)}
-                className={`inline-flex items-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold ${isDark ? 'border-blue-500/40 bg-blue-500/15 text-blue-200 hover:bg-blue-500/25' : 'border-blue-200 bg-blue-600 text-white hover:bg-blue-700'}`}
+                className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-yellow-400/70 text-white hover:bg-yellow-400/10' : 'border-yellow-400 text-gray-950 hover:bg-yellow-50'}`}
               >
                 <Upload className="h-4 w-4" />
                 {t('suppliers.import.open', 'Import items')}
@@ -754,32 +748,30 @@ const SuppliersPage: React.FC = () => {
                 disabled={loading}
                 title={t('common.refresh', 'Refresh')}
                 aria-label={t('common.refresh', 'Refresh')}
-                className={`inline-flex h-12 w-12 items-center justify-center rounded-xl border transition ${iconButtonClass}`}
+                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
               >
-                <RefreshCw className={`h-5 w-5 ${loading ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
               </button>
             </div>
           </div>
 
           <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
             {[
-              { label: t('suppliers.total', 'Total'), value: stats.totalSuppliers, icon: Building2, iconClass: 'bg-blue-500/15 text-blue-500' },
-              { label: t('suppliers.active', 'Active'), value: stats.activeSuppliers, icon: CheckCircle, iconClass: 'bg-emerald-500/15 text-emerald-500' },
-              { label: t('suppliers.unpaid', 'Unpaid'), value: stats.unpaidInvoices, icon: Clock, iconClass: 'bg-amber-500/15 text-amber-500' },
-              { label: t('suppliers.overdue', 'Overdue'), value: stats.overdueInvoices, icon: AlertCircle, iconClass: 'bg-red-500/15 text-red-500' },
-              { label: t('suppliers.owed', 'Total Owed'), value: formatMoney(stats.totalOwed), currency: true, iconClass: 'bg-cyan-500/15 text-cyan-500' },
+              { label: t('suppliers.total', 'Total'), value: stats.totalSuppliers, icon: Building2, iconClass: 'text-blue-500' },
+              { label: t('suppliers.active', 'Active'), value: stats.activeSuppliers, icon: CheckCircle, iconClass: 'text-emerald-500' },
+              { label: t('suppliers.unpaid', 'Unpaid'), value: stats.unpaidInvoices, icon: Clock, iconClass: 'text-amber-500' },
+              { label: t('suppliers.overdue', 'Overdue'), value: stats.overdueInvoices, icon: AlertCircle, iconClass: 'text-red-500' },
+              { label: t('suppliers.owed', 'Total Owed'), value: formatMoney(stats.totalOwed), currency: true, iconClass: 'text-cyan-500' },
             ].map(stat => {
               const Icon = 'icon' in stat ? stat.icon : null;
               return (
                 <div key={stat.label} className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
                   <div className="flex items-center gap-2">
-                    <div className={`flex h-9 w-9 items-center justify-center rounded-lg ${stat.iconClass}`}>
-                      {stat.currency ? (
-                        <span className="text-lg font-bold leading-none">{currencySymbol}</span>
-                      ) : Icon ? (
-                        <Icon className="h-5 w-5" />
-                      ) : null}
-                    </div>
+                    {stat.currency ? (
+                      <span className={`w-5 shrink-0 text-center text-lg font-bold leading-none ${stat.iconClass}`}>{currencySymbol}</span>
+                    ) : Icon ? (
+                      <Icon className={`h-5 w-5 shrink-0 ${stat.iconClass}`} />
+                    ) : null}
                     <div className="min-w-0">
                       <p className={`truncate text-xs ${subtleClass}`}>{stat.label}</p>
                       <p className="truncate text-lg font-bold">{stat.value}</p>
@@ -885,14 +877,14 @@ const SuppliersPage: React.FC = () => {
                             setSelectedSupplierId(supplier.id);
                             setSupplierSummaryId(supplier.id);
                           }}
-                          className={`min-h-[180px] rounded-xl border p-4 text-left transition ${selectedSupplier?.id === supplier.id ? (isDark ? 'border-blue-500 bg-blue-500/10' : 'border-blue-500 bg-blue-50') : isDark ? 'border-zinc-800 bg-zinc-900/60 hover:bg-zinc-900' : 'border-gray-200 bg-white hover:bg-gray-50'}`}
+                          className={`min-h-[180px] rounded-xl border p-4 text-left transition ${selectedSupplier?.id === supplier.id ? (isDark ? 'border-yellow-400 bg-transparent text-white' : 'border-yellow-400 bg-transparent text-gray-950') : isDark ? 'border-zinc-800 bg-zinc-900/60 hover:bg-zinc-900' : 'border-gray-200 bg-white hover:bg-gray-50'}`}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                               <h3 className="truncate text-base font-bold">{supplier.name}</h3>
                               <p className={`mt-1 truncate text-xs ${subtleClass}`}>{supplier.supplier_code || supplier.category || t('suppliers.noCategory', 'No category')}</p>
                             </div>
-                            <span className={`shrink-0 rounded-full border px-2 py-1 text-xs font-semibold ${supplier.is_active ? (isDark ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300' : 'border-emerald-200 bg-emerald-50 text-emerald-700') : (isDark ? 'border-zinc-700 bg-zinc-800 text-zinc-300' : 'border-gray-200 bg-gray-100 text-gray-600')}`}>
+                            <span className={`shrink-0 text-xs font-semibold ${supplier.is_active ? (isDark ? 'text-emerald-300' : 'text-emerald-700') : (isDark ? 'text-zinc-300' : 'text-gray-600')}`}>
                               {supplier.is_active ? t('suppliers.active', 'Active') : t('suppliers.inactive', 'Inactive')}
                             </span>
                           </div>
@@ -1666,7 +1658,7 @@ const EmptyState: React.FC<EmptyStateProps> = ({ isDark, icon, title, descriptio
 
 const InfoLine: React.FC<{ icon: React.ReactNode; label: string; value: string; subtleClass: string }> = ({ icon, label, value, subtleClass }) => (
   <div className="flex items-start gap-3">
-    <div className={subtleClass}>{icon}</div>
+    <div className="text-yellow-400">{icon}</div>
     <div className="min-w-0">
       <p className={`text-xs ${subtleClass}`}>{label}</p>
       <p className="break-words text-sm font-medium">{value}</p>

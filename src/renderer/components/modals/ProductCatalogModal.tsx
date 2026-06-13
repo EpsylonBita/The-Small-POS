@@ -16,7 +16,10 @@ import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useOnBarcodeScan, useBarcodeScannerContext } from '../../contexts/barcode-scanner-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { PaymentModal } from './PaymentModal';
+import {
+  PaymentModal,
+  type RoomChargeContext,
+} from './PaymentModal';
 import type { Product, ProductFilters } from '../../services/ProductCatalogService';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import { getBridge, offEvent, onEvent } from '../../../lib';
@@ -84,6 +87,7 @@ interface ProductCatalogModalProps {
   orderType?: 'pickup' | 'delivery';
   isProcessingOrder?: boolean;
   deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
+  roomChargeContext?: RoomChargeContext | null;
   onOrderComplete?: (orderData: {
     items: any[];
     total: number;
@@ -107,6 +111,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   orderType = 'pickup',
   isProcessingOrder = false,
   deliveryZoneInfo,
+  roomChargeContext = null,
   onOrderComplete
 }) => {
   const { t } = useTranslation();
@@ -945,6 +950,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         orderType={orderType}
         minimumOrderAmount={hasDeliveryPro ? (effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0) : 0}
         onPaymentComplete={handlePaymentComplete}
+        roomChargeContext={roomChargeContext}
       />
     </>
   );

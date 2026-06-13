@@ -1,9 +1,9 @@
 import React from 'react';
-import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from './ui/pos-glass-components';
 import type { UpdateInfo, ProgressInfo } from '../../lib/update-contracts';
 import { useI18n } from '../contexts/i18n-context';
 import { formatDate } from '../utils/format';
+import { getReleaseNotesHtml } from '../utils/release-notes';
 
 /**
  * UpdateDialog Component
@@ -205,10 +205,7 @@ const AvailableState: React.FC<AvailableStateProps> = ({
           <div
             className="text-sm text-gray-400 prose prose-invert prose-sm"
             dangerouslySetInnerHTML={{
-              __html: DOMPurify.sanitize(releaseNotes, {
-                ALLOWED_TAGS: ['p', 'strong', 'em', 'b', 'i', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4'],
-                ALLOWED_ATTR: []
-              })
+              __html: releaseNotes
             }}
           />
         </div>
@@ -515,34 +512,5 @@ const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion, 
     </div>
   );
 };
-
-// Helper function to extract release notes as HTML with XSS sanitization
-function getReleaseNotesHtml(
-  releaseNotes?: UpdateInfo['releaseNotes']
-): string {
-  if (!releaseNotes) {
-    return '';
-  }
-
-  let html: string;
-
-  if (typeof releaseNotes === 'string') {
-    html = releaseNotes;
-  } else if (Array.isArray(releaseNotes)) {
-    // Array of release note objects (ReleaseNoteInfo[])
-    html = releaseNotes
-      .map(note => `<p><strong>${note.version}</strong>: ${note.note || ''}</p>`)
-      .join('');
-  } else {
-    return '';
-  }
-
-  // Sanitize HTML to prevent XSS attacks
-  // Only allow safe formatting tags
-  return DOMPurify.sanitize(html, {
-    ALLOWED_TAGS: ['p', 'strong', 'em', 'b', 'i', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4'],
-    ALLOWED_ATTR: []
-  });
-}
 
 export default UpdateDialog;

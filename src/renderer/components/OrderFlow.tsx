@@ -706,13 +706,26 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           ? Math.round((subtotalAfterDiscount - subtotalAfterDiscount / taxDivisor) * 100) / 100
           : 0;
       const total_amount = subtotalAfterDiscount + deliveryFee;
+      const paymentMethod = typeof orderData.paymentData?.method === 'string'
+        ? orderData.paymentData.method
+        : null;
+      const isRoomChargePayment = paymentMethod === 'room_charge';
+      const roomId =
+        orderData.paymentData?.roomId ||
+        orderData.paymentData?.room_id ||
+        orderData.roomId ||
+        orderData.room_id ||
+        null;
       const initialPayment =
-        !isGhostOrder && !isSplitPayment && (orderData.paymentData?.method === 'cash' || orderData.paymentData?.method === 'card')
+        !isGhostOrder &&
+        !isSplitPayment &&
+        (paymentMethod === 'cash' || paymentMethod === 'card' || paymentMethod === 'room_charge')
           ? {
-              method: orderData.paymentData.method,
+              method: paymentMethod,
+              payment_method: paymentMethod,
               amount: total_amount,
-              cashReceived: orderData.paymentData.method === 'cash' ? orderData.paymentData.cashReceived : undefined,
-              changeGiven: orderData.paymentData.method === 'cash' ? orderData.paymentData.change : undefined,
+              cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
+              changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
               transactionRef: orderData.paymentData.transactionId,
               staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
               staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
@@ -743,6 +756,38 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         return false;
       }
 
+      const existingOrderId = orderData.paymentData?.existingOrderId;
+      if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card')) {
+        const paymentResult: any = await bridge.payments.recordPayment({
+          orderId: existingOrderId,
+          method: paymentMethod,
+          amount: total_amount,
+          cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
+          changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
+          transactionRef: orderData.paymentData.transactionId,
+          staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
+          staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
+        });
+        if (paymentResult?.success === false) {
+          throw new Error(paymentResult.error || 'Failed to record payment');
+        }
+        await silentRefresh().catch(() => {});
+        void finalizeCreatedOrderPayment(existingOrderId, isGhostOrder)
+          .catch((printError: any) => {
+            const stage = printError?.stage;
+            if (isGhostOrder || stage === 'receipt') {
+              console.error('[OrderFlow] Fallback receipt print error:', printError);
+              toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' }));
+              return undefined;
+            }
+
+            console.warn('[OrderFlow] Fallback fiscal print error (non-blocking):', printError);
+            toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' }));
+          });
+        setIsProcessingOrder(false);
+        return true;
+      }
+
       const clientRequestId =
         globalThis.crypto?.randomUUID?.() ??
         `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -769,7 +814,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         discount_amount: discountAmount,
 
         status: 'pending' as const,
-        payment_method: isGhostOrder ? null : (orderData.paymentData?.method || null),
+        payment_method: isGhostOrder ? null : (paymentMethod || null),
+        room_id: isRoomChargePayment ? roomId : null,
+        roomId: isRoomChargePayment ? roomId : null,
         initialPayment,
         is_ghost: isGhostOrder,
         ghost_source: ghostSource,
@@ -849,6 +896,19 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       if (result.success) {
         orderPersisted = true;
         const displayOrderNumber = result.orderNumber || result.orderId || '';
+
+        const roomCharge = (result as any).roomCharge;
+        if (isRoomChargePayment && roomCharge?.applied === false && result.orderId) {
+          await silentRefresh().catch(() => {});
+          orderData.paymentData.existingOrderId = result.orderId;
+          orderData.paymentData.existingOrderNumber = result.orderNumber;
+          orderData.paymentData.roomChargeFallback = true;
+          orderData.paymentData.roomChargeFallbackReason =
+            roomCharge.code || roomCharge.error || 'room_charge_not_applied';
+          setIsProcessingOrder(false);
+          return false;
+        }
+
         toast.success(t('orderFlow.orderCreated', { orderNumber: displayOrderNumber }));
 
         if (hasLoyaltyModule && !isGhostOrder && loyaltyRedemption && result.orderId) {
@@ -929,7 +989,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               if (isGhostOrder || stage === 'receipt') {
                 console.error('[OrderFlow] Ghost receipt print error:', printError);
                 toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' }));
-                return;
+                return undefined;
               }
 
               console.warn('[OrderFlow] Cash register print error (non-blocking):', printError);

@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { motion } from 'framer-motion';
 import { posApiFetch, posApiGet } from '../utils/api-helpers';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
@@ -8,6 +9,7 @@ import { parseSpecialAddressInput } from '../utils/specialAddress';
 import {
   Users,
   Search,
+  Filter,
   Eye,
   Edit3,
   Ban,
@@ -24,6 +26,7 @@ import {
   Save,
   X
 } from 'lucide-react';
+import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 interface UserProfile {
   id: string;
@@ -59,6 +62,8 @@ interface CustomerAddress {
   resolved_street_number?: string;
   address_fingerprint?: string;
 }
+
+const USERS_PAGE_SIZE = 10;
 
 function mapCustomerToUser(customer: any): UserProfile | null {
   const id = customer?.id || customer?.customer_id || customer?.customerId;
@@ -174,7 +179,7 @@ const UsersPage: React.FC = () => {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [typeFilter, setTypeFilter] = useState<'all' | 'customer' | 'app_user'>('all');
+  const [currentPage, setCurrentPage] = useState(1);
   const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
   const [userAddresses, setUserAddresses] = useState<CustomerAddress[]>([]);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
@@ -639,29 +644,28 @@ const UsersPage: React.FC = () => {
 
   const getLoyaltyBadge = (points: number) => {
     let tier = 'Bronze';
-    let color = 'bg-amber-100 text-amber-800 dark:bg-amber-900/20 dark:text-amber-400';
+    let color = 'text-orange-700 dark:text-orange-500';
 
     if (points >= 1000) {
       tier = 'Platinum';
-      color = 'bg-purple-100 text-purple-800 dark:bg-purple-900/20 dark:text-purple-400';
+      color = 'text-purple-500 dark:text-purple-400';
     } else if (points >= 500) {
       tier = 'Gold';
-      color = 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-400';
+      color = 'text-yellow-500 dark:text-yellow-400';
     } else if (points >= 200) {
       tier = 'Silver';
-      color = 'bg-gray-100 text-gray-800 dark:bg-gray-900/20 dark:text-gray-400';
+      color = 'text-zinc-500 dark:text-zinc-300';
     }
 
     return (
-      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${color}`}>
+      <span className={`inline-flex items-center text-xs font-medium ${color}`}>
         <Star className="w-3 h-3 mr-1" />
         {tier}
       </span>
     );
   };
 
-  const filteredUsers = users.filter(user => {
-    if (typeFilter !== 'all' && user.type !== typeFilter) return false;
+  const filteredUsers = useMemo(() => users.filter(user => {
     if (!searchTerm) return true;
     const search = searchTerm.toLowerCase();
     return (
@@ -669,77 +673,95 @@ const UsersPage: React.FC = () => {
       user.email?.toLowerCase().includes(search) ||
       user.phone?.toLowerCase().includes(search)
     );
-  });
+  }), [searchTerm, users]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / USERS_PAGE_SIZE));
+  const activePage = Math.min(currentPage, totalPages);
+  const pageStart = filteredUsers.length === 0 ? 0 : (activePage - 1) * USERS_PAGE_SIZE + 1;
+  const pageEnd = Math.min(activePage * USERS_PAGE_SIZE, filteredUsers.length);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const paginatedUsers = useMemo(() => {
+    const start = (activePage - 1) * USERS_PAGE_SIZE;
+    return filteredUsers.slice(start, start + USERS_PAGE_SIZE);
+  }, [activePage, filteredUsers]);
 
   return (
-    <div className="p-6">
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="p-6">
       {/* Header */}
-      <div className="mb-6">
+      <motion.div variants={pageMotionItem} className="mb-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className={`text-3xl font-bold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+            <h1 className={`truncate text-3xl font-bold tracking-tight ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
               {t('users.title') || 'Users Management'}
             </h1>
-            <p className={`text-lg mt-2 ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
+            <p className={`mt-1 truncate text-sm ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
               {t('users.description') || 'View and manage customer accounts'}
             </p>
           </div>
           <button
-            onClick={loadUsers}
-            className={`inline-flex items-center px-4 py-2 rounded-lg transition-colors ${
+            type="button"
+            onClick={() => void loadUsers()}
+            disabled={loading}
+            title={t('common.refresh', 'Refresh')}
+            aria-label={t('common.refresh', 'Refresh')}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
               resolvedTheme === 'dark'
-                ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                : 'bg-blue-500 hover:bg-blue-600 text-white'
-            }`}
+                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
+                : 'border border-black bg-black text-white hover:bg-zinc-800'
+            } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
           >
-            <RefreshCw className="w-4 h-4 mr-2" />
-            {t('common.actions.refresh') || 'Refresh'}
+            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Search & Filters */}
-      <div className={`mb-6 p-4 rounded-xl ${
-        resolvedTheme === 'dark' ? 'bg-gray-800/50' : 'bg-white'
+      <motion.div variants={pageMotionItem} className={`mb-6 p-4 rounded-xl ${
+        resolvedTheme === 'dark' ? 'bg-zinc-900/70' : 'bg-gray-100'
       }`}>
-        <div className="flex flex-col gap-3 md:flex-row md:items-center">
-          <div className="relative flex-1">
+        <div className="flex items-center">
+          <div className="relative w-full">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
             <input
               type="text"
               placeholder={t('users.searchPlaceholder') || 'Search by name, email, or phone...'}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className={`w-full pl-10 pr-4 py-2 rounded-lg ${
+              className={`w-full pl-10 pr-12 py-2 rounded-lg ${
                 resolvedTheme === 'dark'
-                  ? 'bg-gray-700 text-white border-gray-600'
-                  : 'bg-gray-50 text-gray-900 border-gray-300'
-              } border focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
+                  ? 'bg-zinc-800 text-white border-zinc-600 focus:ring-white/40 focus:border-white/70'
+                  : 'bg-white text-gray-900 border-gray-300 focus:ring-gray-400 focus:border-gray-500'
+              } border focus:ring-2`}
+            />
+            <Filter
+              aria-label={t('users.platformFilter', 'Platform filter')}
+              className={`absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 ${
+                resolvedTheme === 'dark'
+                  ? 'text-zinc-400'
+                  : 'text-gray-500'
+              }`}
             />
           </div>
-          <div>
-            <select
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value as 'all' | 'customer' | 'app_user')}
-              className={`px-3 py-2 rounded-lg border ${
-                resolvedTheme === 'dark' ? 'bg-gray-700 text-white border-gray-600' : 'bg-gray-50 text-gray-900 border-gray-300'
-              }`}
-            >
-              <option value="all">{t('users.filterAll', 'All')}</option>
-              <option value="customer">{t('users.filterCustomers', 'Customers')}</option>
-              <option value="app_user">{t('users.filterAppUsers', 'App Users')}</option>
-            </select>
-          </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Users Table */}
-      <div className={`rounded-xl overflow-hidden ${
-        resolvedTheme === 'dark' ? 'bg-gray-800/50' : 'bg-white'
+      <motion.div variants={pageMotionItem} className={`rounded-xl overflow-hidden ${
+        resolvedTheme === 'dark' ? 'bg-zinc-950' : 'bg-gray-100'
       }`}>
         {loading ? (
           <div className="p-12 text-center">
-            <RefreshCw className="w-8 h-8 mx-auto mb-4 animate-spin text-blue-500" />
+            <RefreshCw className="w-8 h-8 mx-auto mb-4 animate-spin text-yellow-500" />
             <p className={resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'}>
               {t('common.loading') || 'Loading...'}
             </p>
@@ -755,57 +777,47 @@ const UsersPage: React.FC = () => {
             </p>
           </div>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className={resolvedTheme === 'dark' ? 'bg-gray-700/50' : 'bg-gray-50'}>
+              <thead className="bg-yellow-400">
                 <tr>
-                  <th className={`px-6 py-3 text-left text-xs font-medium uppercase tracking-wider ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                  }`}>
+                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
                     {t('users.customer') || 'Customer'}
                   </th>
-                  <th className={`px-6 py-3 text-left text-xs font-medium uppercase tracking-wider ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                  }`}>
+                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
                     {t('users.contact') || 'Contact'}
                   </th>
-                  <th className={`px-6 py-3 text-left text-xs font-medium uppercase tracking-wider ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                  }`}>
+                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
                     {t('users.activity') || 'Activity'}
                   </th>
-                  <th className={`px-6 py-3 text-left text-xs font-medium uppercase tracking-wider ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                  }`}>
+                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
                     {t('users.loyalty') || 'Loyalty'}
                   </th>
-                  <th className={`px-6 py-3 text-left text-xs font-medium uppercase tracking-wider ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                  }`}>
+                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
                     {t('users.status') || 'Status'}
                   </th>
-                  <th className={`px-6 py-3 text-left text-xs font-medium uppercase tracking-wider ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                  }`}>
+                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
                     {t('users.actions') || 'Actions'}
                   </th>
                 </tr>
               </thead>
-              <tbody className={`divide-y ${resolvedTheme === 'dark' ? 'divide-gray-700' : 'divide-gray-200'}`}>
-                {filteredUsers.map((user) => (
-                  <tr
+              <tbody className={`divide-y ${resolvedTheme === 'dark' ? 'divide-zinc-700' : 'divide-gray-300'}`}>
+                {paginatedUsers.map((user) => (
+                  <motion.tr
                     key={user.id}
+                    variants={pageMotionItem}
                     className={`transition-colors ${
-                      resolvedTheme === 'dark' ? 'hover:bg-gray-700/50' : 'hover:bg-gray-50'
+                      resolvedTheme === 'dark' ? 'hover:bg-zinc-900' : 'hover:bg-gray-200'
                     } ${updatingUserId === user.id ? 'opacity-50 pointer-events-none' : ''}`}
                   >
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
                         <div className={`h-10 w-10 rounded-full flex items-center justify-center ${
-                          resolvedTheme === 'dark' ? 'bg-gray-600' : 'bg-gray-200'
+                          resolvedTheme === 'dark' ? 'bg-zinc-700' : 'bg-gray-300'
                         }`}>
                           <span className={`text-sm font-medium ${
-                            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
+                            resolvedTheme === 'dark' ? 'text-zinc-300' : 'text-gray-700'
                           }`}>
                             {user.name?.split(' ').map(n => n[0]).join('') || 'U'}
                           </span>
@@ -831,7 +843,7 @@ const UsersPage: React.FC = () => {
                           <div className={`flex items-center text-sm ${
                             resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
                           }`}>
-                            <Mail className="w-4 h-4 mr-2 text-gray-400" />
+                            <Mail className="w-4 h-4 mr-2 text-yellow-500" />
                             {user.email}
                           </div>
                         )}
@@ -839,7 +851,7 @@ const UsersPage: React.FC = () => {
                           <div className={`flex items-center text-sm ${
                             resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
                           }`}>
-                            <Phone className="w-4 h-4 mr-2 text-gray-400" />
+                            <Phone className="w-4 h-4 mr-2 text-yellow-500" />
                             {user.phone}
                           </div>
                         )}
@@ -851,7 +863,7 @@ const UsersPage: React.FC = () => {
                         <div className={`flex items-center text-sm ${
                           resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
                         }`}>
-                          <ShoppingBag className="w-4 h-4 mr-2 text-gray-400" />
+                          <ShoppingBag className="w-4 h-4 mr-2 text-green-500" />
                           {user.total_orders} {t('users.orders') || 'orders'}
                         </div>
                       </div>
@@ -871,12 +883,12 @@ const UsersPage: React.FC = () => {
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="space-y-2">
                         {user.is_banned ? (
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-400">
+                          <span className="inline-flex items-center text-xs font-medium text-red-500 dark:text-red-400">
                             <Ban className="w-3 h-3 mr-1" />
                             {t('users.banned') || 'Banned'}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400">
+                          <span className="inline-flex items-center text-xs font-medium text-green-500 dark:text-green-400">
                             <CheckCircle className="w-3 h-3 mr-1" />
                             {t('users.active') || 'Active'}
                           </span>
@@ -888,7 +900,7 @@ const UsersPage: React.FC = () => {
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleViewUser(user)}
-                          className="text-blue-600 dark:text-blue-400 hover:text-blue-900 dark:hover:text-blue-300 transition-colors"
+                          className="text-yellow-500 hover:text-yellow-400 transition-colors"
                           title={t('users.viewDetails') || 'View details'}
                         >
                           <Eye className="w-4 h-4" />
@@ -908,13 +920,50 @@ const UsersPage: React.FC = () => {
                         )}
                       </div>
                     </td>
-                  </tr>
+                  </motion.tr>
                 ))}
               </tbody>
             </table>
           </div>
+          <div className={`flex flex-col gap-3 border-t px-6 py-4 text-sm md:flex-row md:items-center md:justify-between ${
+            resolvedTheme === 'dark' ? 'border-zinc-700 text-zinc-300' : 'border-gray-300 text-gray-700'
+          }`}>
+            <span>
+              {pageStart}-{pageEnd} of {filteredUsers.length}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage(page => Math.max(1, page - 1))}
+                disabled={activePage === 1}
+                className={`rounded-lg border px-3 py-2 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  resolvedTheme === 'dark'
+                    ? 'border-yellow-500 text-yellow-400 hover:bg-yellow-400 hover:text-black'
+                    : 'border-yellow-500 text-yellow-700 hover:bg-yellow-400 hover:text-black'
+                }`}
+              >
+                Previous
+              </button>
+              <span className={resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-600'}>
+                Page {activePage} / {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))}
+                disabled={activePage === totalPages}
+                className={`rounded-lg border px-3 py-2 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  resolvedTheme === 'dark'
+                    ? 'border-yellow-500 text-yellow-400 hover:bg-yellow-400 hover:text-black'
+                    : 'border-yellow-500 text-yellow-700 hover:bg-yellow-400 hover:text-black'
+                }`}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+          </>
         )}
-      </div>
+      </motion.div>
 
       {/* User Details Modal */}
       {showDetailsModal && selectedUser && (
@@ -1295,7 +1344,7 @@ const UsersPage: React.FC = () => {
           </div>
         </div>
       )}
-    </div>
+    </motion.div>
   );
 };
 

@@ -1,9 +1,9 @@
 import React from 'react';
-import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
 import type { UpdateInfo } from '../../../lib/update-contracts';
 import { useI18n } from '../../contexts/i18n-context';
 import { formatDate } from '../../utils/format';
+import { getReleaseNotesHtml } from '../../utils/release-notes';
 
 /* 
  * UpdateNotification Component
@@ -30,6 +30,8 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
     const { t } = useI18n(); // Assuming i18n context availability, otherwise fallback to english texts
 
     if (!updateInfo) return null;
+    const releaseNotesHtml =
+        getReleaseNotesHtml(updateInfo.releaseNotes) || '<p>Bug fixes and improvements.</p>';
 
     return (
         <LiquidGlassModal
@@ -60,13 +62,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                     <div
                         className="text-sm text-gray-400 prose prose-invert prose-sm"
                         dangerouslySetInnerHTML={{
-                            __html: DOMPurify.sanitize(
-                                typeof updateInfo.releaseNotes === 'string' ? updateInfo.releaseNotes : 'Bug fixes and improvements.',
-                                {
-                                    ALLOWED_TAGS: ['p', 'strong', 'em', 'b', 'i', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4'],
-                                    ALLOWED_ATTR: []
-                                }
-                            )
+                            __html: releaseNotesHtml
                         }}
                     />
                 </div>
