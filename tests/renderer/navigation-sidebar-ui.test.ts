@@ -36,3 +36,25 @@ test('navigation sidebar opens settings through the modal callback without shift
     /if \(id === 'settings'\) \{\s*onOpenSettings && onOpenSettings\(\);\s*return;\s*\}/,
   );
 });
+
+test('navigation sidebar no longer includes the swipe-to-hide collapse layer', () => {
+  const source = readFileSync(sidebarPath, 'utf8');
+
+  assert.doesNotMatch(source, /isCollapsed/);
+  assert.doesNotMatch(source, /handleSwipe/);
+  assert.doesNotMatch(source, /finishSwipeGesture/);
+  assert.doesNotMatch(source, /NAVIGATION_SWIPE/);
+  assert.doesNotMatch(source, /-translate-x-\[calc\(100%-0\.75rem\)\]/);
+});
+
+test('navigation sidebar touch movement scrolls while long press drag remains available', () => {
+  const source = readFileSync(sidebarPath, 'utf8');
+
+  assert.match(source, /const NAVIGATION_DRAG_HOLD_MS = 280;/);
+  assert.match(source, /const NAVIGATION_DRAG_SCROLL_CANCEL_THRESHOLD_PX = 8;/);
+  assert.match(source, /const scrollNavigationFromPointer = \(session: NavigationDragSession, clientY: number\) => \{/);
+  assert.match(source, /session\.isScrolling = true;/);
+  assert.match(source, /scrollContainer\.scrollTop = Math\.max\(0, Math\.min\(session\.scrollStartTop - deltaY, maxScrollTop\)\);/);
+  assert.match(source, /style=\{\{ touchAction: isComingSoon \? 'pan-y' : 'none' \}\}/);
+  assert.match(source, /beginModuleDrag\(session\);/);
+});

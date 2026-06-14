@@ -52,13 +52,13 @@ import {
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 
-const NAVIGATION_SWIPE_THRESHOLD_PX = 45;
-const NAVIGATION_SWIPE_VERTICAL_LIMIT_PX = 40;
 const NAVIGATION_DRAG_HOLD_MS = 280;
+const NAVIGATION_DRAG_SCROLL_CANCEL_THRESHOLD_PX = 8;
 const NAVIGATION_ORDER_STORAGE_PREFIX = 'pos-navigation-module-order';
 
 interface NavigationDragSession {
   pointerId: number;
+  pointerType: string;
   moduleId: string;
   startX: number;
   startY: number;
@@ -67,6 +67,8 @@ interface NavigationDragSession {
   insertIndex: number;
   holdTimer: number | null;
   isDragging: boolean;
+  isScrolling: boolean;
+  scrollStartTop: number;
   originalOrder: string[];
 }
 
@@ -149,13 +151,12 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   // State for upgrade modal
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [selectedLockedModule, setSelectedLockedModule] = useState<{ moduleId: string; requiredPlan: string } | null>(null);
-  const [isCollapsed, setIsCollapsed] = useState(false);
   const [moduleOrder, setModuleOrder] = useState<string[]>([]);
   const [draggingModuleId, setDraggingModuleId] = useState<string | null>(null);
   const [dragInsertIndex, setDragInsertIndex] = useState<number | null>(null);
   const [dragPosition, setDragPosition] = useState<{ x: number; y: number } | null>(null);
   const railRef = useRef<HTMLDivElement>(null);
-  const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const suppressClickRef = useRef(false);
   const moduleOrderRef = useRef<string[]>([]);
   const moduleButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -490,7 +491,6 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   const beginModuleDrag = (session: NavigationDragSession) => {
     session.isDragging = true;
     clearDragHoldTimer(session);
-    swipeStartRef.current = null;
     setDraggingModuleId(session.moduleId);
     session.insertIndex = findModuleInsertIndex(session.moduleId, session.startY);
     setDragInsertIndex(session.insertIndex);
@@ -498,6 +498,18 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
       x: session.startX - session.offsetX,
       y: session.startY - session.offsetY,
     });
+  };
+
+  const scrollNavigationFromPointer = (session: NavigationDragSession, clientY: number) => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) {
+      return false;
+    }
+
+    const deltaY = clientY - session.startY;
+    const maxScrollTop = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+    scrollContainer.scrollTop = Math.max(0, Math.min(session.scrollStartTop - deltaY, maxScrollTop));
+    return true;
   };
 
   const handleModulePointerDown = (moduleId: string) => (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -508,6 +520,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     const rect = event.currentTarget.getBoundingClientRect();
     const session: NavigationDragSession = {
       pointerId: event.pointerId,
+      pointerType: event.pointerType,
       moduleId,
       startX: event.clientX,
       startY: event.clientY,
@@ -516,11 +529,13 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
       insertIndex: moduleOrderRef.current.indexOf(moduleId),
       holdTimer: null,
       isDragging: false,
+      isScrolling: false,
+      scrollStartTop: scrollContainerRef.current?.scrollTop ?? 0,
       originalOrder: moduleOrderRef.current,
     };
 
     session.holdTimer = window.setTimeout(() => {
-      if (dragSessionRef.current === session) {
+      if (dragSessionRef.current === session && !session.isScrolling) {
         beginModuleDrag(session);
       }
     }, NAVIGATION_DRAG_HOLD_MS);
@@ -529,15 +544,56 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
+  const cancelPendingModuleDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const session = dragSessionRef.current;
+    if (!session || session.pointerId !== event.pointerId || session.isDragging) {
+      return;
+    }
+
+    clearDragHoldTimer(session);
+    dragSessionRef.current = null;
+
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be released by native scrolling.
+    }
+  };
+
   const handleModulePointerMove = (event: React.PointerEvent<HTMLButtonElement>) => {
     const session = dragSessionRef.current;
     if (!session || session.pointerId !== event.pointerId) {
       return;
     }
 
+    if (session.isScrolling) {
+      event.preventDefault();
+      event.stopPropagation();
+      scrollNavigationFromPointer(session, event.clientY);
+      return;
+    }
+
     if (!session.isDragging) {
-      session.startX = event.clientX;
-      session.startY = event.clientY;
+      const deltaX = event.clientX - session.startX;
+      const deltaY = event.clientY - session.startY;
+      const movement = Math.hypot(deltaX, deltaY);
+
+      if (movement > NAVIGATION_DRAG_SCROLL_CANCEL_THRESHOLD_PX) {
+        clearDragHoldTimer(session);
+
+        if (
+          session.pointerType !== 'mouse' &&
+          Math.abs(deltaY) >= Math.abs(deltaX) &&
+          scrollNavigationFromPointer(session, event.clientY)
+        ) {
+          session.isScrolling = true;
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+
+        cancelPendingModuleDrag(event);
+      }
       return;
     }
 
@@ -561,7 +617,14 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
     clearDragHoldTimer(session);
 
-    if (session.isDragging) {
+    if (session.isScrolling) {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressClickRef.current = true;
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    } else if (session.isDragging) {
       event.preventDefault();
       event.stopPropagation();
       suppressClickRef.current = true;
@@ -601,57 +664,6 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     finishModuleDrag(event, false);
   };
 
-  const finishSwipeGesture = (clientX: number, clientY: number) => {
-    const start = swipeStartRef.current;
-    swipeStartRef.current = null;
-
-    if (!start) {
-      return;
-    }
-
-    const deltaX = clientX - start.x;
-    const deltaY = Math.abs(clientY - start.y);
-
-    if (deltaY > NAVIGATION_SWIPE_VERTICAL_LIMIT_PX || Math.abs(deltaX) < NAVIGATION_SWIPE_THRESHOLD_PX) {
-      return;
-    }
-
-    setIsCollapsed(deltaX < 0);
-    suppressClickRef.current = true;
-    window.setTimeout(() => {
-      suppressClickRef.current = false;
-    }, 0);
-  };
-
-  const handleSwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) {
-      return;
-    }
-
-    swipeStartRef.current = { x: event.clientX, y: event.clientY };
-
-    const handleWindowPointerUp = (pointerEvent: PointerEvent) => {
-      finishSwipeGesture(pointerEvent.clientX, pointerEvent.clientY);
-      window.removeEventListener('pointercancel', handleWindowPointerCancel);
-    };
-
-    const handleWindowPointerCancel = () => {
-      swipeStartRef.current = null;
-      window.removeEventListener('pointerup', handleWindowPointerUp);
-    };
-
-    window.addEventListener('pointerup', handleWindowPointerUp, { once: true });
-    window.addEventListener('pointercancel', handleWindowPointerCancel, { once: true });
-  };
-
-  const handleSwipeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
-    finishSwipeGesture(event.clientX, event.clientY);
-  };
-
-  const handleSwipeCancel = () => {
-    swipeStartRef.current = null;
-  };
-
   const handleClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!suppressClickRef.current) {
       return;
@@ -689,16 +701,14 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     >
       {/* Theme-aware Sidebar */}
       <div
-        className={`pointer-events-auto relative max-h-full transition-transform duration-300 ease-out will-change-transform ${isCollapsed ? '-translate-x-[calc(100%-0.75rem)]' : 'translate-x-0'}`}
+        className="pointer-events-auto relative max-h-full"
         style={{ maxHeight: availableHeight ?? undefined, touchAction: 'pan-y' }}
-        onPointerDown={handleSwipeStart}
-        onPointerUp={handleSwipeEnd}
-        onPointerCancel={handleSwipeCancel}
         onClickCapture={handleClickCapture}
       >
         <div className={`${resolvedTheme === 'dark'
           ? 'bg-black backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.6)] border-r border-amber-400/25'
           : 'bg-white/90 backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.34)] border-r border-amber-200/70'} max-h-full overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-hide`}
+          ref={scrollContainerRef}
           style={{
             maxHeight: availableHeight ?? undefined,
             scrollbarWidth: 'none',
@@ -900,17 +910,6 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           </div>
         );
       })()}
-
-      {isCollapsed && (
-        <div
-          aria-hidden="true"
-          className="pointer-events-auto absolute left-0 top-0 z-10 h-full w-10 touch-pan-y"
-          style={{ touchAction: 'pan-y' }}
-          onPointerDown={handleSwipeStart}
-          onPointerUp={handleSwipeEnd}
-          onPointerCancel={handleSwipeCancel}
-        />
-      )}
 
       {/* Upgrade Prompt Modal */}
       <UpgradePromptModal
