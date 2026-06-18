@@ -509,12 +509,13 @@ fn spawn_app_executable(manifest: &ResetManifest) -> Result<(), String> {
 
 fn relaunch_after_reset(manifest: &ResetManifest) -> Result<(), String> {
     if cfg!(debug_assertions) {
-        let project_dir = infer_pos_tauri_project_dir(&manifest.app_executable).ok_or_else(|| {
-            format!(
-                "Could not infer pos-tauri project dir from executable '{}'",
-                manifest.app_executable.display()
-            )
-        })?;
+        let project_dir =
+            infer_pos_tauri_project_dir(&manifest.app_executable).ok_or_else(|| {
+                format!(
+                    "Could not infer pos-tauri project dir from executable '{}'",
+                    manifest.app_executable.display()
+                )
+            })?;
 
         thread::sleep(Duration::from_millis(DEV_RELAUNCH_SETTLE_MS));
         if !can_connect_to_dev_server(DEV_SERVER_PORT) {
@@ -642,13 +643,7 @@ pub fn run_reset_helper(manifest_path: &Path) -> Result<(), String> {
     ))?;
 
     if let Err(error) = relaunch_after_reset(&manifest) {
-        let _ = write_failed_status(
-            &manifest,
-            "relaunch_failed",
-            error.clone(),
-            None,
-            None,
-        );
+        let _ = write_failed_status(&manifest, "relaunch_failed", error.clone(), None, None);
         return Err(error);
     }
 
