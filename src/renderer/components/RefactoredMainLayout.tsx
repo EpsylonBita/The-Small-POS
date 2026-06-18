@@ -476,6 +476,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   const advisorySummary = missingAdvisoryDatasets.length > 0
     ? missingAdvisoryDatasets.map((dataset) => dataset.replace(/_/g, ' ')).join(', ')
     : '';
+  const locksPageScroll = currentView === 'orders' || currentView === 'tables';
 
   return (
     <NavigationProvider currentView={currentView} onViewChange={handleViewChange}>
@@ -500,7 +501,10 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
 
         {/* Main Content Area with Container */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0 ml-16 sm:ml-20">
-          <ContentContainer className="flex-1 min-h-0 overflow-auto relative touch-scroll">
+          <ContentContainer
+            className="flex-1 min-h-0 overflow-hidden relative"
+            contentClassName={locksPageScroll ? 'overflow-hidden' : undefined}
+          >
             {isOffline && offlineBundleStatus && (
               <div
                 className={`mx-3 mt-3 rounded-xl border px-4 py-3 text-sm ${
@@ -534,7 +538,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
               <PageLoadMotion
                 key={currentView}
                 animationKey={currentView}
-                className="h-full min-h-[400px] sm:min-h-[500px] md:min-h-[600px]"
+                className={locksPageScroll
+                  ? 'h-full min-h-0'
+                  : 'h-full min-h-[400px] sm:min-h-[500px] md:min-h-[600px]'}
               >
                 {renderCurrentView()}
               </PageLoadMotion>

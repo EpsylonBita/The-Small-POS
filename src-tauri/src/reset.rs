@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -20,6 +21,10 @@ const APP_EXIT_DELAY_MS: u64 = 800;
 const FILESYSTEM_DELETE_RETRY_MS: u64 = 500;
 const FILESYSTEM_DELETE_TIMEOUT_MS: u64 = 60_000;
 const KEYRING_DELETE_TIMEOUT_MS: u64 = 10_000;
+const DEV_SERVER_PORT: u16 = 1420;
+const DEV_RELAUNCH_SETTLE_MS: u64 = 2_000;
+const DEV_SERVER_READY_TIMEOUT_MS: u64 = 20_000;
+const DEV_SERVER_POLL_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -447,6 +452,93 @@ fn write_failed_status(
     write_status(&status)
 }
 
+fn infer_pos_tauri_project_dir(app_executable: &Path) -> Option<PathBuf> {
+    app_executable
+        .ancestors()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some("src-tauri"))
+        .and_then(|src_tauri_dir| src_tauri_dir.parent().map(Path::to_path_buf))
+}
+
+fn can_connect_to_dev_server(port: u16) -> bool {
+    let addresses = [
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+    ];
+
+    addresses.iter().any(|address| {
+        TcpStream::connect_timeout(address, Duration::from_millis(DEV_SERVER_POLL_MS)).is_ok()
+    })
+}
+
+fn wait_for_dev_server(port: u16, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() <= deadline {
+        if can_connect_to_dev_server(port) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(DEV_SERVER_POLL_MS));
+    }
+    false
+}
+
+fn npm_executable() -> &'static str {
+    if cfg!(windows) {
+        "npm.cmd"
+    } else {
+        "npm"
+    }
+}
+
+fn start_dev_frontend_server(project_dir: &Path) -> Result<(), String> {
+    Command::new(npm_executable())
+        .arg("run")
+        .arg("dev")
+        .current_dir(project_dir)
+        .env("TAURI_ENV_DEBUG", "true")
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("start Vite dev server: {error}"))
+}
+
+fn spawn_app_executable(manifest: &ResetManifest) -> Result<(), String> {
+    Command::new(&manifest.app_executable)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to relaunch app: {error}"))
+}
+
+fn relaunch_after_reset(manifest: &ResetManifest) -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        let project_dir = infer_pos_tauri_project_dir(&manifest.app_executable).ok_or_else(|| {
+            format!(
+                "Could not infer pos-tauri project dir from executable '{}'",
+                manifest.app_executable.display()
+            )
+        })?;
+
+        thread::sleep(Duration::from_millis(DEV_RELAUNCH_SETTLE_MS));
+        if !can_connect_to_dev_server(DEV_SERVER_PORT) {
+            info!(
+                project_dir = %project_dir.display(),
+                port = DEV_SERVER_PORT,
+                "Reset helper starting Vite dev server for debug relaunch"
+            );
+            start_dev_frontend_server(&project_dir)?;
+        }
+
+        if !wait_for_dev_server(
+            DEV_SERVER_PORT,
+            Duration::from_millis(DEV_SERVER_READY_TIMEOUT_MS),
+        ) {
+            return Err(format!(
+                "Vite dev server did not become reachable at http://localhost:{DEV_SERVER_PORT}"
+            ));
+        }
+    }
+
+    spawn_app_executable(manifest)
+}
+
 pub fn run_reset_helper(manifest_path: &Path) -> Result<(), String> {
     let manifest_contents =
         fs::read(manifest_path).map_err(|e| format!("read reset manifest: {e}"))?;
@@ -549,16 +641,15 @@ pub fn run_reset_helper(manifest_path: &Path) -> Result<(), String> {
         None,
     ))?;
 
-    if let Err(error) = Command::new(&manifest.app_executable).spawn() {
-        let error_message = format!("Failed to relaunch app: {error}");
+    if let Err(error) = relaunch_after_reset(&manifest) {
         let _ = write_failed_status(
             &manifest,
             "relaunch_failed",
-            error_message.clone(),
+            error.clone(),
             None,
             None,
         );
-        return Err(error_message);
+        return Err(error);
     }
 
     write_status(&make_status(
@@ -646,5 +737,23 @@ mod tests {
         assert_eq!(decoded.operation_id, "test");
         assert_eq!(decoded.phase, "preparing");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn infer_pos_tauri_project_dir_from_debug_executable_path() {
+        let path = PathBuf::from("repo")
+            .join("pos-tauri")
+            .join("src-tauri")
+            .join("target")
+            .join("debug")
+            .join(if cfg!(windows) {
+                "the-small-pos.exe"
+            } else {
+                "the-small-pos"
+            });
+        assert_eq!(
+            infer_pos_tauri_project_dir(&path),
+            Some(PathBuf::from("repo").join("pos-tauri"))
+        );
     }
 }

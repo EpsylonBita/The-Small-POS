@@ -1248,7 +1248,7 @@ pub(crate) fn record_payment_in_connection(
 /// and `payment_method`, and enqueues a sync entry.
 #[allow(clippy::type_complexity)]
 pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
-    let input = build_payment_record_input(payload)?;
+    let mut input = build_payment_record_input(payload)?;
     if input.method != "cash" && input.method != "card" && input.method != "room_charge" {
         return Err(
             "Only cash, card, and room_charge payments can be recorded locally".to_string(),
@@ -1259,6 +1259,8 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         options.sync_order_owner_with_payment = false;
     }
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    input.order_id = resolve_order_id(&conn, &input.order_id)
+        .ok_or_else(|| format!("Order not found: {}", input.order_id))?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
@@ -2347,6 +2349,46 @@ mod tests {
         assert_eq!(arr[0]["cashReceived"], 30.0);
         assert_eq!(arr[0]["changeGiven"], 5.0);
         assert_eq!(arr[0]["id"], payment_id);
+    }
+
+    #[test]
+    fn test_record_payment_accepts_supabase_order_id() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'local-table-order', 'remote-table-order', '[]', 22.0, 2200, 'pending', 'synced',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert synced table order");
+        drop(conn);
+
+        let result = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "remote-table-order",
+                "method": "card",
+                "amount": 22.0,
+                "transactionRef": "CARD-TABLE-REMOTE-ID",
+            }),
+        )
+        .expect("record payment using remote order id");
+
+        assert_eq!(result["success"], true);
+        let conn = db.conn.lock().unwrap();
+        let payment_order_id: String = conn
+            .query_row(
+                "SELECT order_id FROM order_payments WHERE transaction_ref = 'CARD-TABLE-REMOTE-ID'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load recorded payment order id");
+        assert_eq!(payment_order_id, "local-table-order");
     }
 
     #[test]

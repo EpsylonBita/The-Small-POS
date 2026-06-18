@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ReactDOM from 'react-dom';
 import {
   ArrowRightLeft,
   Banknote,
@@ -21,12 +22,13 @@ import {
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import toast from 'react-hot-toast';
-import { getBridge, type RecordPaymentParams } from '../../../lib';
+import { emitCompatEvent, getBridge, type RecordPaymentParams } from '../../../lib';
 import { useI18n } from '../../contexts/i18n-context';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable } from '../../types/tables';
 import { posApiGet, posApiPatch, posApiPost } from '../../utils/api-helpers';
 import {
+  buildTableSessionOpenPayload,
   buildTableSessionPaymentPayload,
   findOpenTableOrderForTable,
   findTableOrderForTable,
@@ -888,15 +890,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       }
 
       if (!sessionId && table.currentOrderId) {
-        const repairPayload = {
-          action: 'open',
-          table_id: table.id,
-          table_number: table.tableNumber,
-          active_order_id: table.currentOrderId,
-          guest_count: normalizeGuestCount(table.guestCount || 1),
-          customer_name: tr('labels.tableNumber', 'Table {{number}}', { number: table.tableNumber }),
-          client_event_id: `pos-tauri-table-session-repair-${table.currentOrderId}`,
-        };
+        const repairPayload = buildTableSessionOpenPayload({
+          table,
+          orderId: table.currentOrderId,
+          orderData: localOrder as any,
+          guestCount: table.guestCount || 1,
+          customerName: tr('labels.tableNumber', 'Table {{number}}', { number: table.tableNumber }),
+        });
 
         try {
           const openResult = await posApiPost<{ success?: boolean; session?: TableSessionDetails; error?: string }>(
@@ -1244,6 +1244,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       return false;
     }
     const tipValue = parseMoneyInput(tipAmount);
+    const nextPaidAfterPayment = Number((paidTotal + amount).toFixed(2));
+    const nextOutstandingAfterPayment = Number(Math.max(0, orderTotal - nextPaidAfterPayment).toFixed(2));
+    const isFullySettledAfterPayment = nextOutstandingAfterPayment <= 0.01;
     const localPaymentItems: RecordPaymentParams['items'] | undefined = itemPaymentEntries.length > 0
       ? itemPaymentEntries.map(entry => {
           const itemPaymentQuantity = Math.max(1, Number(entry.itemQuantity || 1));
@@ -1357,6 +1360,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           })),
           ...current,
         ]);
+      }
+      if (isFullySettledAfterPayment && table?.id) {
+        emitCompatEvent('table-session-settled', {
+          tableId: table.id,
+          tableSessionId: session.id,
+          orderId: session.active_order_id,
+        });
       }
       toast.success(tr('messages.paymentRecorded', '{{method}} payment recorded', {
         method: method === 'cash' ? tr('paymentMethods.cash', 'Cash') : tr('paymentMethods.card', 'Card'),
@@ -1735,7 +1745,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     },
   );
 
-  return (
+  const modalContent = (
     <motion.div
       className="liquid-glass-modal-viewport"
       initial={{ opacity: 0 }}
@@ -2647,6 +2657,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       </motion.div>
     </motion.div>
   );
+
+  return ReactDOM.createPortal(modalContent, document.body);
 };
 
 export default TableCheckManagerModal;

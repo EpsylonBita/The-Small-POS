@@ -10,7 +10,11 @@ import { ZoneValidationAlert } from './delivery/ZoneValidationAlert';
 import { FloatingActionButton } from './ui/FloatingActionButton';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
 import type { CreateReservationDto } from './tables';
-import { reservationsService } from '../services/ReservationsService';
+import {
+  buildChangedReservationUpdate,
+  reservationsService,
+  type Reservation,
+} from '../services/ReservationsService';
 import { useOrderStore } from '../hooks/useOrderStore';
 import { useShift } from '../contexts/shift-context';
 import { useI18n } from '../contexts/i18n-context';
@@ -245,7 +249,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
   // Fetch tables for table orders - use actual IDs
   // Only enable fetching when both IDs are available
-  const { tables } = useTables({ 
+  const { tables, refetch: refetchTables, updateTableStatus } = useTables({
     branchId: effectiveBranchId || '', 
     organizationId: organizationId || '',
     enabled: Boolean(effectiveBranchId && organizationId)
@@ -256,6 +260,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const [showTableActionModal, setShowTableActionModal] = useState(false);
   const [showReservationForm, setShowReservationForm] = useState(false);
   const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(null);
+  const [editingReservation, setEditingReservation] = useState<Reservation | null>(null);
   const [tableNumber, setTableNumber] = useState('');
 
   // Fetch tax rate from terminal settings; auto-updates on settings change
@@ -553,6 +558,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
   // Handle table selection from TableSelector
   const handleTableSelectorSelect = useCallback((table: RestaurantTable) => {
+    setEditingReservation(null);
     setSelectedTable(table);
     setShowTableSelector(false);
     setShowTableActionModal(true);
@@ -579,25 +585,146 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Handle New Reservation action from TableActionModal
   const handleTableNewReservation = useCallback(() => {
     if (selectedTable) {
+      setEditingReservation(null);
       setShowTableActionModal(false);
       setShowReservationForm(true);
     }
   }, [selectedTable]);
 
+  const handleTableEditReservation = useCallback(async () => {
+    const reservationBranchId = effectiveBranchId || branchId;
+    if (!selectedTable || !reservationBranchId || !organizationId) {
+      toast.error(t('orderFlow.missingContext') || 'Missing branch or organization context');
+      return;
+    }
+
+    try {
+      reservationsService.setContext(reservationBranchId, organizationId);
+      const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
+      if (!reservation) {
+        toast.error(t('tableActionModal.reservationNotFound', { defaultValue: 'No active reservation found for this table' }));
+        return;
+      }
+
+      setEditingReservation(reservation);
+      setShowTableActionModal(false);
+      setShowReservationForm(true);
+    } catch (error) {
+      console.error('Failed to load reservation for editing:', error);
+      toast.error(t('tableActionModal.reservationLoadFailed', { defaultValue: 'Failed to load reservation' }));
+    }
+  }, [branchId, effectiveBranchId, organizationId, selectedTable, t]);
+
+  const handleTableNoShowReservation = useCallback(async () => {
+    const reservationBranchId = effectiveBranchId || branchId;
+    if (!selectedTable || !reservationBranchId || !organizationId) {
+      toast.error(t('orderFlow.missingContext') || 'Missing branch or organization context');
+      return;
+    }
+
+    try {
+      reservationsService.setContext(reservationBranchId, organizationId);
+      const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
+      if (!reservation) {
+        toast.error(t('tableActionModal.reservationNotFound', { defaultValue: 'No active reservation found for this table' }));
+        return;
+      }
+
+      await reservationsService.updateStatus(reservation.id, 'no_show');
+      await updateTableStatus(selectedTable.id, 'available');
+      await refetchTables();
+      toast.success(t('tableActionModal.noShowSuccess', { defaultValue: 'Reservation marked as no-show' }));
+      setShowTableActionModal(false);
+      setSelectedTable(null);
+    } catch (error) {
+      console.error('Failed to mark reservation no-show:', error);
+      toast.error(t('tableActionModal.noShowFailed', { defaultValue: 'Failed to mark reservation as no-show' }));
+    }
+  }, [branchId, effectiveBranchId, organizationId, refetchTables, selectedTable, t, updateTableStatus]);
+
+  const handleTableCancelReservation = useCallback(async () => {
+    const reservationBranchId = effectiveBranchId || branchId;
+    if (!selectedTable || !reservationBranchId || !organizationId) {
+      toast.error(t('orderFlow.missingContext') || 'Missing branch or organization context');
+      return;
+    }
+
+    try {
+      reservationsService.setContext(reservationBranchId, organizationId);
+      const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
+      if (!reservation) {
+        toast.error(t('tableActionModal.reservationNotFound', { defaultValue: 'No active reservation found for this table' }));
+        return;
+      }
+
+      await reservationsService.cancelReservation(reservation.id,
+        t('tableActionModal.cancelReason', { defaultValue: 'Cancelled from POS table actions' }),
+      );
+      await updateTableStatus(selectedTable.id, 'available');
+      await refetchTables();
+      toast.success(t('tableActionModal.cancelSuccess', { defaultValue: 'Reservation cancelled' }));
+      setShowTableActionModal(false);
+      setSelectedTable(null);
+    } catch (error) {
+      console.error('Failed to cancel reservation:', error);
+      toast.error(t('tableActionModal.cancelFailed', { defaultValue: 'Failed to cancel reservation' }));
+    }
+  }, [branchId, effectiveBranchId, organizationId, refetchTables, selectedTable, t, updateTableStatus]);
+
+  const handleTableSetAvailable = useCallback(async () => {
+    if (!selectedTable) {
+      return;
+    }
+
+    const success = await updateTableStatus(selectedTable.id, 'available');
+    if (success) {
+      toast.success(t('tableActionModal.setAvailableSuccess', { defaultValue: 'Table marked available' }));
+      setShowTableActionModal(false);
+      setSelectedTable(null);
+      return;
+    }
+
+    toast.error(t('tableActionModal.setAvailableFailed', { defaultValue: 'Failed to mark table available' }));
+  }, [selectedTable, t, updateTableStatus]);
+
   // Handle reservation form submission
   const handleReservationSubmit = useCallback(async (data: CreateReservationDto) => {
-    if (!branchId || !organizationId) {
+    const reservationBranchId = effectiveBranchId || branchId;
+    if (!reservationBranchId || !organizationId) {
       toast.error(t('orderFlow.missingContext') || 'Missing branch or organization context');
       return;
     }
     
     try {
       // Set context for the service with actual IDs
-      reservationsService.setContext(branchId, organizationId);
+      reservationsService.setContext(reservationBranchId, organizationId);
       
       // Format date and time from the Date object
       const reservationDate = toLocalDateString(data.reservationTime);
       const reservationTime = data.reservationTime.toTimeString().slice(0, 5);
+
+      if (editingReservation) {
+        const updatePayload = buildChangedReservationUpdate(editingReservation, {
+          customerName: data.customerName,
+          customerPhone: data.customerPhone,
+          partySize: data.partySize,
+          reservationDate,
+          reservationTime,
+          tableId: data.tableId,
+          specialRequests: data.specialRequests,
+        });
+
+        if (Object.keys(updatePayload).length > 0) {
+          await reservationsService.updateReservationDetails(editingReservation.id, updatePayload);
+        }
+
+        toast.success(t('orderFlow.reservationUpdated', { defaultValue: 'Reservation updated successfully' }));
+        setShowReservationForm(false);
+        setEditingReservation(null);
+        setSelectedTable(null);
+        await refetchTables();
+        return;
+      }
       
       // Create the reservation with table status update
       await reservationsService.createReservationWithTableUpdate({
@@ -613,15 +740,31 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       toast.success(t('orderFlow.reservationCreated') || 'Reservation created successfully');
       setShowReservationForm(false);
       setSelectedTable(null);
+      await refetchTables();
     } catch (error) {
       console.error('Failed to create reservation:', error);
-      toast.error(t('orderFlow.reservationFailed') || 'Failed to create reservation');
+      const reservationUpdateError = error instanceof Error && error.message.trim()
+        ? error.message
+        : typeof error === 'string' && error.trim()
+          ? error
+          : null;
+      toast.error(
+        editingReservation
+          ? reservationUpdateError ||
+            t('orderFlow.reservationUpdateFailed', {
+              defaultValue: 'Failed to update reservation',
+            })
+          : t('orderFlow.reservationFailed', {
+              defaultValue: 'Failed to create reservation',
+            }),
+      );
     }
-  }, [t, branchId, organizationId]);
+  }, [t, branchId, effectiveBranchId, organizationId, editingReservation, refetchTables]);
 
   // Handle reservation form cancel
   const handleReservationCancel = useCallback(() => {
     setShowReservationForm(false);
+    setEditingReservation(null);
     setSelectedTable(null);
   }, []);
 
@@ -1204,6 +1347,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           table={selectedTable}
           onNewOrder={handleTableNewOrder}
           onNewReservation={handleTableNewReservation}
+          onSetAvailable={handleTableSetAvailable}
+          onEditReservation={handleTableEditReservation}
+          onNoShowReservation={handleTableNoShowReservation}
+          onCancelReservation={handleTableCancelReservation}
           onClose={() => {
             setShowTableActionModal(false);
             setSelectedTable(null);
@@ -1218,6 +1365,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           tableId={selectedTable.id}
           tableCapacity={selectedTable.capacity}
           tableNumber={selectedTable.tableNumber}
+          initialReservation={editingReservation}
           onSubmit={handleReservationSubmit}
           onCancel={handleReservationCancel}
         />

@@ -6,7 +6,7 @@ import type { TableStatus as CanonicalTableStatus } from '../../repo-shared/type
 
 // Re-export canonical TableStatus
 export type TableStatus = CanonicalTableStatus;
-export type TableShape = 'rectangle' | 'circle' | 'square' | 'custom';
+export type TableShape = 'rectangle' | 'circle' | 'square' | 'custom' | 'round' | 'oval' | 'booth';
 
 export interface RestaurantTable {
   id: string;
@@ -20,6 +20,9 @@ export interface RestaurantTable {
   status: TableStatus;
   positionX: number | null;
   positionY: number | null;
+  width?: number | null;
+  height?: number | null;
+  rotation?: number | null;
   shape: TableShape | null;
   notes: string | null;
   createdAt: string;
@@ -87,6 +90,9 @@ export interface TableAPIResponse {
   status: TableStatus;
   position_x: number | null;
   position_y: number | null;
+  width?: number | null;
+  height?: number | null;
+  rotation?: number | null;
   shape: TableShape | null;
   notes: string | null;
   created_at: string;
@@ -117,6 +123,9 @@ export function transformTableFromAPI(apiTable: TableAPIResponse): RestaurantTab
     status: apiTable.status,
     positionX: apiTable.position_x,
     positionY: apiTable.position_y,
+    width: apiTable.width ?? null,
+    height: apiTable.height ?? null,
+    rotation: apiTable.rotation ?? null,
     shape: apiTable.shape,
     notes: apiTable.notes,
     createdAt: apiTable.created_at,

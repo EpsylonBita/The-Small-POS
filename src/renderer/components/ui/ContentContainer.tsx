@@ -4,9 +4,14 @@ import { useTheme } from '../../contexts/theme-context';
 interface ContentContainerProps {
   children: React.ReactNode;
   className?: string;
+  contentClassName?: string;
 }
 
-export const ContentContainer = memo<ContentContainerProps>(({ children, className = '' }) => {
+export const ContentContainer = memo<ContentContainerProps>(({
+  children,
+  className = '',
+  contentClassName,
+}) => {
   const { resolvedTheme } = useTheme();
 
   return (
@@ -32,7 +37,7 @@ export const ContentContainer = memo<ContentContainerProps>(({ children, classNa
           }`}
         />
         {/* Content */}
-        <div className="relative h-full overflow-y-auto scrollbar-hide">
+        <div className={`relative h-full min-h-0 ${contentClassName ?? 'overflow-y-auto scrollbar-hide'}`}>
           {children}
         </div>
       </div>

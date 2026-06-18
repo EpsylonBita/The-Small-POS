@@ -5,7 +5,11 @@ import {
   resetPlatformCache,
   setBridge,
 } from '../../src/lib';
-import { reservationsService } from '../../src/renderer/services/ReservationsService';
+import {
+  buildChangedReservationUpdate,
+  reservationsService,
+  type Reservation,
+} from '../../src/renderer/services/ReservationsService';
 import { driveThruService } from '../../src/renderer/services/DriveThruService';
 import { appointmentsService } from '../../src/renderer/services/AppointmentsService';
 
@@ -63,6 +67,41 @@ function reservationApiRecord(overrides: Record<string, unknown> = {}) {
     cancellation_reason: null,
     created_at: '2026-04-10T09:00:00.000Z',
     updated_at: '2026-04-10T09:30:00.000Z',
+    ...overrides,
+  };
+}
+
+function reservationModelRecord(overrides: Partial<Reservation> = {}): Reservation {
+  return {
+    id: 'reservation-1',
+    organizationId: 'org-1',
+    branchId: 'branch-1',
+    reservationNumber: 'RSV-001',
+    customerId: null,
+    customerName: 'Sara Keller',
+    customerPhone: '+41 21 555 0305',
+    customerEmail: null,
+    partySize: 6,
+    tableId: 'table-t07',
+    tableNumber: 7,
+    roomId: null,
+    roomNumber: undefined,
+    checkInDate: null,
+    checkOutDate: null,
+    reservationDate: '2026-06-18',
+    reservationTime: '18:30:00',
+    reservationDatetime: '2026-06-18T18:30:00.000Z',
+    durationMinutes: 120,
+    status: 'confirmed',
+    specialRequests: 'High chair needed.',
+    notes: null,
+    confirmedAt: null,
+    seatedAt: null,
+    completedAt: null,
+    cancelledAt: null,
+    cancellationReason: null,
+    createdAt: '2026-06-18T09:00:00.000Z',
+    updatedAt: '2026-06-18T09:30:00.000Z',
     ...overrides,
   };
 }
@@ -198,6 +237,16 @@ test('ReservationsService desktop create/update use bridge reservation transport
       cancellationReason: 'Customer request',
     });
 
+    const detailUpdated = await reservationsService.updateReservationDetails('reservation-43', {
+      customerName: 'Grace Hopper',
+      customerPhone: '555-0100',
+      partySize: 7,
+      reservationDate: '2026-04-12',
+      reservationTime: '19:30',
+      tableId: 'table-7',
+      specialRequests: 'High chair needed',
+    });
+
     assert.deepEqual(calls.update, [
       {
         reservationId: 'reservation-42',
@@ -206,13 +255,97 @@ test('ReservationsService desktop create/update use bridge reservation transport
           cancellation_reason: 'Customer request',
         },
       },
+      {
+        reservationId: 'reservation-43',
+        payload: {
+          customerName: 'Grace Hopper',
+          customer_name: 'Grace Hopper',
+          customerPhone: '555-0100',
+          customer_phone: '555-0100',
+          partySize: 7,
+          party_size: 7,
+          reservationDate: '2026-04-12',
+          reservation_date: '2026-04-12',
+          reservationTime: '19:30',
+          reservation_time: '19:30',
+          tableId: 'table-7',
+          table_id: 'table-7',
+          specialRequests: 'High chair needed',
+          special_requests: 'High chair needed',
+        },
+      },
     ]);
     assert.equal(updated.id, 'reservation-42');
     assert.equal(updated.status, 'cancelled');
     assert.equal(updated.cancellationReason, 'Customer request');
+    assert.equal(detailUpdated.id, 'reservation-43');
   } finally {
     cleanup();
   }
+});
+
+test('ReservationsService desktop update errors prefer embedded API messages', async () => {
+  const cleanup = installTauriRuntime();
+  const bridge = {
+    reservations: {
+      update: async () => ({
+        success: false,
+        error:
+          'TABLE_UNAVAILABLE (HTTP 409): {"success":false,"error":"TABLE_UNAVAILABLE","message":"Table is not available for the requested time"}',
+      }),
+    },
+  } as any;
+
+  setBridge(bridge);
+  (reservationsService as any).bridge = bridge;
+
+  try {
+    await assert.rejects(
+      () =>
+        reservationsService.updateReservationDetails('reservation-43', {
+          partySize: 7,
+          reservationDate: '2026-06-18',
+          reservationTime: '18:30',
+          tableId: 'table-7',
+        }),
+      { message: 'Table is not available for the requested time' },
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('buildChangedReservationUpdate omits unchanged table and time fields for guest-only edits', () => {
+  const current = reservationModelRecord();
+
+  const update = buildChangedReservationUpdate(current, {
+    customerName: 'Sara Keller',
+    customerPhone: '+41 21 555 0305',
+    partySize: 7,
+    reservationDate: '2026-06-18',
+    reservationTime: '18:30',
+    tableId: 'table-t07',
+    specialRequests: 'High chair needed.',
+  });
+
+  assert.deepEqual(update, {
+    partySize: 7,
+  });
+});
+
+test('buildChangedReservationUpdate includes table id when an availability field changes', () => {
+  const current = reservationModelRecord();
+
+  const update = buildChangedReservationUpdate(current, {
+    reservationDate: '18/06/2026',
+    reservationTime: '19:30',
+    tableId: 'table-t07',
+  });
+
+  assert.deepEqual(update, {
+    reservationTime: '19:30',
+    tableId: 'table-t07',
+  });
 });
 
 test('DriveThruService desktop reads use cached admin fetch and status updates use offline mutation bridge', async () => {

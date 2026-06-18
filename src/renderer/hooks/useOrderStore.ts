@@ -122,7 +122,18 @@ interface OrderStore {
     options?: UpdateOrderStatusOptions,
   ) => Promise<UpdateOrderStatusDetailedResult>;
   returnCancelledToPending: (orderId: string) => Promise<boolean>;
-  createOrder: (orderData: Partial<Order>) => Promise<{ success: boolean; orderId?: string; orderNumber?: string; error?: string; savedForRetry?: boolean; roomCharge?: RoomChargeOrderResult }>;
+  createOrder: (orderData: Partial<Order>) => Promise<{
+    success: boolean;
+    orderId?: string;
+    orderNumber?: string;
+    clientRequestId?: string;
+    client_request_id?: string;
+    clientOrderId?: string;
+    client_order_id?: string;
+    error?: string;
+    savedForRetry?: boolean;
+    roomCharge?: RoomChargeOrderResult;
+  }>;
   setSelectedOrder: (order: Order | null) => void;
   setFilter: (filter: Partial<OrderStore['filter']>) => void;
   getFilteredOrders: () => Order[];
@@ -1043,6 +1054,10 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           success: true,
           orderId: newOrder.id,
           orderNumber: getVisibleOrderNumber(newOrder) || newOrder.id,
+          clientRequestId: (newOrder as any).clientRequestId,
+          client_request_id: (newOrder as any).client_request_id,
+          clientOrderId: (newOrder as any).clientOrderId,
+          client_order_id: (newOrder as any).client_order_id,
           savedForRetry: Boolean((newOrder as any).savedForRetry),
           roomCharge: (newOrder as any).roomCharge,
         };

@@ -1,11 +1,22 @@
+import type { TableStatus } from '../types/tables';
+
 type ServiceOrderType = 'pickup' | 'delivery' | 'dine-in';
 
 interface TableLike {
   id?: string | null;
+  status?: string | null;
   tableNumber?: number | string | null;
+  current_order_id?: string | null;
   currentOrderId?: string | null;
   table_session_id?: string | null;
   tableSessionId?: string | null;
+  unpaidBalance?: number | string | null;
+  balance?: {
+    order_total?: number | string | null;
+    paid_total?: number | string | null;
+    outstanding_balance?: number | string | null;
+    payment_status?: string | null;
+  } | null;
 }
 
 type OrderLike = Record<string, unknown> & {
@@ -13,6 +24,7 @@ type OrderLike = Record<string, unknown> & {
   order_number?: string | null;
   orderNumber?: string | null;
   supabase_id?: string | null;
+  supabaseId?: string | null;
   client_request_id?: string | null;
   clientRequestId?: string | null;
   client_order_id?: string | null;
@@ -33,6 +45,23 @@ type OrderLike = Record<string, unknown> & {
   notes?: string | null;
 };
 
+export interface TableSessionOpenPayload {
+  [key: string]: unknown;
+  action: 'open' | 'reopen';
+  table_id: string | null;
+  table_number: string | number | null;
+  active_order_id: string | null;
+  active_order_client_id: string | null;
+  client_order_id: string | null;
+  client_request_id: string | null;
+  guest_count: number;
+  customer_name: string;
+  client_event_id: string;
+}
+
+const UUID_V4_OR_COMPAT_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export function normalizeGuestCount(value: unknown, fallback = 1): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
@@ -45,8 +74,73 @@ function hasValue(value: unknown): boolean {
   return value !== null && value !== undefined && String(value).trim().length > 0;
 }
 
+function normalizeTextReference(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function isUuidLike(value: unknown): value is string {
+  const normalized = normalizeTextReference(value);
+  return Boolean(normalized && UUID_V4_OR_COMPAT_RE.test(normalized));
+}
+
+function firstTextReference(...values: unknown[]): string | null {
+  for (const value of values) {
+    const normalized = normalizeTextReference(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+const TABLE_DISPLAY_STATUSES = [
+  'available',
+  'occupied',
+  'reserved',
+  'cleaning',
+  'maintenance',
+  'unavailable',
+] as const satisfies readonly TableStatus[];
+
+function normalizeTableStatus(value: unknown): TableStatus {
+  const status = String(value ?? '').trim().toLowerCase();
+  return TABLE_DISPLAY_STATUSES.includes(status as TableStatus)
+    ? (status as TableStatus)
+    : 'available';
+}
+
 function normalizeOrderType(value: unknown): string {
   return String(value || '').trim().toLowerCase();
+}
+
+function readMoney(value: unknown): number {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function isCompletedPaymentStatus(value: unknown): boolean {
+  const status = String(value ?? '').trim().toLowerCase();
+  return status === 'paid' || status === 'completed' || status === 'settled' || status === 'closed';
+}
+
+function tablePaymentLooksSettled(table: TableLike): boolean {
+  const record = table as Record<string, unknown>;
+  const paymentStatus =
+    table.balance?.payment_status ??
+    record.paymentStatus ??
+    record.payment_status;
+  if (isCompletedPaymentStatus(paymentStatus)) {
+    return true;
+  }
+
+  const orderTotal = readMoney(table.balance?.order_total);
+  const paidTotal = readMoney(table.balance?.paid_total);
+  const outstandingBalance = readMoney(table.unpaidBalance ?? table.balance?.outstanding_balance);
+  return orderTotal > 0 && outstandingBalance <= 0.005 && paidTotal + 0.005 >= orderTotal;
 }
 
 export function normalizeTableNumberForMatch(value: unknown): string | null {
@@ -130,6 +224,7 @@ function orderMatchesId(order: OrderLike, targetId: string | null): boolean {
   return [
     order.id,
     order.supabase_id,
+    order.supabaseId,
     order.order_number,
     order.orderNumber,
     order.client_request_id,
@@ -226,6 +321,60 @@ export function findOpenTableOrderForTable<T extends OrderLike>(
   return findTableOrderForTableCandidate(orders, table, { requireUnsettledPayment: true });
 }
 
+export function tableHasOpenCheckReference(table: TableLike | null | undefined): boolean {
+  if (!table) {
+    return false;
+  }
+
+  if (tablePaymentLooksSettled(table)) {
+    return false;
+  }
+
+  const orderTotal = readMoney(table.balance?.order_total);
+  const outstandingBalance = readMoney(table.unpaidBalance ?? table.balance?.outstanding_balance);
+
+  return (
+    hasValue(table.currentOrderId) ||
+    hasValue(table.current_order_id) ||
+    hasValue(table.tableSessionId) ||
+    hasValue(table.table_session_id) ||
+    orderTotal > 0 ||
+    outstandingBalance > 0
+  );
+}
+
+export function resolveTableDisplayStatus(table: TableLike | null | undefined): TableStatus {
+  const status = normalizeTableStatus(table?.status);
+
+  if (status === 'occupied' && !tableHasOpenCheckReference(table)) {
+    return 'available';
+  }
+
+  return status;
+}
+
+export function shouldApplyOptimisticTableOverride(
+  table: TableLike | null | undefined,
+  override: Partial<TableLike> | null | undefined,
+): boolean {
+  if (!table || !override) {
+    return false;
+  }
+
+  const overrideStatus = normalizeTableStatus(override.status);
+  if (overrideStatus === 'occupied') {
+    const serverStatus = normalizeTableStatus(table.status);
+    if (serverStatus !== 'occupied') {
+      return false;
+    }
+    if (tablePaymentLooksSettled(table)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export function shouldBypassPaymentForTableOrder(input: {
   orderType?: string | null;
   tableNumber?: string | number | null;
@@ -267,6 +416,47 @@ export function buildTableOrderCreateFields(input: {
   };
 }
 
+export function buildTableSessionOpenPayload(input: {
+  table: TableLike;
+  orderId: unknown;
+  orderResult?: Record<string, unknown> | null;
+  orderData?: OrderLike | null;
+  guestCount?: unknown;
+  customerName?: string | null;
+}): TableSessionOpenPayload {
+  const orderId = normalizeTextReference(input.orderId);
+  const orderResult = input.orderResult || {};
+  const orderData = input.orderData || {};
+  const clientOrderId = firstTextReference(
+    orderResult.clientOrderId,
+    orderResult.client_order_id,
+    orderResult.clientRequestId,
+    orderResult.client_request_id,
+    orderData.clientOrderId,
+    orderData.client_order_id,
+    orderData.clientRequestId,
+    orderData.client_request_id,
+    orderId,
+  );
+  const activeOrderId = isUuidLike(orderId) ? orderId : null;
+  const eventReference = clientOrderId || orderId || firstTextReference(input.table.id, input.table.tableNumber) || 'open';
+
+  return {
+    action: 'open',
+    table_id: input.table.id ?? null,
+    table_number: input.table.tableNumber ?? null,
+    active_order_id: activeOrderId,
+    active_order_client_id: clientOrderId,
+    client_order_id: clientOrderId,
+    client_request_id: clientOrderId,
+    guest_count: normalizeGuestCount(input.guestCount),
+    customer_name:
+      firstTextReference(input.customerName) ||
+      `Table ${firstTextReference(input.table.tableNumber) || ''}`.trim(),
+    client_event_id: `pos-tauri-table-session-${eventReference}`,
+  };
+}
+
 export function buildOptimisticOccupiedTable<T extends object>(
   table: T,
   input: {
@@ -289,6 +479,29 @@ export function buildOptimisticOccupiedTable<T extends object>(
     tableSessionId: input.tableSessionId || null,
     guestCount: normalizeGuestCount(input.guestCount),
     ...(input.occupiedSince ? { occupiedSince: input.occupiedSince } : {}),
+  };
+}
+
+export function buildReleasedTableAfterSettlement<T extends object>(
+  table: T,
+): T & {
+  status: 'available';
+  currentOrderId?: undefined;
+  tableSessionId: null;
+  guestCount: null;
+  occupiedSince?: undefined;
+  unpaidBalance: 0;
+  balance: null;
+} {
+  return {
+    ...table,
+    status: 'available',
+    currentOrderId: undefined,
+    tableSessionId: null,
+    guestCount: null,
+    occupiedSince: undefined,
+    unpaidBalance: 0,
+    balance: null,
   };
 }
 

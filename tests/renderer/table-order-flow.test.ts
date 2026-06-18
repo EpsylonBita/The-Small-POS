@@ -2,7 +2,9 @@ import {
   buildTableSessionPaymentPayload,
   buildTableOrderCreateFields,
   buildOrderServiceTableMetadata,
+  buildTableSessionOpenPayload,
   buildOptimisticOccupiedTable,
+  buildReleasedTableAfterSettlement,
   findOpenTableOrderForTable,
   findTableOrderForTable,
   getTableNumberForTableServiceOrder,
@@ -11,6 +13,10 @@ import {
   normalizeTableNumberForMatch,
   shouldShowInStandardOrderLane,
   shouldBypassPaymentForTableOrder,
+  isUuidLike,
+  shouldApplyOptimisticTableOverride,
+  tableHasOpenCheckReference,
+  resolveTableDisplayStatus,
 } from '../../src/renderer/utils/tableOrderFlow'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
@@ -72,6 +78,46 @@ describe('table order flow helpers', () => {
         idempotency_key: 'pay-1',
       },
     )
+  })
+
+  it('builds table-session open payloads with a server-resolvable client order reference', () => {
+    const payload = buildTableSessionOpenPayload({
+      table: {
+        id: '55555555-5555-4555-9555-555555555555',
+        tableNumber: 'T05',
+      },
+      orderId: '11111111-1111-4111-9111-111111111111',
+      orderData: {
+        clientRequestId: 'client-request-table-t05',
+      },
+      guestCount: 4,
+      customerName: 'Table T05',
+    })
+
+    assert.equal(payload.active_order_id, '11111111-1111-4111-9111-111111111111')
+    assert.equal(payload.active_order_client_id, 'client-request-table-t05')
+    assert.equal(payload.client_order_id, 'client-request-table-t05')
+    assert.equal(payload.client_request_id, 'client-request-table-t05')
+    assert.equal(payload.client_event_id, 'pos-tauri-table-session-client-request-table-t05')
+  })
+
+  it('does not put non-UUID local order references in active_order_id', () => {
+    const payload = buildTableSessionOpenPayload({
+      table: {
+        id: '55555555-5555-4555-9555-555555555555',
+        tableNumber: 5,
+      },
+      orderId: 'local-table-order-5',
+      orderResult: {
+        client_order_id: 'client-order-5',
+      },
+      guestCount: 2,
+    })
+
+    assert.equal(isUuidLike('local-table-order-5'), false)
+    assert.equal(payload.active_order_id, null)
+    assert.equal(payload.active_order_client_id, 'client-order-5')
+    assert.equal(payload.client_order_id, 'client-order-5')
   })
 
   it('adds integer cents to table-session item payments', () => {
@@ -146,6 +192,27 @@ describe('table order flow helpers', () => {
         currentOrderId: null,
       }),
       order,
+    )
+  })
+
+  it('matches a local table check by camelCase Supabase order id before payment', () => {
+    const localOrder = {
+      id: 'local-order-1',
+      supabaseId: 'remote-order-1',
+      orderNumber: 'ORD-LOCAL-1',
+      status: 'pending',
+      orderType: 'dine-in',
+      paymentStatus: 'pending',
+      createdAt: '2026-06-17T20:32:12.000Z',
+    }
+
+    assert.equal(
+      findOpenTableOrderForTable([localOrder], {
+        id: 'table-1',
+        tableNumber: 'T05',
+        currentOrderId: 'remote-order-1',
+      }),
+      localOrder,
     )
   })
 
@@ -233,6 +300,185 @@ describe('table order flow helpers', () => {
         guestCount: 2,
         occupiedSince: '2026-05-20T10:00:00.000Z',
       },
+    )
+  })
+
+  it('builds an immediately released table projection after full settlement', () => {
+    assert.deepEqual(
+      buildReleasedTableAfterSettlement({
+        id: 'table-1',
+        status: 'occupied',
+        tableNumber: 'T05',
+        capacity: 4,
+        currentOrderId: 'order-paid',
+        tableSessionId: 'session-paid',
+        guestCount: 4,
+        occupiedSince: '2026-06-18T10:00:00.000Z',
+        unpaidBalance: 0,
+        balance: {
+          order_total: 22,
+          paid_total: 22,
+          outstanding_balance: 0,
+          payment_status: 'paid',
+        },
+      }),
+      {
+        id: 'table-1',
+        status: 'available',
+        tableNumber: 'T05',
+        capacity: 4,
+        currentOrderId: undefined,
+        tableSessionId: null,
+        guestCount: null,
+        occupiedSince: undefined,
+        unpaidBalance: 0,
+        balance: null,
+      },
+    )
+  })
+
+  it('does not treat occupied-only tables as open checks', () => {
+    assert.equal(
+      tableHasOpenCheckReference({
+        id: 'table-b03',
+        status: 'occupied',
+        tableNumber: 'B03',
+        currentOrderId: null,
+        tableSessionId: null,
+        unpaidBalance: 0,
+        balance: null,
+      }),
+      false,
+    )
+  })
+
+  it('treats tables with check references or balances as open checks', () => {
+    assert.equal(
+      tableHasOpenCheckReference({
+        id: 'table-1',
+        tableNumber: '1',
+        currentOrderId: 'order-1',
+      }),
+      true,
+    )
+    assert.equal(
+      tableHasOpenCheckReference({
+        id: 'table-2',
+        tableNumber: '2',
+        tableSessionId: 'session-2',
+      }),
+      true,
+    )
+    assert.equal(
+      tableHasOpenCheckReference({
+        id: 'table-3',
+        tableNumber: '3',
+        balance: { order_total: 42, outstanding_balance: 42 },
+      }),
+      true,
+    )
+  })
+
+  it('does not treat a fully paid table-session balance as an open check', () => {
+    assert.equal(
+      tableHasOpenCheckReference({
+        id: 'table-paid',
+        status: 'occupied',
+        tableNumber: 'T05',
+        currentOrderId: 'order-paid',
+        tableSessionId: 'session-paid',
+        unpaidBalance: 0,
+        balance: {
+          order_total: 22,
+          paid_total: 22,
+          outstanding_balance: 0,
+          payment_status: 'paid',
+        },
+      }),
+      false,
+    )
+    assert.equal(
+      resolveTableDisplayStatus({
+        id: 'table-paid',
+        status: 'occupied',
+        tableNumber: 'T05',
+        currentOrderId: 'order-paid',
+        tableSessionId: 'session-paid',
+        unpaidBalance: 0,
+        balance: {
+          order_total: 22,
+          paid_total: 22,
+          outstanding_balance: 0,
+          payment_status: 'paid',
+        },
+      }),
+      'available',
+    )
+  })
+
+  it('drops stale occupied optimistic overrides when the server releases a table', () => {
+    assert.equal(
+      shouldApplyOptimisticTableOverride(
+        {
+          id: 'table-1',
+          status: 'available',
+          tableNumber: 'T05',
+          currentOrderId: null,
+          tableSessionId: null,
+          balance: null,
+          unpaidBalance: 0,
+        },
+        {
+          status: 'occupied',
+          currentOrderId: 'order-paid',
+          tableSessionId: 'session-paid',
+        },
+      ),
+      false,
+    )
+    assert.equal(
+      shouldApplyOptimisticTableOverride(
+        {
+          id: 'table-1',
+          status: 'occupied',
+          tableNumber: 'T05',
+          currentOrderId: 'order-open',
+          tableSessionId: 'session-open',
+        },
+        {
+          status: 'occupied',
+          currentOrderId: 'order-open',
+          tableSessionId: 'session-open',
+        },
+      ),
+      true,
+    )
+  })
+
+  it('shows occupied-only tables as available in table cards', () => {
+    assert.equal(
+      resolveTableDisplayStatus({
+        id: 'table-b03',
+        status: 'occupied',
+        tableNumber: 'B03',
+        currentOrderId: null,
+        tableSessionId: null,
+        unpaidBalance: 0,
+        balance: null,
+      }),
+      'available',
+    )
+  })
+
+  it('keeps occupied display status when a table has an open check reference', () => {
+    assert.equal(
+      resolveTableDisplayStatus({
+        id: 'table-1',
+        status: 'occupied',
+        tableNumber: '1',
+        tableSessionId: 'session-1',
+      }),
+      'occupied',
     )
   })
 

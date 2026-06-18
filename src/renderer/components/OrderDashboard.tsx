@@ -44,7 +44,7 @@ import type {
 import { OrderApprovalPanel } from "./order/OrderApprovalPanel";
 import { OrderConflictBanner } from "./OrderConflictBanner";
 import { LiquidGlassModal } from "./ui/pos-glass-components";
-import { TableSelector, TableActionModal, TableCheckManagerModal, ReservationForm } from "./tables";
+import { TableSelector, TableActionModal, TableCheckManagerModal, ReservationForm, TableFloorPlanView } from "./tables";
 import type { CreateReservationDto } from "./tables";
 import {
   ArrowRightLeft,
@@ -52,6 +52,8 @@ import {
   CheckCircle2,
   Clock3,
   Layers,
+  LayoutGrid,
+  Map as MapIcon,
   Plus,
   ReceiptText,
   UserCheck,
@@ -59,7 +61,11 @@ import {
   WalletCards,
 } from "lucide-react";
 import { toLocalDateString } from "../utils/date";
-import { reservationsService } from "../services/ReservationsService";
+import {
+  buildChangedReservationUpdate,
+  reservationsService,
+  type Reservation,
+} from "../services/ReservationsService";
 import { PrintPreviewModal } from "./modals/PrintPreviewModal";
 import { FloatingActionButton } from "./ui/FloatingActionButton";
 import { useTheme } from "../contexts/theme-context";
@@ -125,11 +131,14 @@ import { formatCurrency } from "../utils/format";
 import {
   buildOptimisticOccupiedTable,
   buildTableOrderCreateFields,
+  buildTableSessionOpenPayload,
   getTableNumberForTableServiceOrder,
   isTableServiceOrder,
   isUnsettledOrderPaymentStatus,
   normalizeTableNumberForMatch,
+  resolveTableDisplayStatus,
   shouldShowInStandardOrderLane,
+  tableHasOpenCheckReference,
 } from "../utils/tableOrderFlow";
 import {
   enqueueTableSessionOpen,
@@ -590,6 +599,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [tableStatusFilter, setTableStatusFilter] = useState<TableStatus | "all">(
       "all",
     );
+    const [tableViewMode, setTableViewMode] = useState<"list" | "floorplan">(
+      "list",
+    );
 
     // State for table order flow
     const [showTableSelector, setShowTableSelector] = useState(false);
@@ -599,6 +611,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(
       null,
     );
+    const [editingReservation, setEditingReservation] =
+      useState<Reservation | null>(null);
     const [tableGuestCount, setTableGuestCount] = useState(1);
     const [isOrderTypeTransitioning, setIsOrderTypeTransitioning] =
       useState(false);
@@ -736,16 +750,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const tableGridStats = useMemo(() => {
       const total = floorScopedTables.length;
       const occupied = floorScopedTables.filter(
-        (table) => table.status === "occupied",
+        (table) => resolveTableDisplayStatus(table) === "occupied",
       ).length;
       const available = floorScopedTables.filter(
-        (table) => table.status === "available",
+        (table) => resolveTableDisplayStatus(table) === "available",
       ).length;
       const reserved = floorScopedTables.filter(
-        (table) => table.status === "reserved",
+        (table) => resolveTableDisplayStatus(table) === "reserved",
       ).length;
       const cleaning = floorScopedTables.filter(
-        (table) => table.status === "cleaning",
+        (table) => resolveTableDisplayStatus(table) === "cleaning",
       ).length;
       const due = floorScopedTables.reduce(
         (sum, table) => sum + readTableBalance(table).due,
@@ -766,7 +780,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       () =>
         tableStatusFilter === "all"
           ? floorScopedTables
-          : floorScopedTables.filter((table) => table.status === tableStatusFilter),
+          : floorScopedTables.filter(
+              (table) => resolveTableDisplayStatus(table) === tableStatusFilter,
+            ),
       [floorScopedTables, tableStatusFilter],
     );
 
@@ -911,11 +927,39 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Refs for click-outside detection to auto-close bulk actions bar
     const bulkActionsBarRef = useRef<HTMLDivElement>(null);
     const orderGridRef = useRef<HTMLDivElement>(null);
+    const tableGridScrollRef = useRef<HTMLDivElement>(null);
     const alertTimeoutRef = useRef<number | null>(null);
     const alertingOrderIdRef = useRef<string | null>(null);
     const activeAlertAudioRef = useRef<HTMLAudioElement | null>(null);
     const shiftRefreshArmedRef = useRef(false);
     const splitPaymentCompletedRef = useRef(false);
+
+    const handleTableGridWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+      const scrollTarget = tableGridScrollRef.current;
+      if (!scrollTarget) {
+        return;
+      }
+
+      const maxScrollTop = scrollTarget.scrollHeight - scrollTarget.clientHeight;
+      if (maxScrollTop <= 0) {
+        return;
+      }
+
+      const deltaY =
+        event.deltaMode === 1
+          ? event.deltaY * 40
+          : event.deltaMode === 2
+            ? event.deltaY * scrollTarget.clientHeight
+            : event.deltaY;
+      const nextScrollTop = Math.max(
+        0,
+        Math.min(scrollTarget.scrollTop + deltaY, maxScrollTop),
+      );
+
+      event.preventDefault();
+      event.stopPropagation();
+      scrollTarget.scrollTop = nextScrollTop;
+    }, []);
     const singlePaymentReasonCodes = useMemo(
       () =>
         new Set([
@@ -1337,7 +1381,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     );
 
     useEffect(() => {
-      if (!displayTables.some((table) => table.status === "occupied" || table.occupiedSince)) {
+      if (!displayTables.some((table) => tableHasOpenCheckReference(table) && table.occupiedSince)) {
         return;
       }
 
@@ -1403,11 +1447,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setFilteredOrders(filtered);
 
       // Calculate order counts for tabs
-      const openTableCount = displayTables.filter(
-        (table) =>
-          table.status === "occupied" ||
-          Boolean(table.tableSessionId || table.currentOrderId),
-      ).length;
+      const openTableCount = displayTables.filter(tableHasOpenCheckReference).length;
       const counts = {
         orders: 0,
         delivered: 0,
@@ -1451,11 +1491,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Update tables count when tables data changes
     useEffect(() => {
       if (displayTables) {
-        const openTableCount = displayTables.filter(
-          (table) =>
-            table.status === "occupied" ||
-            Boolean(table.tableSessionId || table.currentOrderId),
-        ).length;
+        const openTableCount = displayTables.filter(tableHasOpenCheckReference).length;
         setOrderCounts((prev) => ({
           ...prev,
           tables: openTableCount,
@@ -1619,9 +1655,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
     };
 
-    const tableHasOpenCheck = useCallback((table: RestaurantTable) => {
-      return table.status === "occupied" || Boolean(table.tableSessionId || table.currentOrderId);
-    }, []);
+    const tableHasOpenCheck = useCallback(
+      (table: RestaurantTable) => tableHasOpenCheckReference(table),
+      [],
+    );
 
     const openTableCheckManager = useCallback((table: RestaurantTable) => {
       setSelectedTable(table);
@@ -1632,6 +1669,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Handle table selection from TableSelector
     const handleTableSelectorSelect = useCallback((table: RestaurantTable) => {
+      setEditingReservation(null);
       setSelectedTable(table);
       setShowTableSelector(false);
       if (tableHasOpenCheck(table)) {
@@ -1670,15 +1708,164 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Handle New Reservation action from TableActionModal
     const handleTableNewReservation = useCallback(() => {
       if (selectedTable) {
+        setEditingReservation(null);
         setShowTableActionModal(false);
         setShowReservationForm(true);
       }
     }, [selectedTable]);
 
+    const handleTableEditReservation = useCallback(async () => {
+      const reservationBranchId = effectiveBranchId || branchId;
+      if (!selectedTable || !reservationBranchId || !organizationId) {
+        toast.error(
+          t("orderDashboard.missingContext") ||
+            "Missing branch or organization context",
+        );
+        return;
+      }
+
+      try {
+        reservationsService.setContext(reservationBranchId, organizationId);
+        const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
+        if (!reservation) {
+          toast.error(
+            t("tableActionModal.reservationNotFound", {
+              defaultValue: "No active reservation found for this table",
+            }),
+          );
+          return;
+        }
+
+        setEditingReservation(reservation);
+        setShowTableActionModal(false);
+        setShowReservationForm(true);
+      } catch (error) {
+        console.error("Failed to load reservation for editing:", error);
+        toast.error(
+          t("tableActionModal.reservationLoadFailed", {
+            defaultValue: "Failed to load reservation",
+          }),
+        );
+      }
+    }, [branchId, effectiveBranchId, organizationId, selectedTable, t]);
+
+    const handleTableNoShowReservation = useCallback(async () => {
+      const reservationBranchId = effectiveBranchId || branchId;
+      if (!selectedTable || !reservationBranchId || !organizationId) {
+        toast.error(
+          t("orderDashboard.missingContext") ||
+            "Missing branch or organization context",
+        );
+        return;
+      }
+
+      try {
+        reservationsService.setContext(reservationBranchId, organizationId);
+        const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
+        if (!reservation) {
+          toast.error(
+            t("tableActionModal.reservationNotFound", {
+              defaultValue: "No active reservation found for this table",
+            }),
+          );
+          return;
+        }
+
+        await reservationsService.updateStatus(reservation.id, "no_show");
+        await updateTableStatus(selectedTable.id, "available");
+        await refetchTables();
+        toast.success(
+          t("tableActionModal.noShowSuccess", {
+            defaultValue: "Reservation marked as no-show",
+          }),
+        );
+        setShowTableActionModal(false);
+        setSelectedTable(null);
+      } catch (error) {
+        console.error("Failed to mark reservation no-show:", error);
+        toast.error(
+          t("tableActionModal.noShowFailed", {
+            defaultValue: "Failed to mark reservation as no-show",
+          }),
+        );
+      }
+    }, [branchId, effectiveBranchId, organizationId, refetchTables, selectedTable, t, updateTableStatus]);
+
+    const handleTableCancelReservation = useCallback(async () => {
+      const reservationBranchId = effectiveBranchId || branchId;
+      if (!selectedTable || !reservationBranchId || !organizationId) {
+        toast.error(
+          t("orderDashboard.missingContext") ||
+            "Missing branch or organization context",
+        );
+        return;
+      }
+
+      try {
+        reservationsService.setContext(reservationBranchId, organizationId);
+        const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
+        if (!reservation) {
+          toast.error(
+            t("tableActionModal.reservationNotFound", {
+              defaultValue: "No active reservation found for this table",
+            }),
+          );
+          return;
+        }
+
+        await reservationsService.cancelReservation(reservation.id,
+          t("tableActionModal.cancelReason", {
+            defaultValue: "Cancelled from POS table actions",
+          }),
+        );
+        await updateTableStatus(selectedTable.id, "available");
+        await refetchTables();
+        toast.success(
+          t("tableActionModal.cancelSuccess", {
+            defaultValue: "Reservation cancelled",
+          }),
+        );
+        setShowTableActionModal(false);
+        setSelectedTable(null);
+      } catch (error) {
+        console.error("Failed to cancel reservation:", error);
+        toast.error(
+          t("tableActionModal.cancelFailed", {
+            defaultValue: "Failed to cancel reservation",
+          }),
+        );
+      }
+    }, [branchId, effectiveBranchId, organizationId, refetchTables, selectedTable, t, updateTableStatus]);
+
+    const handleTableSetAvailable = useCallback(async () => {
+      if (!selectedTable) {
+        return;
+      }
+
+      const success = await updateTableStatus(selectedTable.id, "available");
+      if (success) {
+        toast.success(
+          t("tableActionModal.setAvailableSuccess", {
+            defaultValue: "Table marked available",
+          }),
+        );
+        setShowTableActionModal(false);
+        setSelectedTable(null);
+        return;
+      }
+
+      toast.error(
+        t("tableActionModal.setAvailableFailed", {
+          defaultValue: "Failed to mark table available",
+        }),
+      );
+    }, [selectedTable, t, updateTableStatus]);
+
     // Handle reservation form submission
     const handleReservationSubmit = useCallback(
       async (data: CreateReservationDto) => {
-        if (!branchId || !organizationId) {
+        const reservationBranchId = effectiveBranchId || branchId;
+        if (!reservationBranchId || !organizationId) {
           toast.error(
             t("orderDashboard.missingContext") ||
               "Missing branch or organization context",
@@ -1688,13 +1875,40 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         try {
           // Set context for the service with actual IDs
-          reservationsService.setContext(branchId, organizationId);
+          reservationsService.setContext(reservationBranchId, organizationId);
 
           // Format date and time from the Date object
           const reservationDate = toLocalDateString(data.reservationTime);
           const reservationTime = data.reservationTime
             .toTimeString()
             .slice(0, 5);
+
+          if (editingReservation) {
+            const updatePayload = buildChangedReservationUpdate(editingReservation, {
+              customerName: data.customerName,
+              customerPhone: data.customerPhone,
+              partySize: data.partySize,
+              reservationDate,
+              reservationTime,
+              tableId: data.tableId,
+              specialRequests: data.specialRequests,
+            });
+
+            if (Object.keys(updatePayload).length > 0) {
+              await reservationsService.updateReservationDetails(editingReservation.id, updatePayload);
+            }
+
+            toast.success(
+              t("orderDashboard.reservationUpdated", {
+                defaultValue: "Reservation updated successfully",
+              }),
+            );
+            setShowReservationForm(false);
+            setEditingReservation(null);
+            setSelectedTable(null);
+            await refetchTables();
+            return;
+          }
 
           // Create the reservation with table status update
           await reservationsService.createReservationWithTableUpdate({
@@ -1713,25 +1927,35 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           );
           setShowReservationForm(false);
           setSelectedTable(null);
+          await refetchTables();
         } catch (error) {
           console.error("Failed to create reservation:", error);
+          const reservationUpdateError = extractOrderDashboardErrorMessage(error);
           toast.error(
-            t("orderDashboard.reservationFailed") ||
-              "Failed to create reservation",
+            editingReservation
+              ? reservationUpdateError ||
+                t("orderDashboard.reservationUpdateFailed", {
+                  defaultValue: "Failed to update reservation",
+                })
+              : t("orderDashboard.reservationFailed", {
+                  defaultValue: "Failed to create reservation",
+                }),
           );
         }
       },
-      [t, branchId, organizationId],
+      [t, branchId, effectiveBranchId, organizationId, editingReservation, refetchTables],
     );
 
     // Handle reservation form cancel
     const handleReservationCancel = useCallback(() => {
       setShowReservationForm(false);
+      setEditingReservation(null);
       setSelectedTable(null);
     }, []);
 
     // Handle table selection from Tables tab grid
     const handleTableSelect = useCallback((table: RestaurantTable) => {
+      setEditingReservation(null);
       setSelectedTable(table);
       if (tableHasOpenCheck(table)) {
         openTableCheckManager(table);
@@ -3107,23 +3331,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }
 
           if (isTableOrder && result.orderId && selectedTable) {
-            const tableSessionOpenPayload = {
-              action: "open",
-              table_id: selectedTable.id,
-              table_number: selectedTable.tableNumber,
-              active_order_id: result.orderId,
-              active_order_client_id:
-                (result as any).clientOrderId ||
-                (result as any).client_order_id ||
-                (result as any).clientRequestId ||
-                (result as any).client_request_id ||
-                null,
-              guest_count: tableGuestCount,
-              customer_name:
+            const tableSessionOpenPayload = buildTableSessionOpenPayload({
+              table: selectedTable,
+              orderId: result.orderId,
+              orderResult: result as any,
+              orderData: orderToCreate as any,
+              guestCount: tableGuestCount,
+              customerName:
                 persistedCustomerName ||
                 `Table ${selectedTable.tableNumber}`,
-              client_event_id: `pos-tauri-table-session-${result.orderId}`,
-            };
+            });
             try {
               const sessionResult = await posApiPost<{
                 success?: boolean;
@@ -5156,7 +5373,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           {activeTab === "tables" ? (
           <div
             ref={orderGridRef}
-            className={`h-full overflow-y-auto rounded-2xl border p-4 shadow-sm transition-colors scrollbar-hide touch-scroll ${
+            onWheel={handleTableGridWheel}
+            className={`flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border p-4 shadow-sm transition-colors ${
               resolvedTheme === "light"
                 ? "border-amber-100/80 bg-[#fffaf1]/90"
                 : "border-white/10 bg-slate-950/45"
@@ -5190,7 +5408,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 </p>
               </div>
             ) : (
-              <div className="space-y-4">
+              <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4">
+                <div className="shrink-0 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="grid w-full grid-cols-3 gap-2 sm:w-auto sm:min-w-[390px]">
                     <div
@@ -5270,6 +5489,42 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   </div>
 
                   <div className="flex flex-wrap items-center justify-end gap-2">
+                    <div
+                      className={`inline-flex rounded-xl border p-1 ${
+                        resolvedTheme === "light"
+                          ? "border-amber-100/80 bg-[#fffdf8]"
+                          : "border-white/10 bg-white/[0.06]"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setTableViewMode("list")}
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
+                          tableViewMode === "list"
+                            ? "bg-blue-600 text-white"
+                            : resolvedTheme === "light"
+                              ? "text-slate-700 hover:bg-[#fffaf1]"
+                              : "text-slate-200 hover:bg-white/[0.08]"
+                        }`}
+                      >
+                        <LayoutGrid className="h-4 w-4" />
+                        {t("tablesDashboard.viewMode.list", "List")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTableViewMode("floorplan")}
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
+                          tableViewMode === "floorplan"
+                            ? "bg-blue-600 text-white"
+                            : resolvedTheme === "light"
+                              ? "text-slate-700 hover:bg-[#fffaf1]"
+                              : "text-slate-200 hover:bg-white/[0.08]"
+                        }`}
+                      >
+                        <MapIcon className="h-4 w-4" />
+                        {t("tablesDashboard.viewMode.floorPlan", "2D")}
+                      </button>
+                    </div>
                     {(
                       [
                         "all",
@@ -5357,28 +5612,44 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     </button>
                   ))}
                 </div>
+                </div>
 
-                {visibleTableCards.length === 0 ? (
+                <div
+                  data-testid="order-dashboard-table-grid-container"
+                  className="h-[calc(100dvh-30rem)] min-h-56 overflow-hidden"
+                >
                   <div
-                    className={`rounded-xl border border-dashed py-10 text-center font-semibold ${
-                      resolvedTheme === "light"
-                        ? "border-slate-300 text-slate-500"
-                        : "border-white/15 text-white/50"
-                    }`}
+                    ref={tableGridScrollRef}
+                    data-testid="order-dashboard-table-scroll-region"
+                    className="h-full min-h-0 overflow-y-auto overflow-x-hidden pr-1 scrollbar-hide touch-scroll"
                   >
-                    {t("tablesDashboard.noMatchingTables", "No tables match these filters")}
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
+                  {visibleTableCards.length === 0 ? (
+                    <div
+                      className={`flex min-h-full items-center justify-center rounded-xl border border-dashed py-10 text-center font-semibold ${
+                        resolvedTheme === "light"
+                          ? "border-slate-300 text-slate-500"
+                          : "border-white/15 text-white/50"
+                      }`}
+                    >
+                      {t("tablesDashboard.noMatchingTables", "No tables match these filters")}
+                    </div>
+                  ) : tableViewMode === "floorplan" ? (
+                    <TableFloorPlanView
+                      tables={visibleTableCards}
+                      isDark={resolvedTheme !== "light"}
+                      selectedTableId={selectedTable?.id ?? null}
+                      onTableSelect={handleTableSelect}
+                      className="min-h-full"
+                    />
+                  ) : (
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pb-3">
                     {visibleTableCards.map((table) => {
+                      const displayStatus = resolveTableDisplayStatus(table);
                       const visual =
-                        tableStatusConfig[table.status] ||
+                        tableStatusConfig[displayStatus] ||
                         tableStatusConfig.available;
                       const balance = readTableBalance(table);
-                      const hasOpenCheck =
-                        table.status === "occupied" ||
-                        Boolean(table.tableSessionId || table.currentOrderId) ||
-                        balance.total > 0;
+                      const hasOpenCheck = tableHasOpenCheckReference(table);
                       const paidPercent =
                         balance.total > 0
                           ? Math.min(
@@ -5646,7 +5917,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       );
                     })}
                   </div>
-                )}
+                  )}
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -5832,6 +6105,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             table={selectedTable}
             onNewOrder={handleTableNewOrder}
             onNewReservation={handleTableNewReservation}
+            onSetAvailable={handleTableSetAvailable}
+            onEditReservation={handleTableEditReservation}
+            onNoShowReservation={handleTableNoShowReservation}
+            onCancelReservation={handleTableCancelReservation}
             onClose={() => {
               setShowTableActionModal(false);
               setSelectedTable(null);
@@ -5862,6 +6139,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             tableId={selectedTable.id}
             tableCapacity={selectedTable.capacity}
             tableNumber={selectedTable.tableNumber}
+            initialReservation={editingReservation}
             onSubmit={handleReservationSubmit}
             onCancel={handleReservationCancel}
           />

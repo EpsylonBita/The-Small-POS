@@ -1,10 +1,11 @@
-import React, { memo, useState, useEffect, useMemo, useCallback } from 'react';
+import React, { memo, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { useOrderStore } from '../../hooks/useOrderStore';
 import { useTables } from '../../hooks/useTables';
 import { useSystemClock } from '../../hooks/useSystemClock';
 import { ReservationInfoPanel } from './ReservationInfoPanel';
+import { TableFloorPlanView } from './TableFloorPlanView';
 import { FloatingActionButton } from '../ui/FloatingActionButton';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
@@ -15,6 +16,7 @@ import {
   ClipboardList,
   Clock3,
   LayoutGrid,
+  Map as MapIcon,
   Plus,
   ReceiptText,
   RefreshCw,
@@ -26,6 +28,7 @@ import {
 } from 'lucide-react';
 import { formatCurrency, formatTime as formatTimeValue } from '../../utils/format';
 import { toLocalDateString } from '../../utils/date';
+import { resolveTableDisplayStatus, tableHasOpenCheckReference } from '../../utils/tableOrderFlow';
 
 interface TablesDashboardProps {
   branchId: string;
@@ -804,8 +807,10 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
   const now = useSystemClock();
   const [filter, setFilter] = useState<TableStatus | 'all'>('all');
   const [floorFilter, setFloorFilter] = useState('all');
+  const [tableViewMode, setTableViewMode] = useState<'list' | 'floorplan'>('list');
   const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(null);
   const [showReservationPanel, setShowReservationPanel] = useState(false);
+  const tableGridScrollRef = useRef<HTMLDivElement>(null);
 
   const textStrong = isDark ? 'text-white' : 'text-slate-950';
   const textMuted = isDark ? 'text-slate-300/75' : 'text-slate-600';
@@ -855,10 +860,10 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
 
   const stats = useMemo(() => {
     const total = floorScopedTables.length;
-    const available = floorScopedTables.filter(table => table.status === 'available').length;
-    const occupied = floorScopedTables.filter(table => table.status === 'occupied').length;
-    const reserved = floorScopedTables.filter(table => table.status === 'reserved').length;
-    const cleaning = floorScopedTables.filter(table => table.status === 'cleaning').length;
+    const available = floorScopedTables.filter(table => resolveTableDisplayStatus(table) === 'available').length;
+    const occupied = floorScopedTables.filter(table => resolveTableDisplayStatus(table) === 'occupied').length;
+    const reserved = floorScopedTables.filter(table => resolveTableDisplayStatus(table) === 'reserved').length;
+    const cleaning = floorScopedTables.filter(table => resolveTableDisplayStatus(table) === 'cleaning').length;
     const due = floorScopedTables.reduce((sum, table) => {
       const balance = table.balance || {};
       const outstanding = Number(table.unpaidBalance ?? balance.outstanding_balance ?? 0);
@@ -871,7 +876,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
 
   const filteredTables = useMemo(() => {
     if (filter === 'all') return floorScopedTables;
-    return floorScopedTables.filter(table => table.status === filter);
+    return floorScopedTables.filter(table => resolveTableDisplayStatus(table) === filter);
   }, [filter, floorScopedTables]);
 
   const statusConfig: Record<TableStatus, {
@@ -994,6 +999,33 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     setShowReservationPanel(false);
   };
 
+  const handleTableGridWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    const scrollTarget = tableGridScrollRef.current;
+    if (!scrollTarget) {
+      return;
+    }
+
+    const maxScrollTop = scrollTarget.scrollHeight - scrollTarget.clientHeight;
+    if (maxScrollTop <= 0) {
+      return;
+    }
+
+    const deltaY =
+      event.deltaMode === 1
+        ? event.deltaY * 40
+        : event.deltaMode === 2
+          ? event.deltaY * scrollTarget.clientHeight
+          : event.deltaY;
+    const nextScrollTop = Math.max(
+      0,
+      Math.min(scrollTarget.scrollTop + deltaY, maxScrollTop),
+    );
+
+    event.preventDefault();
+    event.stopPropagation();
+    scrollTarget.scrollTop = nextScrollTop;
+  }, []);
+
   if (tables.length === 0) {
     return (
       <div className={`h-full flex items-center justify-center ${isDark ? 'text-white/50' : 'text-gray-500'}`}>
@@ -1012,8 +1044,8 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
 
   return (
     <div className="flex h-full min-h-0 gap-4">
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="mb-4 space-y-3">
+      <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden" onWheel={handleTableGridWheel}>
+        <div className="mb-4 shrink-0 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="grid min-w-[360px] grid-cols-3 gap-2">
               <div className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
@@ -1045,6 +1077,36 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className={`inline-flex rounded-xl border p-1 ${subtleClass}`}>
+                <button
+                  type="button"
+                  onClick={() => setTableViewMode('list')}
+                  className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                    tableViewMode === 'list'
+                      ? 'bg-blue-600 text-white'
+                      : isDark
+                        ? 'text-slate-200 hover:bg-white/[0.08]'
+                        : 'text-slate-700 hover:bg-white'
+                  }`}
+                >
+                  <LayoutGrid className="h-4 w-4" />
+                  {t('tablesDashboard.viewMode.list', { defaultValue: 'List' })}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTableViewMode('floorplan')}
+                  className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                    tableViewMode === 'floorplan'
+                      ? 'bg-blue-600 text-white'
+                      : isDark
+                        ? 'text-slate-200 hover:bg-white/[0.08]'
+                        : 'text-slate-700 hover:bg-white'
+                  }`}
+                >
+                  <MapIcon className="h-4 w-4" />
+                  {t('tablesDashboard.viewMode.floorPlan', { defaultValue: '2D' })}
+                </button>
+              </div>
               {(['all', 'available', 'occupied', 'reserved', 'cleaning'] as const).map(status => (
                 <button
                   key={status}
@@ -1075,7 +1137,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
             </div>
           </div>
 
-          <div className={`flex items-center gap-2 rounded-xl border p-1 backdrop-blur-xl ${subtleClass}`}>
+          <div className={`flex items-center gap-2 overflow-x-auto rounded-xl border p-1 backdrop-blur-xl scrollbar-hide ${subtleClass}`}>
             <span className={`ml-2 mr-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
               <LayoutGrid className="h-3.5 w-3.5" />
               {t('tablesDashboard.floor', { defaultValue: 'Floor' })}
@@ -1112,17 +1174,35 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
           </div>
         </div>
 
-        <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto pr-1">
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-3 pb-3">
+        <div
+          data-testid="tables-dashboard-table-grid-container"
+          className="h-[calc(100dvh-30rem)] min-h-56 overflow-hidden"
+        >
+          <div
+            ref={tableGridScrollRef}
+            data-testid="tables-dashboard-table-scroll-region"
+            className="h-full min-h-0 overflow-y-auto overflow-x-hidden pr-1 scrollbar-hide touch-scroll"
+          >
+          {tableViewMode === 'floorplan' ? (
+            <TableFloorPlanView
+              tables={filteredTables}
+              isDark={isDark}
+              selectedTableId={selectedTable?.id ?? null}
+              onTableSelect={handleTableClick}
+              className="min-h-full"
+            />
+          ) : (
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-3 pb-3">
             {filteredTables.map(table => {
-              const visual = statusConfig[table.status] || statusConfig.available;
+              const displayStatus = resolveTableDisplayStatus(table);
+              const visual = statusConfig[displayStatus] || statusConfig.available;
               const balance = readBalance(table);
               const paidPercent = balance.total > 0 ? Math.min(100, Math.round((balance.paid / balance.total) * 100)) : 0;
-              const occupiedInfo = formatOccupiedDuration(table.occupiedSince);
               const waiterName = table.currentWaiterName || t('tablesDashboard.unassigned', { defaultValue: 'Unassigned' });
               const guestCount = table.guestCount || table.capacity || 0;
               const isSelected = selectedTable?.id === table.id;
-              const hasOpenCheck = table.status === 'occupied' || Boolean(table.tableSessionId || table.currentOrderId);
+              const hasOpenCheck = tableHasOpenCheckReference(table);
+              const occupiedInfo = hasOpenCheck ? formatOccupiedDuration(table.occupiedSince) : null;
 
               return (
                 <div
@@ -1239,8 +1319,10 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                 </div>
               );
             })}
-          </div>
+            </div>
+          )}
         </div>
+      </div>
       </div>
 
       {selectedTable && (
@@ -1277,9 +1359,11 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
             </div>
 
             {(() => {
-              const visual = statusConfig[selectedTable.status] || statusConfig.available;
+              const displayStatus = resolveTableDisplayStatus(selectedTable);
+              const visual = statusConfig[displayStatus] || statusConfig.available;
               const balance = readBalance(selectedTable);
-              const occupiedInfo = formatOccupiedDuration(selectedTable.occupiedSince);
+              const hasOpenCheck = tableHasOpenCheckReference(selectedTable);
+              const occupiedInfo = hasOpenCheck ? formatOccupiedDuration(selectedTable.occupiedSince) : null;
               return (
                 <div className="mt-4 space-y-3">
                   <div className={`rounded-xl border p-3 ${subtleClass}`}>

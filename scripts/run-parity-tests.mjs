@@ -53,6 +53,8 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'z-report-closeout-sync.test.ts'),
   path.join(testsRoot, 'renderer', 'display-pages-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'order-number-utils.test.ts'),
+  path.join(testsRoot, 'renderer', 'table-order-flow.test.ts'),
+  path.join(testsRoot, 'renderer', 'table-floor-plan.test.ts'),
   path.join(testsRoot, 'renderer', 'staff-shift-checkout-print.test.ts'),
   path.join(testsRoot, 'renderer', 'kds-live-draft-sync.test.ts'),
   // Wave 8 H29 regression: corrupt keyring blob must be rejected by

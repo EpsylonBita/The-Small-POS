@@ -314,6 +314,53 @@ html.dark, html.dark body, html.dark #root {
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
   }
+
+  .floor-plan-scrollbar {
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .floor-plan-scrollbar-light {
+    scrollbar-color: rgba(148, 116, 69, 0.42) transparent;
+  }
+
+  .floor-plan-scrollbar-dark {
+    scrollbar-color: rgba(148, 163, 184, 0.42) transparent;
+  }
+
+  .floor-plan-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .floor-plan-scrollbar::-webkit-scrollbar-track,
+  .floor-plan-scrollbar::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  .floor-plan-scrollbar::-webkit-scrollbar-thumb {
+    min-height: 48px;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+  }
+
+  .floor-plan-scrollbar-light::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 116, 69, 0.36);
+  }
+
+  .floor-plan-scrollbar-dark::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.34);
+  }
+
+  .floor-plan-scrollbar-light:hover::-webkit-scrollbar-thumb {
+    background-color: rgba(120, 86, 42, 0.52);
+  }
+
+  .floor-plan-scrollbar-dark:hover::-webkit-scrollbar-thumb {
+    background-color: rgba(203, 213, 225, 0.48);
+  }
   
   /* Full height minus header - with safe area support */
   .h-screen-header {

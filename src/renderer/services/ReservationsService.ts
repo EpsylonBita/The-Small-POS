@@ -19,6 +19,45 @@ function formatError(error: unknown): string {
   }
 }
 
+function parseEmbeddedApiErrorMessage(error: string | undefined): string | null {
+  if (!error?.trim()) return null;
+
+  const jsonStart = error.indexOf('{');
+  if (jsonStart < 0) return null;
+
+  try {
+    const parsed = JSON.parse(error.slice(jsonStart)) as {
+      message?: unknown;
+      error?: unknown;
+    };
+    if (typeof parsed.message === 'string' && parsed.message.trim()) {
+      return parsed.message;
+    }
+    if (typeof parsed.error === 'string' && parsed.error.trim()) {
+      return parsed.error;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function reservationApiErrorMessage(
+  result: { data?: unknown; error?: string } | undefined,
+  fallback: string,
+): string {
+  const body = result?.data as { message?: unknown; error?: unknown } | undefined;
+  if (typeof body?.message === 'string' && body.message.trim()) {
+    return body.message;
+  }
+  if (typeof body?.error === 'string' && body.error.trim() && body.error !== 'TABLE_UNAVAILABLE') {
+    return body.error;
+  }
+
+  return parseEmbeddedApiErrorMessage(result?.error) || result?.error || fallback;
+}
+
 export {
   generateReservationNumber,
   validateReservationNumberFormat,
@@ -105,6 +144,24 @@ export interface CreateReservationDto {
   notes?: string;
 }
 
+export interface UpdateReservationDto {
+  customerName?: string;
+  customerPhone?: string;
+  customerEmail?: string;
+  customerId?: string;
+  partySize?: number;
+  reservationDate?: string;
+  reservationTime?: string;
+  durationMinutes?: number | null;
+  tableId?: string | null;
+  roomId?: string | null;
+  roomNumber?: string | null;
+  checkInDate?: string | null;
+  checkOutDate?: string | null;
+  specialRequests?: string;
+  notes?: string;
+}
+
 function transformFromAPI(data: any): Reservation {
   return {
     id: data.id,
@@ -168,6 +225,149 @@ function listDatesInclusive(start: string, end: string): string[] {
   }
 
   return dates;
+}
+
+function setIfDefined(
+  payload: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+  value: unknown,
+): void {
+  if (value !== undefined) {
+    payload[camelKey] = value;
+    payload[snakeKey] = value;
+  }
+}
+
+function buildUpdateReservationPayload(data: UpdateReservationDto): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+
+  setIfDefined(payload, 'customerName', 'customer_name', data.customerName);
+  setIfDefined(payload, 'customerPhone', 'customer_phone', data.customerPhone);
+  setIfDefined(payload, 'customerEmail', 'customer_email', data.customerEmail);
+  setIfDefined(payload, 'customerId', 'customer_id', data.customerId);
+  setIfDefined(payload, 'partySize', 'party_size', data.partySize);
+  setIfDefined(payload, 'reservationDate', 'reservation_date', data.reservationDate);
+  setIfDefined(payload, 'reservationTime', 'reservation_time', data.reservationTime);
+  setIfDefined(payload, 'durationMinutes', 'duration_minutes', data.durationMinutes);
+  setIfDefined(payload, 'tableId', 'table_id', data.tableId);
+  setIfDefined(payload, 'roomId', 'room_id', data.roomId);
+  setIfDefined(payload, 'roomNumber', 'room_number', data.roomNumber);
+  setIfDefined(payload, 'checkInDate', 'check_in_date', data.checkInDate);
+  setIfDefined(payload, 'checkOutDate', 'check_out_date', data.checkOutDate);
+  setIfDefined(payload, 'specialRequests', 'special_requests', data.specialRequests);
+  setIfDefined(payload, 'notes', 'notes', data.notes);
+
+  return payload;
+}
+
+function normalizeReservationDateValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const trimmed = String(value).trim();
+  if (!trimmed) return '';
+
+  const isoDate = trimmed.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoDate) return isoDate[1];
+
+  const slashDate = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashDate) {
+    const [, day, month, year] = slashDate;
+    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+  }
+
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? trimmed : toLocalDateString(parsed);
+}
+
+function normalizeReservationTimeValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const trimmed = String(value).trim();
+  if (!trimmed) return '';
+  const time = trimmed.match(/^(\d{1,2}):(\d{2})/);
+  if (!time) return trimmed;
+  const [, hour, minute] = time;
+  return `${hour.padStart(2, '0')}:${minute}`;
+}
+
+function normalizeOptionalText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function setChangedTextField(
+  update: UpdateReservationDto,
+  key: 'customerName' | 'customerPhone' | 'customerEmail' | 'customerId' | 'specialRequests' | 'notes',
+  nextValue: string | undefined,
+  currentValue: unknown,
+): void {
+  if (nextValue === undefined) return;
+  if (normalizeOptionalText(nextValue) !== normalizeOptionalText(currentValue)) {
+    update[key] = nextValue;
+  }
+}
+
+export function buildChangedReservationUpdate(
+  current: Reservation,
+  next: UpdateReservationDto,
+): UpdateReservationDto {
+  const update: UpdateReservationDto = {};
+
+  setChangedTextField(update, 'customerName', next.customerName, current.customerName);
+  setChangedTextField(update, 'customerPhone', next.customerPhone, current.customerPhone);
+  setChangedTextField(update, 'customerEmail', next.customerEmail, current.customerEmail);
+  setChangedTextField(update, 'customerId', next.customerId, current.customerId);
+  setChangedTextField(update, 'specialRequests', next.specialRequests, current.specialRequests);
+  setChangedTextField(update, 'notes', next.notes, current.notes);
+
+  if (next.partySize !== undefined) {
+    const nextPartySize = Number(next.partySize);
+    if (Number.isFinite(nextPartySize) && nextPartySize !== Number(current.partySize)) {
+      update.partySize = nextPartySize;
+    }
+  }
+
+  if (next.reservationDate !== undefined) {
+    const currentDate = normalizeReservationDateValue(
+      current.reservationDate || current.reservationDatetime,
+    );
+    const nextDate = normalizeReservationDateValue(next.reservationDate);
+    if (nextDate !== currentDate) {
+      update.reservationDate = nextDate || next.reservationDate;
+    }
+  }
+
+  if (next.reservationTime !== undefined) {
+    const currentTime = normalizeReservationTimeValue(
+      current.reservationTime || current.reservationDatetime,
+    );
+    const nextTime = normalizeReservationTimeValue(next.reservationTime);
+    if (nextTime !== currentTime) {
+      update.reservationTime = nextTime || next.reservationTime;
+    }
+  }
+
+  if (next.durationMinutes !== undefined) {
+    const nextDuration = Number(next.durationMinutes);
+    if (Number.isFinite(nextDuration) && nextDuration !== Number(current.durationMinutes)) {
+      update.durationMinutes = nextDuration;
+    }
+  }
+
+  const currentTableId = current.tableId ?? null;
+  if (next.tableId !== undefined && (next.tableId ?? null) !== currentTableId) {
+    update.tableId = next.tableId;
+  }
+
+  const availabilityFieldsChanged =
+    update.tableId !== undefined ||
+    update.reservationDate !== undefined ||
+    update.reservationTime !== undefined ||
+    update.durationMinutes !== undefined;
+  if (availabilityFieldsChanged && update.tableId === undefined && currentTableId) {
+    update.tableId = currentTableId;
+  }
+
+  return update;
 }
 
 class ReservationsService {
@@ -255,7 +455,7 @@ class ReservationsService {
       : await this.bridge.reservations.create(payload);
 
     if (!result.success) {
-      throw new Error(result.error || 'Failed to create reservation');
+      throw new Error(reservationApiErrorMessage(result, 'Failed to create reservation'));
     }
 
     const body = (result.data ?? {}) as {
@@ -266,7 +466,7 @@ class ReservationsService {
     };
 
     if (body.success === false || !body.reservation) {
-      throw new Error(body.error || body.message || 'Failed to create reservation');
+      throw new Error(reservationApiErrorMessage({ data: body }, 'Failed to create reservation'));
     }
 
     return body.reservation;
@@ -277,14 +477,14 @@ class ReservationsService {
     payload: Record<string, unknown>,
   ) {
     const result = isBrowser()
-      ? await posApiPatch<{ success?: boolean; reservation?: any; error?: string }>(
+      ? await posApiPatch<{ success?: boolean; reservation?: any; error?: string; message?: string }>(
           `/api/pos/reservations/${reservationId}`,
           payload,
         )
       : await this.bridge.reservations.update(reservationId, payload);
 
     if (!result.success) {
-      throw new Error(result.error || 'Failed to update reservation');
+      throw new Error(reservationApiErrorMessage(result, 'Failed to update reservation'));
     }
 
     const body = (result.data ?? {}) as {
@@ -295,7 +495,7 @@ class ReservationsService {
     };
 
     if (body.success === false || !body.reservation) {
-      throw new Error(body.error || body.message || 'Failed to update reservation');
+      throw new Error(reservationApiErrorMessage({ data: body }, 'Failed to update reservation'));
     }
 
     return body.reservation;
@@ -432,6 +632,18 @@ class ReservationsService {
     const reservation = await this.updateReservationRequest(reservationId, {
       table_id: tableId,
     });
+
+    return transformFromAPI(reservation);
+  }
+
+  async updateReservationDetails(
+    reservationId: string,
+    data: UpdateReservationDto,
+  ): Promise<Reservation> {
+    const reservation = await this.updateReservationRequest(
+      reservationId,
+      buildUpdateReservationPayload(data),
+    );
 
     return transformFromAPI(reservation);
   }

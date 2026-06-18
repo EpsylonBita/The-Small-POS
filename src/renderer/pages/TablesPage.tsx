@@ -370,10 +370,20 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
   if (!isOpen || !table) return null;
 
   const statusActions: { status: TableStatus; label: string; icon: typeof CheckCircle; color: string }[] = [
-    { status: 'available', label: t('tables.setAvailable', 'Set Available'), icon: CheckCircle, color: STATUS_COLORS.available },
+    {
+      status: 'available',
+      label: table.status === 'cleaning'
+        ? t('tables.setCleaned', 'Cleaned')
+        : table.status === 'maintenance'
+          ? t('tables.markBackInService', 'Back in service')
+          : t('tables.setAvailable', 'Set Available'),
+      icon: CheckCircle,
+      color: STATUS_COLORS.available,
+    },
     { status: 'occupied', label: t('tables.setOccupied', 'Set Occupied'), icon: Users, color: STATUS_COLORS.occupied },
     { status: 'reserved', label: t('tables.setReserved', 'Set Reserved'), icon: Clock, color: STATUS_COLORS.reserved },
     { status: 'cleaning', label: t('tables.setCleaning', 'Set Cleaning'), icon: Sparkles, color: STATUS_COLORS.cleaning },
+    { status: 'maintenance', label: t('tables.setMaintenance', 'Set Maintenance'), icon: AlertTriangle, color: STATUS_COLORS.maintenance },
   ];
 
   const handleStatusClick = (status: TableStatus) => {

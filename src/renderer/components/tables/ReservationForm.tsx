@@ -33,6 +33,7 @@ export interface ReservationFormProps {
   tableId: string;
   tableCapacity: number;
   tableNumber: number;
+  initialReservation?: Reservation | null;
   onSubmit: (data: CreateReservationDto) => Promise<void>;
   onCancel: () => void;
   isOpen: boolean;
@@ -80,6 +81,7 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
   tableId,
   tableCapacity,
   tableNumber,
+  initialReservation = null,
   onSubmit,
   onCancel,
   isOpen
@@ -88,6 +90,7 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
   const { resolvedTheme } = useTheme();
   const now = useSystemClock();
   const isDark = resolvedTheme === 'dark';
+  const isEditing = Boolean(initialReservation);
 
   // Form state
   const [customerName, setCustomerName] = useState('');
@@ -108,9 +111,45 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
   // Load existing reservations for this table on mount
   useEffect(() => {
     if (isOpen && tableId) {
-      reservationsService.getReservationsForTable(tableId).then(setExistingReservations);
+      reservationsService.getReservationsForTable(tableId).then((reservations) => {
+        setExistingReservations(
+          reservations.filter((reservation) => reservation.id !== initialReservation?.id),
+        );
+      });
     }
-  }, [isOpen, tableId]);
+  }, [isOpen, tableId, initialReservation?.id]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    if (initialReservation) {
+      setCustomerName(initialReservation.customerName || '');
+      setCustomerPhone(initialReservation.customerPhone || '');
+      setReservationDate(
+        initialReservation.reservationDate ||
+          toLocalDateString(new Date(initialReservation.reservationDatetime)),
+      );
+      setReservationTime(String(initialReservation.reservationTime || '').slice(0, 5));
+      setPartySize(Math.max(1, Number(initialReservation.partySize || 1)));
+      setSpecialRequests(initialReservation.specialRequests || '');
+      setErrors({});
+      return;
+    }
+
+    setCustomerName('');
+    setCustomerPhone('');
+    setReservationDate('');
+    setReservationTime('');
+    setPartySize(Math.max(1, Math.min(2, tableCapacity || 2)));
+    setSpecialRequests('');
+    setErrors({});
+  }, [
+    isOpen,
+    initialReservation,
+    tableCapacity,
+  ]);
 
   // Check for conflicts when date/time changes
   useEffect(() => {
@@ -118,18 +157,24 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
       setIsCheckingConflicts(true);
       reservationsService.checkReservationConflicts(tableId, reservationDate, reservationTime)
         .then((conflicts) => {
-          setConflictingReservations(conflicts);
-          setShowConflictWarning(conflicts.length > 0);
+          const activeConflicts = conflicts.filter(
+            (reservation) => reservation.id !== initialReservation?.id,
+          );
+          setConflictingReservations(activeConflicts);
+          setShowConflictWarning(activeConflicts.length > 0);
         })
         .finally(() => setIsCheckingConflicts(false));
     } else {
       setConflictingReservations([]);
       setShowConflictWarning(false);
     }
-  }, [reservationDate, reservationTime, tableId]);
+  }, [reservationDate, reservationTime, tableId, initialReservation?.id]);
 
   // Get minimum date (today)
-  const minDate = toLocalDateString(now);
+  const todayDate = toLocalDateString(now);
+  const minDate = isEditing && reservationDate && reservationDate < todayDate
+    ? reservationDate
+    : todayDate;
 
   // Validate form
   const validateForm = useCallback((): boolean => {
@@ -202,11 +247,11 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
         customerPhone: customerPhone.trim(),
         reservationTime: reservationDateTime,
         partySize,
-        specialRequests: specialRequests.trim() || undefined,
+        specialRequests: specialRequests.trim(),
         tableId,
       });
     } catch (error) {
-      console.error('Failed to create reservation:', error);
+      console.error(isEditing ? 'Failed to update reservation:' : 'Failed to create reservation:', error);
     } finally {
       setIsSubmitting(false);
     }
@@ -252,7 +297,9 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
         }`}>
           <div>
             <h2 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              {t('reservationForm.title', { defaultValue: 'New Reservation' })}
+              {isEditing
+                ? t('reservationForm.editTitle', { defaultValue: 'Edit Reservation' })
+                : t('reservationForm.title', { defaultValue: 'New Reservation' })}
             </h2>
             <p className={`text-sm mt-1 ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
               {t('reservationForm.subtitle', { 
@@ -554,10 +601,14 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
               }`}
             >
               {isSubmitting 
-                ? t('reservationForm.creating', { defaultValue: 'Creating...' })
+                ? isEditing
+                  ? t('reservationForm.saving', { defaultValue: 'Saving...' })
+                  : t('reservationForm.creating', { defaultValue: 'Creating...' })
                 : isCheckingConflicts
                   ? t('reservationForm.checking', { defaultValue: 'Checking...' })
-                  : t('reservationForm.create', { defaultValue: 'Create Reservation' })
+                  : isEditing
+                    ? t('reservationForm.save', { defaultValue: 'Save Changes' })
+                    : t('reservationForm.create', { defaultValue: 'Create Reservation' })
               }
             </button>
           </div>

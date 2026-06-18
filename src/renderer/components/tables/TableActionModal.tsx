@@ -15,12 +15,16 @@ import React, { memo, useEffect, useState } from 'react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import type { RestaurantTable, TableStatus } from '../../types/tables';
-import { X, ShoppingCart, Calendar, Users, LayoutGrid, Clock, Minus, Plus } from 'lucide-react';
+import { X, ShoppingCart, Calendar, Users, LayoutGrid, Clock, Minus, Plus, CheckCircle2, Pencil, UserX, Ban } from 'lucide-react';
 
 interface TableActionModalProps {
   table: RestaurantTable;
   onNewOrder: (guestCount: number) => void;
   onNewReservation: () => void;
+  onSetAvailable: () => void | Promise<void>;
+  onEditReservation?: () => void | Promise<void>;
+  onNoShowReservation?: () => void | Promise<void>;
+  onCancelReservation?: () => void | Promise<void>;
   onClose: () => void;
   isOpen: boolean;
 }
@@ -35,6 +39,10 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
   table,
   onNewOrder,
   onNewReservation,
+  onSetAvailable,
+  onEditReservation,
+  onNoShowReservation,
+  onCancelReservation,
   onClose,
   isOpen
 }) => {
@@ -81,14 +89,43 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
     }
   };
 
+  const isCleaningTable = table.status === 'cleaning';
+  const isMaintenanceTable = table.status === 'maintenance';
+  const isUnavailableTable = table.status === 'unavailable';
+  const isReservedTable = table.status === 'reserved';
+  const blocksGuestActions = isCleaningTable || isMaintenanceTable || isUnavailableTable;
+
   const handleNewOrder = () => {
+    if (blocksGuestActions) {
+      return;
+    }
     onNewOrder(guestCount);
     // Note: Don't call onClose() here - the parent handler manages modal state
   };
 
   const handleNewReservation = () => {
+    if (isMaintenanceTable || isUnavailableTable) {
+      return;
+    }
     onNewReservation();
     // Note: Don't call onClose() here - the parent handler manages modal state
+  };
+
+  const handleSetAvailable = () => {
+    onSetAvailable();
+    // Note: Don't call onClose() here - the parent handler manages modal state
+  };
+
+  const handleEditReservation = () => {
+    onEditReservation?.();
+  };
+
+  const handleNoShowReservation = () => {
+    onNoShowReservation?.();
+  };
+
+  const handleCancelReservation = () => {
+    onCancelReservation?.();
   };
 
   if (!isOpen) return null;
@@ -238,10 +275,16 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
           {/* New Order Button - Requirements 3.2, 3.3 */}
           <button
             onClick={handleNewOrder}
+            disabled={blocksGuestActions}
+            aria-disabled={blocksGuestActions}
             className={`w-full p-4 rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] ${
-              isDark
-                ? 'bg-blue-500/10 border-blue-500/30 hover:border-blue-500 hover:bg-blue-500/20'
-                : 'bg-blue-50 border-blue-200 hover:border-blue-500 hover:bg-blue-100'
+              blocksGuestActions
+                ? isDark
+                  ? 'cursor-not-allowed bg-white/5 border-white/10 opacity-60'
+                  : 'cursor-not-allowed bg-gray-100 border-gray-200 opacity-70'
+                : isDark
+                  ? 'bg-blue-500/10 border-blue-500/30 hover:border-blue-500 hover:bg-blue-500/20'
+                  : 'bg-blue-50 border-blue-200 hover:border-blue-500 hover:bg-blue-100'
             }`}
           >
             <div className="flex items-center gap-4">
@@ -258,9 +301,21 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
                   {t('tableActionModal.newOrder', { defaultValue: 'New Order' })}
                 </div>
                 <div className={`text-sm ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
-                  {t('tableActionModal.newOrderDescription', { 
-                    defaultValue: 'Start a new order for this table' 
-                  })}
+                  {isCleaningTable
+                    ? t('tableActionModal.newOrderCleaningDisabled', {
+                        defaultValue: 'Mark the table cleaned before taking a new order',
+                      })
+                    : isMaintenanceTable
+                      ? t('tableActionModal.newOrderMaintenanceDisabled', {
+                          defaultValue: 'Return this table to service before taking a new order',
+                        })
+                      : isUnavailableTable
+                        ? t('tableActionModal.newOrderUnavailableDisabled', {
+                            defaultValue: 'Make this table available before taking a new order',
+                          })
+                    : t('tableActionModal.newOrderDescription', {
+                        defaultValue: 'Start a new order for this table',
+                      })}
                 </div>
               </div>
 
@@ -273,52 +328,204 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
             </div>
           </button>
 
-          {/* New Reservation Button - Requirements 3.2, 3.4 */}
-          <button
-            onClick={handleNewReservation}
-            className={`w-full p-4 rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] ${
-              isDark
-                ? 'bg-purple-500/10 border-purple-500/30 hover:border-purple-500 hover:bg-purple-500/20'
-                : 'bg-purple-50 border-purple-200 hover:border-purple-500 hover:bg-purple-100'
-            }`}
-          >
-            <div className="flex items-center gap-4">
-              {/* Icon */}
-              <div className={`p-3 rounded-xl ${
-                isDark ? 'bg-purple-500/20' : 'bg-purple-100'
-              }`}>
-                <Calendar className="w-6 h-6 text-purple-500" />
-              </div>
-
-              {/* Text */}
-              <div className="flex-1 text-left">
-                <div className="text-lg font-bold text-purple-500">
-                  {t('tableActionModal.newReservation', { defaultValue: 'New Reservation' })}
+          {blocksGuestActions && (
+            <button
+              onClick={handleSetAvailable}
+              className={`w-full p-4 rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] ${
+                isDark
+                  ? 'bg-emerald-500/10 border-emerald-500/30 hover:border-emerald-500 hover:bg-emerald-500/20'
+                  : 'bg-emerald-50 border-emerald-200 hover:border-emerald-500 hover:bg-emerald-100'
+              }`}
+            >
+              <div className="flex items-center gap-4">
+                <div className={`p-3 rounded-xl ${
+                  isDark ? 'bg-emerald-500/20' : 'bg-emerald-100'
+                }`}>
+                  <CheckCircle2 className="w-6 h-6 text-emerald-500" />
                 </div>
-                <div className={`text-sm ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
-                  {t('tableActionModal.newReservationDescription', { 
-                    defaultValue: 'Book this table for a future time' 
-                  })}
+
+                <div className="flex-1 text-left">
+                  <div className="text-lg font-bold text-emerald-500">
+                    {isCleaningTable
+                      ? t('tableActionModal.markCleaned', { defaultValue: 'Cleaned' })
+                      : isMaintenanceTable
+                        ? t('tableActionModal.markBackInService', { defaultValue: 'Back in service' })
+                        : t('tableActionModal.markAvailable', { defaultValue: 'Set Available' })}
+                  </div>
+                  <div className={`text-sm ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
+                    {isMaintenanceTable
+                      ? t('tableActionModal.markBackInServiceDescription', {
+                          defaultValue: 'Set this table as available after maintenance',
+                        })
+                      : t('tableActionModal.markAvailableDescription', {
+                          defaultValue: 'Set this table as available for orders',
+                        })}
+                  </div>
+                </div>
+
+                <div className="text-emerald-500">
+                  <CheckCircle2 className="w-6 h-6" />
                 </div>
               </div>
+            </button>
+          )}
 
-              {/* Arrow */}
-              <div className="text-purple-500">
-                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              </div>
+          {isReservedTable && (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <button
+                onClick={handleEditReservation}
+                disabled={!onEditReservation}
+                className={`w-full p-4 rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] ${
+                  isDark
+                    ? 'bg-amber-500/10 border-amber-500/30 hover:border-amber-500 hover:bg-amber-500/20'
+                    : 'bg-amber-50 border-amber-200 hover:border-amber-500 hover:bg-amber-100'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`p-3 rounded-xl ${isDark ? 'bg-amber-500/20' : 'bg-amber-100'}`}>
+                    <Pencil className="w-5 h-5 text-amber-500" />
+                  </div>
+                  <div className="text-left">
+                    <div className="font-bold text-amber-500">
+                      {t('tableActionModal.editReservation', { defaultValue: 'Edit Reservation' })}
+                    </div>
+                    <div className={`text-xs ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
+                      {t('tableActionModal.editReservationDescription', {
+                        defaultValue: 'Change time, guests, or notes',
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </button>
+
+              <button
+                onClick={handleNoShowReservation}
+                disabled={!onNoShowReservation}
+                className={`w-full p-4 rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] ${
+                  isDark
+                    ? 'bg-slate-500/10 border-slate-500/30 hover:border-slate-400 hover:bg-slate-500/20'
+                    : 'bg-slate-50 border-slate-200 hover:border-slate-400 hover:bg-slate-100'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`p-3 rounded-xl ${isDark ? 'bg-slate-500/20' : 'bg-slate-100'}`}>
+                    <UserX className="w-5 h-5 text-slate-500" />
+                  </div>
+                  <div className="text-left">
+                    <div className="font-bold text-slate-500">
+                      {t('tableActionModal.noShowReservation', { defaultValue: 'No Show' })}
+                    </div>
+                    <div className={`text-xs ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
+                      {t('tableActionModal.noShowReservationDescription', {
+                        defaultValue: 'Guest did not arrive',
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </button>
+
+              <button
+                onClick={handleCancelReservation}
+                disabled={!onCancelReservation}
+                className={`w-full p-4 rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] sm:col-span-2 ${
+                  isDark
+                    ? 'bg-red-500/10 border-red-500/30 hover:border-red-500 hover:bg-red-500/20'
+                    : 'bg-red-50 border-red-200 hover:border-red-500 hover:bg-red-100'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`p-3 rounded-xl ${isDark ? 'bg-red-500/20' : 'bg-red-100'}`}>
+                    <Ban className="w-5 h-5 text-red-500" />
+                  </div>
+                  <div className="text-left">
+                    <div className="font-bold text-red-500">
+                      {t('tableActionModal.cancelReservation', { defaultValue: 'Cancel Reservation' })}
+                    </div>
+                    <div className={`text-xs ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
+                      {t('tableActionModal.cancelReservationDescription', {
+                        defaultValue: 'Cancel booking and release table',
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </button>
             </div>
-          </button>
+          )}
+
+          {/* New Reservation Button - Requirements 3.2, 3.4 */}
+          {!isReservedTable && (
+            <button
+              onClick={handleNewReservation}
+              disabled={isMaintenanceTable || isUnavailableTable}
+              aria-disabled={isMaintenanceTable || isUnavailableTable}
+              className={`w-full p-4 rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] ${
+                isMaintenanceTable || isUnavailableTable
+                  ? isDark
+                    ? 'cursor-not-allowed bg-white/5 border-white/10 opacity-60'
+                    : 'cursor-not-allowed bg-gray-100 border-gray-200 opacity-70'
+                  : isDark
+                    ? 'bg-purple-500/10 border-purple-500/30 hover:border-purple-500 hover:bg-purple-500/20'
+                    : 'bg-purple-50 border-purple-200 hover:border-purple-500 hover:bg-purple-100'
+              }`}
+            >
+              <div className="flex items-center gap-4">
+                {/* Icon */}
+                <div className={`p-3 rounded-xl ${
+                  isDark ? 'bg-purple-500/20' : 'bg-purple-100'
+                }`}>
+                  <Calendar className="w-6 h-6 text-purple-500" />
+                </div>
+
+                {/* Text */}
+                <div className="flex-1 text-left">
+                  <div className="text-lg font-bold text-purple-500">
+                    {t('tableActionModal.newReservation', { defaultValue: 'New Reservation' })}
+                  </div>
+                  <div className={`text-sm ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
+                    {isMaintenanceTable || isUnavailableTable
+                      ? t('tableActionModal.newReservationUnavailableDescription', {
+                          defaultValue: 'Return this table to service before booking',
+                        })
+                      : t('tableActionModal.newReservationDescription', {
+                          defaultValue: 'Book this table for a future time',
+                        })}
+                  </div>
+                </div>
+
+                {/* Arrow */}
+                <div className="text-purple-500">
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </div>
+              </div>
+            </button>
+          )}
         </div>
 
         {/* Footer hint */}
-        <div className={`px-4 pb-4 text-center text-xs ${
-          isDark ? 'text-white/40' : 'text-gray-400'
-        }`}>
-          {t('tableActionModal.hint', { 
-            defaultValue: 'Select an action to continue' 
-          })}
+      <div className={`px-4 pb-4 text-center text-xs ${
+        isDark ? 'text-white/40' : 'text-gray-400'
+      }`}>
+          {isCleaningTable
+            ? t('tableActionModal.cleaningHint', {
+                defaultValue: 'Set the table as cleaned to make it available for orders',
+              })
+            : isMaintenanceTable
+              ? t('tableActionModal.maintenanceHint', {
+                  defaultValue: 'Maintenance tables are out of service until marked back in service',
+                })
+              : isReservedTable
+                ? t('tableActionModal.reservedHint', {
+                    defaultValue: 'Manage this reservation or start the table order when guests arrive',
+                  })
+              : isUnavailableTable
+                ? t('tableActionModal.unavailableHint', {
+                    defaultValue: 'Set the table available before using it for guests',
+                  })
+            : t('tableActionModal.hint', {
+                defaultValue: 'Select an action to continue',
+              })}
         </div>
       </div>
     </div>

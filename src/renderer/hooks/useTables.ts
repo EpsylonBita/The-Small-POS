@@ -10,7 +10,11 @@ import { transformTableFromAPI } from '../types/tables';
 import { reservationsService } from '../services/ReservationsService';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
-import { buildOptimisticOccupiedTable } from '../utils/tableOrderFlow';
+import {
+  buildOptimisticOccupiedTable,
+  buildReleasedTableAfterSettlement,
+  shouldApplyOptimisticTableOverride,
+} from '../utils/tableOrderFlow';
 
 const TABLE_REFRESH_MIN_MS = 30000;
 
@@ -58,6 +62,10 @@ export function useTables({
     return nextTables.map((table) => {
       const override = overrides[table.id];
       if (!override) {
+        return table;
+      }
+      if (!shouldApplyOptimisticTableOverride(table, override)) {
+        delete overrides[table.id];
         return table;
       }
 
@@ -274,11 +282,27 @@ export function useTables({
       scheduleRefresh(150);
     };
 
+    const handleTableSessionSettled = (payload: { tableId?: string | null }) => {
+      const tableId = typeof payload?.tableId === 'string' ? payload.tableId.trim() : '';
+      if (!tableId) {
+        scheduleRefresh(150);
+        return;
+      }
+      delete optimisticTableOverridesRef.current[tableId];
+      setTables((prevTables) =>
+        prevTables.map((table) =>
+          table.id === tableId ? buildReleasedTableAfterSettlement(table) : table,
+        ),
+      );
+      scheduleRefresh(150);
+    };
+
     onEvent('sync:status', handleSyncStatus);
     onEvent('sync:complete', handleOrderMutation);
     onEvent('order-created', handleOrderMutation);
     onEvent('order-status-updated', handleOrderMutation);
     onEvent('order-deleted', handleOrderMutation);
+    onEvent('table-session-settled', handleTableSessionSettled);
 
     return () => {
       disposed = true;
@@ -288,6 +312,7 @@ export function useTables({
       offEvent('order-created', handleOrderMutation);
       offEvent('order-status-updated', handleOrderMutation);
       offEvent('order-deleted', handleOrderMutation);
+      offEvent('table-session-settled', handleTableSessionSettled);
     };
   }, [fetchTables, enabled]);
 
