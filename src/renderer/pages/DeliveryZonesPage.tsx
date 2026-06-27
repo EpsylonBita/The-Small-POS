@@ -141,9 +141,8 @@ const DeliveryZonesPage: React.FC = () => {
           <button
             type="button"
             onClick={() => void fetchData()}
-            title={t('common.refresh', 'Refresh')}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -153,10 +152,10 @@ const DeliveryZonesPage: React.FC = () => {
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
+            className={`p-4 rounded-2xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
                 <CheckCircle className="w-5 h-5 text-green-500" />
               </div>
               <div>
@@ -169,10 +168,10 @@ const DeliveryZonesPage: React.FC = () => {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.05 }}
-            className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
+            className={`p-4 rounded-2xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
                 <Activity className="w-5 h-5 text-yellow-400" />
               </div>
               <div>
@@ -185,11 +184,11 @@ const DeliveryZonesPage: React.FC = () => {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
-            className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
+            className={`p-4 rounded-2xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <Truck className="w-5 h-5 text-blue-500" />
+              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+                <Truck className="w-5 h-5 text-emerald-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.successRate', 'Success Rate')}</p>
@@ -201,10 +200,10 @@ const DeliveryZonesPage: React.FC = () => {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15 }}
-            className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
+            className={`p-4 rounded-2xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
                 <Flame className="w-5 h-5 text-red-500" />
               </div>
               <div>
@@ -217,7 +216,7 @@ const DeliveryZonesPage: React.FC = () => {
       </div>
 
       {zones.length === 0 ? (
-        <div className={`p-8 rounded-xl text-center border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+        <div className={`p-8 rounded-2xl text-center border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
           <MapPin className="w-12 h-12 mx-auto mb-4 text-gray-400" />
           <h3 className="text-lg font-semibold mb-2">{t('deliveryZones.noZones', 'No Delivery Zones')}</h3>
           <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
@@ -237,8 +236,8 @@ const DeliveryZonesPage: React.FC = () => {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: idx * 0.04 }}
                   onClick={() => setSelectedZoneId(zone.id)}
-                  className={`p-4 rounded-xl cursor-pointer transition-all border ${
-                    isDark ? 'bg-zinc-950 hover:bg-zinc-900 border-zinc-800' : 'bg-white hover:bg-gray-50 border-gray-200'
+                  className={`p-4 rounded-2xl cursor-pointer transition-all duration-150 active:scale-[0.99] border ${
+                    isDark ? 'bg-zinc-950 active:bg-zinc-900 border-zinc-800' : 'bg-white active:bg-gray-50 border-gray-200'
                   } ${
                     selectedZoneId === zone.id
                       ? isDark ? 'ring-2 ring-zinc-500' : 'ring-2 ring-gray-400'
@@ -263,23 +262,23 @@ const DeliveryZonesPage: React.FC = () => {
                   </div>
 
                   <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="flex items-center gap-2">
                         <DollarSign className="w-4 h-4 text-green-500" />
                         <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.fee', 'Delivery Fee')}</p>
                       </div>
                       <p className="font-semibold mt-1">{zone.delivery_fee === 0 ? t('common.free', 'Free') : formatMoney(zone.delivery_fee)}</p>
                     </div>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="flex items-center gap-2">
                         <Activity className="w-4 h-4 text-yellow-400" />
                         <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.validations', 'Validations')}</p>
                       </div>
                       <p className="font-semibold mt-1">{zoneAnalytics?.totalValidations || 0}</p>
                     </div>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="flex items-center gap-2">
-                        <Clock className="w-4 h-4 text-blue-500" />
+                        <Clock className="w-4 h-4 text-amber-500" />
                         <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.estimatedTime', 'Est. Time')}</p>
                       </div>
                       <p className="font-semibold mt-1">
@@ -289,19 +288,19 @@ const DeliveryZonesPage: React.FC = () => {
                   </div>
 
                   <div className="mt-3 grid grid-cols-1 sm:grid-cols-4 gap-2 text-sm">
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.minOrder', 'Min Order')}</p>
                       <p className="font-semibold mt-1">{formatMoney(zone.min_order_amount)}</p>
                     </div>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.successRate', 'Success Rate')}</p>
                       <p className="font-semibold mt-1">{(zoneAnalytics?.successRate || 0).toFixed(1)}%</p>
                     </div>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.orders', 'Orders')}</p>
                       <p className="font-semibold mt-1">{zoneAnalytics?.totalOrders || 0}</p>
                     </div>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.revenue', 'Revenue')}</p>
                       <p className="font-semibold mt-1">{formatMoney(zoneAnalytics?.totalRevenue || 0)}</p>
                     </div>
@@ -323,7 +322,7 @@ const DeliveryZonesPage: React.FC = () => {
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`h-fit rounded-xl border p-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
+            className={`h-fit rounded-2xl border p-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-2 mb-4">
               <MapPin className="w-5 h-5 text-green-500" />
@@ -334,7 +333,7 @@ const DeliveryZonesPage: React.FC = () => {
 
             {selectedZone && selectedZoneAnalytics ? (
               <div className="space-y-3">
-                <div className={`rounded-lg px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                <div className={`rounded-xl px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                   <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.validationTotals', 'Validation Totals')}</p>
                   <p className="text-2xl font-bold mt-1">{selectedZoneAnalytics.totalValidations}</p>
                   <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
@@ -342,14 +341,14 @@ const DeliveryZonesPage: React.FC = () => {
                   </p>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <div className={`rounded-lg px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                  <div className={`rounded-xl px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                     <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.overrideRate', 'Override Rate')}</p>
                     <p className="text-xl font-bold mt-1">{selectedZoneAnalytics.overrideRate.toFixed(1)}%</p>
                     <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
                       {selectedZoneAnalytics.overrideApprovals}/{selectedZoneAnalytics.overrideRequests} {t('deliveryZones.approved', 'approved')}
                     </p>
                   </div>
-                  <div className={`rounded-lg px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                  <div className={`rounded-xl px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                     <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.averageOrder', 'Average Order')}</p>
                     <p className="text-xl font-bold mt-1">{formatMoney(selectedZoneAnalytics.averageOrderValue)}</p>
                     <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
@@ -357,7 +356,7 @@ const DeliveryZonesPage: React.FC = () => {
                     </p>
                   </div>
                 </div>
-                <div className={`rounded-lg px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                <div className={`rounded-xl px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                   <div className="flex items-center justify-between">
                     <div>
                       <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.deliveryPerformance', 'Delivery Performance')}</p>
@@ -369,7 +368,7 @@ const DeliveryZonesPage: React.FC = () => {
                     </div>
                   </div>
                 </div>
-                <div className={`rounded-lg px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                <div className={`rounded-xl px-3 py-3 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                   <div className="flex items-center gap-2 mb-2">
                     <AlertTriangle className="w-4 h-4 text-amber-500" />
                     <p className="font-medium">{t('deliveryZones.mapSignals', 'Map Signals')}</p>
@@ -380,7 +379,7 @@ const DeliveryZonesPage: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <div className={`rounded-lg px-3 py-4 ${isDark ? 'bg-black border border-zinc-800 text-zinc-400' : 'bg-gray-50 border border-gray-200 text-gray-600'}`}>
+              <div className={`rounded-xl px-3 py-4 ${isDark ? 'bg-black border border-zinc-800 text-zinc-400' : 'bg-gray-50 border border-gray-200 text-gray-600'}`}>
                 {t('deliveryZones.selectZonePrompt', 'Select a zone to view validation and delivery metrics.')}
               </div>
             )}
@@ -392,10 +391,10 @@ const DeliveryZonesPage: React.FC = () => {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ delay: 0.3 }}
-        className={`mt-6 p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
+        className={`mt-6 p-4 rounded-2xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
       >
         <div className="flex items-start gap-3">
-          <Info className="w-5 h-5 mt-0.5 text-blue-500" />
+          <Info className="w-5 h-5 mt-0.5 text-zinc-400" />
           <div>
             <p className={`font-medium ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{t('deliveryZones.infoTitle', 'Delivery Zone Analytics')}</p>
             <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>

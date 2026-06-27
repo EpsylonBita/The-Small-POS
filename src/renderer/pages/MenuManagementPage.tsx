@@ -3,10 +3,11 @@ import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
-import { Eye, EyeOff, Search, RefreshCw } from 'lucide-react';
+import { Eye, EyeOff, Search, RefreshCw, BadgePercent } from 'lucide-react';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
+import { formatCurrency } from '../utils/format';
 
 // Types
 interface MenuItem {
@@ -111,7 +112,7 @@ export const MenuManagementPage: React.FC = () => {
       }
     } catch (error) {
       console.error('Error loading data:', error);
-      toast.error('Failed to load data');
+      toast.error(t('menu.failedToLoadData', 'Failed to load data'));
     } finally {
       setLoading(false);
     }
@@ -130,7 +131,7 @@ export const MenuManagementPage: React.FC = () => {
       setCategories(mapped);
     } catch (error) {
       console.error('Error loading categories:', error);
-      toast.error('Failed to load categories');
+      toast.error(t('menu.failedToLoadCategories', 'Failed to load categories'));
     }
   };
 
@@ -140,7 +141,7 @@ export const MenuManagementPage: React.FC = () => {
       setMenuItems(result || []);
     } catch (error) {
       console.error('Error loading menu items:', error);
-      toast.error('Failed to load menu items');
+      toast.error(t('menu.failedToLoadMenuItems', 'Failed to load menu items'));
     }
   };
 
@@ -150,7 +151,7 @@ export const MenuManagementPage: React.FC = () => {
       setIngredients(result || []);
     } catch (error) {
       console.error('Error loading ingredients:', error);
-      toast.error('Failed to load ingredients');
+      toast.error(t('menu.failedToLoadIngredients', 'Failed to load ingredients'));
     }
   };
 
@@ -160,13 +161,13 @@ export const MenuManagementPage: React.FC = () => {
       setCombos(result || []);
     } catch (error) {
       console.error('Error loading combos:', error);
-      toast.error('Failed to load offers');
+      toast.error(t('menu.failedToLoadOffers', 'Failed to load offers'));
     }
   };
 
   const toggleCategoryAvailability = async (id: string, currentStatus: boolean) => {
     if (toggleAction.disabled) {
-      toast.error(toggleAction.message || 'This action requires an online connection.');
+      toast.error(toggleAction.message || t('menu.onlineRequired', 'This action requires an online connection.'));
       return;
     }
 
@@ -179,17 +180,17 @@ export const MenuManagementPage: React.FC = () => {
         is_active: !currentStatus,
       });
 
-      toast.success('Category updated successfully');
+      toast.success(t('menu.categoryUpdated', 'Category updated successfully'));
     } catch (error) {
       console.error('Error updating category:', error);
-      toast.error('Failed to update category');
+      toast.error(t('menu.failedToUpdateCategory', 'Failed to update category'));
       setCategories(original);
     }
   };
 
   const toggleMenuItemAvailability = async (id: string, currentStatus: boolean) => {
     if (toggleAction.disabled) {
-      toast.error(toggleAction.message || 'This action requires an online connection.');
+      toast.error(toggleAction.message || t('menu.onlineRequired', 'This action requires an online connection.'));
       return;
     }
 
@@ -202,17 +203,17 @@ export const MenuManagementPage: React.FC = () => {
         is_available: !currentStatus,
       });
 
-      toast.success('Menu item updated successfully');
+      toast.success(t('menu.menuItemUpdated', 'Menu item updated successfully'));
     } catch (error) {
       console.error('Error updating menu item:', error);
-      toast.error('Failed to update menu item');
+      toast.error(t('menu.failedToUpdateMenuItem', 'Failed to update menu item'));
       setMenuItems(original);
     }
   };
 
   const toggleIngredientAvailability = async (id: string, currentStatus: boolean) => {
     if (toggleAction.disabled) {
-      toast.error(toggleAction.message || 'This action requires an online connection.');
+      toast.error(toggleAction.message || t('menu.onlineRequired', 'This action requires an online connection.'));
       return;
     }
 
@@ -225,17 +226,17 @@ export const MenuManagementPage: React.FC = () => {
         is_available: !currentStatus,
       });
 
-      toast.success('Ingredient updated successfully');
+      toast.success(t('menu.ingredientUpdated', 'Ingredient updated successfully'));
     } catch (error) {
       console.error('Error updating ingredient:', error);
-      toast.error('Failed to update ingredient');
+      toast.error(t('menu.failedToUpdateIngredient', 'Failed to update ingredient'));
       setIngredients(original);
     }
   };
 
   const toggleComboAvailability = async (id: string, currentStatus: boolean) => {
     if (toggleAction.disabled) {
-      toast.error(toggleAction.message || 'This action requires an online connection.');
+      toast.error(toggleAction.message || t('menu.onlineRequired', 'This action requires an online connection.'));
       return;
     }
 
@@ -248,10 +249,10 @@ export const MenuManagementPage: React.FC = () => {
         is_active: !currentStatus,
       });
 
-      toast.success('Offer updated successfully');
+      toast.success(t('menu.offerUpdated', 'Offer updated successfully'));
     } catch (error) {
       console.error('Error updating combo:', error);
-      toast.error('Failed to update offer');
+      toast.error(t('menu.failedToUpdateOffer', 'Failed to update offer'));
       setCombos(original);
     }
   };
@@ -278,12 +279,12 @@ export const MenuManagementPage: React.FC = () => {
     (combo.name_el || '').toLowerCase().includes(searchLower)
   );
 
-  const getTabClass = (tab: typeof activeTab) => `px-4 py-2 rounded-lg transition-all ${
+  const getTabClass = (tab: typeof activeTab) => `px-4 py-2 rounded-2xl transition-transform active:scale-[0.98] ${
     activeTab === tab
       ? 'bg-yellow-500 text-black font-semibold border border-yellow-400'
       : resolvedTheme === 'dark'
-        ? 'bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
-        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+        ? 'bg-zinc-900 text-zinc-200 active:bg-zinc-800'
+        : 'bg-gray-100 text-gray-700 active:bg-gray-200'
   }`;
 
   const gridCardClass = `p-4 rounded-xl border ${
@@ -291,7 +292,18 @@ export const MenuManagementPage: React.FC = () => {
       ? 'bg-yellow-500/10 border-yellow-500/45'
       : 'bg-yellow-50 border-yellow-200'
   }`;
-  const refreshLabel = loading ? 'Refreshing menu' : 'Refresh menu';
+  // Round 234: availability toggles are real 44x44 glass touch targets (was a borderless p-2 eye
+  // glyph that read like decoration on a touchscreen). Semantic green = enabled, red = disabled,
+  // with a translucent tinted glass surface + active press feedback; no hover, no native title.
+  const getAvailabilityToggleClass = (active: boolean) =>
+    `inline-flex h-11 w-11 items-center justify-center rounded-2xl border backdrop-blur-md transition disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 ${
+      active
+        ? 'border-green-500/40 bg-green-500/15 text-green-500 active:bg-green-500/25'
+        : 'border-red-500/40 bg-red-500/15 text-red-500 active:bg-red-500/25'
+    }`;
+  const refreshLabel = loading
+    ? t('menu.refreshingMenu', 'Refreshing menu')
+    : t('menu.refreshMenu', 'Refresh menu');
 
   const renderTabs = () => (
     <motion.div variants={pageMotionItem} className="flex gap-2 mb-6">
@@ -299,25 +311,27 @@ export const MenuManagementPage: React.FC = () => {
         onClick={() => setActiveTab('categories')}
         className={getTabClass('categories')}
       >
-        Categories
+        {t('menu.managementTabs.categories', 'Categories')}
       </button>
       <button
         onClick={() => setActiveTab('subcategories')}
         className={getTabClass('subcategories')}
       >
-        Subcategories
+        {/* Historical data model: the 'subcategories' tab/table actually stores menu items.
+            Keep the internal key + bridge naming; only the staff-facing label is corrected. */}
+        {t('menu.managementTabs.menuItems', 'Menu Items')}
       </button>
       <button
         onClick={() => setActiveTab('ingredients')}
         className={getTabClass('ingredients')}
       >
-        Ingredients
+        {t('menu.managementTabs.ingredients', 'Ingredients')}
       </button>
       <button
         onClick={() => setActiveTab('combos')}
         className={getTabClass('combos')}
       >
-        Offers
+        {t('menu.managementTabs.offers', 'Offers')}
       </button>
     </motion.div>
   );
@@ -333,7 +347,7 @@ export const MenuManagementPage: React.FC = () => {
           placeholder={t('menu.searchPlaceholder')}
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          className={`w-full pl-10 pr-4 py-2 rounded-lg border ${
+          className={`w-full pl-10 pr-4 py-2 rounded-2xl border ${
             resolvedTheme === 'dark'
               ? 'bg-zinc-900 border-white text-white placeholder-zinc-400'
               : 'bg-gray-100 border-white text-gray-900 placeholder-gray-500'
@@ -357,18 +371,14 @@ export const MenuManagementPage: React.FC = () => {
                 {(language === 'el'
                   ? (category.name_el || category.name_en || category.name)
                   : (category.name_en || category.name_el || category.name)
-                ) || 'Unnamed'}
+                ) || t('menu.unnamed', 'Unnamed')}
               </h3>
             </div>
             <button
               onClick={() => toggleCategoryAvailability(category.id, category.is_active)}
               disabled={toggleAction.disabled}
-              title={toggleAction.message || (category.is_active ? 'Disable' : 'Enable')}
-              className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                category.is_active
-                  ? 'text-green-500 hover:bg-green-500/10'
-                  : 'text-red-500 hover:bg-red-500/10'
-              }`}
+              aria-label={toggleAction.message || (category.is_active ? t('menu.disable', 'Disable') : t('menu.enable', 'Enable'))}
+              className={getAvailabilityToggleClass(category.is_active)}
             >
               {category.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
@@ -392,18 +402,14 @@ export const MenuManagementPage: React.FC = () => {
                 {item.name}
               </h3>
               <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                €{(item.base_price || 0).toFixed(2)}
+                {formatCurrency(item.base_price || 0, 'EUR', language)}
               </p>
             </div>
             <button
               onClick={() => toggleMenuItemAvailability(item.id, item.is_available)}
               disabled={toggleAction.disabled}
-              title={toggleAction.message || (item.is_available ? 'Disable' : 'Enable')}
-              className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                item.is_available
-                  ? 'text-green-500 hover:bg-green-500/10'
-                  : 'text-red-500 hover:bg-red-500/10'
-              }`}
+              aria-label={toggleAction.message || (item.is_available ? t('menu.disable', 'Disable') : t('menu.enable', 'Enable'))}
+              className={getAvailabilityToggleClass(item.is_available)}
             >
               {item.is_available ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
@@ -431,24 +437,20 @@ export const MenuManagementPage: React.FC = () => {
                   />
                 )}
                 <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                  {ingredient.name || 'Unnamed'}
+                  {ingredient.name || t('menu.unnamed', 'Unnamed')}
                 </h3>
               </div>
               {ingredient.price != null && ingredient.price > 0 && (
                 <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  €{ingredient.price.toFixed(2)}
+                  {formatCurrency(ingredient.price, 'EUR', language)}
                 </p>
               )}
             </div>
             <button
               onClick={() => toggleIngredientAvailability(ingredient.id, ingredient.is_available)}
               disabled={toggleAction.disabled}
-              title={toggleAction.message || (ingredient.is_available ? 'Disable' : 'Enable')}
-              className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                ingredient.is_available
-                  ? 'text-green-500 hover:bg-green-500/10'
-                  : 'text-red-500 hover:bg-red-500/10'
-              }`}
+              aria-label={toggleAction.message || (ingredient.is_available ? t('menu.disable', 'Disable') : t('menu.enable', 'Enable'))}
+              className={getAvailabilityToggleClass(ingredient.is_available)}
             >
               {ingredient.is_available ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
@@ -458,8 +460,64 @@ export const MenuManagementPage: React.FC = () => {
     </motion.div>
   );
 
-  const renderCombos = () => (
-    <motion.div key="combos" variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+  const renderCombos = () => {
+    // Round 235: offers/combos can be legitimately empty (none synced) or filtered to nothing by the
+    // search. Both used to leave a bare black grid; render a small centered glass empty state instead,
+    // distinguishing no-data from no-search-results. UI only -- no data is created/refreshed here.
+    if (filteredCombos.length === 0) {
+      const isSearching = searchTerm.trim().length > 0;
+      return (
+        <motion.div
+          key="combos-empty"
+          variants={pageMotionItem}
+          data-menu-offers-empty
+          className="flex justify-center py-12"
+        >
+          <div
+            className={`flex max-w-md flex-col items-center gap-3 rounded-2xl border px-8 py-10 text-center backdrop-blur-md ${
+              resolvedTheme === 'dark'
+                ? 'border-white/10 bg-white/5'
+                : 'border-black/10 bg-black/5'
+            }`}
+          >
+            <span
+              className={`inline-flex h-14 w-14 items-center justify-center rounded-2xl border ${
+                resolvedTheme === 'dark'
+                  ? 'border-amber-400/30 bg-amber-400/10 text-amber-300'
+                  : 'border-amber-400/40 bg-amber-400/15 text-amber-600'
+              }`}
+            >
+              <BadgePercent className="w-7 h-7" />
+            </span>
+            <h3 className={`text-lg font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+              {isSearching
+                ? t('menu.offersEmpty.searchTitle', 'No offers match the search')
+                : t('menu.offersEmpty.title', 'No offers configured')}
+            </h3>
+            <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+              {isSearching
+                ? t('menu.offersEmpty.searchSubtitle', 'Clear the search or try another term')
+                : t('menu.offersEmpty.subtitle', 'Create offers in the admin dashboard or refresh after syncing.')}
+            </p>
+            {isSearching && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm('')}
+                className={`mt-1 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border px-5 transition active:scale-95 ${
+                  resolvedTheme === 'dark'
+                    ? 'border-amber-400/30 bg-amber-400/10 text-amber-200 active:bg-amber-400/20'
+                    : 'border-amber-400/40 bg-amber-400/15 text-amber-700 active:bg-amber-400/25'
+                }`}
+              >
+                {t('menu.offersEmpty.clearSearch', 'Clear search')}
+              </button>
+            )}
+          </div>
+        </motion.div>
+      );
+    }
+    return (
+      <motion.div key="combos" variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       {filteredCombos.map((combo) => (
         <motion.div
           key={combo.id}
@@ -469,26 +527,22 @@ export const MenuManagementPage: React.FC = () => {
           <div className="flex items-start justify-between mb-2">
             <div className="flex-1">
               <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                {(language === 'el' ? (combo.name_el || combo.name_en) : combo.name_en) || 'Unnamed'}
+                {(language === 'el' ? (combo.name_el || combo.name_en) : combo.name_en) || t('menu.unnamed', 'Unnamed')}
               </h3>
               <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                €{(combo.base_price || 0).toFixed(2)}
+                {formatCurrency(combo.base_price || 0, 'EUR', language)}
               </p>
               {combo.is_featured && (
                 <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full">
-                  Featured
+                  {t('menu.featured', 'Featured')}
                 </span>
               )}
             </div>
             <button
               onClick={() => toggleComboAvailability(combo.id, combo.is_active)}
               disabled={toggleAction.disabled}
-              title={toggleAction.message || (combo.is_active ? 'Disable' : 'Enable')}
-              className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                combo.is_active
-                  ? 'text-green-500 hover:bg-green-500/10'
-                  : 'text-red-500 hover:bg-red-500/10'
-              }`}
+              aria-label={toggleAction.message || (combo.is_active ? t('menu.disable', 'Disable') : t('menu.enable', 'Enable'))}
+              className={getAvailabilityToggleClass(combo.is_active)}
             >
               {combo.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
@@ -496,7 +550,8 @@ export const MenuManagementPage: React.FC = () => {
         </motion.div>
       ))}
     </motion.div>
-  );
+    );
+  };
 
   return (
     <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="p-6">
@@ -513,8 +568,7 @@ export const MenuManagementPage: React.FC = () => {
           onClick={loadData}
           disabled={loading}
           aria-label={refreshLabel}
-          title={refreshLabel}
-          className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${resolvedTheme === 'dark' ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+          className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl border backdrop-blur-xl transition shadow-sm shadow-amber-500/10 ${resolvedTheme === 'dark' ? 'border-amber-400/30 bg-white/10 text-amber-300 active:bg-white/20' : 'border-amber-400/40 bg-black/5 text-amber-600 active:bg-black/10'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>

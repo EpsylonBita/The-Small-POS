@@ -275,7 +275,8 @@ const verificationTone = (value: unknown): string => {
   const status = normalizeVerificationStatus(value)
   if (status === 'verified') return 'bg-emerald-500/15 border-emerald-400/30 text-emerald-200'
   if (status === 'degraded') return 'bg-amber-500/15 border-amber-400/30 text-amber-200'
-  if (status === 'candidate') return 'bg-blue-500/15 border-blue-400/30 text-blue-200'
+  // candidate = pending/needs-verification (informational) -> amber, not blue
+  if (status === 'candidate') return 'bg-amber-500/15 border-amber-400/30 text-amber-100'
   return 'bg-white/5 border-white/10 liquid-glass-modal-text-muted'
 }
 
@@ -456,7 +457,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         setReadability(guessReadabilityFromRecommended(selected.recommended))
       }
       if (!selected) {
-        toast(t('settings.printer.noDevicesFound', 'No printers found'), { icon: <Info className="w-4 h-4 text-blue-400" /> })
+        toast(t('settings.printer.noDevicesFound', 'No printers found'), { icon: <Info className="w-4 h-4 text-amber-400" /> })
       }
     } catch (error) {
       console.error('[PrinterSetupWizard] discovery failed', error)
@@ -802,7 +803,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         </button>
       </div>
 
-      <div className="p-3 rounded-lg border border-blue-500/20 bg-blue-500/10 text-xs text-blue-100">
+      <div className="p-3 rounded-2xl border border-amber-500/20 bg-amber-500/10 text-xs text-amber-100">
         {t(
           'settings.printer.quickWizardDraftOnlyHint',
           'Compatibility-first setup: the wizard tests transport and encoding using an unsaved draft profile. No temporary printer profiles are created.',
@@ -810,7 +811,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
       </div>
 
       {candidates.length === 0 ? (
-        <div className="p-4 rounded-lg border border-white/10 bg-white/5 text-sm liquid-glass-modal-text-muted">
+        <div className="p-4 rounded-2xl border border-white/10 bg-white/5 text-sm liquid-glass-modal-text-muted">
           {discovering ? t('settings.printer.scanning', 'Scanning...') : t('settings.printer.noDevicesFound', 'No printers found')}
         </div>
       ) : (
@@ -827,10 +828,10 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
                   setTemplate('classic')
                   setReadability(guessReadabilityFromRecommended(candidate.recommended))
                 }}
-                className={`w-full text-left p-3 rounded-lg border transition-all ${
+                className={`w-full text-left p-3 rounded-lg border transition-all active:scale-[0.99] ${
                   selected
-                    ? 'bg-blue-500/15 border-blue-400/50'
-                    : 'bg-white/5 border-white/10 hover:bg-white/10'
+                    ? 'bg-amber-500/15 border-amber-400/50'
+                    : 'bg-white/5 border-white/10'
                 }`}
               >
                 <div className="flex items-center justify-between gap-3">
@@ -858,7 +859,9 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
                         : t('settings.printer.quickWizardNeedsReview', 'Needs review')}
                     </div>
                     <div className="text-[11px] liquid-glass-modal-text-muted mt-1">
-                      {candidate.detectedBrand}
+                      {candidate.detectedBrand === 'Unknown'
+                        ? t('settings.printer.unknown', 'Unknown')
+                        : candidate.detectedBrand}
                     </div>
                   </div>
                 </div>
@@ -886,7 +889,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
     const awaitingConfirmation = Boolean(result?.success) && state.confirmed === null
 
     return (
-      <div key={stage.kind} className="rounded-lg border border-white/10 bg-white/5 p-3 space-y-3">
+      <div key={stage.kind} className="rounded-2xl border border-white/10 bg-white/5 p-3 space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="font-medium liquid-glass-modal-text">
@@ -920,7 +923,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         )}
 
         {result && (
-          <div className={`rounded-lg border p-3 text-xs ${
+          <div className={`rounded-2xl border p-3 text-xs ${
             result.success
               ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-100'
               : 'bg-amber-500/10 border-amber-500/20 text-amber-100'
@@ -956,7 +959,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         )}
 
         {awaitingConfirmation && (
-          <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs text-blue-100">
+          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
             <div className="font-medium mb-2">
               {t('settings.printer.quickWizardConfirmPaperResult', 'Did the paper output print correctly?')}
             </div>
@@ -1003,7 +1006,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
       </h3>
       {selectedCandidate ? (
         <div className="space-y-3">
-          <div className="p-3 rounded-lg border border-white/10 bg-white/5">
+          <div className="p-3 rounded-2xl border border-white/10 bg-white/5">
             <div className="flex items-center gap-2 text-sm liquid-glass-modal-text">
               <Printer className="w-4 h-4" />
               <span className="font-medium">{selectedCandidate.name}</span>
@@ -1033,7 +1036,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
 
           {sampleKinds.map(stage => renderVerificationCard(stage, stage.kind !== 'transport_text' && verification.transport_text.confirmed !== true))}
 
-          <div className={`rounded-lg border p-3 ${verificationTone(verificationStatus)}`}>
+          <div className={`rounded-2xl border p-3 ${verificationTone(verificationStatus)}`}>
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-xs font-medium">
@@ -1051,7 +1054,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
           </div>
 
           {transportFailureMessage && (
-            <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
               <div className="font-medium">
                 {t('settings.printer.quickWizardDiscoveredNotPrintableTitle', 'Discovered, not yet printable')}
               </div>
@@ -1068,17 +1071,17 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
           )}
 
           {selectedCandidate.reasons.length > 0 && (
-            <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-              <div className="text-xs font-medium text-blue-300 mb-1">
+            <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20">
+              <div className="text-xs font-medium text-amber-300 mb-1">
                 {t('settings.printer.quickWizardWhyTitle', 'Why this recommendation')}
               </div>
-              <ul className="text-xs text-blue-100/80 space-y-1">
+              <ul className="text-xs text-amber-100/80 space-y-1">
                 {selectedCandidate.reasons.slice(0, 3).map(reason => (
                   <li key={reason}>• {reason}</li>
                 ))}
               </ul>
               {selectedCandidate.probeHints?.preferredEmulationOrder?.length ? (
-                <div className="mt-2 text-[11px] text-blue-100/70">
+                <div className="mt-2 text-[11px] text-amber-100/70">
                   {t('settings.printer.quickWizardProbeOrder', 'Probe order')}:{' '}
                   {selectedCandidate.probeHints.preferredEmulationOrder.join(' → ')}
                 </div>
@@ -1100,7 +1103,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         {t('settings.printer.quickWizardStyleTitle', 'Step 3: Defaults & Readability')}
       </h3>
 
-      <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-xs liquid-glass-modal-text-muted">
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-xs liquid-glass-modal-text-muted">
         {t(
           'settings.printer.quickWizardCompatibilityDefaults',
           'Safe defaults for new profiles: Classic template, text render mode, and automatic protocol selection. Optional logo / raster support is only trusted after confirmation.',
@@ -1123,7 +1126,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
 
       <div>
         <label className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
-          {t('settings.printer.quickWizardReadability', 'Readability')}
+          {t('settings.printer.quickWizardReadability.label', 'Readability')}
         </label>
         <div className="grid grid-cols-3 gap-2">
           {(['small', 'normal', 'large'] as ReadabilitySize[]).map(size => (
@@ -1133,7 +1136,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
               onClick={() => setReadability(size)}
               className={`px-3 py-2 rounded-lg border text-sm ${
                 readability === size
-                  ? 'bg-blue-500/15 border-blue-400/50 text-blue-100'
+                  ? 'bg-amber-500/15 border-amber-400/50 text-amber-100'
                   : 'bg-white/5 border-white/10 liquid-glass-modal-text'
               }`}
             >
@@ -1143,7 +1146,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         </div>
       </div>
 
-      <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
         <div className="text-xs liquid-glass-modal-text-muted mb-2">
           {t('settings.printer.quickWizardLivePreview', 'Live style preview')}
         </div>
@@ -1175,7 +1178,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         {t('settings.printer.quickWizardSaveTitle', 'Step 4: Save & Assign')}
       </h3>
 
-      <div className={`rounded-lg border p-3 ${verificationTone(verificationStatus)}`}>
+      <div className={`rounded-2xl border p-3 ${verificationTone(verificationStatus)}`}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="font-medium">
@@ -1227,7 +1230,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         </label>
       </div>
 
-      <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-xs liquid-glass-modal-text-muted">
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-xs liquid-glass-modal-text-muted">
         <div>{t('settings.printer.quickWizardSavedTemplate', 'Template')}: {template}</div>
         <div>{t('settings.printer.quickWizardSavedRenderMode', 'Render mode')}: {derivedCapabilities.renderMode || 'text'}</div>
         <div>{t('settings.printer.quickWizardSavedEmulation', 'Emulation')}: {derivedCapabilities.emulation || 'auto'}</div>
@@ -1248,9 +1251,9 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
                 key={step}
                 type="button"
                 onClick={() => setCurrentStep(step)}
-                className={`px-2.5 py-1.5 text-xs rounded-md transition ${
+                className={`px-2.5 py-1.5 text-xs rounded-md transition active:scale-95 ${
                   active
-                    ? 'bg-blue-500/20 text-blue-200'
+                    ? 'bg-amber-500/20 text-amber-100'
                     : passed
                     ? 'text-emerald-200'
                     : 'liquid-glass-modal-text-muted'
@@ -1262,8 +1265,10 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
           })}
         </div>
         <button onClick={onOpenExpert} className={liquidGlassModalButton('secondary', 'sm')} type="button">
-          <SlidersHorizontal className="w-4 h-4 mr-1" />
-          {t('settings.printer.quickWizardAdvanced', 'Expert Settings')}
+          <span className="inline-flex items-center justify-center gap-1">
+            <SlidersHorizontal className="w-4 h-4 shrink-0" />
+            {t('settings.printer.quickWizardAdvanced', 'Expert Settings')}
+          </span>
         </button>
       </div>
 
@@ -1289,10 +1294,10 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
               className={liquidGlassModalButton('primary', 'md')}
               type="button"
             >
-              <span className="inline-flex items-center gap-1">
-                <Wand2 className="w-4 h-4" />
+              <span className="inline-flex items-center justify-center gap-1">
+                <Wand2 className="w-4 h-4 shrink-0" />
                 {t('common.actions.next', 'Next')}
-                <ChevronRight className="w-4 h-4" />
+                <ChevronRight className="w-4 h-4 shrink-0" />
               </span>
             </button>
           ) : (

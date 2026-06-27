@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { translateRoleName } from '../../utils/role-labels';
 import { useShift } from '../../contexts/shift-context';
 import { useTheme } from '../../contexts/theme-context';
 import { useFeatures } from '../../hooks/useFeatures';
 import type { ZReportData } from '../../types/reports';
 import { exportZReportToCSV, exportStaffOrdersToCSV } from '../../utils/reportExport';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
-import { toLocalDateString } from '../../utils/date';
+import { parseLocalDateString, toLocalDateString } from '../../utils/date';
 import { clearBusinessDayStorage } from '../../utils/session-utils';
 import {
   normalizeZReportData,
@@ -22,13 +23,17 @@ import {
   Banknote,
   CalendarDays,
   CheckCircle,
-  CreditCard,
+  ChevronDown,
   Download,
   FileText,
+  ListChecks,
+  Lock,
   Printer,
+  Receipt,
   RefreshCw,
   ShieldCheck,
   UploadCloud,
+  Users,
   X,
   XCircle,
 } from 'lucide-react';
@@ -61,6 +66,56 @@ function extractErrorMessage(
   return formatOperatorFacingError(error, fallback, t);
 }
 
+// Normalize a raw backend slug to a canonical lookup key: lowercase, trim, and collapse
+// '-'/'_'/whitespace so dine-in/dine_in, room_service/room-service, drive-through/
+// drive_through and room_charge/room-charge each resolve to one localized label.
+function normalizeZReportSlug(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '_');
+}
+
+// Localized display label for a Z-report audit row's order type. The raw filter values
+// (order.orderType) are kept for matching; only the visible audit label is localized here.
+function localizeZReportOrderType(
+  value: unknown,
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  const key = ({
+    delivery: 'delivery',
+    dine_in: 'dineIn',
+    pickup: 'pickup',
+    takeaway: 'takeaway',
+    drive_through: 'driveThrough',
+    room_service: 'roomService',
+  } as Record<string, string>)[normalizeZReportSlug(value)];
+  if (!key) {
+    return t('modals.zReport.orderTypes.unknown', { defaultValue: 'Unknown' });
+  }
+  return t(`modals.zReport.orderTypes.${key}`, { defaultValue: key });
+}
+
+// Localized display label for a Z-report audit row's payment/method/status token. The
+// audit field can carry either a payment method (cash/card/split/room_charge) or a
+// settlement status (pending/unpaid), so both are mapped; anything else (incl. missing
+// or 'unknown') falls back to a localized Unknown label — never the raw slug.
+function localizeZReportPaymentLabel(
+  value: unknown,
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  const key = ({
+    cash: 'cash',
+    card: 'card',
+    split: 'split',
+    room_charge: 'roomCharge',
+    pending: 'pending',
+    unpaid: 'unpaid',
+    unknown: 'unknown',
+  } as Record<string, string>)[normalizeZReportSlug(value)];
+  if (!key) {
+    return t('modals.zReport.paymentLabels.unknown', { defaultValue: 'Unknown' });
+  }
+  return t(`modals.zReport.paymentLabels.${key}`, { defaultValue: key });
+}
+
 const ZReportModal: React.FC<ZReportModalProps> = ({
   isOpen,
   onClose,
@@ -86,13 +141,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const strongTextClass = 'text-white';
   const mutedTextClass = 'text-slate-200/90';
   const softTextClass = 'text-slate-300/75';
-  const glassControlClass = 'border-white/[0.15] bg-white/[0.12] text-white shadow-sm shadow-black/10 backdrop-blur-xl hover:bg-white/[0.18]';
+  const glassControlClass = 'border-white/[0.15] bg-white/[0.12] text-white shadow-sm shadow-black/10 backdrop-blur-xl active:bg-white/[0.18]';
   const canExecuteZReport =
     isFeatureEnabled('zReportExecution') ||
     (!featuresLoading && (isMainTerminal || (!isMobileWaiter && !parentTerminalId)));
   const showMainTerminalWarning = !featuresLoading && !canExecuteZReport;
+  // Round 320: the decision panel's 3-way action switch checks lockedTerminal FIRST, so the green submit
+  // branch is reachable only when `canExecuteZReport && closeoutReady` -- identical to the prior gate.
+  const lockedTerminal = !canExecuteZReport;
   const isPendingLocalSubmit = lockDate;
-  const [activeTab, setActiveTab] = useState<'summary' | 'cash' | 'staff' | 'orders'>('summary');
+  const [activeTab, setActiveTab] = useState<'review' | 'money' | 'staff' | 'orders'>('review');
   const [selectedDate, setSelectedDate] = useState<string>(() => date || toLocalDateString(new Date()));
   const [isUsingLiveDefaultDate, setIsUsingLiveDefaultDate] = useState(() => !lockDate);
   const [zReport, setZReport] = useState<ZReportData | null>(null);
@@ -151,7 +209,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     if (isOpen && !wasOpenRef.current) {
       const nextDate = date || toLocalDateString(new Date());
       pendingOpenDateRef.current = nextDate;
-      setActiveTab('summary');
+      setActiveTab('review');
       setOrderTypeFilter('all');
       setPaymentMethodFilter('all');
       setError(null);
@@ -344,17 +402,31 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const liveModeLabel = isUsingLiveDefaultDate && !lockDate
     ? t('modals.zReport.liveCurrentWindow')
     : t('modals.zReport.historicalPreview');
+  // Round 322: the working day reads as a friendly, localized date in the header (not a raw ISO string),
+  // with a small chip telling the cashier whether it is the live current day or a past day they picked.
+  // Round 351 (live QA): the chip MUST be derived from the SAME date shown in the header
+  // (resolvedBusinessDate) compared to the terminal-local today -- NOT from isUsingLiveDefaultDate. When the
+  // report payload returns a different (past) date than the live-default selectedDate, the chip would otherwise
+  // say "Today" for a past business day. It now says "Today" only when the displayed date is valid and equals
+  // today; a returned past zReport.date shows "Past day" even if isUsingLiveDefaultDate is true.
+  const businessDateValue = parseLocalDateString(resolvedBusinessDate);
+  const isBusinessDateValid = !Number.isNaN(businessDateValue.getTime());
+  const localToday = toLocalDateString(new Date());
+  const isLiveDay = !lockDate && isBusinessDateValid && resolvedBusinessDate === localToday;
+  const friendlyBusinessDate = !isBusinessDateValid
+    ? resolvedBusinessDate
+    : formatDate(businessDateValue, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
   const getRoleBadgeClasses = (role?: string) => {
     switch (String(role || '').toLowerCase()) {
       case 'driver':
-        return 'border-indigo-300/30 bg-indigo-500/15 text-indigo-100';
+        return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
       case 'cashier':
       case 'manager':
         return 'border-amber-300/30 bg-amber-500/15 text-amber-100';
       case 'server':
       case 'waiter':
-        return 'border-cyan-300/30 bg-cyan-500/15 text-cyan-100';
+        return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
       default:
         return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
     }
@@ -425,7 +497,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     if (!drawer?.closedAt) {
       return {
         label: t('common.status.active', { defaultValue: 'Active' }),
-        className: 'border-cyan-300/30 bg-cyan-500/15 text-cyan-100',
+        className: 'border-slate-200/20 bg-white/[0.08] text-slate-100',
       };
     }
     return {
@@ -574,11 +646,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       ? t('modals.zReport.readyToClose')
       : t('modals.zReport.needsAttention');
 
+  // Round 323: a zero-variance unreconciled drawer is NOT a money discrepancy -- it just means the cashier
+  // has not finished checkout/reconciliation yet. Split the cash-drawer copy so that case reads as a calm
+  // "cashier checkout needed" instead of a scary variance warning. Blocking + counts are unchanged.
+  const cashDrawerNeedsAttention = closeoutUnreconciledDrawers > 0 || closeoutHasVariance;
   const closeoutChecklistItems: Array<{
     key: string;
     label: string;
     description: string;
     state: CloseoutChecklistState;
+    actionLabel?: string;
   }> = [
     {
       key: 'sync',
@@ -601,13 +678,24 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     {
       key: 'cash-drawer',
       label: t('modals.zReport.cashDrawer'),
-      description: closeoutUnreconciledDrawers > 0 || closeoutHasVariance
-        ? t('modals.zReport.cashDrawerNeedsReview', {
-          drawers: closeoutUnreconciledDrawers,
-          variance: formatMoney(closeoutDrawerVariance),
-        })
-        : t('modals.zReport.cashDrawerReady'),
-      state: closeoutUnreconciledDrawers > 0 || closeoutHasVariance ? 'warning' : 'ready',
+      // Three calm cases: (1) variance present -> money review wording with the amount; (2) both
+      // unreconciled AND variance -> short checkout + variance line; (3) unreconciled with zero variance
+      // -> plain "the cashier just needs to finish checkout", NOT a discrepancy warning.
+      description: !cashDrawerNeedsAttention
+        ? t('modals.zReport.cashDrawerReady')
+        : closeoutHasVariance
+          ? (closeoutUnreconciledDrawers > 0
+            ? t('modals.zReport.cashDrawerCheckoutAndVariance', { variance: formatMoney(closeoutDrawerVariance) })
+            : t('modals.zReport.cashDrawerNeedsReview', { variance: formatMoney(closeoutDrawerVariance) }))
+          : t('modals.zReport.cashDrawerCheckoutNeeded'),
+      // Zero-variance unresolved drawers want a calm "checkout" action; a real variance wants "reconcile".
+      // Either way the state stays amber/warning -- never a red money/sync error.
+      actionLabel: cashDrawerNeedsAttention
+        ? (closeoutHasVariance
+          ? t('modals.zReport.clarity.cashDrawerReconcileAction', { defaultValue: 'Reconcile drawer' })
+          : t('modals.zReport.clarity.cashDrawerCheckoutAction', { defaultValue: 'Close cashier shift' }))
+        : undefined,
+      state: cashDrawerNeedsAttention ? 'warning' : 'ready',
     },
     {
       key: 'expenses',
@@ -626,6 +714,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       state: showMainTerminalWarning ? 'warning' : 'ready',
     },
   ];
+
+  // Round 304: the close-day hero names the ONE thing to fix first -- the first non-ready checklist
+  // item, in checklist priority order (sync -> payments -> cash drawer -> expenses -> staff).
+  const primaryIssue = closeoutChecklistItems.find((item) => item.state !== 'ready') ?? null;
+  // Short, localized status word for each Check-tab row (icon + label + status).
+  const closeoutStateLabel = (state: CloseoutChecklistState): string => {
+    if (state === 'ready') return t('modals.zReport.clarity.statusReady', { defaultValue: 'Ready' });
+    if (state === 'error') return t('modals.zReport.clarity.statusAction', { defaultValue: 'Action needed' });
+    if (state === 'pending') return t('modals.zReport.clarity.statusChecking', { defaultValue: 'Checking…' });
+    return t('modals.zReport.clarity.statusAttention', { defaultValue: 'Needs attention' });
+  };
 
   const totalOrders = summarySales.totalOrders ?? 0;
   const cashCollected = summarySales.cashSales ?? 0;
@@ -652,11 +751,19 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const totalShiftCount = zReport?.shiftCount ?? zReport?.shifts?.total ?? staffReportsSorted.length;
   const driverCount = zReport?.driverEarnings?.breakdown?.length ?? zReport?.shifts?.driver ?? 0;
   const completedDeliveries = zReport?.driverEarnings?.completedDeliveries ?? zReport?.driverEarnings?.totalDeliveries ?? 0;
-  const reportTabs: Array<{ key: typeof activeTab; label: string }> = [
-    { key: 'summary', label: t('modals.zReport.tabs.overview', { defaultValue: t('modals.zReport.tabs.summary') }) },
-    { key: 'cash', label: t('modals.zReport.cashDrawer') },
-    { key: 'staff', label: t('modals.zReport.staff') },
-    { key: 'orders', label: t('modals.zReport.orders') },
+  // Round 304: the four tabs read like guided steps -- each carries a short icon + label. The Check
+  // step keeps the 'review' key and the clarity.tabReview label (its EN value is now "Check"; el/de/fr/it
+  // already read "Check"/"Verify").
+  const reportTabs: Array<{
+    key: typeof activeTab;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    badge?: number;
+  }> = [
+    { key: 'review', label: t('modals.zReport.clarity.tabReview', { defaultValue: 'Check' }), icon: ListChecks, badge: closeoutIssueCount },
+    { key: 'money', label: t('modals.zReport.clarity.tabMoney', { defaultValue: 'Money' }), icon: Banknote },
+    { key: 'staff', label: t('modals.zReport.staff'), icon: Users },
+    { key: 'orders', label: t('modals.zReport.orders'), icon: Receipt, badge: totalOrders },
   ];
   const allOrderDetails = staffReportsSorted.flatMap((staff) =>
     Array.isArray(staff.ordersDetails)
@@ -683,7 +790,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       return <XCircle className="h-4 w-4 text-rose-500" />;
     }
     if (state === 'pending') {
-      return <RefreshCw className="h-4 w-4 text-cyan-500" />;
+      return <RefreshCw className="h-4 w-4 text-slate-400" />;
     }
     return <AlertTriangle className="h-4 w-4 text-amber-500" />;
   };
@@ -697,60 +804,46 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       header={(
         <header
           data-z-report-command-header
-          className="flex shrink-0 flex-col gap-3 border-b border-white/10 bg-white/[0.06] px-4 py-3 text-white backdrop-blur-xl lg:flex-row lg:items-center lg:justify-between"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 bg-white/[0.06] px-4 py-3 text-white backdrop-blur-xl"
         >
+          {/* Round 322: a calm, human identity block -- "Close day" + the working day as a FRIENDLY
+              localized date (e.g. "Wednesday, 25 June 2026"), never a raw ISO string. A small chip says
+              whether it is today's live day or a past day. The verdict ("ready"/"needs attention") lives
+              ONLY in the status card below, so the header no longer repeats it. */}
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/[0.15] bg-white/[0.12] backdrop-blur-xl">
               <FileText className={`h-5 w-5 ${softTextClass}`} />
             </div>
             <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-3">
-                <h2 className={`text-2xl font-black tracking-tight ${strongTextClass}`}>
-                  {t('modals.zReport.title', { date: '' }).replace(/\s+-\s*$/, '')}
-                </h2>
-                <span className={`text-sm font-bold ${softTextClass}`}>{resolvedBusinessDate}</span>
-                <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1 text-xs font-bold text-emerald-700 dark:text-emerald-300">
-                  {liveModeLabel}
+              <h2 className={`text-2xl font-black tracking-tight ${strongTextClass}`}>
+                {t('modals.zReport.clarity.assistantTitle', { defaultValue: 'Close day' })}
+              </h2>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <span className={`break-words text-sm font-bold ${softTextClass}`}>{friendlyBusinessDate}</span>
+                <span
+                  data-z-report-day-chip
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-black ${isLiveDay ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-white/[0.18] bg-white/[0.08] text-slate-200'}`}
+                >
+                  {isLiveDay ? <CheckCircle className="h-3 w-3" /> : <CalendarDays className="h-3 w-3" />}
+                  {isLiveDay
+                    ? t('modals.zReport.clarity.dayLive', { defaultValue: 'Today' })
+                    : t('modals.zReport.clarity.dayHistorical', { defaultValue: 'Past day' })}
                 </span>
-              </div>
-              <div className={`mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs font-semibold ${softTextClass}`}>
-                <span>{t('modals.zReport.businessWindow')}: {formatWindowDateTime(resolvedPeriod.start)} - {formatWindowDateTime(resolvedPeriod.end)}</span>
-                <span>{t('modals.zReport.terminal')}: {zReport?.terminalName || '—'}</span>
               </div>
             </div>
           </div>
 
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {[
-              { key: 'refresh', label: t('modals.zReport.refresh'), icon: RefreshCw, onClick: handleRefreshReport, disabled: loading },
-              { key: 'print', label: t('modals.zReport.print'), icon: Printer, onClick: handlePrintReport, disabled: printing || !zReport },
-              { key: 'export', label: t('modals.zReport.exportCSV'), icon: UploadCloud, onClick: handleExportReport, disabled: !zReport },
-            ].map((action) => {
-              const Icon = action.icon;
-              return (
-                <button
-                  key={action.key}
-                  type="button"
-                  onClick={action.onClick}
-                  disabled={action.disabled}
-                  className={`flex h-12 min-w-[68px] flex-col items-center justify-center gap-1 rounded-xl border px-3 text-[11px] font-bold transition ${glassControlClass} ${action.disabled ? 'cursor-not-allowed opacity-50' : ''}`}
-                  title={action.label}
-                >
-                  <Icon className={`h-4 w-4 ${action.key === 'refresh' && loading ? 'animate-spin' : ''}`} />
-                  <span>{action.label}</span>
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              onClick={onClose}
-              className={`flex h-12 min-w-[68px] flex-col items-center justify-center gap-1 rounded-xl border px-3 text-[11px] font-bold transition ${glassControlClass}`}
-              title={t('common.actions.close')}
-            >
-              <X className="h-4 w-4" />
-              <span>{t('common.actions.close')}</span>
-            </button>
-          </div>
+          {/* Round 316: the header is now JUST identity + close. Refresh / Print / CSV are no longer a
+              competing command bar up here -- they moved into the details panel's tab row as a quiet
+              secondary cluster, so the first thing the operator sees is the day, the status, and the steps. */}
+          <button
+            type="button"
+            onClick={onClose}
+            className={`flex h-11 w-11 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl border transition ${glassControlClass}`}
+            aria-label={t('common.actions.close')}
+          >
+            <X className="h-5 w-5" />
+          </button>
         </header>
       )}
       size="full"
@@ -765,147 +858,224 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         {(loading || error) && (
           <div className="mb-3 shrink-0">
             {loading && (
-              <div className={`rounded-xl border px-4 py-3 text-sm font-bold ${dashboardInsetClass}`}>
+              <div className={`rounded-2xl border px-4 py-3 text-sm font-bold ${dashboardInsetClass}`}>
                 {t('modals.zReport.loading')}
               </div>
             )}
             {error && (
-              <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm font-bold text-red-700 dark:text-red-200">
+              <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm font-bold text-red-700 dark:text-red-200">
                 {error}
               </div>
             )}
           </div>
         )}
 
-        <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[260px_minmax(0,1fr)_270px] 2xl:grid-cols-[270px_minmax(0,1fr)_285px]">
-          <aside
-            data-z-report-closeout-checklist
-            className={`flex min-h-0 flex-col overflow-hidden rounded-2xl border ${dashboardPanelClass}`}
+        {/* === Round 320: ONE calm "Close day assistant" panel -- it answers the single question a cashier
+            has ("Can I close the day now?") instead of three competing step cards. It holds, top to bottom:
+            the compact business-day control + a quiet window/terminal detail line; a large ready/blocked/
+            locked verdict with a single issue-count badge; and exactly ONE primary action. The action is a
+            3-way mutually-exclusive switch:
+              - locked (this terminal cannot close)  -> a calm Locked chip + a plain reason line (no submit),
+              - ready (+ executable)                 -> the green submit, with the EXACT preserved gating,
+              - blocked                              -> one amber "Review issues" jump to the Review tab.
+            Because `lockedTerminal = !canExecuteZReport` is checked first, the green submit branch is reached
+            only when `canExecuteZReport && closeoutReady` -- identical to the prior gate. Money / staff /
+            order ledgers live behind the secondary detail tabs below. Handlers + aria-labels unchanged. === */}
+        <div data-z-report-close-assistant className="flex shrink-0 flex-col gap-2.5">
+          <div
+            data-z-report-decision-panel
+            className={`rounded-3xl border p-4 sm:p-5 ${
+              lockedTerminal
+                ? 'border-white/[0.14] bg-white/[0.05]'
+                : closeoutReady
+                  ? 'border-emerald-400/40 bg-emerald-500/[0.08]'
+                  : 'border-amber-400/45 bg-amber-400/[0.1]'
+            }`}
           >
-            <div className={`m-3 rounded-2xl border p-4 backdrop-blur-xl ${closeoutReady ? 'border-emerald-400/40 bg-emerald-500/[0.12] text-emerald-950 dark:text-emerald-50' : 'border-amber-400/50 bg-amber-400/[0.16] text-amber-950 dark:text-amber-50'}`}>
-              <div className="flex items-start gap-3">
-                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${closeoutReady ? 'bg-emerald-500/20 text-emerald-500' : 'bg-amber-500/20 text-amber-500'}`}>
-                  {closeoutReady ? <CheckCircle className="h-6 w-6" /> : <AlertTriangle className="h-6 w-6" />}
+            {/* The verdict ("Can I close now?") + the SINGLE next action. No repeated wording: the verdict
+                states the status; the one button states the next action. When blocked, the button itself
+                names the first thing to fix in plain language ("Fix Cash drawer"). */}
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl ${lockedTerminal ? 'bg-white/[0.08] text-slate-300' : closeoutReady ? 'bg-emerald-500/20 text-emerald-500' : 'bg-amber-500/20 text-amber-500'}`}>
+                  {loading ? <RefreshCw className="h-6 w-6 animate-spin" /> : lockedTerminal ? <Lock className="h-6 w-6" /> : closeoutReady ? <CheckCircle className="h-7 w-7" /> : <AlertTriangle className="h-7 w-7" />}
                 </div>
                 <div className="min-w-0">
-                  <div className="break-words text-lg font-black text-inherit">{closeoutStatusLabel}</div>
-                  <div className="mt-1 text-xs font-semibold leading-5 text-inherit opacity-80">
-                    {closeoutReady ? t('modals.zReport.syncReady') : t('modals.zReport.reviewItems')}
+                  <div className={`break-words text-2xl font-black leading-tight ${strongTextClass}`}>{closeoutStatusLabel}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <span data-z-report-issues-badge className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-black ${closeoutIssueCount === 0 ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : 'border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-200'}`}>
+                      {closeoutIssueCount === 0 ? <CheckCircle className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+                      {t('modals.zReport.clarity.issues', { defaultValue: 'Issues' })}: {closeoutIssueCount}
+                    </span>
                   </div>
+                  {/* Locked is the only state that needs a reason line; ready/blocked say it all in the action. */}
+                  {lockedTerminal && (
+                    <div className={`mt-1 break-words text-xs font-semibold leading-5 ${mutedTextClass}`}>
+                      {showMainTerminalWarning
+                        ? t('terminal.messages.zReportMainOnly', 'Z-Report can only be executed from Main POS terminal')
+                        : t('common.loading', 'Loading...')}
+                    </div>
+                  )}
                 </div>
+              </div>
+
+              {/* The single next action -- mutually exclusive: locked chip / green Close day / amber Fix X. */}
+              <div data-z-report-primary-action className="shrink-0">
+                {lockedTerminal ? (
+                  <span className={`inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-black ${dashboardInsetClass}`}>
+                    <Lock className="h-4 w-4" />
+                    {t('modals.zReport.clarity.locked', { defaultValue: 'Locked' })}
+                  </span>
+                ) : closeoutReady ? (
+                  <button
+                    type="button"
+                    onClick={handleSubmitReport}
+                    className={`inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl border border-emerald-500/40 bg-emerald-600 px-6 text-base font-black text-white shadow-lg shadow-emerald-500/20 transition active:scale-[0.99] active:bg-emerald-500 sm:w-auto ${submitting || loading || Boolean(resolvingBlockerKey) || paymentBlockers.length > 0 ? 'cursor-not-allowed opacity-55' : ''}`}
+                    disabled={submitting || loading || Boolean(resolvingBlockerKey) || paymentBlockers.length > 0}
+                    aria-busy={submitting}
+                  >
+                    <ShieldCheck className="h-5 w-5" />
+                    {submitting ? t('modals.zReport.submitting') : submitButtonLabel}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('review')}
+                    className="inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl border border-amber-500/50 bg-amber-500/15 px-6 text-base font-black text-amber-700 transition active:scale-[0.99] active:bg-amber-500/25 dark:text-amber-200 sm:w-auto"
+                  >
+                    <ListChecks className="h-5 w-5" />
+                    {primaryIssue
+                      ? (primaryIssue.actionLabel
+                        ?? t('modals.zReport.clarity.fixAction', { issue: primaryIssue.label, defaultValue: 'Fix {{issue}}' }))
+                      : t('modals.zReport.clarity.reviewIssues', { defaultValue: 'Review issues' })}
+                  </button>
+                )}
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-3 scrollbar-hide">
-              {closeoutChecklistItems.map((item) => (
-                <div key={item.key} className={`rounded-xl border p-3 ${dashboardInsetClass}`}>
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 shrink-0">{renderChecklistIcon(item.state)}</div>
-                    <div className="min-w-0">
-                      <div className={`break-words text-sm font-black ${strongTextClass}`}>{item.label}</div>
-                      <div className={`mt-1 break-words text-xs font-semibold leading-5 ${mutedTextClass}`}>{item.description}</div>
-                    </div>
-                  </div>
+            {/* Technical detail tucked behind a small summary: change the working day, and see From/Until +
+                terminal in plain words. Closed by default so the first view stays calm. */}
+            <details data-z-report-day-details className="group mt-3">
+              <summary className={`flex min-h-[44px] cursor-pointer list-none items-center gap-2 rounded-xl border px-3 text-xs font-black ${dashboardInsetClass} [&::-webkit-details-marker]:hidden`}>
+                <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
+                <span>{t('modals.zReport.clarity.detailsSummary', { defaultValue: 'Details' })}</span>
+              </summary>
+              <div className="mt-2 flex flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`flex items-center gap-1.5 text-xs font-black ${softTextClass}`}>
+                    <CalendarDays className="h-4 w-4" />
+                    {t('modals.zReport.clarity.dayStepTitle', { defaultValue: 'Business day' })}
+                  </span>
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    onChange={(e) => {
+                      setIsUsingLiveDefaultDate(false);
+                      setSelectedDate(e.target.value);
+                    }}
+                    className={`min-h-[44px] flex-1 rounded-xl border px-3 py-2 text-center text-sm font-black outline-none sm:flex-none ${glassControlClass}`}
+                    aria-label={t('modals.zReport.selectBusinessDay')}
+                    disabled={lockDate}
+                  />
                 </div>
-              ))}
+                <div className={`break-words text-[11px] font-semibold ${softTextClass}`}>
+                  {t('modals.zReport.clarity.from', { defaultValue: 'From' })}: {formatWindowDateTime(resolvedPeriod.start)} · {t('modals.zReport.clarity.until', { defaultValue: 'Until' })}: {formatWindowDateTime(resolvedPeriod.end)} · {t('modals.zReport.terminal')}: {zReport?.terminalName || '—'}
+                </div>
+              </div>
+            </details>
 
-              {paymentBlockers.length > 0 && (
-                <UnsettledPaymentBlockersPanel
-                  blockers={paymentBlockers}
-                  title={t('modals.zReport.paymentIntegrityTitle', {
-                    defaultValue: 'Orders Blocking Z-Report Closeout',
-                  })}
-                  helperText={t('modals.zReport.paymentIntegrityResolveHelper', {
-                    defaultValue:
-                      'Resolve the missing balance here. The fix is recorded against the original business-day drawer before you retry the Z-report.',
-                  })}
-                  onResolveBlocker={handleResolveBlocker}
-                  resolvingKey={resolvingBlockerKey}
-                />
-              )}
-            </div>
+            {submitResult && (
+              <div className="mt-3 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 p-3 text-xs font-bold leading-5 text-emerald-800 dark:text-emerald-200">
+                {submitResult}
+              </div>
+            )}
+          </div>
+        </div>
 
-            <div className={`m-3 mt-0 rounded-xl border p-3 ${dashboardInsetClass}`}>
-              <label className="block">
-                <span className={`flex items-center gap-2 text-xs font-black ${mutedTextClass}`}>
-                  <CalendarDays className="h-4 w-4" />
-                  {t('modals.zReport.selectBusinessDay')}
-                </span>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  onChange={(e) => {
-                    setIsUsingLiveDefaultDate(false);
-                    setSelectedDate(e.target.value);
-                  }}
-                  className={`mt-3 w-full rounded-xl border px-3 py-2 text-sm font-black outline-none ${glassControlClass}`}
-                  aria-label={t('modals.zReport.selectBusinessDay')}
-                  disabled={lockDate}
-                />
-              </label>
-              <div className={`mt-3 text-xs font-semibold ${softTextClass}`}>{liveModeLabel}</div>
-            </div>
-          </aside>
-
-          <main
-            data-z-report-main-panel
-            className={`flex min-h-0 flex-col overflow-hidden rounded-2xl border ${dashboardPanelClass}`}
-          >
-            <div className="shrink-0 border-b border-white/10 p-3">
-              <div className="grid rounded-xl border border-white/[0.12] bg-black/10 p-1 backdrop-blur-xl sm:grid-cols-4">
-                {reportTabs.map((tab) => (
+        {/* === Details: progressive-disclosure ledgers behind tabs (Money / Staff / Orders / Issues) === */}
+        <div
+          data-z-report-details
+          className={`mt-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border ${dashboardPanelClass}`}
+        >
+            {/* Round 316: detail step tabs (the progressive-disclosure ledgers) share their row with the
+                quiet secondary tools cluster (Refresh / Print / CSV) that used to crowd the header. Tabs lead
+                on the left; the tools sit right, deliberately muted -- reachable, never competing with the
+                three close-day steps above. */}
+            <div className="flex shrink-0 flex-col gap-2 border-b border-white/10 p-3 lg:flex-row lg:items-center">
+              <div className="grid flex-1 rounded-xl border border-white/[0.12] bg-black/10 p-1 backdrop-blur-xl sm:grid-cols-4">
+                {reportTabs.map((tab) => {
+                  const TabIcon = tab.icon;
+                  return (
                   <button
                     key={tab.key}
                     type="button"
                     onClick={() => setActiveTab(tab.key)}
-                    className={`min-h-[44px] rounded-lg px-3 text-sm font-black transition ${
+                    className={`inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg px-3 text-sm font-black transition-transform duration-150 active:scale-[0.98] ${
                       activeTab === tab.key
-                        ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                        ? 'bg-yellow-400 text-black shadow-lg shadow-yellow-500/20'
                         : isDarkTheme
-                          ? 'text-slate-300 hover:bg-white/[0.06]'
-                          : 'text-slate-200/80 hover:bg-white/[0.1]'
+                          ? 'text-slate-300'
+                          : 'text-slate-200/80'
                     }`}
                   >
-                    {tab.label}
+                    <TabIcon className="h-4 w-4" />
+                    <span>{tab.label}</span>
+                    {typeof tab.badge === 'number' && tab.badge > 0 && (
+                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-black ${activeTab === tab.key ? 'bg-black/15 text-black' : 'bg-amber-500/20 text-amber-700 dark:text-amber-200'}`}>{tab.badge}</span>
+                    )}
                   </button>
-                ))}
+                  );
+                })}
+              </div>
+              <div
+                data-z-report-utility-tools
+                className="flex items-center justify-end gap-1 rounded-xl border border-white/[0.1] bg-white/[0.04] p-1 backdrop-blur-xl"
+              >
+                {[
+                  { key: 'refresh', label: t('modals.zReport.refresh'), icon: RefreshCw, onClick: handleRefreshReport, disabled: loading },
+                  { key: 'print', label: t('modals.zReport.print'), icon: Printer, onClick: handlePrintReport, disabled: printing || !zReport },
+                  { key: 'export', label: t('modals.zReport.exportCSV'), icon: UploadCloud, onClick: handleExportReport, disabled: !zReport },
+                ].map((action) => {
+                  const Icon = action.icon;
+                  return (
+                    <button
+                      key={action.key}
+                      type="button"
+                      onClick={action.onClick}
+                      disabled={action.disabled}
+                      className={`inline-flex h-9 min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-bold ${softTextClass} transition active:bg-white/[0.12] ${action.disabled ? 'cursor-not-allowed opacity-50' : ''}`}
+                      aria-label={action.label}
+                    >
+                      <Icon className={`h-4 w-4 ${action.key === 'refresh' && loading ? 'animate-spin' : ''}`} />
+                      <span className="hidden md:inline">{action.label}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-hide">
-              {activeTab === 'summary' && (
+            <div data-z-report-center-scroll className="min-h-0 flex-1 overflow-y-auto p-4 pb-6 scroll-pb-6 scrollbar-hide">
+              {activeTab === 'money' && (
                 <div data-z-report-modern-summary className="space-y-4">
+                  {/* Round 316: the two money facts that used to sit on the first screen (Total sales +
+                      Expected cash) now lead the Money tab, so they stay one tap away without crowding the
+                      close-day steps. */}
+                  <div data-z-report-money-glance className="grid grid-cols-2 gap-3">
+                    <div className={`rounded-2xl border p-3 ${dashboardTileClass}`}>
+                      <div className={`flex items-center gap-1.5 text-[11px] font-bold ${softTextClass}`}><Banknote className="h-3.5 w-3.5" />{t('modals.zReport.clarity.totalSales', { defaultValue: 'Total sales' })}</div>
+                      <div className="mt-0.5 break-words text-lg font-black text-emerald-600 dark:text-emerald-300">{formatMoney(totalSales)}</div>
+                    </div>
+                    <div className={`rounded-2xl border p-3 ${dashboardTileClass}`}>
+                      <div className={`flex items-center gap-1.5 text-[11px] font-bold ${softTextClass}`}><ShieldCheck className="h-3.5 w-3.5" />{t('modals.zReport.clarity.expectedCash', { defaultValue: 'Expected cash' })}</div>
+                      <div className={`mt-0.5 break-words text-lg font-black ${strongTextClass}`}>{formatMoney(expectedCash)}</div>
+                    </div>
+                  </div>
                   <section data-z-report-money-reconciliation className="space-y-4">
                     <div>
                       <h3 className={`text-2xl font-black ${strongTextClass}`}>{t('modals.zReport.moneyReconciliation')}</h3>
                     </div>
 
-                    <div className="grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3">
-                      {[
-                        { key: 'total', icon: FileText, label: t('modals.zReport.actualEarned'), value: formatMoney(totalSales), tone: 'text-emerald-600 dark:text-emerald-300' },
-                        { key: 'cash', icon: Banknote, label: t('modals.zReport.cashSales'), value: formatMoney(cashCollected), tone: 'text-amber-600 dark:text-amber-300' },
-                        { key: 'card', icon: CreditCard, label: t('modals.zReport.cardSales'), value: formatMoney(cardCollected), tone: 'text-blue-600 dark:text-blue-300' },
-                        { key: 'expenses', icon: FileText, label: t('modals.zReport.totalExpenses'), value: formatMoney(expensesTotal), tone: 'text-orange-600 dark:text-orange-300' },
-                        { key: 'variance', icon: AlertTriangle, label: t('modals.zReport.variance'), value: formatMoney(closeoutDrawerVariance), tone: closeoutHasVariance ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-600 dark:text-emerald-300' },
-                      ].map((card) => {
-                        const Icon = card.icon;
-                        return (
-                          <div key={card.key} className={`min-w-0 rounded-xl border p-4 ${dashboardTileClass}`}>
-                            <div className="flex min-w-0 items-start gap-3">
-                              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.12] bg-white/[0.12] backdrop-blur-xl">
-                                <Icon className={`h-4 w-4 ${softTextClass}`} />
-                              </div>
-                              <div className="min-w-0">
-                                <div className={`break-words text-xs font-bold leading-4 ${softTextClass}`}>{card.label}</div>
-                                <div className={`mt-2 break-words text-xl font-black leading-tight ${card.tone}`}>{card.value}</div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <div className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
+                    <div className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
                       <div className="grid gap-3 text-center text-sm font-black md:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr_auto_1fr]">
                         <div><div className={softTextClass}>{t('modals.zReport.opening')}</div><div>{formatMoney(drawerOpening)}</div></div>
                         <div className={`hidden md:block ${softTextClass}`}>+</div>
@@ -916,38 +1086,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         <div><div className={softTextClass}>{t('modals.zReport.expected')}</div><div className="text-emerald-600 dark:text-emerald-300">{formatMoney(expectedCash)}</div></div>
                       </div>
                     </div>
-
-                    <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-                      {[
-                        { key: 'shifts', icon: CheckCircle, label: t('modals.zReport.totalShifts'), value: totalShiftCount, helper: `${t('common.status.active', { defaultValue: 'Active' })}: ${activeShiftCount} · ${t('modals.zReport.closing')}: ${closedShiftCount}` },
-                        { key: 'orders', icon: FileText, label: t('modals.zReport.orders'), value: totalOrders, helper: t('modals.zReport.totalOrders') },
-                        { key: 'drivers', icon: CreditCard, label: t('modals.zReport.deliveries'), value: driverCount, helper: `${t('modals.zReport.totalDeliveries')}: ${completedDeliveries}` },
-                        { key: 'drawers', icon: AlertTriangle, label: t('modals.zReport.unreconciledDrawers'), value: closeoutUnreconciledDrawers, helper: closeoutHasVariance ? formatMoney(closeoutDrawerVariance) : t('modals.zReport.yes') },
-                      ].map((card) => {
-                        const Icon = card.icon;
-                        return (
-                          <div key={card.key} className={`min-w-0 rounded-xl border p-4 ${dashboardTileClass}`}>
-                            <div className="flex items-start gap-3">
-                              <Icon className="mt-1 h-5 w-5 shrink-0 text-cyan-500" />
-                              <div className="min-w-0">
-                                <div className={`break-words text-sm font-black ${strongTextClass}`}>{card.label}</div>
-                                <div className={`mt-2 text-2xl font-black ${strongTextClass}`}>{card.value}</div>
-                                <div className={`mt-1 break-words text-xs font-semibold leading-5 ${softTextClass}`}>{card.helper}</div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
                   </section>
                 </div>
               )}
 
-              {activeTab !== 'summary' && (
+              {(activeTab === 'review' || activeTab === 'money' || activeTab === 'staff' || activeTab === 'orders') && (
                 <div data-z-report-modern-details className="space-y-4">
-                  {activeTab === 'cash' && (
+                  {activeTab === 'money' && (
                     <section className="grid gap-4 2xl:grid-cols-2">
-                      <div className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
+                      <div className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
                         <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.drawerLedger')}</h3>
                         <div className="mt-4 space-y-3">
                           {drawerRows.length > 0 ? drawerRows.map((drawer) => {
@@ -957,10 +1104,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             const stats = [
                               { key: 'opening', label: t('modals.zReport.opening'), value: drawer.opening, tone: strongTextClass },
                               { key: 'cash', label: t('modals.zReport.cashSales'), value: drawer.cashSales, tone: 'text-amber-600 dark:text-amber-300' },
-                              { key: 'card', label: t('modals.zReport.cardSales'), value: drawer.cardSales, tone: 'text-blue-600 dark:text-blue-300' },
+                              { key: 'card', label: t('modals.zReport.cardSales'), value: drawer.cardSales, tone: 'text-amber-600 dark:text-amber-300' },
                               { key: 'drops', label: t('modals.zReport.drops'), value: drawer.drops, tone: strongTextClass },
                               { key: 'given', label: t('modals.zReport.driverCashGiven'), value: drawer.driverCashGiven, tone: 'text-orange-600 dark:text-orange-300' },
-                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: 'text-cyan-600 dark:text-cyan-300' },
+                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: 'text-slate-600 dark:text-slate-300' },
                               { key: 'staff', label: t('modals.zReport.staffPayments'), value: drawer.staffPayments, tone: 'text-rose-600 dark:text-rose-300' },
                               { key: 'variance', label: t('modals.zReport.variance'), value: variance, tone: Math.abs(variance) < 0.01 ? 'text-emerald-600 dark:text-emerald-300' : 'text-amber-600 dark:text-amber-300' },
                             ];
@@ -977,14 +1124,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                   <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${status.className}`}>{status.label}</span>
                                 </div>
 
-                                <div className="mt-4 rounded-xl border border-white/[0.12] bg-black/10 p-4">
+                                <div className="mt-4 rounded-2xl border border-white/[0.12] bg-black/10 p-4">
                                   <div className={`text-[11px] font-black uppercase tracking-[0.12em] ${softTextClass}`}>{t('modals.zReport.expected')}</div>
                                   <div className="mt-2 text-3xl font-black text-emerald-600 dark:text-emerald-300">{formatMoney(expected)}</div>
                                 </div>
 
                                 <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 2xl:grid-cols-4">
                                   {stats.map((row) => (
-                                    <div key={row.key} className="min-w-0 rounded-lg border border-white/[0.12] bg-black/10 p-3">
+                                    <div key={row.key} className="min-w-0 rounded-2xl border border-white/[0.12] bg-black/10 p-3">
                                       <div className={`break-words text-xs font-black leading-4 ${softTextClass}`}>{row.label}</div>
                                       <div className={`mt-1 break-words text-base font-black ${row.tone}`}>{formatMoney(row.value)}</div>
                                     </div>
@@ -993,16 +1140,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               </article>
                             );
                           }) : (
-                            <div className="rounded-xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noDrawers')}</div>
+                            <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noDrawers')}</div>
                           )}
                         </div>
                       </div>
 
-                      <div className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
+                      <div className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
                         <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.expenseLedger')}</h3>
                         <div className="mt-4 space-y-2">
                           {expenseRows.length > 0 ? expenseRows.map((expense) => (
-                            <div key={expense.id} className={`grid grid-cols-[minmax(0,1fr)_auto] gap-3 rounded-xl border p-3 ${dashboardTileClass}`}>
+                            <div key={expense.id} className={`grid grid-cols-[minmax(0,1fr)_auto] gap-3 rounded-2xl border p-3 ${dashboardTileClass}`}>
                               <div className="min-w-0">
                                 <div className="truncate text-sm font-black">{expense.description}</div>
                                 <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>{expense.staffName || expense.expenseType || '-'}</div>
@@ -1010,7 +1157,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               <div className="text-right text-sm font-black text-rose-600 dark:text-rose-300">{formatMoney(expense.amount)}</div>
                             </div>
                           )) : (
-                            <div className="rounded-xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noExpenseDetails')}</div>
+                            <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noExpenseDetails')}</div>
                           )}
                         </div>
                       </div>
@@ -1022,7 +1169,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.staffPerformance')}</h3>
                       <div className="mt-4">
                         {staffReportsSorted.length > 0 ? (
-                          <div className="grid gap-3 xl:grid-cols-2">
+                          /* Round 321: only go two-column when there is more than one staff report -- a lone
+                             staff card then uses the full content width instead of rendering as a half-width
+                             column with an empty second track and a hard vertical split. */
+                          <div className={`grid gap-3 ${staffReportsSorted.length > 1 ? 'xl:grid-cols-2' : 'grid-cols-1'}`}>
                             {staffReportsSorted.map((staff) => {
                               const shiftWindow = resolveShiftWindow(staff);
                               const statusLabel = formatShiftStatus(staff);
@@ -1034,8 +1184,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 { key: 'activity', label: activityLabel, value: resolveShiftActivityCount(staff), tone: strongTextClass },
                                 { key: 'sales', label: t('modals.zReport.sales'), value: formatMoney(resolveShiftEarnedTotal(staff)), tone: 'text-emerald-600 dark:text-emerald-300' },
                                 { key: 'cash', label: t('modals.zReport.cash'), value: formatMoney(staff.orders?.cashAmount), tone: 'text-amber-600 dark:text-amber-300' },
-                                { key: 'card', label: t('modals.zReport.card'), value: formatMoney(staff.orders?.cardAmount), tone: 'text-blue-600 dark:text-blue-300' },
-                                { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: 'text-cyan-600 dark:text-cyan-300' },
+                                { key: 'card', label: t('modals.zReport.card'), value: formatMoney(staff.orders?.cardAmount), tone: 'text-amber-600 dark:text-amber-300' },
+                                { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: 'text-slate-600 dark:text-slate-300' },
                               ];
                               return (
                                 <article key={staff.staffShiftId} className={`rounded-xl border p-4 ${dashboardTileClass}`}>
@@ -1047,14 +1197,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                       </div>
                                     </div>
                                     <div className="flex shrink-0 flex-wrap justify-end gap-2">
-                                      <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getRoleBadgeClasses(staff.role)}`}>{staff.role || '—'}</span>
+                                      <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getRoleBadgeClasses(staff.role)}`}>{translateRoleName(t, staff.role || '')}</span>
                                       <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getShiftStatusBadgeClasses(statusValue)}`}>{statusLabel}</span>
                                     </div>
                                   </div>
 
                                   <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
                                     {statRows.map((row) => (
-                                      <div key={row.key} className="min-w-0 rounded-lg border border-white/[0.12] bg-black/10 p-3">
+                                      <div key={row.key} className="min-w-0 rounded-2xl border border-white/[0.12] bg-black/10 p-3">
                                         <div className={`break-words text-xs font-black leading-4 ${softTextClass}`}>{row.label}</div>
                                         <div className={`mt-1 break-words text-base font-black ${row.tone}`}>{row.value}</div>
                                       </div>
@@ -1065,7 +1215,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             })}
                           </div>
                         ) : (
-                          <div className="rounded-xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noStaffReports')}</div>
+                          <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noStaffReports')}</div>
                         )}
                       </div>
                     </section>
@@ -1084,8 +1234,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 onClick={() => setOrderTypeFilter(option.value)}
                                 className={`min-h-[36px] rounded-lg px-3 text-xs font-black transition ${
                                   orderTypeFilter === option.value
-                                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
-                                    : 'text-slate-200/80 hover:bg-white/[0.1]'
+                                    ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20'
+                                    : 'text-slate-200/80 active:bg-white/[0.1]'
                                 }`}
                               >
                                 {option.label}
@@ -1101,7 +1251,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 className={`min-h-[36px] rounded-lg px-3 text-xs font-black transition ${
                                   paymentMethodFilter === option.value
                                     ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
-                                    : 'text-slate-200/80 hover:bg-white/[0.1]'
+                                    : 'text-slate-200/80 active:bg-white/[0.1]'
                                 }`}
                               >
                                 {option.label}
@@ -1112,111 +1262,73 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       </div>
                       <div className="mt-4 space-y-2">
                         {filteredOrderDetails.length > 0 ? filteredOrderDetails.map((order, index) => (
-                          <div key={order.id || index} className={`grid gap-3 rounded-xl border p-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_auto] ${dashboardTileClass}`}>
+                          <div key={order.id || index} className={`grid gap-3 rounded-2xl border p-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_auto] ${dashboardTileClass}`}>
                             <div className="min-w-0">
                               <div className={`truncate text-sm font-black ${strongTextClass}`}>{order.orderNumber || '—'}</div>
                               <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>{order.staffName}</div>
                             </div>
-                            <div className={`text-xs font-semibold ${softTextClass}`}>{order.orderType || '—'} · {order.paymentMethod || '—'}</div>
+                            <div className={`text-xs font-semibold ${softTextClass}`}>{localizeZReportOrderType(order.orderType, t)} · {localizeZReportPaymentLabel(order.paymentMethod, t)}</div>
                             <div className="text-right text-sm font-black text-emerald-600 dark:text-emerald-300">{formatMoney(order.amount)}</div>
                           </div>
                         )) : (
-                          <div className="rounded-xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noOrdersMatchFilter')}</div>
+                          <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noOrdersMatchFilter')}</div>
                         )}
                       </div>
                     </section>
                   )}
+
+                  {activeTab === 'review' && (
+                    <div className="space-y-3">
+                      {/* Round 312: the at-a-glance checks live in the compact checks row above the tabs. Here
+                          we drill into ONLY the checks that still need action (so a clean day stays short),
+                          keep the full payment-blocker resolve panel for real blockers, and show a brief
+                          all-clear when the day is ready -- no green-tick walls. */}
+                      {closeoutChecklistItems.filter((item) => item.state !== 'ready').map((item) => (
+                        <div key={item.key} className={`flex items-start gap-3 rounded-2xl border p-3 ${dashboardInsetClass}`}>
+                          <div className="shrink-0">{renderChecklistIcon(item.state)}</div>
+                          <div className="min-w-0 flex-1">
+                            <div className={`break-words text-sm font-black ${strongTextClass}`}>{item.label}</div>
+                            <div className={`mt-0.5 break-words text-xs font-semibold leading-5 ${mutedTextClass}`}>{item.description}</div>
+                          </div>
+                          <span
+                            className={`shrink-0 text-[11px] font-black ${
+                              item.state === 'error'
+                                ? 'text-rose-600 dark:text-rose-300'
+                                : item.state === 'pending'
+                                  ? softTextClass
+                                  : 'text-amber-600 dark:text-amber-300'
+                            }`}
+                          >
+                            {closeoutStateLabel(item.state)}
+                          </span>
+                        </div>
+                      ))}
+
+                      {paymentBlockers.length > 0 && (
+                        <UnsettledPaymentBlockersPanel
+                          blockers={paymentBlockers}
+                          title={t('modals.zReport.paymentIntegrityTitle', {
+                            defaultValue: 'Orders Blocking Z-Report Closeout',
+                          })}
+                          helperText={t('modals.zReport.paymentIntegrityResolveHelper', {
+                            defaultValue:
+                              'Resolve the missing balance here. The fix is recorded against the original business-day drawer before you retry the Z-report.',
+                          })}
+                          onResolveBlocker={handleResolveBlocker}
+                          resolvingKey={resolvingBlockerKey}
+                        />
+                      )}
+
+                      {closeoutReady && (
+                        <div className="rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-4 text-center text-sm font-bold text-emerald-700 dark:text-emerald-200">
+                          {t('modals.zReport.clarity.readyHint', { defaultValue: 'Everything checks out -- submit to admin.' })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          </main>
-
-          <aside
-            data-z-report-action-panel
-            className={`flex min-h-0 flex-col overflow-hidden rounded-2xl border p-4 ${dashboardPanelClass}`}
-          >
-            <div className="flex items-start gap-3">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-emerald-500/25 bg-emerald-500/10 text-emerald-500">
-                <UploadCloud className="h-5 w-5" />
-              </div>
-              <div className="min-w-0">
-                <div className={`text-xs font-black uppercase tracking-[0.18em] ${softTextClass}`}>{t('modals.zReport.actionPanelTitle')}</div>
-                <div className={`mt-1 break-words text-xl font-black ${strongTextClass}`}>{submitButtonLabel}</div>
-              </div>
-            </div>
-
-            <p className={`mt-4 break-words text-sm font-semibold leading-6 ${mutedTextClass}`}>
-              {t('modals.zReport.commitHelp')}
-            </p>
-
-            <div className={`mt-4 rounded-xl border p-4 ${dashboardInsetClass}`}>
-              <div className="flex items-center justify-between gap-3">
-                <span className={`break-words text-xs font-black uppercase tracking-[0.14em] ${softTextClass}`}>{t('modals.zReport.reviewItems')}</span>
-                <span className={`rounded-full px-2.5 py-1 text-xs font-black ${closeoutReady ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'bg-amber-500/15 text-amber-700 dark:text-amber-200'}`}>{closeoutIssueCount}</span>
-              </div>
-              <div className={`mt-4 text-3xl font-black ${strongTextClass}`}>{formatMoney(totalSales)}</div>
-              <div className={`mt-1 text-xs font-bold ${softTextClass}`}>{resolvedBusinessDate}</div>
-            </div>
-
-            <div className="mt-5 space-y-2">
-              {canExecuteZReport ? (
-                <button
-                  type="button"
-                  onClick={handleSubmitReport}
-                  className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-600 px-4 py-3 text-sm font-black text-white shadow-lg shadow-emerald-500/20 transition hover:bg-emerald-500 ${submitting || loading || Boolean(resolvingBlockerKey) || paymentBlockers.length > 0 ? 'cursor-not-allowed opacity-55' : ''}`}
-                  disabled={submitting || loading || Boolean(resolvingBlockerKey) || paymentBlockers.length > 0}
-                  aria-busy={submitting}
-                >
-                  <ShieldCheck className="h-4 w-4" />
-                  {submitting ? t('modals.zReport.submitting') : submitButtonLabel}
-                </button>
-              ) : (
-                <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm font-bold text-amber-700 dark:text-amber-200">
-                  {showMainTerminalWarning
-                    ? t('terminal.messages.zReportMainOnly', 'Z-Report can only be executed from Main POS terminal')
-                    : t('common.loading', 'Loading...')}
-                </div>
-              )}
-              <button type="button" onClick={handlePrintReport} disabled={printing || !zReport} className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border px-3 py-2 text-sm font-black transition ${glassControlClass} ${printing || !zReport ? 'cursor-not-allowed opacity-60' : ''}`}>
-                <Printer className="h-4 w-4" />
-                {printing ? t('modals.zReport.printing', 'Printing...') : t('modals.zReport.print')}
-              </button>
-              <button type="button" onClick={handleExportReport} disabled={!zReport} className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border px-3 py-2 text-sm font-black transition ${glassControlClass} ${!zReport ? 'cursor-not-allowed opacity-60' : ''}`}>
-                <FileText className="h-4 w-4" />
-                {t('modals.zReport.exportCSV')}
-              </button>
-            </div>
-
-            <div className={`mt-5 min-h-0 flex-1 overflow-y-auto border-t pt-4 scrollbar-hide ${isDarkTheme ? 'border-white/10' : 'border-white/[0.64]'}`}>
-              <div className={`text-xs font-black uppercase tracking-[0.18em] ${softTextClass}`}>{t('modals.zReport.salesSummary')}</div>
-              <div className="mt-3 space-y-2 text-sm">
-                {[
-                  { label: t('modals.zReport.businessDay'), value: resolvedBusinessDate },
-                  { label: t('modals.zReport.periodStart'), value: formatWindowDateTime(resolvedPeriod.start) },
-                  { label: t('modals.zReport.periodEnd'), value: formatWindowDateTime(resolvedPeriod.end) },
-                  { label: t('modals.zReport.terminal'), value: zReport?.terminalName || '—' },
-                  { label: t('modals.zReport.totalShifts'), value: totalShiftCount },
-                ].map((row) => (
-                  <div key={row.label} className="flex items-start justify-between gap-3">
-                    <span className={`break-words ${softTextClass}`}>{row.label}</span>
-                    <span className={`text-right font-black ${strongTextClass}`}>{row.value}</span>
-                  </div>
-                ))}
-              </div>
-
-              {submitResult && (
-                <div className="mt-4 rounded-xl border border-cyan-500/25 bg-cyan-500/10 p-3 text-xs font-bold leading-5 text-cyan-800 dark:text-cyan-200">
-                  {submitResult}
-                </div>
-              )}
-            </div>
-          </aside>
-        </div>
-
-        <div className={`mt-3 flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border px-4 py-3 text-xs font-semibold ${dashboardInsetClass}`}>
-          <span className="flex items-center gap-2"><ShieldCheck className={`h-4 w-4 ${softTextClass}`} />{t('modals.zReport.syncReady')}</span>
-          <span>{t('modals.zReport.periodEnd')}: {formatWindowDateTime(resolvedPeriod.end)}</span>
-          <span>{closeoutReady ? t('modals.zReport.readyToClose') : t('modals.zReport.needsAttention')}</span>
         </div>
       </div>
     </LiquidGlassModal>

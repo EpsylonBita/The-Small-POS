@@ -60,13 +60,13 @@ export function useWindowState(): WindowState {
     };
 
     void checkWindowState();
-    onEvent('window-state-changed', handleWindowStateChanged);
+    onEvent('window_state_changed', handleWindowStateChanged);
     window.addEventListener('resize', handleNativeWindowSignal);
     window.addEventListener('fullscreenchange', handleNativeWindowSignal);
 
     return () => {
       disposed = true;
-      offEvent('window-state-changed', handleWindowStateChanged);
+      offEvent('window_state_changed', handleWindowStateChanged);
       window.removeEventListener('resize', handleNativeWindowSignal);
       window.removeEventListener('fullscreenchange', handleNativeWindowSignal);
     };

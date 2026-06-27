@@ -6,7 +6,6 @@
  * the SyncQueue interface from shared/pos/sync-queue-types.ts.
  */
 
-import { getBridge } from '../../lib';
 import type {
   SyncQueueItem,
   SyncResult,
@@ -18,6 +17,11 @@ import type {
 } from '../../../../shared/pos/sync-queue-types';
 
 type InvokeFn = <T = unknown>(command: string, args?: Record<string, unknown>) => Promise<T>;
+
+const invokeTauriCommand: InvokeFn = async (command, args) => {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke(command, args);
+};
 
 // =============================================
 // ENQUEUE INPUT (matches Rust EnqueueInput)
@@ -53,7 +57,7 @@ export class SyncQueueBridge implements SyncQueue {
   private _pendingCount = 0;
   private _listeners: Set<(count: number) => void> = new Set();
 
-  constructor(invokeFn: InvokeFn = (command, args) => getBridge().invoke(command, args)) {
+  constructor(invokeFn: InvokeFn = invokeTauriCommand) {
     this.invokeFn = invokeFn;
   }
 

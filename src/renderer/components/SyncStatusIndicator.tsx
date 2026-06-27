@@ -13,6 +13,10 @@ import {
   Clock,
   FolderOpen,
   ChevronDown,
+  Send,
+  Wifi,
+  WifiOff,
+  X,
 } from 'lucide-react';
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
@@ -40,6 +44,7 @@ import {
   type DiagnosticsLastParitySync,
   type DiagnosticsSystemHealth,
   type DiagnosticsExportOptions,
+  type RemoteIncidentReportResponse,
   type RecoveryActionLogEntry,
   type SyncFinancialIntegrityResponse,
 } from '../../lib';
@@ -124,6 +129,29 @@ interface SyncHealthPresentation {
   iconClassName: string;
 }
 
+type SimpleHealthState = 'healthy' | 'attention' | 'support_needed';
+type SimpleServiceStatus = {
+  orders: 'working' | 'limited' | 'blocked' | 'start_shift';
+  internet: 'connected' | 'offline' | 'unknown';
+  sync: 'healthy' | 'waiting' | 'failed';
+  printer: 'ready' | 'attention' | 'failed' | 'not_configured';
+  support: 'not_needed' | 'notified' | 'not_sent' | 'failed_to_notify';
+};
+
+interface SimpleHealthSummary {
+  state: SimpleHealthState;
+  canContinueOrders: boolean;
+  orderGuidance: string;
+  title: string;
+  message: string;
+  recommendedActions: string[];
+  problemExplanation: string;
+  primaryAction: 'refresh' | 'send_support' | 'export';
+  secondaryAction: 'send_support' | 'export' | 'advanced';
+  serviceStatuses: SimpleServiceStatus;
+  advanced: DiagnosticsSystemHealth | null;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -133,6 +161,177 @@ const createDefaultFinancialStats = (): DiagnosticsFinancialQueueStatus => ({
   staff_payments: { pending: 0, failed: 0 },
   shift_expenses: { pending: 0, failed: 0 },
 });
+
+const countBacklog = (health: DiagnosticsSystemHealth | null): number => {
+  if (!health?.syncBacklog) return 0;
+  return Object.values(health.syncBacklog).reduce((sum, statuses) => {
+    return (
+      sum +
+      Object.entries(statuses)
+        .filter(([status]) => status !== 'synced' && status !== 'applied')
+        .reduce((inner, [, count]) => inner + count, 0)
+    );
+  }, 0);
+};
+
+const countPrinterFailures = (health: DiagnosticsSystemHealth | null): number => {
+  return (
+    health?.printerStatus?.recentJobs?.filter((job) =>
+      String(job.status || '').toLowerCase().includes('fail'),
+    ).length ?? 0
+  );
+};
+
+const buildSimpleHealthSummary = ({
+  health,
+  syncStatus,
+  supportStatus,
+  isShiftActive,
+}: {
+  health: DiagnosticsSystemHealth | null;
+  syncStatus: SyncStatus;
+  supportStatus: SimpleServiceStatus['support'];
+  isShiftActive: boolean;
+}): SimpleHealthSummary => {
+  const backlog = countBacklog(health);
+  const failedFinancialItems =
+    (health?.financialQueueStatus?.totalFailed ?? 0) ||
+    (health?.financialQueueStatus?.failedPaymentItems ?? 0) ||
+    syncStatus.failedPaymentItems;
+  const invalidOrders = health?.invalidOrders?.count ?? 0;
+  const panicCount = health?.panicCount ?? 0;
+  const printerFailures = countPrinterFailures(health);
+  const printerConfigured = health?.printerStatus?.configured ?? false;
+  const isOnline =
+    typeof health?.isOnline === 'boolean' ? health.isOnline : syncStatus.isOnline;
+  const syncFailed =
+    failedFinancialItems > 0 ||
+    invalidOrders > 0 ||
+    (health?.parityQueueStatus?.failed ?? 0) > 0 ||
+    (health?.parityQueueStatus?.conflicts ?? 0) > 0 ||
+    (health?.syncStatusSummary?.syncErrors ?? 0) > 0;
+
+  const supportNeeded = failedFinancialItems > 0 || invalidOrders > 0 || panicCount > 0;
+  // Printer jobs can remain failed from the last shift/session. Before a shift
+  // starts, keep printer-only noise out of the top-level operator alarm.
+  const activePrinterIssue = isShiftActive && printerFailures > 0;
+  const attentionNeeded =
+    !supportNeeded &&
+    (!isOnline || backlog > 0 || syncStatus.pendingItems > 0 || activePrinterIssue || syncFailed);
+  const orderGuidance = isShiftActive
+    ? 'Can continue taking orders'
+    : 'Start a shift to take orders';
+  const orderStatus: SimpleServiceStatus['orders'] = isShiftActive ? 'working' : 'start_shift';
+
+  if (supportNeeded) {
+    const problemExplanation =
+      failedFinancialItems > 0
+        ? 'Some payments are waiting for support to review. The POS saved them locally.'
+        : invalidOrders > 0
+          ? 'Some saved orders need support to review before they sync.'
+          : 'The POS noticed an app crash and support should review it.';
+
+    return {
+      state: 'support_needed',
+      canContinueOrders: isShiftActive,
+      orderGuidance: isShiftActive ? 'Can continue taking orders' : 'Call support before starting orders',
+      title: 'Support needed',
+      message: 'The POS saved your work, but support should check this terminal.',
+      recommendedActions: isShiftActive
+        ? [
+            'Keep the POS open.',
+            'Do not clear data.',
+            'Contact support if they have not already called.',
+          ]
+        : [
+            'Keep the POS open.',
+            'Do not clear data.',
+            'Contact support before starting orders.',
+          ],
+      problemExplanation,
+      primaryAction: 'send_support',
+      secondaryAction: 'export',
+      serviceStatuses: {
+        orders: isShiftActive ? 'limited' : 'blocked',
+        internet: isOnline ? 'connected' : 'offline',
+        sync: 'failed',
+        printer: printerFailures >= 3 ? 'failed' : printerConfigured ? 'ready' : 'not_configured',
+        support: supportStatus,
+      },
+      advanced: health,
+    };
+  }
+
+  if (attentionNeeded) {
+    const problemExplanation = !isOnline
+      ? 'The POS is not connected to the admin system right now. It will retry automatically.'
+      : printerFailures > 0
+        ? 'The printer is not responding. Orders are still saved, but receipts may not print until it is fixed.'
+        : 'Some data is waiting to sync. The POS saved it locally and will retry automatically.';
+
+    return {
+      state: 'attention',
+      canContinueOrders: isShiftActive,
+      orderGuidance,
+      title: 'Needs attention',
+      message: 'The POS is working, but something needs a quick check.',
+      recommendedActions: isShiftActive
+        ? [
+            'Keep taking orders.',
+            'Keep the POS open.',
+            'Check the internet connection if this warning stays.',
+          ]
+        : [
+            'Start a shift before taking orders.',
+            'Keep the POS open.',
+            'Check the connection if this warning stays.',
+          ],
+      problemExplanation,
+      primaryAction: 'refresh',
+      secondaryAction: 'send_support',
+      serviceStatuses: {
+        orders: orderStatus,
+        internet: isOnline ? 'connected' : 'offline',
+        sync: syncFailed ? 'failed' : backlog > 0 || syncStatus.pendingItems > 0 ? 'waiting' : 'healthy',
+        printer: activePrinterIssue
+          ? printerFailures >= 3
+            ? 'failed'
+            : 'attention'
+          : printerConfigured
+            ? 'ready'
+            : 'not_configured',
+        support: supportStatus,
+      },
+      advanced: health,
+    };
+  }
+
+  return {
+    state: 'healthy',
+    canContinueOrders: isShiftActive,
+    orderGuidance,
+    title: 'Everything is working',
+    message: isShiftActive
+      ? 'The POS is ready for orders.'
+      : 'The POS is ready. Start a shift before taking orders.',
+    recommendedActions: isShiftActive
+      ? ['Keep using the POS normally.']
+      : ['Start a shift when you are ready.', 'Keep the POS open.'],
+    problemExplanation: isShiftActive
+      ? 'Orders, sync, internet, and printer checks look good.'
+      : 'No staff shift is active yet. Start a shift before taking orders.',
+    primaryAction: 'refresh',
+    secondaryAction: 'export',
+    serviceStatuses: {
+      orders: orderStatus,
+      internet: isOnline ? 'connected' : 'unknown',
+      sync: 'healthy',
+      printer: printerConfigured ? 'ready' : 'not_configured',
+      support: supportStatus,
+    },
+    advanced: health,
+  };
+};
 
 const normalizeFinancialStats = (stats: any): DiagnosticsFinancialQueueStatus => {
   if (!stats || typeof stats !== 'object') return createDefaultFinancialStats();
@@ -487,7 +686,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
-  const { staff } = useShift();
+  const { staff, isShiftActive } = useShift();
 
   // --- Sync state ---
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => ({
@@ -536,10 +735,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   // --- System health state (eager on modal open) ---
   const [systemHealth, setSystemHealth] =
     useState<DiagnosticsSystemHealth | null>(null);
+  const [lastHealthCheckedAt, setLastHealthCheckedAt] = useState<string | null>(null);
   const [systemLoading, setSystemLoading] = useState(false);
   const systemLoaded = useRef(false);
   const [exporting, setExporting] = useState(false);
   const [exportPath, setExportPath] = useState<string | null>(null);
+  const [sendingSupport, setSendingSupport] = useState(false);
+  const [incidentReport, setIncidentReport] =
+    useState<RemoteIncidentReportResponse | null>(null);
   const [recoveryFinancialItems, setRecoveryFinancialItems] = useState<
     Awaited<ReturnType<typeof bridge.sync.getFailedFinancialItems>>
   >([]);
@@ -710,6 +913,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       setRecentRecoveryActions(
         Array.isArray(recoveryActions) ? recoveryActions : [],
       );
+      setLastHealthCheckedAt(new Date().toISOString());
       systemLoaded.current = true;
     } catch (err) {
       console.error('Failed to load system health:', err);
@@ -745,6 +949,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         setLastParitySync(
           normalizeLastParitySync((candidate as DiagnosticsSystemHealth).lastParitySync),
         );
+        setLastHealthCheckedAt(new Date().toISOString());
         void bridge.sync
           .getFailedFinancialItems(250)
           .then((items) => setRecoveryFinancialItems(Array.isArray(items) ? items : []))
@@ -765,9 +970,26 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           .catch(() => {});
       }
     };
+    const handleIncidentUpdate = (payload: any) => {
+      if (payload && typeof payload === 'object') {
+        setIncidentReport({
+          success: Boolean(payload.success),
+          candidate: payload.candidate,
+          incidentId:
+            payload.response?.incidentId ?? payload.incidentId ?? null,
+          status: payload.response?.status ?? payload.status,
+          deduped: payload.response?.deduped ?? payload.deduped,
+          alertSent: payload.response?.alertSent ?? payload.alertSent,
+          lastSentAt: payload.lastSentAt ?? payload.lastAttemptAt,
+          error: payload.error,
+        });
+      }
+    };
     onEvent('database-health-update', handleHealthUpdate);
+    onEvent('incident-reporting-update', handleIncidentUpdate);
     return () => {
       offEvent('database-health-update', handleHealthUpdate);
+      offEvent('incident-reporting-update', handleIncidentUpdate);
     };
   }, [loadSystemHealth]);
 
@@ -1114,6 +1336,26 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     }
   };
 
+  const handleSendDiagnosticsToSupport = async () => {
+    setSendingSupport(true);
+    try {
+      const result = await bridge.diagnostics.sendRemoteIncident();
+      setIncidentReport(result);
+      toast.success('Diagnostics sent to support. You can continue using the POS.');
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Diagnostics could not be sent right now.';
+      setIncidentReport({
+        success: false,
+        error: message,
+        lastSentAt: new Date().toISOString(),
+      });
+      toast.error('Diagnostics could not be sent right now. The POS will keep working.');
+    } finally {
+      setSendingSupport(false);
+    }
+  };
+
   const handleOpenExportDir = async () => {
     if (!exportPath) return;
     try {
@@ -1192,6 +1434,28 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         );
       }, 0)
     : 0;
+  const simpleHealthSummary = useMemo(() => {
+    const draft = buildSimpleHealthSummary({
+      health: systemHealth,
+      syncStatus,
+      supportStatus: 'not_sent',
+      isShiftActive,
+    });
+    const supportStatus: SimpleServiceStatus['support'] = incidentReport?.success
+      ? 'notified'
+      : incidentReport?.error
+        ? 'failed_to_notify'
+        : draft.state === 'healthy'
+          ? 'not_needed'
+          : 'not_sent';
+
+    return buildSimpleHealthSummary({
+      health: systemHealth,
+      syncStatus,
+      supportStatus,
+      isShiftActive,
+    });
+  }, [incidentReport, isShiftActive, syncStatus, systemHealth]);
   const syncBlockerDetails = systemHealth?.syncBlockerDetails ?? [];
   const sharedRecoveryIssues = useMemo(
     () =>
@@ -1458,12 +1722,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             onOpenFinancialPanel={() => setShowFinancialPanel(true)}
             showWhenFallback
             className="w-full"
-            buttonClassName="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.08]"
+            buttonClassName="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.08]"
           />
           <button
             type="button"
             onClick={handleOpenRecovery}
-            className="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.08] inline-flex items-center gap-2"
+            className="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.08] inline-flex items-center gap-2"
           >
             <Database className="h-4 w-4" />
             {t('sync.dashboard.openRecovery', { defaultValue: 'Open Recovery Center' })}
@@ -1616,7 +1880,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <button
                 onClick={handleRetryBlockedOrder}
                 disabled={retryingBlockedOrder || syncStatus.syncInProgress}
-                className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center justify-center rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-semibold text-black transition-all active:bg-yellow-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {retryingBlockedOrder ? t('sync.blocker.retrying') : t('sync.blocker.retryOrderNow')}
               </button>
@@ -1725,14 +1989,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   );
                 }
               }}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-emerald-200/90 bg-emerald-50 text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200 dark:hover:bg-emerald-500/16"
-              title={t('sync.actions.refresh', { defaultValue: 'Refresh' })}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-emerald-200/90 bg-emerald-50 text-emerald-700 transition-colors active:bg-emerald-100 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200 dark:active:bg-emerald-500/16"
+              aria-label={t('sync.actions.refresh', { defaultValue: 'Refresh' })}
             >
               <RefreshCw className="h-4 w-4" />
             </button>
             <button
               onClick={() => setShowFinancialPanel(true)}
-              className="inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]"
+              className="inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:active:bg-white/[0.08]"
             >
               {t('sync.actions.manage')}
             </button>
@@ -1982,7 +2246,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   </p>
                   <button
                     onClick={handleRemoveInvalidOrders}
-                    className="mt-4 inline-flex items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700"
+                    className="mt-4 inline-flex items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors active:bg-red-700"
                   >
                     {t('sync.system.removeInvalidOrders')}
                   </button>
@@ -2144,196 +2408,260 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     </section>
   );
 
-  const renderDetailModal = () =>
-    ReactDOM.createPortal(
+  const renderDetailModal = () => {
+    const summary = simpleHealthSummary;
+    const visual = {
+      healthy: {
+        icon: CheckCircle2,
+        shell: 'border-yellow-300/45 bg-[#101008] text-white',
+        iconBox: 'bg-white text-black ring-1 ring-yellow-300/70',
+        title: 'Everything is working',
+      },
+      attention: {
+        icon: AlertTriangle,
+        shell: 'border-yellow-400/55 bg-[#1a1212] text-yellow-50',
+        iconBox: 'bg-yellow-400 text-black',
+        title: 'Needs attention',
+      },
+      support_needed: {
+        icon: AlertTriangle,
+        shell: 'border-red-500/55 bg-[#1d0e0e] text-white',
+        iconBox: 'bg-red-600 text-white',
+        title: 'Support needed',
+      },
+    }[summary.state];
+    const StatusIcon = visual.icon;
+    const statusLabels: Record<string, string> = {
+      working: 'Working',
+      limited: 'Limited',
+      blocked: 'Blocked',
+      start_shift: 'Start shift',
+      connected: 'Connected',
+      offline: 'Offline',
+      unknown: 'Unknown',
+      healthy: 'Healthy',
+      waiting: 'Waiting',
+      failed: 'Failed',
+      ready: 'Ready',
+      attention: 'Check',
+      not_configured: 'Not set',
+      not_needed: 'Not needed',
+      notified: 'Notified',
+      not_sent: 'Not sent',
+      failed_to_notify: 'Try again',
+    };
+    const serviceItems = [
+      { label: 'Orders', value: summary.serviceStatuses.orders },
+      { label: 'Internet', value: summary.serviceStatuses.internet },
+      { label: 'Sync', value: summary.serviceStatuses.sync },
+      { label: 'Printer', value: summary.serviceStatuses.printer },
+      { label: 'Support', value: summary.serviceStatuses.support },
+    ];
+    const lastChecked = lastHealthCheckedAt ? formatDate(lastHealthCheckedAt) : 'Not checked yet';
+
+    return ReactDOM.createPortal(
       <div className="fixed inset-0 z-[10000]" style={{ isolation: 'isolate' }}>
         <div
-          className="absolute inset-0"
-          style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
+          className="absolute inset-0 bg-black/45 backdrop-blur-md"
           onClick={() => setShowDetailPanel(false)}
         />
 
         <div
-          className={`absolute inset-0 z-[10050] flex items-center justify-center px-4 py-6 transition-opacity sm:px-6 sm:py-8 ${
-            showFinancialPanel ? 'opacity-75' : 'opacity-100'
-          }`}
+          className="absolute inset-0 z-[10050] flex items-center justify-center px-3 py-4 sm:px-6 sm:py-8"
           onClick={() => setShowDetailPanel(false)}
         >
           <div
-            className="liquid-glass-modal-shell flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-[32px] !animate-none"
-            style={{ backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
+            className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-yellow-400/25 bg-[#050505] shadow-2xl shadow-black/70"
             onClick={(event) => event.stopPropagation()}
           >
-          <div className="flex shrink-0 items-center justify-between border-b border-slate-200/80 px-6 py-4 dark:border-white/10">
-            <div className="flex min-w-0 items-center gap-3">
-              <svg
-                className={`h-5 w-5 shrink-0 ${syncHealthPresentation.iconClassName}`}
-                fill="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
-              </svg>
+            <div className="flex shrink-0 items-center justify-between border-b border-yellow-400/15 px-5 py-4">
               <div className="min-w-0">
-                <div className={modalEyebrowClass}>{t('sync.health.label')}</div>
-                <h3 className="truncate text-xl font-black tracking-tight text-slate-900 dark:text-white">
-                  {t('recovery.center.systemStatusTitle', {
-                    defaultValue: 'System sync status',
-                  })}
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-yellow-200/70">
+                  Health Status
+                </div>
+                <h3 className="truncate text-xl font-black text-white">
+                  POS status
                 </h3>
               </div>
-              <span
-                className={cn(
-                  'hidden items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold sm:inline-flex',
-                  syncHealthPresentation.badgeClassName,
-                )}
-              >
-                <span className={cn('h-2 w-2 rounded-full', syncHealthPresentation.dotClassName)} />
-                {syncHealthPresentation.label}
-              </span>
-            </div>
-
-            <button
-              onClick={() => setShowDetailPanel(false)}
-              className="liquid-glass-modal-button p-1.5 min-h-0 min-w-0"
-              aria-label={t('common.actions.close')}
-            >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
-            </button>
-          </div>
-
-          <div
-            className="hide-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5"
-            style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' } as React.CSSProperties}
-          >
-            <div className="rounded-[22px] border border-sky-200/90 bg-sky-50/90 px-4 py-4 text-sm text-sky-800 dark:border-sky-400/30 dark:bg-sky-500/10 dark:text-sky-100">
-              {t('sync.recoveryCenter.guidedContextNote', {
-                defaultValue:
-                  'Start with the first blocker. If a known fix exists, the POS can run it or open the exact screen needed to fix the order.',
-              })}
-            </div>
-
-            {systemLoading && !systemHealth ? (
-              <div className="flex h-56 items-center justify-center">
-                <div className="h-12 w-12 animate-spin rounded-full border-4 border-blue-500/30 border-t-blue-500" />
-              </div>
-            ) : (
-              <RecoveryCenterPanel
-                issues={sharedRecoveryIssues}
-                recentActions={recentRecoveryActions}
-                terminalContext={systemHealth?.terminalContext ?? null}
-                onRefresh={handleRecoveryPanelRefresh}
-                onSyncNow={handleForceSync}
-                onNavigate={() => setShowDetailPanel(false)}
-                onActionResolved={(entry) =>
-                  setRecentRecoveryActions((current) => [entry, ...current].slice(0, 8))
-                }
-                titleKey="recovery.center.systemStatusTitle"
-                subtitleKey="recovery.center.systemStatusSubtitle"
-              />
-            )}
-
-            <section className="rounded-[24px] border border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-black/20">
               <button
-                type="button"
-                onClick={() => setAdvancedExpanded((value) => !value)}
-                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-bold text-slate-800 dark:text-slate-100"
+                onClick={() => setShowDetailPanel(false)}
+                className="flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-white/[0.06] text-white active:bg-white/[0.12]"
+                aria-label="Close health status"
               >
-                <span>
-                  {t('recovery.center.advancedDiagnosticsTitle', {
-                    defaultValue: 'Advanced diagnostics and exports',
-                  })}
-                </span>
-                <ChevronDown
-                  className={cn(
-                    'h-4 w-4 transition-transform',
-                    advancedExpanded && 'rotate-180',
-                  )}
-                />
+                <X className="h-5 w-5" />
               </button>
-              {advancedExpanded && (
-                <div className="space-y-5 border-t border-slate-200/80 p-4 dark:border-white/10">
-                  <div className="rounded-[24px] border border-slate-200/80 bg-white/90 p-5 dark:border-white/10 dark:bg-white/[0.04]">
-                    <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-                      <div className="max-w-3xl">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
-                          {t('recovery.center.diagnosticFileTitle', {
-                            defaultValue: 'Diagnostic file',
-                          })}
-                        </div>
-                        <h4 className="mt-3 text-xl font-black tracking-tight text-slate-950 dark:text-white">
-                          {t('recovery.center.diagnosticFileHeadline', {
-                            defaultValue: 'Technical details are saved to a file',
-                          })}
-                        </h4>
-                        <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300/85">
-                          {t('recovery.center.diagnosticFileDescription', {
-                            defaultValue:
-                              'To keep this screen simple, queue counts, parity rows, printer state, database details, logs, issue codes, order ids, and the latest recovery result are included in the exported diagnostic bundle instead of being shown here.',
-                          })}
-                        </p>
-                        <p className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
-                          {t('recovery.center.diagnosticFilePrivacy', {
-                            defaultValue:
-                              'Use this when Contact Dev asks for support details. Sensitive fields are handled by the export settings.',
-                          })}
-                        </p>
-                      </div>
-                      <div className="flex min-w-[220px] flex-col gap-2">
-                        <button
-                          onClick={handleExport}
-                          disabled={exporting}
-                          className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-black text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
-                        >
-                          <Download className={cn('h-4 w-4', exporting && 'animate-bounce')} />
-                          {exporting
-                            ? t('sync.system.exporting')
-                            : t('recovery.center.exportDiagnosticFile', {
-                                defaultValue: 'Export diagnostic file',
-                              })}
-                        </button>
-                        {exportPath && (
-                          <button
-                            onClick={handleOpenExportDir}
-                            className="inline-flex min-h-[42px] items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]"
-                          >
-                            <FolderOpen className="h-4 w-4" />
-                            {t('sync.system.openFolder')}
-                          </button>
-                        )}
-                      </div>
+            </div>
+
+            <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+              <section className={cn('rounded-3xl border p-5', visual.shell)}>
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+                  <div className={cn('flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl', visual.iconBox)}>
+                    <StatusIcon className="h-9 w-9" aria-hidden="true" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-bold">Status: {visual.title}</div>
+                    <h2 className="mt-1 text-2xl font-black tracking-tight">{summary.title}</h2>
+                    <p className="mt-2 max-w-2xl text-base leading-7">{summary.message}</p>
+                    <div className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-full border border-white/10 bg-white/10 px-4 text-sm font-black text-white">
+                      {summary.canContinueOrders ? (
+                        <CheckCircle2 className="h-4 w-4 text-yellow-300" />
+                      ) : summary.state === 'support_needed' ? (
+                        <AlertTriangle className="h-4 w-4 text-red-500" />
+                      ) : (
+                        <Clock className="h-4 w-4 text-yellow-300" />
+                      )}
+                      {summary.orderGuidance}
                     </div>
-                    {exportPath && (
-                      <div className="mt-4 flex flex-col gap-3 rounded-[20px] border border-emerald-200/90 bg-emerald-50/90 p-3 dark:border-emerald-400/30 dark:bg-emerald-500/10 sm:flex-row sm:items-center">
-                        <div className="flex min-w-0 flex-1 items-center gap-2">
-                          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-300" />
-                          <span className="truncate text-sm font-medium text-emerald-700 dark:text-emerald-200">
-                            {t('sync.system.exportSuccess')}
-                          </span>
-                        </div>
-                      </div>
-                    )}
+                    <div className="mt-3 text-sm opacity-80">Last checked: {lastChecked}</div>
                   </div>
                 </div>
+
+                <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  {serviceItems.map((item) => (
+                    <div key={item.label} className="rounded-2xl border border-yellow-400/10 bg-white/[0.08] px-3 py-3">
+                      <div className="text-xs font-bold uppercase tracking-wide text-yellow-100/70">{item.label}</div>
+                      <div className="mt-1 text-sm font-black">{statusLabels[item.value] ?? item.value}</div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <div className="mt-5 grid gap-4 lg:grid-cols-[1fr_1fr]">
+                <section className="rounded-3xl border border-yellow-400/15 bg-[#0c0c0c] p-5">
+                  <h4 className="text-lg font-black text-white">What you should do</h4>
+                  <ol className="mt-4 space-y-3">
+                    {summary.recommendedActions.slice(0, 3).map((action, index) => (
+                      <li key={action} className="flex gap-3 text-base text-white/85">
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-yellow-300/50 bg-white text-sm font-black text-black">
+                          {index + 1}
+                        </span>
+                        <span className="pt-1">{action}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+
+                <section className="rounded-3xl border border-yellow-400/15 bg-[#0c0c0c] p-5">
+                  <h4 className="text-lg font-black text-white">What is happening</h4>
+                  <p className="mt-4 text-base leading-7 text-white/85">
+                    {summary.problemExplanation}
+                  </p>
+                  {incidentReport?.success && (
+                    <div className="mt-4 rounded-2xl border border-yellow-400/30 bg-yellow-400/10 p-3 text-sm font-semibold text-yellow-50">
+                      Support has received the diagnostic report.
+                      {incidentReport.incidentId ? (
+                        <span className="mt-1 block text-xs font-medium">Incident ID: {incidentReport.incidentId}</span>
+                      ) : null}
+                    </div>
+                  )}
+                  {incidentReport?.error && (
+                    <div className="mt-4 rounded-2xl border border-yellow-400/30 bg-yellow-400/10 p-3 text-sm font-semibold text-yellow-50">
+                      Diagnostics could not be sent right now. The POS will keep working and you can try again later.
+                    </div>
+                  )}
+                </section>
+              </div>
+
+              <section className="mt-5 rounded-3xl border border-yellow-400/15 bg-[#0c0c0c] p-5">
+                <h4 className="text-lg font-black text-white">Support actions</h4>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <button
+                    onClick={loadSystemHealth}
+                    disabled={systemLoading}
+                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl bg-white px-4 text-sm font-black text-black active:bg-yellow-50 disabled:opacity-50"
+                  >
+                    <RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />
+                    Refresh status
+                  </button>
+                  <button
+                    onClick={handleSendDiagnosticsToSupport}
+                    disabled={sendingSupport}
+                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-yellow-300 bg-yellow-400 px-4 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                  >
+                    <Send className={cn('h-5 w-5', sendingSupport && 'animate-pulse')} />
+                    {sendingSupport ? 'Sending...' : 'Send diagnostics to support'}
+                  </button>
+                  <button
+                    onClick={handleExport}
+                    disabled={exporting}
+                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/[0.07] px-4 text-sm font-black text-white active:bg-white/[0.12] disabled:opacity-50"
+                  >
+                    <Download className={cn('h-5 w-5', exporting && 'animate-bounce')} />
+                    Export diagnostics file
+                  </button>
+                  <button
+                    onClick={() => setAdvancedExpanded((value) => !value)}
+                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/[0.07] px-4 text-sm font-black text-white active:bg-white/[0.12]"
+                  >
+                    <ChevronDown className={cn('h-5 w-5 transition-transform', advancedExpanded && 'rotate-180')} />
+                    Open advanced details
+                  </button>
+                </div>
+                <p className="mt-4 text-sm leading-6 text-white/55">
+                  The POS can continue working locally. Do not reset or clear data unless support asks.
+                </p>
+                {exportPath && (
+                  <button
+                    onClick={handleOpenExportDir}
+                    className="mt-3 inline-flex min-h-[46px] items-center gap-2 rounded-2xl border border-white/15 bg-white/[0.07] px-4 text-sm font-semibold text-white active:bg-white/[0.12]"
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    Open diagnostics folder
+                  </button>
+                )}
+              </section>
+
+              {advancedExpanded && (
+                <section className="mt-5 space-y-4 rounded-3xl border border-yellow-400/15 bg-[#0c0c0c] p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h4 className="text-lg font-black text-white">Advanced details for support</h4>
+                      <p className="mt-1 text-sm text-white/55">Only use this section when support asks.</p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {[
+                      ['Terminal ID', systemHealth?.terminalContext?.terminalId || 'Unknown'],
+                      ['Branch ID', systemHealth?.terminalContext?.branchId || 'Unknown'],
+                      ['Organization ID', systemHealth?.terminalContext?.organizationId || 'Unknown'],
+                      ['Last sync', systemHealth?.lastSyncTime || syncStatus.lastSync || 'Never'],
+                      ['Sync backlog', totalBacklog],
+                      ['Financial failed', financialFailedCount],
+                      ['Printer failures', countPrinterFailures(systemHealth)],
+                      ['Crash count', systemHealth?.panicCount ?? 0],
+                      ['Incident ID', incidentReport?.incidentId || 'None'],
+                    ].map(([label, value]) => (
+                      <div key={String(label)} className="rounded-2xl border border-yellow-400/10 bg-white/[0.05] p-3">
+                        <div className="text-xs font-bold uppercase tracking-wide text-yellow-100/60">{label}</div>
+                        <div className="mt-1 break-words text-sm font-black text-white">{String(value)}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <div>
+                      <div className="mb-2 text-sm font-black text-white">Health JSON</div>
+                      <pre className="max-h-80 overflow-auto rounded-2xl border border-yellow-400/10 bg-black p-4 text-xs leading-5 text-white/80">
+                        {JSON.stringify(summary.advanced ?? {}, null, 2)}
+                      </pre>
+                    </div>
+                    <div>
+                      <div className="mb-2 text-sm font-black text-white">Recent support report</div>
+                      <pre className="max-h-80 overflow-auto rounded-2xl border border-yellow-400/10 bg-black p-4 text-xs leading-5 text-white/80">
+                        {JSON.stringify(incidentReport ?? { state: 'not_sent' }, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
+                </section>
               )}
-            </section>
+            </div>
           </div>
         </div>
-          </div>
-        </div>,
+      </div>,
       document.body,
     );
+  };
 
   // =========================================================================
   // Render
@@ -2343,9 +2671,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     <div className={`relative flex items-center gap-1.5 ${className}`}>
       {/* Heart Icon Status Indicator */}
       <button
-        className="group relative rounded-full p-2 transition-all duration-200 hover:bg-slate-100/80 dark:hover:bg-white/10"
+        className="group relative rounded-full p-2 transition-all duration-200 active:bg-slate-100/80 dark:active:bg-white/10"
         onClick={() => setShowDetailPanel(!showDetailPanel)}
-        title={getStatusText()}
+        aria-label={getStatusText()}
       >
         <svg
           className={`w-6 h-6 transition-all duration-300 ${heartStatusClass} ${
@@ -2375,8 +2703,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           <button
             onClick={handleForceSync}
             disabled={syncStatus.syncInProgress}
-            className="p-1 rounded-md text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-            title={t('sync.actions.retry', { defaultValue: 'Retry sync' })}
+            className="p-1 rounded-md text-red-400 active:bg-red-500/20 transition-colors disabled:opacity-50"
+            aria-label={t('sync.actions.retry', { defaultValue: 'Retry sync' })}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`} />
           </button>
@@ -2388,8 +2716,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       {capacityWarning && (
         <button
           onClick={() => setShowDetailPanel(true)}
-          className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-orange-600 transition-colors hover:bg-orange-500/15 dark:text-orange-300"
-          title={t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
+          className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-orange-600 transition-colors active:bg-orange-500/15 dark:text-orange-300"
+          aria-label={t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
         >
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
           {t('sync.capacity.badge', {

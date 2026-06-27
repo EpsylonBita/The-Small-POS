@@ -3,12 +3,16 @@
     "all": "All",
     "actions": {
       "add": "Add",
+      "remove": "Remove",
+      "decrease": "Decrease",
+      "increase": "Increase",
       "edit": "Edit",
       "delete": "Delete",
       "save": "Save",
       "cancel": "Cancel",
       "confirm": "Confirm",
       "close": "Close",
+      "done": "Done",
       "back": "Back",
       "next": "Next",
       "submit": "Submit",
@@ -46,6 +50,8 @@
     "clear": "Clear",
     "back": "Back",
     "loading": "Loading...",
+    "online": "Online",
+    "offline": "Offline",
     "notEntered": "Not entered",
     "cancel": "Cancel",
     "hide": "Hide",
@@ -131,7 +137,17 @@
       "waiter": "Waiter",
       "manager": "Manager",
       "admin": "Admin",
-      "staff": "Staff"
+      "staff": "Staff",
+      "server": "Server",
+      "head_chef": "Head Chef",
+      "line_cook": "Line Cook",
+      "bartender": "Bartender",
+      "front_desk": "Front Desk",
+      "room_service": "Room Service",
+      "housekeeper": "Housekeeper",
+      "housekeeping_supervisor": "Housekeeping Supervisor",
+      "shift_lead": "Shift Lead",
+      "branch_manager": "Branch Manager"
     },
     "close": "Close",
     "retry": "Retry",
@@ -142,7 +158,12 @@
       "orders": "Orders",
       "delivered": "Delivered",
       "canceled": "Canceled",
-      "tables": "Tables"
+      "tables": "Tables",
+      "rooms": "Rooms",
+      "services": "Services",
+      "tab": "{{label}} {{value}}",
+      "selectedTab": "{{label}} {{value}} — Selected",
+      "tablistLabel": "Order status tabs"
     },
     "noOrders": "No orders found",
     "ordersWillAppear": "Orders will appear here when created"
@@ -279,6 +300,16 @@
   },
   "navigation": {
     "menu": {
+      "rooms": "Rooms",
+      "tables": "Tables",
+      "appointments": "Appointments",
+      "housekeeping": "Housekeeping",
+      "staff_schedule": "Staff Schedule",
+      "reservations": "Reservations",
+      "service_catalog": "Services",
+      "suppliers": "Supplier Management",
+      "inventory": "Inventory Management",
+      "loyalty": "Loyalty & Rewards",
       "home": "Home",
       "orders": "Orders",
       "menu": "Menu",
@@ -316,10 +347,15 @@
     "checkIn": "Check In",
     "activeShift": "Active Shift",
     "logout": "Logout",
+    "currentPage": "{{label}} — Current page",
     "plugin_integrations": "Plugins",
     "integrations": "Plugins"
   },
   "orders": {
+    "pagination": {
+      "previous": "Previous page",
+      "next": "Next page"
+    },
     "title": "Orders",
     "subtitle": "Manage customer orders",
     "newOrder": "New Order",
@@ -348,7 +384,8 @@
       "dineIn": "Dine In",
       "pickup": "Pickup",
       "delivery": "Delivery",
-      "online": "Online"
+      "online": "Online",
+      "roomService": "Room service"
     },
     "actions": {
       "create": "Create Order",
@@ -449,9 +486,62 @@
       "cancelled": "Cancelled",
       "revenue": "Revenue",
       "averageValue": "Avg. Order Value"
+    },
+    "loadingOrders": "Loading orders...",
+    "ordersTotal": "{{count}} orders total",
+    "refreshOrders": "Refresh orders",
+    "syncingOrders": "Syncing orders",
+    "showFilters": "Show filters",
+    "hideFilters": "Hide filters",
+    "searchPlaceholder": "Search by order number, customer name, or phone...",
+    "clearSearch": "Clear search",
+    "itemsCount": "{{count}} items",
+    "emptyTitle": "No Orders Found",
+    "emptyDescription": "No orders match your current filters.",
+    "pageOf": "Page {{current}} of {{total}}",
+    "filters": {
+      "status": "Status",
+      "orderType": "Order Type",
+      "allStatuses": "All Statuses",
+      "allTypes": "All Types",
+      "dateFrom": "Date From",
+      "clearAll": "Clear all filters"
     }
   },
   "menu": {
+    "managementTabs": {
+      "categories": "Categories",
+      "menuItems": "Menu Items",
+      "ingredients": "Ingredients",
+      "offers": "Offers"
+    },
+    "refreshMenu": "Refresh menu",
+    "refreshingMenu": "Refreshing menu",
+    "unnamed": "Unnamed",
+    "featured": "Featured",
+    "enable": "Enable",
+    "disable": "Disable",
+    "failedToLoadData": "Failed to load data",
+    "failedToLoadCategories": "Failed to load categories",
+    "failedToLoadMenuItems": "Failed to load menu items",
+    "failedToLoadIngredients": "Failed to load ingredients",
+    "failedToLoadOffers": "Failed to load offers",
+    "categoryUpdated": "Category updated successfully",
+    "failedToUpdateCategory": "Failed to update category",
+    "menuItemUpdated": "Menu item updated successfully",
+    "failedToUpdateMenuItem": "Failed to update menu item",
+    "ingredientUpdated": "Ingredient updated successfully",
+    "failedToUpdateIngredient": "Failed to update ingredient",
+    "offerUpdated": "Offer updated successfully",
+    "failedToUpdateOffer": "Failed to update offer",
+    "onlineRequired": "This action requires an online connection.",
+    "offersEmpty": {
+      "title": "No offers configured",
+      "subtitle": "Create offers in the admin dashboard or refresh after syncing.",
+      "searchTitle": "No offers match the search",
+      "searchSubtitle": "Clear the search or try another term",
+      "clearSearch": "Clear search"
+    },
     "title": "Menu",
     "subtitle": "Browse menu items",
     "header": "Menu Management",
@@ -499,6 +589,12 @@
       "couponApplied": "Coupon applied!",
       "couponInvalid": "Invalid coupon code",
       "couponError": "Failed to validate coupon",
+      "couponNotFound": "Coupon not found",
+      "couponInactive": "This coupon is inactive",
+      "couponExpired": "This coupon has expired",
+      "couponUsageLimit": "This coupon's usage limit has been reached",
+      "couponNotAvailable": "This coupon is not available for this branch",
+      "couponMinOrder": "Your order doesn't meet this coupon's minimum amount",
       "couponDiscount": "Coupon",
       "loyaltyDiscount": "Loyalty",
       "loyaltyButton": "Loyalty",
@@ -512,6 +608,7 @@
       "scanCoupon": "Scan",
       "manualItem": "Manual Item",
       "addManualItem": "Manual Item",
+      "manualItemSubmit": "Add",
       "manualPricePlaceholder": "Price",
       "manualNamePlaceholder": "Item name (optional)",
       "manualItemAdded": "Manual item added",
@@ -525,6 +622,9 @@
       "percentMode": "% Mode",
       "fixedMode": "Fixed",
       "quickDiscounts": "Quick discounts",
+      "manualDiscount": "Manual discount",
+      "removeDiscount": "Remove discount",
+      "applyDiscount": "Apply discount",
       "selectedCount": "{{count}} selected",
       "exitSelection": "Exit selection",
       "clearSelection": "Clear selection",
@@ -632,6 +732,8 @@
       "manualSync": "Manual sync required"
     },
     "itemModal": {
+      "noIngredientsForFilter": "No ingredients available for this filter.",
+      "noIngredientsForFilterHint": "Try selecting \"{{all}}\" to see all ingredients.",
       "customizeTitle": "Customize Your {{item}}",
       "currentSelection": "Current selection",
       "maxIngredientsHint": "(Max {{count}} ingredients)",
@@ -654,7 +756,10 @@
       "withoutHint": "Mark ingredients to remove (no price change)",
       "withoutLabel": "Without",
       "withoutCount": "Without: {{count}} item(s)",
-      "updateItem": "Update Item"
+      "updateItem": "Update Item",
+      "searchIngredients": "Search ingredients...",
+      "addNotes": "Add Notes",
+      "editNotes": "Edit Notes"
     },
     "ingredients": {
       "otherCategory": "Other"
@@ -734,6 +839,7 @@
     "noUsers": "No users found",
     "tryAdjusting": "Try adjusting your search",
     "noUsersYet": "No users yet",
+    "noMatches": "No users match your search or filters",
     "customerDetails": "Customer Details",
     "basicInfo": "Basic Information",
     "name": "Name",
@@ -746,6 +852,18 @@
     "filterAppUsers": "App Users",
     "unnamed": "Unnamed User",
     "confirmDeleteAddress": "Are you sure you want to delete this address?",
+    "deleteAddressTitle": "Delete address",
+    "loyaltyTier": {
+      "bronze": "Bronze",
+      "silver": "Silver",
+      "gold": "Gold",
+      "platinum": "Platinum"
+    },
+    "pagination": {
+      "previous": "Previous",
+      "next": "Next",
+      "pageOf": "Page {{current}} of {{total}}"
+    },
     "deleteAddressSuccess": "Address deleted successfully",
     "deleteAddressError": "Failed to delete address",
     "updateAddressSuccess": "Address updated successfully",
@@ -757,6 +875,20 @@
       "floor": "Floor",
       "deliveryNotes": "Delivery Notes",
       "default": "Default"
+    },
+    "filters": {
+      "openLabel": "Filter users",
+      "statusLabel": "Status",
+      "loyaltyLabel": "Loyalty tier",
+      "clear": "Clear filters",
+      "status": {
+        "all": "All",
+        "active": "Active",
+        "banned": "Banned"
+      },
+      "loyalty": {
+        "all": "All tiers"
+      }
     }
   },
   "customer": {
@@ -1189,6 +1321,7 @@
     "shiftDetails": "Shift Details",
     "noActiveShift": "No active shift",
     "duration": "{{hours}}h {{minutes}}m",
+    "durationHoursOnly": "{{hours}}h",
     "durationFallback": "0h 0m",
     "status": {
       "active": "Active",
@@ -1540,6 +1673,31 @@
     }
   },
   "settings": {
+    "settingsHub": {
+      "subtitle": "Set up and manage this register",
+      "status": {
+        "register": "This register",
+        "sync": "Sync",
+        "actions": "Allowed actions",
+        "modules": "Active modules"
+      },
+      "sections": {
+        "admin": { "label": "Start", "detail": "Quick status" },
+        "connection": { "label": "Connection", "detail": "Link this POS" },
+        "terminal": { "label": "Screen & Sound", "detail": "Display, sound and language" },
+        "security": { "label": "PIN & Lock", "detail": "Staff PIN and auto lock" },
+        "database": { "label": "Data", "detail": "Sync and local data" },
+        "hardware": { "label": "Devices", "detail": "Scale, scanner and hardware" },
+        "printing": { "label": "Printer", "detail": "Receipt setup" },
+        "payments": { "label": "Card Machines", "detail": "Card payment devices" },
+        "about": { "label": "Info", "detail": "App version" }
+      },
+      "groups": {
+        "daily": "Daily setup",
+        "device": "Device",
+        "system": "System"
+      }
+    },
     "title": "Settings",
     "subtitle": "Configure terminal settings",
     "header": "POS Settings",
@@ -1571,12 +1729,17 @@
       "clearButton": "Factory Reset",
       "clearing": "Clearing...",
       "resetting": "Performing factory reset...",
-      "helpText": "⚠️ This will completely reset the POS to factory settings. All local data will be deleted and you'll need to enter the connection code again.",
+      "helpText": "This will completely reset the POS to factory settings. All local data will be deleted and you'll need to enter the connection code again.",
       "confirmClear": "⚠️ FACTORY RESET WARNING ⚠️\n\nThis will completely reset the POS terminal to factory settings:\n\n• All local orders will be deleted\n• All settings will be cleared\n• Terminal configuration will be removed\n• You will need to enter the connection code again\n\nAre you sure you want to continue?",
       "confirmFactoryReset": "⚠️ FINAL CONFIRMATION ⚠️\n\nThis is your last chance to cancel.\n\nAll data will be permanently deleted and the app will restart.\n\nClick OK to proceed with factory reset.",
       "cleared": "Successfully cleared {{count}} orders from local database",
       "resetSuccess": "Factory reset complete. App will restart...",
       "clearFailed": "Failed to perform factory reset",
+      "clearAllOrdersLabel": "Clear All Orders",
+      "clearAllOrdersHelp": "Removes all orders including today's",
+      "clearAllOrdersButton": "Clear",
+      "allOrdersCleared": "Cleared {{count}} orders",
+      "allOrdersClearFailed": "Failed to clear all orders",
       "clearOperationalLabel": "Clear All Operational Data",
       "clearOperationalHelp": "Clears orders, shifts, drawers, payments. Keeps settings.",
       "clearOperationalButton": "Clear",
@@ -1608,6 +1771,19 @@
       "operationalCleared": "All operational data cleared successfully",
       "operationalClearFailed": "Failed to clear operational data",
       "management": "Database Management",
+      "repairToolsTitle": "Safe fixes",
+      "repairToolsHelp": "Keeps your data",
+      "dangerZoneTitle": "Danger zone",
+      "dangerZoneHelp": "These actions permanently delete data and cannot be undone.",
+      "advancedResetTitle": "Advanced reset tools",
+      "advancedResetSummary": "Deletes data",
+      "cannotUndo": "Cannot be undone",
+      "dangerDeleteOrdersButton": "Delete all orders",
+      "dangerEraseDataButton": "Erase operational data",
+      "dangerFactoryResetButton": "Factory reset",
+      "repairQueueButton": "Fix queue",
+      "repairOldOrdersButton": "Clean old orders",
+      "repairDeletedOrdersButton": "Sync deleted orders",
       "clearSyncQueueLabel": "Clear Sync Queue",
       "clearSyncQueueHelp": "Clears stuck sync items without deleting data",
       "clearSyncButton": "Clear",
@@ -1637,6 +1813,43 @@
     "connection": {
       "syncPolicy": "Sync Policy"
     },
+    "deviceSetup": {
+      "overview": {
+        "statusTitle": "This register is set up",
+        "statusHelp": "Everything this register can do is shown below in plain words.",
+        "statusTitleWarning": "Sync needs attention",
+        "statusHelpWarning": "Run sync to refresh this register before changing devices or payment settings.",
+        "registerType": "Register type",
+        "syncState": "Sync",
+        "pinStatus": "PIN",
+        "pinResetShort": "New PIN needed",
+        "pinOkShort": "PIN ready",
+        "moreCount": "+{{count}} more"
+      },
+      "title": "Device setup",
+      "help": "Link this register and see what it can do.",
+      "registerLabel": "Register",
+      "connectionLabel": "Connection",
+      "registerId": "Register ID",
+      "dashboardAddress": "Dashboard address",
+      "posKey": "POS key",
+      "connectionCodeHelp": "Paste the connection code from your dashboard.",
+      "dashboardAddressPlaceholder": "https://your-dashboard.example.com",
+      "syncStatus": "Sync",
+      "allowedActions": "Allowed actions",
+      "noAllowedActions": "No allowed actions yet",
+      "activeAreas": "Active areas",
+      "coreAreasOnly": "Core areas only",
+      "unassignedRegister": "Unassigned register",
+      "noDashboardAddress": "No dashboard address",
+      "pinResetRequired": "A new PIN is required at next sign-in.",
+      "pinResetClear": "No PIN reset pending.",
+      "syncButton": "Sync settings",
+      "synced": "Settings synced",
+      "syncFailed": "Could not sync settings",
+      "ghostModeOff": "Ghost Mode is turned off for this register.",
+      "enterDashboardAddress": "Enter a valid dashboard address"
+    },
     "managedByAdmin": {
       "title": "Managed by Admin",
       "helpText": "Admin controls access policy. This terminal controls hardware and local behavior.",
@@ -1661,6 +1874,16 @@
         "healthy": "Healthy",
         "error": "Error",
         "blocked": "Blocked",
+        "stale": "Stale",
+        "failed": "Failed",
+        "fail": "Failed",
+        "disconnected": "Disconnected",
+        "connected": "Connected",
+        "good": "Good",
+        "live": "Live",
+        "ok": "OK",
+        "synced": "Synced",
+        "degraded": "Degraded",
         "unknown": "Unknown"
       }
     },
@@ -1673,13 +1896,20 @@
     "printQueue": {
       "title": "Print Queue",
       "helpText": "Jobs already sent to the LAN printer cannot be recalled from the device. These controls only stop or retry jobs still queued locally on this POS.",
-      "pausedProfiles": "Profile pauses active for: {{profiles}}",
+      "pausedProfiles": "Profile pauses active for configured printers",
       "refresh": "Refresh",
       "resume": "Resume queue",
       "pause": "Pause queue",
       "cancelPending": "Cancel pending",
       "empty": "No local print jobs are queued right now.",
       "defaultPrinter": "Default",
+      "configuredPrinter": "Configured printer",
+      "localJob": "Local print job",
+      "reference": "Reference {{reference}}",
+      "issue": {
+        "hardwareProfileMissing": "Choose a printer for this job, then retry.",
+        "needsAttention": "This print job needs printer setup before it can print."
+      },
       "unknown": "Unknown",
       "cancel": "Cancel",
       "retry": "Retry",
@@ -1698,6 +1928,11 @@
         "status": "Status",
         "printer": "Printer",
         "action": "Action"
+      },
+      "entityType": {
+        "order_receipt": "Order receipt",
+        "receipt": "Receipt",
+        "print_job": "Print job"
       },
       "status": {
         "pending": "Pending",
@@ -1718,8 +1953,27 @@
       "sync": "Synchronization",
       "advanced": "Advanced"
     },
+    "security": {
+      "pinHelp": "Local staff authentication"
+    },
     "terminal": {
+      "screenTimeout": "Screen timeout (minutes)",
+      "touchSensitivity": "Touch sensitivity",
+      "touchLow": "Low",
+      "touchMedium": "Medium",
+      "touchHigh": "High",
+      "displayBrightness": "Display brightness",
+      "audioEnabled": "Audio enabled",
+      "audioHelp": "Play UI sounds on this device",
+      "receiptAutoPrint": "Auto-print receipts",
+      "receiptAutoPrintHelp": "Automatically print after successful checkout",
+      "saveButton": "Save Terminal Preferences",
+      "saved": "Terminal preferences saved",
+      "saveFailed": "Failed to save terminal preferences",
+      "invalidTimeout": "Screen timeout must be between 1 and 120 minutes",
+      "invalidBrightness": "Brightness must be between 10 and 100",
       "title": "Terminal Settings",
+      "helpText": "Local UX and operator preferences for this device",
       "terminalId": "Terminal ID",
       "terminalName": "Terminal Name",
       "branchId": "Branch ID",
@@ -1742,6 +1996,7 @@
       },
       "messages": {
         "featureDisabled": "This feature is disabled for your terminal type",
+        "orderCreationDisabled": "Order creation is disabled for this terminal",
         "zReportMainOnly": "Z-Report can only be executed from Main POS terminal",
         "cashDrawerMainOnly": "Cash drawer operations are managed by Main POS",
         "noPaymentMethods": "No payment methods available for this terminal",
@@ -1773,10 +2028,80 @@
       "expertSettings": "Expert Settings",
       "verificationFirstHint": "Use Quick Setup first. It verifies a working transport and encoding path before you rely on a printer in live service.",
       "startQuickSetup": "Start Verification Wizard",
+      "quickSetupFirstTitle": "Quick setup first",
+      "quickSetupFirstBody": "Use the verification wizard for the normal path. This form is for manual connection entry and expert overrides.",
+      "verificationSummaryNew": "New manual profiles start unverified until the wizard confirms a working path.",
+      "discoveredNotPrintable": "Discovered, not yet printable. Run the wizard to verify a working path.",
       "quickWizardAdvanced": "Expert Settings",
       "quickWizardDetectTitle": "Step 1: Detect Printers",
       "quickWizardDetectHint": "We detect nearby and installed printers first, but nothing is treated as printable until verification succeeds.",
       "quickWizardDraftOnlyHint": "Compatibility-first setup: the wizard tests transport and encoding using an unsaved draft profile. No temporary printer profiles are created.",
+      "transportWindowsQueue": "Windows queue",
+      "transportRawTcp": "Raw TCP",
+      "transportSerial": "Serial / RFCOMM",
+      "transportUnknown": "Not resolved",
+      "verificationVerified": "Verified",
+      "verificationDegraded": "Degraded",
+      "verificationCandidate": "Candidate",
+      "verificationUnverified": "Needs verification",
+      "unknown": "Unknown",
+      "optional": "Optional",
+      "testing": "Testing...",
+      "quickWizardVerifyTransportTitle": "1. Transport + cut sample",
+      "quickWizardVerifyTransportHint": "Checks whether this printer can be reached through a working queue, raw TCP, or serial connection.",
+      "quickWizardVerifyEncodingTitle": "2. Language / encoding sample",
+      "quickWizardVerifyEncodingHint": "Confirms that the active language and character set print correctly on this device.",
+      "quickWizardVerifyBrandingTitle": "3. Optional logo / raster sample",
+      "quickWizardVerifyBrandingHint": "Optional upgrade for branded output after plain-text printing is already confirmed.",
+      "quickWizardFallbackReason": "Using safe defaults for this printer.",
+      "quickWizardBrandingDispatched": "Branding sample dispatched. Confirm the actual paper result before saving.",
+      "quickWizardSampleDispatched": "Sample dispatched. Confirm the actual paper result before saving.",
+      "quickWizardSavedUnverified": "Saved as discovered only. Run verification before using it as a default printer.",
+      "quickWizardCandidateState": "Discovered only. Verify before using.",
+      "quickWizardAlreadyConfigured": "Existing profile found.",
+      "quickWizardNotConfiguredYet": "No saved profile yet.",
+      "quickWizardHighConfidence": "High confidence",
+      "quickWizardNeedsReview": "Needs review",
+      "quickWizardSendSample": "Send sample",
+      "quickWizardVerifyLockedHint": "Confirm the basic transport sample first.",
+      "quickWizardSampleSent": "Sample dispatched",
+      "quickWizardSampleFailed": "Sample failed",
+      "quickWizardResolvedPath": "Resolved path",
+      "quickWizardTransportReachable": "Transport reachable",
+      "quickWizardTransportNotReachable": "Transport not reachable",
+      "quickWizardKnownQueues": "Detected Windows queues",
+      "quickWizardConfirmPaperResult": "Did the paper output print correctly?",
+      "quickWizardStageVerified": "Confirmed working",
+      "quickWizardStageRejected": "This stage is not trusted yet. Adjust settings or keep the profile unverified.",
+      "quickWizardVerifyTitle": "Step 2: Verify Compatibility",
+      "quickWizardVerifyDraftHint": "Each stage uses a draft profile only. The printer is not saved until the last step.",
+      "quickWizardVerificationSummary": "Verification summary",
+      "quickWizardDiscoveredNotPrintableTitle": "Discovered, not yet printable",
+      "quickWizardDiscoveredNotPrintableBody": "The device was detected, but the app could not confirm a working queue, raw TCP path, or serial/RFCOMM transport yet.",
+      "quickWizardWhyTitle": "Why this recommendation",
+      "quickWizardProbeOrder": "Probe order",
+      "quickWizardSelectPrinterFirst": "Select a printer first.",
+      "quickWizardStyleTitle": "Step 3: Defaults & Readability",
+      "quickWizardCompatibilityDefaults": "Safe defaults for new profiles: Classic template, text render mode, and automatic protocol selection. Optional logo / raster support is only trusted after confirmation.",
+      "quickWizardReadability": {
+        "label": "Readability",
+        "small": "Small",
+        "normal": "Normal",
+        "large": "Large"
+      },
+      "quickWizardLivePreview": "Live style preview",
+      "quickWizardReadabilityHint": "Fine-tuning stays available in Expert Settings. Changing protocol, render mode, or connection details later will reset verification.",
+      "quickWizardSaveTitle": "Step 4: Save & Assign",
+      "quickWizardReadyVerifiedTitle": "Ready to save as verified",
+      "quickWizardReadyUnverifiedTitle": "Ready to save as discovered only",
+      "quickWizardReadyVerifiedBody": "This printer now has a confirmed transport path and can be used as a working receipt printer.",
+      "quickWizardReadyUnverifiedBody": "You can still save the profile, but it will remain unverified and should not be relied on as the default printer yet.",
+      "quickWizardDefaultLocked": "Default remains disabled until transport verification succeeds",
+      "quickWizardAssignOtherRoles": "Assign this printer to other roles (optional)",
+      "quickWizardSavedTemplate": "Template",
+      "quickWizardSavedRenderMode": "Render mode",
+      "quickWizardSavedEmulation": "Emulation",
+      "quickWizardSavedAddress": "Resolved address",
       "quickWizardStep": {
         "detect": "Detect",
         "verify": "Verify",
@@ -1857,7 +2182,55 @@
       "receiptTemplateClassic": "Classic (simple text layout)",
       "receiptTemplateModern": "Modern (styled with headers)",
       "receiptTemplateHint": "Classic: simple text-based layout. Modern: styled layout with pillow-shaped section headers.",
+      "classicRenderMode": "Classic print style",
+      "classicRenderModeText": "Printer text",
+      "classicRenderModeRasterExact": "Image-like receipt",
+      "classicEmulationMode": "Printer language",
+      "classicEmulationAuto": "Auto detect",
+      "classicEmulationEscpos": "ESC/POS",
+      "classicEmulationStarLine": "Star Line",
+      "fontType": "Font size",
+      "fontTypeA": "Larger",
+      "fontTypeB": "Compact",
       "escposCodePage": "ESC/POS Code Page Override",
+      "bluetoothAddressRequired": "Bluetooth address is required",
+      "chooseLogoFile": "Choose file",
+      "classicLeftMarginDots": "Left Margin (dots)",
+      "classicPrintableWidthDots": "Printable Width (dots)",
+      "classicPrintableWidthDotsAuto": "Auto",
+      "classicRasterThreshold": "Threshold (1-255)",
+      "discoveredOnlyHint": "Discovery does not mean printable yet. Complete the verification wizard before using a discovered printer in service.",
+      "enableLogo": "Enable logo",
+      "greekTestPrintDispatched": "Greek test print dispatched",
+      "logoFileLoaded": "Logo file loaded. Save settings to apply.",
+      "logoFileReadFailed": "Failed to read logo file",
+      "logoFileTooLarge": "Logo file is too large (max 2MB).",
+      "logoFileTypeUnsupported": "Please choose a PNG or JPG file",
+      "logoPreview": "Preview",
+      "logoSettingsSaveFailed": "Failed to save receipt logo settings",
+      "logoSettingsSaved": "Receipt logo settings saved",
+      "logoSource": "Logo source (URL / file path / data URL)",
+      "logoSourceCustomActive": "Custom receipt logo source is active.",
+      "logoSourceFallbackActive": "Using organization logo fallback from terminal settings.",
+      "logoSourcePlaceholder": "Paste URL or choose file",
+      "nameRequired": "Printer name is required",
+      "networkIpRequired": "Network printer IP is required",
+      "previewUnavailable": "Preview unavailable",
+      "receiptLogoHint": "Optional per-organization logo for printed receipts (PNG/JPG supported).",
+      "receiptLogoTitle": "Receipt Logo",
+      "resolvedAddress": "Resolved address",
+      "resolvedTransport": "Resolved Transport",
+      "saveFailed": "Failed to save setting",
+      "stateDegraded": "Degraded",
+      "stateUnresolved": "Unresolved",
+      "stateUnverified": "Needs verification",
+      "systemNameRequired": "System printer name is required",
+      "testPrintDispatched": "Test print dispatched",
+      "transportUnreachable": "Transport unreachable",
+      "useOrgLogo": "Use org logo fallback",
+      "verification": "Verification",
+      "verificationResetWarning": "These manual changes affect transport or protocol settings, so this profile will return to an unverified state after save.",
+      "verificationSummaryExisting": "Saved printer verification state from the last successful setup.",
       "escposCodePageHint": "Leave empty for auto-detect. Common values: Epson=14, Star=15 (CP737 Greek). Check your printer manual.",
       "escposCodePagePlaceholder": "Auto (leave empty for default)",
       "fallbackPrinter": "Fallback Printer",
@@ -1906,6 +2279,21 @@
       "errorUnknown": "Unknown error",
       "textScaleLabel": "Receipt Text Size",
       "textScaleHint": "Adjust how large text appears on printed receipts",
+      "safeTypographyHint": "Safe mode avoids risky size commands. Use font, density, and emphasis presets for reliable receipts.",
+      "textScaleTextModeHint": "Printer text ignores exact sizing. Moving this slider switches the preview to image-like receipt mode.",
+      "textScaleModernUnavailable": "Modern receipts use fixed text size. Switch to Classic + Image-like receipt to adjust text size.",
+      "textScaleAutoSwitchInline": "Text-size changes switch this draft to image-like receipt mode so preview and print can match.",
+      "textScaleAutoSwitchToast": "Text-size changes switch this draft to image-like receipt mode so preview and print can match.",
+      "classicRenderModeHint": "Image-like receipt is best when exact spacing matters. Leave the advanced fields on Auto unless support asks you to change them.",
+      "layoutDensityPreset": "Density Preset",
+      "layoutDensityCompact": "Compact",
+      "layoutDensityBalanced": "Balanced",
+      "layoutDensitySpacious": "Spacious",
+      "layoutDensity": "Layout Density",
+      "layoutDensityScaleHint": "Fine-tune spacing around the preset. Lower values tighten the receipt, higher values open it up.",
+      "headerEmphasis": "Header Emphasis",
+      "headerEmphasisStrong": "Strong",
+      "headerEmphasisNormal": "Normal",
       "logoScaleLabel": "Logo Size",
       "logoScaleHint": "Adjust the logo size on printed receipts",
       "resetToDefault": "Reset",
@@ -1917,6 +2305,12 @@
       "sectionCalibration": "Calibration",
       "sectionRoleDefaults": "Role & Defaults",
       "livePreview": "Live Preview",
+      "previewExact": "Exact preview",
+      "previewApproximate": "Approximate preview",
+      "previewTemplateClassic": "Classic",
+      "previewTemplateModern": "Modern",
+      "previewRenderModeText": "Text",
+      "previewRenderModeRasterExact": "Raster Exact",
       "previewLoading": "Generating preview...",
       "receiptActions": {
         "sectionTitle": "Automatic Receipt Actions",
@@ -1944,7 +2338,10 @@
       "showImages": "Show Images",
       "animationsEnabled": "Enable Animations",
       "langEnglish": "English",
-      "langGreek": "Greek"
+      "langGreek": "Greek",
+      "langGerman": "German",
+      "langFrench": "French",
+      "langItalian": "Italian"
     },
     "payment": {
       "title": "Payment Settings",
@@ -2008,11 +2405,61 @@
       "dateFormat": "Date Format",
       "timeFormat": "Time Format"
     },
+    "recovery": {
+      "unknown": "Unknown",
+      "countsSummary": "{{orders}} orders • {{shifts}} shifts • {{drawers}} drawers",
+      "orders": "Orders",
+      "shifts": "Shifts",
+      "drawers": "Drawers",
+      "snapshot": "Snapshot",
+      "businessDay": "Business day",
+      "supportNoteTitle": "Support reference saved",
+      "supportNoteHelp": "Export this snapshot if support asks for it.",
+      "restoreNote": "Restored print jobs in pending or printing state will be cancelled during recovery so the POS does not replay historical tickets after restart.",
+      "kinds": {
+        "scheduled": "Scheduled",
+        "manual": "Manual",
+        "pre_factory_reset": "Before factory reset",
+        "pre_emergency_reset": "Before emergency reset",
+        "pre_clear_operational_data": "Before clearing data",
+        "pre_restore": "Before restore",
+        "pre_migration": "Before migration",
+        "pre_recovery_action": "Before recovery action",
+        "quarantined_open_failure": "Quarantined (open failure)"
+      },
+      "title": "Local Recovery",
+      "help": "Keeps local SQLite recovery points and export bundles for up to 7 days.",
+      "latestAutomatic": "Latest automatic snapshot",
+      "latestDestructive": "Latest protective snapshot",
+      "createSnapshot": "Create snapshot",
+      "exportCurrent": "Export current data",
+      "openFolder": "Open recovery folder",
+      "openFolderFailed": "Failed to open the recovery folder",
+      "noPoints": "No local recovery points are available yet.",
+      "loadFailed": "Failed to load local recovery points",
+      "snapshotCreated": "Recovery snapshot created",
+      "snapshotCreateFailed": "Failed to create recovery snapshot",
+      "exportPinTitle": "Confirm recovery export",
+      "exportPinSubtitle": "Enter the admin PIN to export the local recovery bundle.",
+      "exportCreated": "Recovery export created",
+      "exportFailed": "Failed to export recovery bundle",
+      "exportPointPinTitle": "Confirm recovery export",
+      "exportPointPinSubtitle": "Enter the admin PIN to export the selected recovery point.",
+      "exportPointCreated": "Recovery point export created",
+      "exportPointFailed": "Failed to export recovery point",
+      "restorePinTitle": "Confirm restore",
+      "restorePinSubtitle": "Enter the admin PIN to restore the selected recovery point and restart the POS. Any restored pending print jobs will be cancelled instead of replaying automatically.",
+      "restoreFailed": "Failed to stage recovery restore",
+      "exportSelected": "Export selected",
+      "restoreSelected": "Restore selected",
+      "selectPoint": "Select a recovery point to inspect or restore it."
+    },
     "peripherals": {
       "title": "Peripherals",
       "helpText": "Configure external hardware devices",
       "saved": "Peripheral settings saved",
       "saveFailed": "Failed to save peripheral settings",
+      "saveButton": "Save peripherals",
       "scale": {
         "title": "Weighing Scale",
         "port": "COM Port",
@@ -2057,6 +2504,12 @@
         "stop": "Stop"
       },
       "cashRegister": {
+        "helpText": "Configure fiscal devices and tax settings",
+        "fiscalPrintLabel": "Auto Fiscal Print",
+        "fiscalPrintHelp": "Send fiscal receipt to cash register on each order",
+        "fiscalPrintEnabled": "Fiscal printing enabled",
+        "fiscalPrintDisabled": "Fiscal printing disabled",
+        "fiscalPrintSaveFailed": "Failed to save setting",
         "title": "Cash Register / Fiscal Printer",
         "addDevice": "Add Device",
         "editDevice": "Edit Device",
@@ -2140,14 +2593,53 @@
         "disabled": "Caller ID has been disabled on this terminal.",
         "testBeforeSave": "Run a successful connection test after the latest changes before activating Caller ID.",
         "testRequiredHint": "Run Test Connection after any change before you activate Caller ID on this terminal.",
+        "presets": {
+          "genericEurope": {
+            "label": "Generic SIP Europe",
+            "description": "Standard SIP credentials from a provider or hosted PBX."
+          },
+          "threeCx": {
+            "description": "3CX default SIP transport and port."
+          },
+          "freePbx": {
+            "description": "Common Asterisk-style SIP registration defaults."
+          },
+          "yeastar": {
+            "description": "Local or hosted Yeastar PBX with standard SIP credentials."
+          }
+        },
+        "reason": {
+          "authFailed": "Authentication failed. Check the SIP username, auth username, and password.",
+          "timeout": "The SIP server did not answer in time. Check the server, port, and firewall.",
+          "unsupportedProvider": "This provider requires an unsupported SIP challenge or router-locked setup.",
+          "portInUse": "The local SIP listen port is already in use on this POS terminal.",
+          "invalidConfig": "The SIP configuration is incomplete.",
+          "networkError": "The SIP server could not be reached over the selected transport.",
+          "failed": "Caller ID failed to start."
+        },
+        "testFailed": "Connection test failed",
+        "saveFailed": "Failed to save Caller ID settings",
+        "disableFailed": "Failed to disable Caller ID",
         "setup": {
           "providerPreset": "Provider preset",
           "providerPresetHelp": "Start from common SIP defaults and edit the server details.",
-          "generic": "Generic SIP",
+          "generic": "Manual SIP",
           "genericHelp": "Use the SIP server, username, and password from your provider or PBX.",
-          "legacy": "Advanced / Legacy PBX",
+          "legacy": "Older PBX",
           "legacyHelp": "Keep using an IP-trusted PBX registration flow for older installs."
         },
+        "steps": {
+          "choose": "Step 1 · Choose your phone setup",
+          "details": "Step 2 · Enter your line details",
+          "activate": "Step 3 · Test, then turn it on"
+        },
+        "checklist": {
+          "title": "What you'll need",
+          "server": "Your phone server address (like sip.example.com)",
+          "username": "Your extension or username (like 200)",
+          "password": "The password for that line"
+        },
+        "routerNoteCompact": "Phone line that only lives inside your internet router, with no username or password? That isn't supported yet.",
         "status": {
           "listening": "Listening",
           "registering": "Registering",
@@ -2490,6 +2982,13 @@
       "delivery": "Delivery Order",
       "deliveryDescription": "Deliver order to customer address"
     },
+    "printPreview": {
+      "zoomOut": "Zoom out",
+      "zoomIn": "Zoom in",
+      "receiptFrame": "Receipt preview",
+      "previewUnavailable": "Preview unavailable",
+      "defaultPrinter": "Default receipt printer"
+    },
     "editSettlementDelta": {
       "collectTitle": "Extra Payment",
       "refundTitle": "Refund",
@@ -2578,6 +3077,12 @@
       "pleaseWait": "Please wait while we create your order",
       "editOrder": "Edit Order",
       "editModeMessage": "You are editing an existing order. Add, remove, or modify items as needed.",
+      "discardOrder": {
+        "title": "Discard this order?",
+        "message": "This order has items in the cart. Closing now will discard them.",
+        "keepEditing": "Keep editing",
+        "discard": "Discard order"
+      },
       "editFailed": "Failed to save changes. Please try again.",
       "saveChanges": "Save Changes",
       "addCustomer": "Add Customer",
@@ -2614,7 +3119,7 @@
       "insufficientCash": "Insufficient cash received",
       "selectDriverRequired": "Please select a driver for delivery orders",
       "belowMinimumTitle": "Minimum Order Not Met",
-      "belowMinimumMessage": "Order amount is below minimum order amount of €{{amount}}",
+      "belowMinimumMessage": "Order amount is below minimum order amount of {{amount}}",
       "paymentSuccess": "Payment completed! Change: {{change}}",
       "paymentFailed": "Payment failed. Please try again.",
       "cashSuccess": "Cash payment successful!",
@@ -2739,6 +3244,11 @@
       "paymentMethod": "Payment Method"
     },
     "simplePricing": {
+      "orderTypePricing": "Order Type Pricing",
+      "pickupPrice": "Pickup price (\u20ac)",
+      "deliveryPrice": "Delivery price (\u20ac)",
+      "pricingHelp": "Set different prices for pickup and delivery orders.",
+      "savePricing": "Save pricing",
       "title": "Set Pricing"
     },
     "staffShift": {
@@ -2986,6 +3496,11 @@
       "enterPinAction": "Enter PIN",
       "enterPinHelper": "Use the staff member's 4-digit POS PIN to continue.",
       "roleSelectionHelper": "Choose the role for this shift before you continue.",
+      "cashierFirstCheckInRequired": "The first check-in for this business day must be a cashier.",
+      "cashierFirstCheckInHelper": "Start a cashier shift first. The other roles unlock after the cashier checks in.",
+      "cashierFirstCheckInBlocked": "This staff member does not have a cashier role. Go back and choose a cashier first.",
+      "cashierFirstRoleLockedHelper": "Cashier must start the current business day before this role can check in.",
+      "roleLockedUntilCashier": "Locked until cashier starts",
       "cashierRoleHelper": "Financial shift with drawer counting and end-of-shift reconciliation.",
       "driverRoleHelper": "Delivery shift. Starting cash from the active cashier is optional.",
       "serverRoleHelper": "Service shift. Starting cash from the active cashier is optional.",
@@ -3010,6 +3525,41 @@
     },
     "zReport": {
       "title": "Z Report - {{date}}",
+      "clarity": {
+        "totalSales": "Total sales",
+        "expectedCash": "Expected cash",
+        "issues": "Issues",
+        "nextStep": "Next step",
+        "readyHint": "Everything checks out — submit to admin.",
+        "reviewHint": "Fix {{count}} item(s) below, then submit.",
+        "seeIssuesTab": "See the Issues tab",
+        "reviewIssues": "Review issues",
+        "tabMoney": "Money",
+        "tabReview": "Check",
+        "tabIssues": "Issues",
+        "fixFirst": "Start with {{issue}}, then submit.",
+        "statusReady": "Ready",
+        "statusAttention": "Needs attention",
+        "statusAction": "Action needed",
+        "statusChecking": "Checking…",
+        "dayStepTitle": "Business day",
+        "readyStepTitle": "Close the day",
+        "checksStepTitle": "Checks",
+        "submitStepTitle": "Submit",
+        "allChecksPassed": "All checks passed",
+        "checksNeedAttention": "{{count}} to fix — start with {{issue}}",
+        "submitLocked": "Submit unlocks when all checks pass.",
+        "assistantTitle": "Close day",
+        "locked": "Locked",
+        "dayLive": "Today",
+        "dayHistorical": "Past day",
+        "detailsSummary": "Details",
+        "from": "From",
+        "until": "Until",
+        "fixAction": "Fix {{issue}}",
+        "cashDrawerCheckoutAction": "Close cashier shift",
+        "cashDrawerReconcileAction": "Reconcile drawer"
+      },
       "selectDate": "Select report date",
       "selectBusinessDay": "Select business day",
       "businessDay": "Business Day",
@@ -3047,7 +3597,9 @@
       "paymentsReady": "All order payments are balanced.",
       "paymentsNeedAction": "{{count}} payment blocker(s) must be resolved before commit.",
       "cashDrawerReady": "Cash drawer totals are balanced.",
-      "cashDrawerNeedsReview": "{{drawers}} drawer(s) unreconciled. Variance: {{variance}}.",
+      "cashDrawerNeedsReview": "Drawer variance of {{variance}}. Reconcile before closing.",
+      "cashDrawerCheckoutNeeded": "The cashier must close their shift and reconcile the drawer before closing the day.",
+      "cashDrawerCheckoutAndVariance": "Close the cashier shift and review the {{variance}} variance before closing.",
       "expensesReady": "No pending expense review.",
       "expensesNeedReview": "{{count}} expense item(s) still need review.",
       "staffReady": "Staff shifts are available for this report.",
@@ -3147,6 +3699,24 @@
         "card": "Card"
       },
       "noOrdersMatchFilter": "No orders match the selected filters",
+      "orderTypes": {
+        "delivery": "Delivery",
+        "dineIn": "Dine-in",
+        "pickup": "Pickup",
+        "takeaway": "Takeaway",
+        "driveThrough": "Drive-through",
+        "roomService": "Room service",
+        "unknown": "Unknown"
+      },
+      "paymentLabels": {
+        "cash": "Cash",
+        "card": "Card",
+        "split": "Split",
+        "roomCharge": "Room charge",
+        "pending": "Pending",
+        "unpaid": "Unpaid",
+        "unknown": "Unknown"
+      },
       "exportOrdersCSV": "Export Orders CSV",
       "exportCSV": "Export CSV",
       "exportStaffCSV": "Export Staff CSV",
@@ -3274,18 +3844,20 @@
     },
     "orderCancellation": {
       "title": "Cancel Orders",
-      "message": "You are about to cancel {{count}} order(s). Please provide a reason for the cancellation.",
+      "message_one": "You are about to cancel {{count}} order. Please provide a reason for the cancellation.",
+      "message_other": "You are about to cancel {{count}} orders. Please provide a reason for the cancellation.",
       "reasonLabel": "Cancellation Reason *",
       "reasonPlaceholder": "Enter reason for cancellation...",
       "characterCount": "{{current}}/{{max}} characters",
       "confirm": "Confirm Cancel",
-      "cancel": "Cancel",
+      "keepOrder": "Keep order",
       "reasonRequired": "Please provide a reason for cancellation"
     },
     "addCustomer": {
       "title": "Add New Customer",
       "editTitle": "Edit Customer",
       "addAddressTitle": "Add New Address",
+      "editAddressTitle": "Edit Address",
       "customerInformation": "Customer Information",
       "nameLabel": "Full Name *",
       "namePlaceholder": "Enter full name",
@@ -3293,15 +3865,17 @@
       "phonePlaceholder": "Enter phone number",
       "emailLabel": "Email (optional)",
       "emailPlaceholder": "Enter email address",
-      "nameOnRingerLabel": "Name on Ringer",
+      "nameOnRingerLabel": "Name on Ringer (optional)",
       "nameOnRingerPlaceholder": "Name for apartment ringer",
       "addressLabel": "Address *",
       "streetPlaceholder": "Enter delivery address in Greece...",
+      "manualAddressPlaceholder": "Enter address manually",
+      "manualAddressEntryHint": "Delivery zones are disabled for this terminal. Address search and zone validation are off, so the address will be saved manually.",
       "cityLabel": "City",
       "cityPlaceholder": "Enter city",
       "postcodeLabel": "Postal Code",
       "postcodePlaceholder": "Enter postal code",
-      "floorLabel": "Floor Number",
+      "floorLabel": "Floor Number (optional)",
       "floorPlaceholder": "e.g., 2nd floor, Ground floor",
       "notesLabel": "Notes (optional)",
       "notesPlaceholder": "Additional delivery notes or special instructions",
@@ -3323,6 +3897,7 @@
       "floorRequired": "Floor number is required",
       "save": "Add Customer",
       "saveAddress": "Save Address",
+      "saveChanges": "Save Changes",
       "saving": "Saving...",
       "cancel": "Cancel",
       "success": "Customer added successfully",
@@ -3357,7 +3932,8 @@
     },
     "editOptions": {
       "title": "Edit Options",
-      "message": "Choose what you want to edit for {{count}} selected order(s).",
+      "message_one": "Choose what you want to edit for {{count}} selected order.",
+      "message_other": "Choose what you want to edit for {{count}} selected orders.",
       "editCustomerInfo": "Edit Customer Info",
       "editCustomerInfoDesc": "Update customer name, phone, address",
       "editOrderItems": "Edit Order Items",
@@ -3381,7 +3957,8 @@
     },
     "driverAssignment": {
       "title": "Assign Driver",
-      "message": "{{count}} delivery order(s) need to be assigned to a driver.",
+      "message_one": "{{count}} delivery order needs to be assigned to a driver.",
+      "message_other": "{{count}} delivery orders need to be assigned to a driver.",
       "fetchFailed": "Failed to fetch drivers",
       "assignedTo": "Assigned to {{name}}",
       "notAvailable": "{{name}} is not available",
@@ -3409,7 +3986,8 @@
     },
     "editOrderItems": {
       "title": "Edit Order Items",
-      "message": "Modify items and quantities for {{count}} selected order(s).",
+      "message_one": "Modify items and quantities for {{count}} selected order.",
+      "message_other": "Modify items and quantities for {{count}} selected orders.",
       "atLeastOneItem": "At least one item must have a quantity greater than 0",
       "saveFailed": "Failed to save order items",
       "each": "each",
@@ -3426,13 +4004,16 @@
     },
     "editCustomer": {
       "title": "Edit Customer Information",
-      "updateMessage": "Update customer details for {{count}} selected order(s).",
+      "updateMessage_one": "Update customer details for {{count}} selected order.",
+      "updateMessage_other": "Update customer details for {{count}} selected orders.",
       "customerName": "Customer Name *",
       "customerNamePlaceholder": "Enter customer name",
       "phoneNumber": "Phone Number *",
       "phoneNumberPlaceholder": "Enter phone number",
       "address": "Address",
       "addressPlaceholder": "Start typing address for suggestions...",
+      "manualAddressPlaceholder": "Enter address manually",
+      "manualAddressEntryHint": "Delivery zones are disabled for this terminal. Address search and zone validation are off, so the address will be saved manually.",
       "postalCode": "Postal Code",
       "postalCodePlaceholder": "e.g., 10678",
       "autoFilled": "✓ Auto-filled",
@@ -3480,6 +4061,8 @@
       "subtitle": "Adding address for {{name}}",
       "address": "Address *",
       "addressPlaceholder": "Start typing address...",
+      "manualAddressPlaceholder": "Enter address manually",
+      "manualAddressEntryHint": "Delivery zones are disabled for this terminal. Address search and zone validation are off, so the address will be saved manually.",
       "postalCode": "Postal Code",
       "postalPlaceholder": "e.g., 10678",
       "floorNumber": "Floor Number",
@@ -3496,6 +4079,10 @@
       "unknownError": "Unknown error"
     },
     "connectionSettings": {
+      "ghostMode": "Ghost Mode",
+      "ghostModeHelp": "Use manual item code X with price 1 to arm ghost mode for the current cart only.",
+      "available": "Available",
+      "unavailable": "Unavailable",
       "title": "Settings",
       "connectionSettings": "Connection Settings",
       "terminalId": "Terminal ID (legacy)",
@@ -3521,9 +4108,18 @@
       "cancel": "Cancel",
       "savePin": "Save PIN",
       "theme": "Theme",
-      "light": "☀️ Light",
-      "dark": "🌙 Dark",
-      "system": "🖥️ System",
+      "light": "Light",
+      "about": "About",
+      "aboutSubtitle": "Version info",
+      "aboutVersion": "Version",
+      "aboutBuildDate": "Build Date",
+      "aboutGitSha": "Git SHA",
+      "aboutPlatform": "Platform",
+      "aboutRust": "Rust",
+      "aboutCopyInfo": "Copy Info",
+      "aboutCopied": "Copied!",
+      "dark": "Dark",
+      "system": "System",
       "language": "Language",
       "close": "Close",
       "enterBoth": "Paste the connection code or fill the legacy terminal fields",
@@ -3555,6 +4151,44 @@
       "totalOrders": "Total Orders",
       "totalSpent": "Total Spent",
       "noOrders": "No order history found"
+    },
+    "refund": {
+      "title": "Void / Refund",
+      "subtitle": "Manage payment adjustments",
+      "orderTotal": "Order total",
+      "noPayments": "No payments found for this order",
+      "tableSettledTitle": "Paid on the table check",
+      "tableSettledBody": "This order was settled through its table session, so there is no order-level payment to void or refund here. Reopen the table check to adjust or refund the payment.",
+      "activePayments": "Active Payments",
+      "closedPayments": "Voided / Refunded",
+      "adjustmentHistory": "Adjustment History",
+      "statusCompleted": "Completed",
+      "statusVoided": "Voided",
+      "statusRefunded": "Refunded",
+      "voidButton": "Void",
+      "refundButton": "Refund",
+      "voidWarning": "This will fully reverse the payment of",
+      "confirmVoid": "Confirm Void",
+      "confirmRefund": "Confirm Refund",
+      "refundAmount": "Refund Amount",
+      "maxRefund": "Maximum refundable: {{amount}}",
+      "reason": "Reason",
+      "reasonPlaceholder": "Reason for this adjustment...",
+      "reasonRequired": "A reason is required",
+      "invalidAmount": "Enter a valid refund amount",
+      "exceedsBalance": "Refund amount exceeds remaining balance of {{amount}}",
+      "refundLabel": "Refund",
+      "voidLabel": "Void",
+      "refunded": "Refunded",
+      "remaining": "Remaining",
+      "cashierCash": "Cashier drawer",
+      "driverCash": "Driver shift cash",
+      "cardRefund": "Card Refund",
+      "loadFailed": "Failed to load payment data",
+      "refundSuccess": "Refund recorded successfully",
+      "refundFailed": "Refund failed",
+      "voidSuccess": "Payment voided successfully",
+      "voidFailed": "Void failed"
     }
   },
   "errors": {
@@ -3592,6 +4226,12 @@
     "keepLocal": "Keep local changes"
   },
   "inventory": {
+    "filter": {
+      "all": "All",
+      "critical": "Critical",
+      "low": "Low",
+      "good": "Good"
+    },
     "title": "Inventory",
     "subtitle": "Manage inventory items and availability",
     "header": "Inventory Management",
@@ -3718,7 +4358,8 @@
       "loadFailed": "Failed to load inventory",
       "adjustmentNegative": "Adjustment would result in negative stock",
       "adjustmentFailed": "Failed to adjust stock"
-    }
+    },
+    "adjustmentQuantity": "Adjustment quantity"
   },
   "theme": {
     "light": "Light",
@@ -3750,6 +4391,7 @@
     "clear": "Clear",
     "loggingIn": "Logging in…",
     "loginButton": "Login",
+    "connectionSettings": "Connection settings",
     "footer": "The Small POS",
     "enterWithoutPin": "Enter Without PIN",
     "noPinWarning": "No PIN set. You can set one in Settings after logging in.",
@@ -3817,6 +4459,29 @@
     "overrideRequiresApproval": "Override requires manager approval",
     "tableOrder": "Table Order",
     "tableDescription": "Dine-in at table",
+    "roomOrder": "Room",
+    "roomDescription": "Room order, check-in or reservation",
+    "serviceOrder": "Service",
+    "serviceDescription": "Book an appointment",
+    "roomFlowTitle": "Room",
+    "roomFlowOrder": "Room Order",
+    "roomFlowOrderDesc": "Charge an order to a room",
+    "roomFlowCheckin": "Check-in",
+    "roomFlowCheckinDesc": "Check in a reserved room",
+    "roomFlowReservation": "Create Reservation",
+    "roomFlowReservationDesc": "Reserve an available room",
+    "roomOrderTitle": "Select a room",
+    "roomOrderEmpty": "No occupied rooms with an open folio yet",
+    "roomOrderEmptyHint": "A room charge needs a checked-in guest with an active folio. Use Check-in first to open one.",
+    "roomOrderNoFolio": "No active folio",
+    "roomCheckinSelectTitle": "Select a reserved room",
+    "roomReservationSelectTitle": "Select an available room",
+    "roomCheckinEmpty": "No reserved rooms to check in",
+    "roomCheckinEmptyHint": "Check-in needs an existing room reservation. If no rooms appear here, create a reservation first, then come back to check the guest in.",
+    "roomReservationEmpty": "No available rooms to reserve",
+    "roomOrderSelectRoom": "Room {{room}}",
+    "roomGuestCustomer": "Room {{room}} — {{guest}}",
+    "roomCustomer": "Room {{room}}",
     "tableCustomer": "Table {{table}}",
     "reservationComingSoon": "Reservation feature coming soon"
   },
@@ -3854,6 +4519,8 @@
     "customerInfoUpdated": "Customer information updated for {{count}} order(s)",
     "customerInfoFailed": "Failed to update customer information",
     "orderItemsUpdated": "Order items updated for {{count}} order(s)",
+    "orderEditPaymentRequiredToSave": "Choose how to collect the extra payment. The order edit will be saved after payment is recorded.",
+    "tableOrderUpdated": "Table check updated. Balance stays open until the customer pays.",
     "orderItemsFailed": "Failed to update order items",
     "paymentMethodUpdated": "Payment method updated",
     "paymentMethodUpdateFailed": "Failed to update payment method",
@@ -3867,7 +4534,8 @@
     "noCancelledOrdersSelected": "No cancelled orders selected",
     "printFailed": "Receipt print failed",
     "fiscalPrintFailed": "Cash register print failed",
-    "orderCreateFailed": "Failed to create order"
+    "orderCreateFailed": "Failed to create order",
+    "collectPaymentFailed": "Payment collection is required before continuing."
   },
   "bulkActions": {
     "driver": "Driver",
@@ -3983,7 +4651,9 @@
       "occupied": "Occupied",
       "reserved": "Reserved",
       "cleaning": "Cleaning",
-      "outOfService": "Out of Service"
+      "outOfService": "Out of Service",
+      "maintenance": "Maintenance",
+      "unavailable": "Unavailable"
     },
     "card": {
       "tableNumber": "Table #{{number}}",
@@ -4005,7 +4675,13 @@
       "markReserved": "Mark Reserved",
       "changeStatus": "Change Status",
       "viewOrder": "View Order",
-      "transferTable": "Transfer Table"
+      "transferTable": "Transfer Table",
+      "quickActions": "Quick Actions",
+      "newOrder": "New Order",
+      "newReservation": "Reserve",
+      "markMaintenance": "Set Maintenance",
+      "markCleaned": "Cleaned",
+      "markBackInService": "Back in service"
     },
     "filters": {
       "search": "Search tables...",
@@ -4017,7 +4693,9 @@
       "section": "Filter by Section",
       "allSections": "All Sections",
       "floor": "Filter by Floor",
-      "allFloors": "All Floors"
+      "allFloors": "All Floors",
+      "title": "Filter Tables",
+      "clear": "Clear Filters"
     },
     "messages": {
       "loading": "Loading tables...",
@@ -4032,7 +4710,10 @@
       "syncError": "Failed to sync tables",
       "lastSync": "Last synced: {{time}}",
       "confirmClear": "Clear this table and mark as available?",
-      "confirmStatusChange": "Change table status to {{status}}?"
+      "confirmStatusChange": "Change table status to {{status}}?",
+      "refreshed": "Tables refreshed",
+      "noMatchingTables": "No tables match your filters",
+      "noTablesOnFloorPlan": "No tables to display"
     },
     "stats": {
       "total": "Total Tables",
@@ -4040,13 +4721,16 @@
       "occupied": "Occupied",
       "reserved": "Reserved",
       "occupancyRate": "Occupancy Rate",
-      "avgTurnover": "Avg. Turnover"
+      "avgTurnover": "Avg. Turnover",
+      "availableTotal": "{{available}} available / {{total}} total"
     },
     "layout": {
       "title": "Table Layout",
       "gridView": "Grid View",
       "listView": "List View",
-      "floorPlan": "Floor Plan"
+      "floorPlan": "Floor Plan",
+      "switchToFloorPlan": "Switch to floor plan view",
+      "switchToGrid": "Switch to grid view"
     }
   },
   "reservations": {
@@ -4166,6 +4850,8 @@
     "owed": "Total Owed",
     "suppliers": "Suppliers",
     "search": "Search suppliers...",
+    "searchSuppliers": "Search suppliers...",
+    "searchInvoices": "Search invoices...",
     "orders": "Orders",
     "spent": "Spent",
     "invoice": {
@@ -4408,11 +5094,46 @@
       "cleaning": "Cleaning"
     }
   },
+  "appointmentsView": {
+    "toasts": {
+      "created": "Appointment created successfully",
+      "createFailed": "Failed to create appointment",
+      "updateStatusFailed": "Failed to update status",
+      "checkedIn": "Customer checked in",
+      "checkInFailed": "Failed to check in",
+      "completed": "Appointment completed",
+      "completeFailed": "Failed to complete",
+      "status": {
+        "scheduled": "Appointment scheduled",
+        "confirmed": "Appointment confirmed",
+        "in_progress": "Appointment in progress",
+        "completed": "Appointment completed",
+        "cancelled": "Appointment cancelled",
+        "no_show": "Appointment marked as no-show"
+      }
+    }
+  },
   "reservationsView": {
+    "toasts": {
+      "created": "Reservation created successfully",
+      "createFailed": "Failed to create reservation",
+      "updateStatusFailed": "Failed to update status",
+      "tableAssigned": "Table assigned",
+      "assignTableFailed": "Failed to assign table",
+      "status": {
+        "pending": "Reservation pending",
+        "confirmed": "Reservation confirmed",
+        "seated": "Reservation seated",
+        "completed": "Reservation completed",
+        "no_show": "Reservation marked as no-show",
+        "cancelled": "Reservation cancelled"
+      }
+    },
     "status": {
       "confirmed": "Confirmed",
       "pending": "Pending",
       "seated": "Seated",
+      "completed": "Completed",
       "no_show": "No Show",
       "cancelled": "Cancelled"
     },
@@ -4420,10 +5141,65 @@
       "total": "Total",
       "confirmed": "Confirmed",
       "pending": "Pending",
-      "seated": "Seated"
+      "seated": "Seated",
+      "guests": "Guests"
+    },
+    "tabs": {
+      "tables": "Tables",
+      "rooms": "Rooms",
+      "services": "Services"
+    },
+    "headers": {
+      "tables": "Table Reservations",
+      "rooms": "Room Reservations",
+      "services": "Service Reservations"
+    },
+    "actions": {
+      "confirm": "Confirm",
+      "seat": "Seat",
+      "complete": "Complete",
+      "noShow": "No Show",
+      "checkIn": "Check In"
+    },
+    "validation": {
+      "customerRequired": "Customer name and phone are required",
+      "serviceRequired": "Service, staff, date and time are required",
+      "invalidReservation": "Please provide a valid date, time and party size",
+      "roomRequired": "Room, check-in date and check-out date are required"
+    },
+    "form": {
+      "customerName": "Customer name",
+      "service": "Service",
+      "staff": "Staff",
+      "selectService": "Select a service",
+      "selectStaff": "Select staff",
+      "room": "Room",
+      "selectRoom": "Select a room",
+      "customerPhone": "Customer phone",
+      "customerEmail": "Customer email (optional)",
+      "partySize": "Party size",
+      "duration": "Duration (minutes)",
+      "tableId": "Table ID (optional)",
+      "roomId": "Room ID",
+      "checkInDate": "Check-in date",
+      "checkOutDate": "Check-out date",
+      "specialRequests": "Special requests (optional)",
+      "notes": "Notes (optional)",
+      "tableOptional": "Select a table (optional)",
+      "reservationDate": "Reservation date",
+      "reservationTime": "Reservation time"
     },
     "searchPlaceholder": "Search...",
     "addReservation": "Add",
+    "create": "Create",
+    "createTitle": "Create Reservation",
+    "createServiceInAppointments": "Create service bookings from Appointments",
+    "createServiceTitle": "Create Service Booking",
+    "refresh": "Refresh",
+    "pendingAlert": "reservation(s) pending confirmation",
+    "loading": "Loading reservations...",
+    "walkInCustomer": "Walk-in customer",
+    "service": "Service",
     "filter": {
       "today": "Today",
       "tomorrow": "Tomorrow",
@@ -4434,8 +5210,19 @@
       "timeline": "Timeline"
     },
     "table": "Table",
+    "room": "Room",
+    "noTable": "No table",
     "guests": "guests",
     "noReservations": "No reservations found",
+    "noReservationsHint": "Try selecting a different date or adjusting your search",
+    "noBranch": "Please select a branch to view reservations",
+    "noModules": "No reservation modules available",
+    "noModulesHint": "Please acquire Tables, Rooms, or Services to manage reservations.",
+    "detailTitle": "Reservation Details",
+    "customer": "Customer",
+    "when": "Date & Time",
+    "quickActions": "Quick Actions",
+    "assignTable": "Assign Table",
     "partySize": "Party Size",
     "time": "Time",
     "phone": "Phone",
@@ -4444,7 +5231,8 @@
     "dateNavigation": {
       "previous": "Previous Day",
       "next": "Next Day"
-    }
+    },
+    "selectTable": "Select a table"
   },
   "onboarding": {
     "connectionString": "Connection Code",
@@ -4555,7 +5343,8 @@
     "validation": {
       "selectStaff": "Please select a staff member",
       "selectDateTime": "Please select start and end date/time",
-      "endAfterStart": "End time must be after start time"
+      "endAfterStart": "End time must be after start time",
+      "tooLong": "Shift duration must be less than {{hours}} hours"
     },
     "ergani": {
       "noBranch": "Branch is not configured for this terminal.",
@@ -4965,6 +5754,18 @@
     "loadError": "Unable to load orders",
     "noOrders": "No Active Orders",
     "noOrdersDesc": "New orders will appear here automatically",
+    "view": {
+      "list": "List view",
+      "grid": "Grid view"
+    },
+    "sound": {
+      "disable": "Mute sound",
+      "enable": "Enable sound"
+    },
+    "autoRefresh": {
+      "pause": "Pause live refresh",
+      "resume": "Resume live refresh"
+    },
     "externalDisplay": {
       "copyTvLink": "Copy TV link",
       "open": "Open on connected display",
@@ -4990,6 +5791,13 @@
     }
   },
   "loyalty": {
+    "tier": {
+      "none": "No tier",
+      "bronze": "Bronze",
+      "silver": "Silver",
+      "gold": "Gold",
+      "platinum": "Platinum"
+    },
     "contextMissing": {
       "title": "Loyalty context is missing",
       "body": "This terminal is missing organization settings. Check terminal settings and try again.",
@@ -5181,12 +5989,14 @@
   },
   "ecr": {
     "title": "Payment Terminals",
+    "configuredTerminals": "Configured Terminals",
     "subtitle": "Manage card payment terminals",
     "discover": "Discover",
     "addManual": "Add Terminal",
     "loading": "Loading payment terminals...",
     "refreshSuccess": "Terminals refreshed",
     "refreshError": "Failed to refresh",
+    "refreshStatus": "Refresh connection status",
     "disconnectSuccess": "Terminal disconnected",
     "deleteSuccess": "Terminal deleted",
     "setDefaultSuccess": "Default terminal updated",
@@ -5238,6 +6048,7 @@
       "name": "Terminal Name",
       "namePlaceholder": "e.g., Main Terminal",
       "nameRequired": "Terminal name is required",
+      "missingRequired": "Enter the terminal name and connection details to enable Add.",
       "connection": "Connection Type",
       "protocol": "Protocol",
       "legacyGeneric": "Generic ECR (legacy)",
@@ -5311,9 +6122,59 @@
       "inactive": "Inactive"
     },
     "noDescription": "No description",
-    "noServices": "No services found"
+    "noServices": "No services found",
+    "addTitle": "Add Service",
+    "editTitle": "Edit Service",
+    "fields": {
+      "name": "Name",
+      "namePlaceholder": "Service name",
+      "category": "Category",
+      "noCategory": "No category",
+      "price": "Price",
+      "duration": "Duration (minutes)",
+      "description": "Description",
+      "descriptionPlaceholder": "Optional description",
+      "active": "Active"
+    },
+    "validation": {
+      "nameRequired": "Service name is required",
+      "priceInvalid": "Enter a valid price",
+      "durationInvalid": "Enter a duration of at least 1 minute"
+    },
+    "delete": {
+      "title": "Delete Service",
+      "message": "Delete {{name}}? This cannot be undone.",
+      "confirm": "Delete"
+    },
+    "toast": {
+      "created": "Service created",
+      "updated": "Service updated",
+      "deleted": "Service deleted",
+      "saveFailed": "Failed to save service",
+      "deleteFailed": "Failed to delete service"
+    }
   },
   "appointments": {
+    "status": {
+      "scheduled": "Scheduled",
+      "confirmed": "Confirmed",
+      "in_progress": "In Progress",
+      "completed": "Completed",
+      "cancelled": "Cancelled",
+      "no_show": "No Show"
+    },
+    "validation": {
+      "availabilityFailed": "Failed to validate staff availability"
+    },
+    "walkIn": "Walk-in",
+    "service": "Service",
+    "staff": "Staff",
+    "noAppointments": "No appointments found",
+    "noAppointmentsHint": "Try selecting a different date or adjusting your filters",
+    "newAppointment": "New Appointment",
+    "previousDay": "Previous day",
+    "nextDay": "Next day",
+    "selectStaffService": "Please select staff and service",
     "selectBranch": "Please select a branch to view appointments",
     "stats": {
       "total": "Total",
@@ -5341,6 +6202,10 @@
     "modal": {
       "title": "New Appointment",
       "phoneSearchLabel": "Search Customer by Phone",
+      "sections": {
+        "guestService": "Customer & Service",
+        "dateTime": "Date & Time"
+      },
       "phonePlaceholder": "Enter phone number...",
       "search": "Search",
       "customerNotFound": "Customer not found. Add new customer:",
@@ -5355,6 +6220,13 @@
         "evening": "Evening"
       },
       "selectStaffAvailability": "Select staff to see availability",
+      "selectStaffServiceAvailability": "Choose staff and service first to see real availability",
+      "slotsEmpty": {
+        "title": "Pick staff and service first",
+        "help": "Choose a staff member and a service first, then the real available times show up here.",
+        "staffStep": "Staff",
+        "serviceStep": "Service"
+      },
       "loadingSlots": "Loading...",
       "availability": {
         "available": "Available",
@@ -5364,7 +6236,15 @@
       "notesPlaceholder": "Optional notes...",
       "cancel": "Cancel",
       "create": "Create",
-      "creating": "Creating..."
+      "creating": "Creating...",
+      "customer": "Customer",
+      "bannedCustomer": "Banned Customer",
+      "clearCustomer": "Clear",
+      "previousMonth": "Previous month",
+      "nextMonth": "Next month",
+      "searchCustomer": "Search Customer",
+      "walkInName": "Walk-in name",
+      "walkInPhone": "Phone"
     }
   },
   "integrations": {
@@ -5513,7 +6393,8 @@
     "itemsCount": "{{count}} items",
     "people": "People",
     "unassigned": "-- Unassigned --",
-    "unassignedWarning": "{{count}} item(s) not assigned",
+    "unassignedWarning_one": "{{count}} item not assigned",
+    "unassignedWarning_other": "{{count}} items not assigned",
     "noItems": "No items assigned",
     "receiptCombined": "Combined",
     "receiptIndividual": "Individual",
@@ -5521,7 +6402,28 @@
     "processing": "Processing...",
     "success": "Split payment completed successfully",
     "failed": "Split payment failed. Please try again.",
-    "discountPersistFailed": "Payment recorded, but the discount could not be saved to the order. Review the order total before closing it."
+    "discountPersistFailed": "Payment recorded, but the discount could not be saved to the order. Review the order total before closing it.",
+    "payable": "Payable",
+    "discount": "Discount",
+    "outstanding": "Due",
+    "alreadyPaid": "Already Paid",
+    "allItemsPaid": "All remaining balance has already been allocated to previous item payments",
+    "alreadyPaidSummary": "Already paid {{paid}}. Remaining due {{due}}",
+    "balanceAdjustment": "Balance Adjustment",
+    "balanceChanged": "Order balance changed while split payment was open. The split was refreshed to the latest outstanding amount of {{amount}}.",
+    "cardBusy": "Another card payment is already in progress",
+    "cardFailed": "Card payment failed",
+    "cashierDrawer": "Cashier",
+    "collectedBy": "Collected By",
+    "driverShift": "Driver",
+    "loading": "Loading split payment",
+    "loadingHint": "Checking existing split payments and paid items...",
+    "manualCardFallback": "No ready payment terminal. This portion will be recorded as a manual card payment on confirm.",
+    "partialSuccess": "Split payment recorded. Remaining balance: {{amount}}",
+    "portionPaid": "{{person}} paid successfully",
+    "priorPayments": "Prior Payments",
+    "terminalApproved": "Terminal",
+    "waitingForApproval": "Waiting for card approval on the payment terminal..."
   },
   "recovery": {
     "common": {
@@ -5677,7 +6579,9 @@
       "guidedTitle": "Sync recovery",
       "guidedSubtitle": "The POS checks the blocker, offers the safest known solution, then verifies sync again.",
       "blockedCount": "{{count}} blocking",
-      "terminalContextLine": "Terminal {{terminalId}}",
+      "thisTerminal": "This register",
+      "branchFallback": "This branch",
+      "organizationFallback": "This business",
       "remainingIssues": "{{count}} visible issues",
       "noVisibleBlockerTitle": "Nothing is blocking sync",
       "noVisibleBlockerDescription": "No order, payment, or queue item currently needs manual recovery.",
@@ -5933,14 +6837,190 @@
       "loadFailed": "[NEEDS EN TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
     }
   },
+  "housekeepingView": {
+    "loading": "Loading housekeeping tasks...",
+    "errorTitle": "Unable to load housekeeping tasks",
+    "room": "Room",
+    "unassigned": "Unassigned",
+    "staffFallback": "Staff",
+    "status": {
+      "pending": "Pending",
+      "inProgress": "In Progress",
+      "completed": "Completed",
+      "verified": "Verified"
+    },
+    "stats": {
+      "totalTasks": "Total Tasks",
+      "completedToday": "Completed Today",
+      "avgTime": "Avg Time"
+    },
+    "filter": {
+      "allFloors": "All Floors",
+      "floor": "Floor",
+      "allTypes": "All Types",
+      "allPriorities": "All Priorities",
+      "allStaff": "All Staff",
+      "unassigned": "Unassigned"
+    },
+    "priority": {
+      "urgent": "Urgent",
+      "high": "High",
+      "normal": "Normal",
+      "low": "Low"
+    },
+    "assign": {
+      "none": "Unassigned"
+    },
+    "action": {
+      "start": "Start",
+      "complete": "Complete",
+      "verify": "Verify",
+      "createTask": "Create task"
+    },
+    "empty": {
+      "title": "No housekeeping tasks",
+      "description": "Housekeeping tasks appear here automatically when rooms are checked out or set to cleaning."
+    },
+    "toasts": {
+      "loadFailed": "Failed to load housekeeping tasks",
+      "updateFailed": "Failed to update task",
+      "assignFailed": "Failed to assign staff",
+      "createSuccess": "Housekeeping task created",
+      "createFailed": "Failed to create task"
+    },
+    "fallbackHint": "Shown from a room in cleaning status. Actions become available once the housekeeping task is created.",
+    "taskType": {
+      "cleaning": "Cleaning",
+      "checkout_clean": "Checkout Clean",
+      "stayover_clean": "Stayover Clean",
+      "deep_clean": "Deep Clean",
+      "turndown": "Turndown",
+      "inspection": "Inspection"
+    }
+  },
   "roomsView": {
     "noBranch": "Please select a branch to view rooms",
+    "loading": "Loading rooms...",
+    "searchPlaceholder": "Search room or guest...",
+    "filters": "Filters",
+    "all": "All",
+    "allFloors": "All Floors",
+    "floor": "Floor {{floor}}",
+    "noRooms": "No rooms found",
+    "noRoomsHint": "Try adjusting your filters",
+    "newCheckinOrReservation": "New Check-in or Reservation",
+    "changeStatus": "Change Status",
+    "roomTitle": "Room {{number}}",
+    "settleRoomTitle": "Settle Room {{number}}",
+    "addChargeTitle": "Add Charge - Room {{number}}",
+    "newCheckin": "New Check-in",
+    "newReservation": "New Reservation",
+    "selectRoom": "Select Room",
+    "chooseRoom": "Choose a room...",
+    "roomOption": "Room {{number}} - {{type}} ({{rate}}/night)",
+    "roomTypes": {
+      "standard": "Standard",
+      "deluxe": "Deluxe",
+      "suite": "Suite",
+      "penthouse": "Penthouse",
+      "accessible": "Accessible"
+    },
+    "outstandingBalance": "Outstanding Balance",
+    "paymentMethod": "Payment Method",
+    "paymentMethods": {
+      "cash": "Cash",
+      "card": "Card",
+      "transfer": "Transfer",
+      "bank_transfer": "Bank transfer",
+      "other": "Other"
+    },
+    "paymentAmount": "Payment Amount",
+    "reference": "Reference",
+    "postPaymentCheckout": "Post Payment & Checkout",
+    "chargeType": "Charge Type",
+    "chargeTypes": {
+      "other": "Other",
+      "room": "Room",
+      "food": "Food",
+      "beverage": "Beverage",
+      "service": "Service",
+      "tax": "Tax"
+    },
+    "description": "Description",
+    "amount": "Amount",
+    "quantity": "Quantity",
+    "notes": "Notes",
+    "notesPlaceholder": "Special requests, notes...",
+    "guestName": "Guest Name",
+    "phone": "Phone",
+    "email": "Email",
+    "idNumber": "ID Number",
+    "numberOfNights": "Number of Nights",
+    "estimatedStayCharge": "Estimated Stay Charge",
+    "totalAmount": "Total Amount",
+    "completeCheckin": "Complete Check-in",
+    "createReservation": "Create Reservation",
+    "checkInDate": "Check-in Date",
+    "checkOutDate": "Check-out Date",
     "status": {
       "available": "Available",
       "occupied": "Occupied",
       "reserved": "Reserved",
       "maintenance": "Maintenance",
       "cleaning": "Cleaning"
+    },
+    "stats": {
+      "total": "Total",
+      "available": "Available",
+      "occupied": "Occupied",
+      "cleaning": "Cleaning",
+      "occupancy": "Occupancy"
+    },
+    "fields": {
+      "status": "Status",
+      "type": "Type",
+      "capacity": "Capacity",
+      "ratePerNight": "Rate/Night",
+      "guest": "Guest",
+      "folioBalance": "Folio Balance",
+      "guestsCount": "{{count}} guests"
+    },
+    "actions": {
+      "checkin": "Check-in",
+      "reserve": "Reserve",
+      "checkout": "Checkout",
+      "addCharge": "Add Charge"
+    },
+    "toasts": {
+      "missingContext": "Missing branch or organization context",
+      "roomNotFound": "Selected room not found",
+      "checkinQueued": "Check-in queued for sync",
+      "checkinReceiptFailed": "Check-in completed, but receipt failed",
+      "checkinNoReceipt": "Room checked in without a reservation or receipt",
+      "checkinSuccess": "Check-in completed successfully",
+      "reservationsModuleRequired": "Reservations module is required to create room reservations",
+      "reservationCreated": "Reservation created successfully",
+      "reservationFailed": "Failed to create reservation",
+      "folioCheckoutOffline": "Folio checkout requires an online connection",
+      "checkoutQueued": "Checkout queued for sync",
+      "statusUpdated": "Room status updated to {{status}}",
+      "statusUpdateFailed": "Failed to update room status",
+      "checkoutHousekeepingFailed": "Checkout completed, but housekeeping task creation failed",
+      "folioSkipped": "Checkout completed; folio settlement was skipped because guest billing is not available",
+      "checkoutAlreadyCompleted": "Checkout already completed",
+      "checkoutCompleted": "Checkout completed",
+      "invalidPaymentAmount": "Enter a valid payment amount",
+      "paymentPosted": "Payment posted",
+      "noActiveFolio": "No active folio is available for this room",
+      "chargeOffline": "Adding a folio charge requires an online connection",
+      "chargeDescriptionRequired": "Enter a charge description",
+      "invalidChargeAmount": "Enter a valid charge amount",
+      "invalidQuantity": "Enter a valid quantity",
+      "chargeAdded": "Charge added",
+      "checkinFailed": "Failed to complete check-in",
+      "checkoutFailed": "Failed to complete checkout",
+      "paymentFailed": "Failed to post payment",
+      "chargeFailed": "Failed to add charge"
     }
   },
   "guestBilling": {
@@ -6024,5 +7104,128 @@
   },
   "filters": {
     "all": "All"
+  },
+  "floorPlan": {
+    "tableProperties": {
+      "pax_one": "{{count}} pax",
+      "pax_other": "{{count}} pax"
+    }
+  },
+  "tableSelector": {
+    "title": "Select a Table",
+    "subtitle_one": "{{count}} table available",
+    "subtitle_other": "{{count}} tables available",
+    "searchPlaceholder": "Search by table number...",
+    "minCapacity": "Min. capacity:",
+    "all": "All",
+    "noTables": "No tables available",
+    "tryDifferentFilters": "Try different filters",
+    "allTablesOccupied": "All tables are currently occupied or being cleaned",
+    "floor": "Floor",
+    "allFloors": "All floors",
+    "floorNumber": "Floor {{floor}}",
+    "status": {
+      "available": "Available",
+      "reserved": "Reserved",
+      "occupied": "Occupied",
+      "cleaning": "Cleaning",
+      "maintenance": "Maintenance",
+      "unavailable": "Unavailable"
+    }
+  },
+  "tableActionModal": {
+    "title": "Table Actions",
+    "tableNumber": "Table",
+    "guests_one": "guest",
+    "guests_other": "guests",
+    "covers": "Covers",
+    "coversDescription": "Guests on this check",
+    "decreaseCovers": "Decrease covers",
+    "increaseCovers": "Increase covers",
+    "unpaidBalance": "Open balance: {{amount}}",
+    "newOrder": "New Order",
+    "newOrderDescription": "Start a new order for this table",
+    "newOrderCleaningDisabled": "Mark the table cleaned before taking a new order",
+    "newOrderMaintenanceDisabled": "Return this table to service before taking a new order",
+    "newOrderUnavailableDisabled": "Make this table available before taking a new order",
+    "markCleaned": "Cleaned",
+    "markAvailable": "Set Available",
+    "markBackInService": "Back in service",
+    "markAvailableDescription": "Set this table as available for orders",
+    "markBackInServiceDescription": "Set this table as available after maintenance",
+    "editReservation": "Edit Reservation",
+    "editReservationDescription": "Change time, guests, or notes",
+    "noShowReservation": "No Show",
+    "noShowReservationDescription": "Guest did not arrive",
+    "cancelReservation": "Cancel Reservation",
+    "cancelReservationDescription": "Cancel booking and release table",
+    "newReservation": "New Reservation",
+    "newReservationDescription": "Book this table for a future time",
+    "newReservationUnavailableDescription": "Return this table to service before booking",
+    "cleaningHint": "Set the table as cleaned to make it available for orders",
+    "maintenanceHint": "Maintenance tables are out of service until marked back in service",
+    "reservedHint": "Manage this reservation or start the table order when guests arrive",
+    "unavailableHint": "Set the table available before using it for guests",
+    "hint": "Select an action to continue",
+    "reservationNotFound": "No active reservation found for this table",
+    "reservationReleased": "Reservation no longer active; table released",
+    "reservationLoadFailed": "Failed to load reservation",
+    "noShowSuccess": "Reservation marked as no-show",
+    "noShowFailed": "Failed to mark reservation as no-show",
+    "cancelReason": "Cancelled from POS table actions",
+    "cancelSuccess": "Reservation cancelled",
+    "cancelFailed": "Failed to cancel reservation",
+    "setAvailableSuccess": "Table marked available",
+    "setAvailableFailed": "Failed to mark table available",
+    "status": {
+      "available": "Available",
+      "reserved": "Reserved",
+      "occupied": "Occupied",
+      "cleaning": "Cleaning",
+      "maintenance": "Maintenance",
+      "unavailable": "Unavailable"
+    }
+  },
+  "reservationForm": {
+    "title": "New Reservation",
+    "editTitle": "Edit Reservation",
+    "subtitle": "Table {{tableNumber}} • Capacity: {{capacity}} {{guests}}",
+    "customerName": "Customer Name",
+    "customerNamePlaceholder": "Enter customer name",
+    "phone": "Phone Number",
+    "phonePlaceholder": "+30 XXX XXX XXXX",
+    "date": "Date",
+    "time": "Time",
+    "partySize": "Number of Guests",
+    "decreaseGuests": "Decrease guests",
+    "increaseGuests": "Increase guests",
+    "guests_one": "guest",
+    "guests_other": "guests",
+    "guestCount_one": "{{count}} guest",
+    "guestCount_other": "{{count}} guests",
+    "specialRequests": "Special Requests",
+    "specialRequestsPlaceholder": "Any special requests or notes...",
+    "existingReservations": "This table has existing reservations:",
+    "existingReservationItem": "{{date}} at {{time}} — {{customer}} ({{guests}})",
+    "andMore": "… and {{count}} more",
+    "conflictWarning": "Time conflict detected!",
+    "conflictDescription": "There is already a reservation at this time:",
+    "conflictItem": "{{time}} — {{customer}} ({{guests}})",
+    "conflictAction": "Please choose a different time or cancel the existing reservation first.",
+    "cancel": "Cancel",
+    "save": "Save Changes",
+    "create": "Create Reservation",
+    "saving": "Saving...",
+    "creating": "Creating...",
+    "checking": "Checking...",
+    "errors": {
+      "nameRequired": "Customer name is required",
+      "phoneRequired": "Phone number is required",
+      "phoneInvalid": "Please enter a valid phone number",
+      "dateRequired": "Reservation date is required",
+      "timeRequired": "Reservation time is required",
+      "partySizeMin": "Party size must be at least 1",
+      "partySizeExceedsCapacity": "Party size exceeds table capacity of {{capacity}}"
+    }
   }
 }

@@ -42,7 +42,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
             className="!max-w-lg"
         >
             <div className="space-y-4">
-                <div className="flex items-center space-x-3 text-cyan-400">
+                <div className="flex items-center space-x-3 text-amber-300">
                     <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                     </svg>
@@ -56,7 +56,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                     </div>
                 </div>
 
-                <div className="bg-black/20 rounded-lg p-4 max-h-48 overflow-y-auto">
+                <div className="bg-black/20 rounded-2xl p-4 max-h-48 overflow-y-auto">
                     <h4 className="text-sm font-semibold text-gray-300 mb-2">{t('updates.available.whatsNew')}</h4>
                     {/* Render release notes as HTML content safely or plain text */}
                     <div

@@ -85,12 +85,16 @@ Replay prepares the request only after terminal context is available. It sends
 `x-pos-api-key` and `x-terminal-id`; strict POS endpoints must not rely on an
 admin bearer token as a substitute for terminal identity.
 
-Fiscal device receipt numbers are operational order metadata, not payment
-ledger rows. When `commands/ecr.rs` receives a successful fiscal receipt number,
-it persists `ecr_transactions.fiscal_receipt_number` and enqueues an `orders`
-`UPDATE` in `parity_sync_queue` in the same SQLite transaction. The payload
-must include `fiscalReceiptNumber` and may include `fiscal_receipt_number` for
-server compatibility; replay maps it to remote `orders.fiscal_receipt_number`.
+Fiscal receipt identifiers are operational order metadata, not payment ledger
+rows. Local `orders.receipt_number` is a fiscal payload alias and is only
+populated for branches with acquired/enabled fiscal reporting entitlement;
+branches without a government order-reporting plugin keep it empty while still
+using `order_number` for normal POS operations. When
+`commands/ecr.rs` receives a successful fiscal receipt number, it persists
+`ecr_transactions.fiscal_receipt_number` and enqueues an `orders` `UPDATE` in
+`parity_sync_queue` in the same SQLite transaction. The payload must include
+`fiscalReceiptNumber` and may include `fiscal_receipt_number` for server
+compatibility; replay maps it to remote `orders.fiscal_receipt_number`.
 
 ## API Mapping
 

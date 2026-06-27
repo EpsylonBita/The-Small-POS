@@ -56,7 +56,7 @@ export const OrderSyncRouteIndicator: React.FC<OrderSyncRouteIndicatorProps> = (
 
     if (condensed) {
         return (
-            <div className="flex items-center gap-1 text-xs" title={t('sync.routing.viaParent')}>
+            <div className="flex items-center gap-1 text-xs" role="img" aria-label={t('sync.routing.viaParent')}>
                 <span className={`w-2 h-2 rounded-full ${status.routingMode === 'via_parent' && status.parentInfo ? 'bg-blue-400' : 'bg-orange-400'}`}></span>
             </div>
         );
@@ -114,7 +114,7 @@ export const OrderSyncRouteIndicator: React.FC<OrderSyncRouteIndicatorProps> = (
     }
 
     return (
-        <div className={`rounded-lg border border-slate-200/80 bg-white/90 p-3 mt-2 dark:border-white/10 dark:bg-white/[0.04] ${className}`.trim()}>
+        <div className={`rounded-2xl border border-slate-200/80 bg-white/90 p-3 mt-2 dark:border-white/10 dark:bg-white/[0.04] ${className}`.trim()}>
             <div className="flex items-center justify-between mb-1">
                 <span className="text-xs text-slate-500 dark:text-slate-400">{t('sync.routing.label')}</span>
                 <span className={`text-xs font-semibold ${status.routingMode === 'via_parent' ? 'text-blue-600 dark:text-blue-300' :

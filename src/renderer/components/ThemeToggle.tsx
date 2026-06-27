@@ -18,8 +18,8 @@ export default function ThemeToggle() {
     return (
         <button
             onClick={cycle}
-            title={t('app.themeToggle.title', { theme })}
-            className={`transition text-2xl p-2 ${isDark ? 'text-white/70 hover:text-white' : 'text-slate-900 hover:text-black'}`}
+            aria-label={t('app.themeToggle.title', { theme })}
+            className={`inline-flex items-center justify-center transition text-2xl p-2 active:scale-95 ${isDark ? 'text-white/70 active:text-white' : 'text-slate-900 active:text-black'}`}
         >
             <span className="leading-none select-none">{label}</span>
         </button>

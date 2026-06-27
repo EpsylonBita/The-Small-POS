@@ -123,7 +123,7 @@ test('StaffScheduleView uses yellow accents for selected controls instead of blu
   assert.match(source, /bg-yellow-400 border-yellow-400 text-black/);
   assert.match(source, /bg-yellow-950\/20 border-yellow-500/);
   assert.match(source, /bg-yellow-100 border-yellow-200 text-yellow-800/);
-  assert.match(source, /hover:border-yellow-500 hover:text-yellow-200/);
+  assert.match(source, /active:border-yellow-500 active:text-yellow-200/);
   assert.doesNotMatch(source, /staffSchedule\.actions\.addShift/);
   assert.match(source, /staffSchedule\.addShiftForDay/);
   assert.doesNotMatch(source, /focus:border-blue-500/);
@@ -134,6 +134,15 @@ test('StaffScheduleView uses yellow accents for selected controls instead of blu
   assert.doesNotMatch(source, /rgba\(37,99,235/);
   assert.doesNotMatch(source, /rgba\(59,130,246/);
   assert.doesNotMatch(source, /style=\{roleFilter === role \?/);
+});
+
+test('Round 430: StaffScheduleView keeps page controls and preview cards on smooth touch radii', () => {
+  const source = readScheduleSource();
+
+  assert.match(source, /className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-red-600 active:bg-red-500 text-white transition-transform active:scale-95"/);
+  assert.match(source, /className=\{`rounded-2xl border-l-4 px-2 py-2 \$\{isDark \? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'\}`\}/);
+  assert.match(source, /className=\{`w-full px-3 py-2 rounded-2xl border text-sm \$\{/);
+  assert.doesNotMatch(source, /rounded-lg/);
 });
 
 test('StaffScheduleView only shows ERGANI publish when the plugin is acquired', () => {
@@ -182,4 +191,34 @@ test('StaffScheduleView staffSchedule translation keys exist in every POS locale
       `${file} is missing StaffScheduleView translations:\n${missing.map(key => `  - staffSchedule.${key}`).join('\n')}`,
     );
   }
+});
+
+// Round 188 (touch-first, live QA): StaffScheduleView interactive controls (prev/next week, refresh,
+// per-day add-shift, unscheduled-staff buttons) exposed native DOM `title` tooltips as accessibility
+// "Description" text. Touchscreen-first POS -> no native title tooltips and no hover utilities;
+// accessible names via aria-label, visual state via active: tap feedback.
+test('StaffScheduleView has no native title tooltips and no hover utilities; controls keep aria-labels + handlers', () => {
+  const source = readScheduleSource();
+
+  // No native DOM title attribute and no hover utilities anywhere in the view.
+  assert.doesNotMatch(source, /\btitle=/);
+  assert.doesNotMatch(source, /hover:/);
+  assert.doesNotMatch(source, /dark:hover:/);
+  assert.doesNotMatch(source, /group-hover:/);
+
+  // Previous / next week + refresh keep their handlers and localized aria-labels.
+  assert.match(source, /onClick=\{\(\) => navigateWeek\('prev'\)\}\s*aria-label=\{t\('staffSchedule\.actions\.previousWeek', 'Previous week'\)\}/);
+  assert.match(source, /onClick=\{\(\) => navigateWeek\('next'\)\}\s*aria-label=\{t\('staffSchedule\.actions\.nextWeek', 'Next week'\)\}/);
+  assert.match(source, /onClick=\{fetchStaffData\}\s*aria-label=\{refreshScheduleLabel\}/);
+
+  // Day add-shift button keeps its handler + localized aria-label.
+  assert.match(source, /onClick=\{\(\) => openCreateModal\(day\)\}\s*aria-label=\{t\('staffSchedule\.addShiftForDay', 'Add shift for this day'\)\}/);
+
+  // Unscheduled-staff button keeps its handler + a member-aware aria-label (was a native title).
+  assert.match(source, /onClick=\{\(\) => openCreateModal\(defaultCreateDate, member\.id\)\}/);
+  assert.match(source, /aria-label=\{`\$\{t\('staffSchedule\.addShiftForStaff', 'Add shift for this staff member'\)\}: \$\{member\.name\}`\}/);
+
+  // Touch-first state: yellow/active accents preserved, no blue chrome.
+  assert.match(source, /active:border-yellow-500 active:text-yellow-200/);
+  assert.doesNotMatch(source, /text-blue-|bg-blue-|border-blue-/);
 });

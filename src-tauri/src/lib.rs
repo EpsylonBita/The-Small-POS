@@ -47,6 +47,7 @@ mod escpos;
 pub mod fiscal; // pub so integration tests (tests/*.rs) can exercise enqueue_for_order, active_cache, etc.
 mod hardware_manager;
 mod idempotency;
+mod incident_reporting;
 mod loyalty;
 mod menu;
 mod money;
@@ -491,9 +492,52 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Prevent the native window menu at the source instead of racing to
+        // remove it after the window is realized.
+        //
+        // Tauri 2 only auto-generates the default menu (File/Edit/View/Window/
+        // Help) on macOS, and only attaches an app-wide menu to a window when
+        // `AppHandle::menu()` returns `Some`. Earlier rounds set an EMPTY app
+        // menu (`Menu::new`) and then called `app.remove_menu()` /
+        // `window.remove_menu()` from `setup()`. That failed live QA because
+        // config windows ("main") are built *before* the setup closure runs
+        // (tauri `app.rs`: build config windows, then run the setup closure),
+        // so the empty menu was already attached to the window via muda's
+        // native `SetMenu`/`DrawMenuBar`, and the removal was a deferred
+        // `run_on_main_thread` cleanup that raced the already-realized window
+        // and its menu-hosting titlebar.
+        //
+        // Fix: disable the macOS default AND never set an app-wide menu, so
+        // `AppHandle::menu()` stays `None`. Every window then gets `None` for
+        // its menu at creation time — the main window here, plus the
+        // runtime-created customer/external display window in
+        // `commands::system_ui::display_open_window` (which also inherits the
+        // app menu). muda's `SetMenu` is therefore never invoked, so there is
+        // no native menu, and no menu-hosting titlebar, to remove. The
+        // borderless shell itself comes from `decorations: false` in
+        // `tauri.conf.json`; the `setup()` step below re-asserts it on the live
+        // window as defense-in-depth. Custom in-app titlebar/window controls
+        // are unaffected.
+        .enable_macos_default_menu(false)
         .setup(|app| {
             use std::sync::Arc;
             use tauri::Manager;
+
+            // Re-assert the borderless shell contract on the live main window.
+            // `decorations: false` in tauri.conf.json already creates the window
+            // without a native titlebar; this idempotent re-assertion guards the
+            // dev/debug/rebuilt exe against any path that could flip it back on.
+            // Best-effort: a failure must warn, never abort startup.
+            #[cfg(desktop)]
+            {
+                if let Some(main_window) = app.get_webview_window("main") {
+                    if let Err(error) = main_window.set_decorations(false) {
+                        warn!(error = %error, "Startup: failed to keep main window decorations disabled");
+                    }
+                } else {
+                    warn!("Startup: main window not found for shell decorations assertion");
+                }
+            }
 
             let app_data_dir = app.path().app_data_dir().map_err(|e| {
                 error!("Failed to get app data dir: {e}");
@@ -640,6 +684,23 @@ pub fn run() {
                 }
                 Err(e) => {
                     error!("Failed to init system health database: {e} — system health monitor disabled");
+                }
+            }
+
+            // Start safe remote incident reporter (45s interval)
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    let db_for_incident_reporter = Arc::new(db);
+                    commands::diagnostics::start_remote_incident_reporter(
+                        app.handle().clone(),
+                        db_for_incident_reporter,
+                        sync_state.clone(),
+                        45,
+                        cancel_token.clone(),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to init incident reporting database: {e} — remote incident reporter disabled");
                 }
             }
 
@@ -1114,6 +1175,9 @@ pub fn run() {
             commands::system_ui::clipboard_write_text,
             commands::system_ui::show_notification,
             // Window
+            commands::system_ui::window_start_drag,
+            commands::system_ui::window_get_position,
+            commands::system_ui::window_set_position,
             commands::system_ui::window_get_state,
             commands::system_ui::window_minimize,
             commands::system_ui::window_maximize,
@@ -1140,6 +1204,7 @@ pub fn run() {
             commands::diagnostics::diagnostics_get_system_health,
             commands::diagnostics::diagnostics_export,
             commands::diagnostics::diagnostics_open_export_dir,
+            commands::diagnostics::diagnostics_send_remote_incident,
             // Recovery
             commands::recovery::recovery_list_points,
             commands::recovery::recovery_create_snapshot,

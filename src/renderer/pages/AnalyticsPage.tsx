@@ -93,10 +93,10 @@ const AnalyticsPage: React.FC = () => {
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-gray-700' : 'border-gray-200'} shadow-lg`}
+      className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
     >
       <div className="flex items-center justify-between mb-2">
-        <div className={`p-2 rounded-lg ${color}`}>
+        <div className={`p-2 rounded-2xl ${color}`}>
           <Icon className="w-5 h-5 text-white" />
         </div>
         {change !== undefined && (
@@ -114,7 +114,7 @@ const AnalyticsPage: React.FC = () => {
   if (loading && !analytics) {
     return (
       <div className="flex items-center justify-center h-full">
-        <RefreshCw className="w-8 h-8 animate-spin text-cyan-500" />
+        <RefreshCw className="w-8 h-8 animate-spin text-amber-500" />
       </div>
     );
   }
@@ -124,7 +124,7 @@ const AnalyticsPage: React.FC = () => {
   const maxOrders = Math.max(...hourlyDistribution.map((entry) => entry.orders), 1);
 
   return (
-    <div className={`h-full overflow-auto p-4 ${isDark ? 'bg-gray-900' : 'bg-[#fdfaf5]'}`}>
+    <div className={`h-full overflow-y-auto overflow-x-hidden scrollbar-hide p-4 ${isDark ? 'bg-black' : 'bg-[#fdfaf5]'}`}>
       <div className="flex items-center justify-between mb-6">
         <div className="min-w-0">
           <h1 className="truncate text-3xl font-bold tracking-tight">
@@ -139,10 +139,10 @@ const AnalyticsPage: React.FC = () => {
             <button
               key={p}
               onClick={() => setPeriod(p)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-2xl text-sm font-medium transition-transform active:scale-95 ${
                 period === p
-                  ? 'bg-cyan-500 text-white'
-                  : isDark ? 'bg-gray-800 text-gray-300 hover:bg-gray-700' : 'bg-white text-gray-700 hover:bg-gray-100'
+                  ? 'bg-yellow-400 text-black'
+                  : isDark ? 'bg-zinc-900 text-gray-300 active:bg-zinc-800' : 'bg-white text-gray-700 active:bg-gray-100'
               }`}
             >
               {t(`analytics.period.${p}`, p.charAt(0).toUpperCase() + p.slice(1))}
@@ -152,13 +152,12 @@ const AnalyticsPage: React.FC = () => {
             type="button"
             onClick={() => void fetchAnalytics()}
             disabled={loading}
-            title={t('common.refresh', 'Refresh')}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
               isDark
-                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                : 'border border-black bg-black text-white hover:bg-zinc-800'
-            } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
+                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
+            } ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -178,13 +177,13 @@ const AnalyticsPage: React.FC = () => {
           label={t('analytics.totalOrders', 'Total Orders')}
           value={String(analytics?.totalOrders || 0)}
           change={analytics?.ordersChange}
-          color="bg-blue-500"
+          color="bg-amber-500"
         />
         <StatCard
           icon={Activity}
           label={t('analytics.avgOrder', 'Avg Order Value')}
           value={formatMoney(analytics?.averageOrderValue || 0)}
-          color="bg-purple-500"
+          color="bg-zinc-600"
         />
         <StatCard
           icon={Users}
@@ -199,7 +198,7 @@ const AnalyticsPage: React.FC = () => {
           icon={Route}
           label={t('analytics.deliveryValidations', 'Delivery Validations')}
           value={String(analytics?.deliveryValidations || 0)}
-          color="bg-cyan-500"
+          color="bg-yellow-500"
         />
         <StatCard
           icon={MapPinned}
@@ -225,10 +224,10 @@ const AnalyticsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-gray-700' : 'border-gray-200'} shadow-lg`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
         >
           <div className="flex items-center gap-2 mb-4">
-            <PieChart className="w-5 h-5 text-cyan-500" />
+            <PieChart className="w-5 h-5 text-amber-500" />
             <h3 className="font-semibold">{t('analytics.categoryBreakdown', 'Sales by Category')}</h3>
           </div>
           <div className="space-y-3">
@@ -240,7 +239,7 @@ const AnalyticsPage: React.FC = () => {
                 </div>
                 <div className={`h-2 rounded-full ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
                   <div
-                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-500"
+                    className="h-full rounded-full bg-gradient-to-r from-amber-500 to-orange-500"
                     style={{ width: `${Math.min(cat.percentage, 100)}%` }}
                   />
                 </div>
@@ -252,10 +251,10 @@ const AnalyticsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-gray-700' : 'border-gray-200'} shadow-lg`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
         >
           <div className="flex items-center gap-2 mb-4">
-            <Clock className="w-5 h-5 text-cyan-500" />
+            <Clock className="w-5 h-5 text-amber-500" />
             <h3 className="font-semibold">{t('analytics.hourlyOrders', 'Orders by Hour')}</h3>
           </div>
           <div className="flex items-end justify-between h-32 gap-1">
@@ -264,7 +263,7 @@ const AnalyticsPage: React.FC = () => {
               return (
                 <div key={entry.hour} className="flex-1 flex flex-col items-center">
                   <div
-                    className="w-full bg-gradient-to-t from-cyan-500 to-blue-500 rounded-t"
+                    className="w-full bg-gradient-to-t from-amber-500 to-orange-500 rounded-t"
                     style={{ height: `${height}%`, minHeight: '4px' }}
                   />
                   <span className={`text-xs mt-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
@@ -281,11 +280,11 @@ const AnalyticsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-gray-700' : 'border-gray-200'} shadow-lg`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
         >
           <div className="grid grid-cols-2 gap-4">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-amber-500/20">
+              <div className="p-2 rounded-2xl bg-amber-500/20">
                 <Clock className="w-5 h-5 text-amber-500" />
               </div>
               <div>
@@ -296,8 +295,8 @@ const AnalyticsPage: React.FC = () => {
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-pink-500/20">
-                <BarChart3 className="w-5 h-5 text-pink-500" />
+              <div className="p-2 rounded-2xl bg-yellow-500/20">
+                <BarChart3 className="w-5 h-5 text-yellow-500" />
               </div>
               <div>
                 <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -312,10 +311,10 @@ const AnalyticsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-gray-700' : 'border-gray-200'} shadow-lg`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
         >
           <div className="flex items-center gap-2 mb-4">
-            <Route className="w-5 h-5 text-cyan-500" />
+            <Route className="w-5 h-5 text-amber-500" />
             <h3 className="font-semibold">{t('analytics.topZones', 'Top Delivery Zones')}</h3>
           </div>
           {topZones.length === 0 ? (
@@ -327,7 +326,7 @@ const AnalyticsPage: React.FC = () => {
               {topZones.map((zone) => (
                 <div
                   key={zone.zoneId}
-                  className={`rounded-lg border px-3 py-3 ${isDark ? 'border-gray-700 bg-black/20' : 'border-gray-200 bg-gray-50'}`}
+                  className={`rounded-2xl border px-3 py-3 ${isDark ? 'border-gray-700 bg-black/20' : 'border-gray-200 bg-gray-50'}`}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div>

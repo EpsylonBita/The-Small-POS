@@ -180,7 +180,7 @@ const KioskManagementPage: React.FC = () => {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600" />
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-yellow-400" />
       </div>
     );
   }
@@ -190,7 +190,7 @@ const KioskManagementPage: React.FC = () => {
       initial="hidden"
       animate="show"
       variants={pageMotionContainer}
-      className={`p-6 h-full overflow-auto ${isDark ? 'text-white' : 'text-gray-900'}`}
+      className={`p-6 h-full overflow-auto scrollbar-hide ${isDark ? 'text-white' : 'text-gray-900'}`}
     >
       {/* Header */}
       <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-6">
@@ -204,7 +204,7 @@ const KioskManagementPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg ${
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-2xl ${
             isOnline
               ? isDark ? 'bg-green-500/20 text-green-400' : 'bg-green-100 text-green-600'
               : isDark ? 'bg-red-500/20 text-red-400' : 'bg-red-100 text-red-600'
@@ -218,12 +218,11 @@ const KioskManagementPage: React.FC = () => {
             type="button"
             onClick={() => void fetchKioskData()}
             disabled={isLoading}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-sm ${
               isDark
-                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                : 'border border-black bg-black text-white hover:bg-zinc-800'
-            } ${isLoading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
-            title={t('common.refresh', { defaultValue: 'Refresh' })}
+                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
+                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
+            } ${isLoading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
             aria-label={t('common.refresh', { defaultValue: 'Refresh' })}
           >
             <RefreshCw className="w-5 h-5" />
@@ -232,7 +231,7 @@ const KioskManagementPage: React.FC = () => {
       </motion.div>
 
       {error && (
-        <motion.div variants={pageMotionItem} className={`mb-6 p-4 rounded-lg flex items-center gap-3 ${
+        <motion.div variants={pageMotionItem} className={`mb-6 p-4 rounded-2xl flex items-center gap-3 ${
           isDark ? 'bg-red-900/20 border border-red-800' : 'bg-red-50 border border-red-200'
         }`}>
           <AlertCircle className="w-5 h-5 text-red-500" />
@@ -241,12 +240,12 @@ const KioskManagementPage: React.FC = () => {
       )}
 
       {/* Kiosk Status Card */}
-      <motion.div variants={pageMotionItem} className={`mb-6 p-6 rounded-xl ${
+      <motion.div variants={pageMotionItem} className={`mb-6 p-6 rounded-2xl ${
         isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
       }`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <div className={`p-3 rounded-lg ${
+            <div className={`flex h-14 w-14 items-center justify-center rounded-2xl ${
               isKioskEnabled
                 ? isDark ? 'bg-green-900/30' : 'bg-green-100'
                 : isDark ? 'bg-gray-700' : 'bg-gray-100'
@@ -275,12 +274,11 @@ const KioskManagementPage: React.FC = () => {
               <button
                 onClick={handleOpenKiosk}
                 disabled={openAction.disabled || !branchId}
-                className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] ${
                   isDark
-                    ? 'bg-blue-900/30 text-blue-400 hover:bg-blue-900/50'
-                    : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
-                } disabled:opacity-50 disabled:cursor-not-allowed`}
-                title={openAction.message || undefined}
+                    ? 'border border-yellow-400/40 bg-yellow-400/12 text-yellow-100 active:bg-yellow-400/20'
+                    : 'border border-yellow-400/60 bg-yellow-50 text-yellow-700 active:bg-yellow-100'
+                } disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100`}
               >
                 <ExternalLink className="w-4 h-4" />
                 {t('modules.kiosk.openKiosk', { defaultValue: 'Open Kiosk' })}
@@ -290,10 +288,10 @@ const KioskManagementPage: React.FC = () => {
             <button
               onClick={handleToggleKiosk}
               disabled={isToggling || toggleAction.disabled}
-              className={`p-2 rounded-lg transition-colors ${
-                isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'
-              } disabled:opacity-50`}
-              title={toggleAction.message || (isKioskEnabled ? 'Disable kiosk' : 'Enable kiosk')}
+              className={`p-2 rounded-2xl transition-transform duration-150 active:scale-95 ${
+                isDark ? 'active:bg-gray-700' : 'active:bg-gray-100'
+              } disabled:opacity-50 disabled:active:scale-100`}
+              aria-label={isKioskEnabled ? 'Disable kiosk' : 'Enable kiosk'}
             >
               {isToggling ? (
                 <RefreshCw className="w-8 h-8 animate-spin text-gray-400" />
@@ -313,7 +311,7 @@ const KioskManagementPage: React.FC = () => {
           icon={<ShoppingBag className="w-5 h-5" />}
           label={t('modules.kiosk.todayOrders', { defaultValue: "Today's Orders" })}
           value={stats.todayOrders}
-          color="blue"
+          color="yellow"
           isDark={isDark}
         />
         <StatCard
@@ -334,18 +332,18 @@ const KioskManagementPage: React.FC = () => {
           icon={<span className="text-lg font-bold">€</span>}
           label={t('modules.kiosk.revenue', { defaultValue: 'Revenue' })}
           value={formatCurrency(stats.totalRevenue)}
-          color="purple"
+          color="green"
           isDark={isDark}
         />
       </motion.div>
 
       {/* QR Code Info */}
-      <motion.div variants={pageMotionItem} className={`mb-6 p-6 rounded-xl ${
+      <motion.div variants={pageMotionItem} className={`mb-6 p-6 rounded-2xl ${
         isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
       }`}>
         <div className="flex items-center gap-4 mb-4">
-          <div className={`p-2 rounded-lg ${isDark ? 'bg-purple-900/30' : 'bg-purple-100'}`}>
-            <QrCode className={`w-6 h-6 ${isDark ? 'text-purple-400' : 'text-purple-600'}`} />
+          <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${isDark ? 'bg-yellow-400/15' : 'bg-yellow-100'}`}>
+            <QrCode className={`w-6 h-6 ${isDark ? 'text-yellow-300' : 'text-yellow-600'}`} />
           </div>
           <div>
             <h2 className="text-lg font-semibold">
@@ -364,7 +362,7 @@ const KioskManagementPage: React.FC = () => {
       </motion.div>
 
       {/* Recent Kiosk Orders */}
-      <motion.div variants={pageMotionItem} className={`rounded-xl ${
+      <motion.div variants={pageMotionItem} className={`rounded-2xl ${
         isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
       }`}>
         <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -386,12 +384,12 @@ const KioskManagementPage: React.FC = () => {
               <motion.div
                 key={order.id}
                 variants={pageMotionItem}
-                className={`px-6 py-4 flex items-center justify-between ${
-                  isDark ? 'hover:bg-gray-700/50' : 'hover:bg-gray-50'
-                } transition-colors`}
+                className={`px-6 py-4 flex items-center justify-between transition-colors ${
+                  isDark ? 'active:bg-gray-700/50' : 'active:bg-gray-50'
+                }`}
               >
                 <div className="flex items-center gap-4">
-                  <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center ${
                     isDark ? 'bg-gray-700' : 'bg-gray-100'
                   }`}>
                     <span className="font-mono text-sm font-bold">
@@ -408,12 +406,12 @@ const KioskManagementPage: React.FC = () => {
                   </div>
                 </div>
                 <div className="flex items-center gap-4">
-                  <span className={`px-2 py-1 rounded text-xs font-medium ${
+                  <span className={`px-2 py-1 rounded-2xl text-xs font-medium ${
                     order.status === 'completed' || order.status === 'delivered'
                       ? isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-700'
                       : order.status === 'pending'
                       ? isDark ? 'bg-amber-900/30 text-amber-400' : 'bg-amber-100 text-amber-700'
-                      : isDark ? 'bg-blue-900/30 text-blue-400' : 'bg-blue-100 text-blue-700'
+                      : isDark ? 'bg-zinc-800 text-zinc-300' : 'bg-zinc-100 text-zinc-700'
                   }`}>
                     {order.status}
                   </span>
@@ -433,23 +431,22 @@ interface StatCardProps {
   icon: React.ReactNode;
   label: string;
   value: string | number;
-  color: 'blue' | 'green' | 'amber' | 'purple';
+  color: 'yellow' | 'green' | 'amber';
   isDark: boolean;
 }
 
 function StatCard({ icon, label, value, color, isDark }: StatCardProps) {
   const colorClasses = {
-    blue: isDark ? 'bg-blue-900/30 text-blue-400' : 'bg-blue-100 text-blue-600',
+    yellow: isDark ? 'bg-yellow-400/15 text-yellow-300' : 'bg-yellow-100 text-yellow-700',
     green: isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-600',
     amber: isDark ? 'bg-amber-900/30 text-amber-400' : 'bg-amber-100 text-amber-600',
-    purple: isDark ? 'bg-purple-900/30 text-purple-400' : 'bg-purple-100 text-purple-600',
   };
 
   return (
-    <motion.div variants={pageMotionItem} className={`p-4 rounded-xl ${
+    <motion.div variants={pageMotionItem} className={`p-4 rounded-2xl ${
       isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
     }`}>
-      <div className={`inline-flex p-2 rounded-lg ${colorClasses[color]} mb-3`}>
+      <div className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl ${colorClasses[color]} mb-3`}>
         {icon}
       </div>
       <div className="text-2xl font-bold">{value}</div>

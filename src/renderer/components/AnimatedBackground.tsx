@@ -10,7 +10,7 @@ export default function AnimatedBackground() {
   const darkOrbGradient = 'radial-gradient(circle, #ffffff 0%, #fde68a 35%, #facc15 55%, #d97706 70%, transparent 100%)'
 
   return (
-    <div className={`fixed inset-0 overflow-hidden ${isDark ? 'bg-black' : 'bg-white'}`}>
+    <div className={`fixed inset-0 overflow-hidden pointer-events-none ${isDark ? 'bg-black' : 'bg-white'}`}>
       {/* Light Theme Orbs - Black core with yellow edges */}
       {!isDark && (
         <>
@@ -288,4 +288,3 @@ export default function AnimatedBackground() {
     </div>
   )
 }
-

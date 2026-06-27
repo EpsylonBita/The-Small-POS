@@ -4,6 +4,7 @@ import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { useModules } from '../contexts/module-context';
 import { isModuleComingSoon } from '../../shared/constants/pos-modules';
+import { resolveNavigationLabel } from '../utils/i18nLabels';
 import {
   Clock,
   LogOut,
@@ -55,6 +56,13 @@ import UpgradePromptModal from './modals/UpgradePromptModal';
 const NAVIGATION_DRAG_HOLD_MS = 280;
 const NAVIGATION_DRAG_SCROLL_CANCEL_THRESHOLD_PX = 8;
 const NAVIGATION_ORDER_STORAGE_PREFIX = 'pos-navigation-module-order';
+// Round 302: base focus reset shared by every sidebar icon button -- the native focus rectangle is ALWAYS
+// removed (it lingered after a pointer/touch tap and read like a selected state on this touchscreen POS).
+// The yellow keyboard ring is appended IN-COMPONENT only while keyboard modality is active (see
+// sidebarFocusRing below); `rounded-xl` just shapes that ring (the icon buttons have no background, so the
+// inactive/active icon appearance is unchanged). No hover.
+const SIDEBAR_FOCUS_BASE = 'rounded-xl focus:outline-none';
+const SIDEBAR_FOCUS_RING_KEYBOARD = `${SIDEBAR_FOCUS_BASE} focus-visible:ring-2 focus-visible:ring-yellow-400/70`;
 
 interface NavigationDragSession {
   pointerId: number;
@@ -79,6 +87,18 @@ const areStringArraysEqual = (first: string[], second: string[]) => {
 
   return first.every((value, index) => value === second[index]);
 };
+
+// Round 236 (Orders hub IA migration): tables, rooms, and appointments/services are now reached
+// through the Orders order-taking hub (tabs + New Order modal), so they are hidden from the
+// primary navigation rail. The underlying pages, routes, and route guards are untouched and remain
+// reachable for direct/internal rendering and tests.
+const HUB_MIGRATED_NAV_IDS = new Set<string>([
+  'tables',
+  'rooms',
+  'appointments',
+  'services',
+  'service_catalog',
+]);
 
 const buildNavigationOrder = (storedOrder: string[], moduleIds: string[]) => {
   const availableIds = new Set(moduleIds);
@@ -146,7 +166,13 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff, isShiftActive } = useShift();
-  const { navigationModules, isLoading } = useModules();
+  const { navigationModules: rawNavigationModules, isLoading } = useModules();
+  // Hide the hub-migrated modules from the rail (Round 236). Everything downstream
+  // (ordering, drag-reorder, render) consumes this filtered list.
+  const navigationModules = useMemo(
+    () => rawNavigationModules.filter((navModule) => !HUB_MIGRATED_NAV_IDS.has(navModule.module.id)),
+    [rawNavigationModules],
+  );
 
   // State for upgrade modal
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
@@ -162,6 +188,15 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   const moduleButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const dragSessionRef = useRef<NavigationDragSession | null>(null);
   const [availableHeight, setAvailableHeight] = useState<number | null>(null);
+  const [canScrollUp, setCanScrollUp] = useState(false);
+  const [canScrollDown, setCanScrollDown] = useState(false);
+  // Round 302 correction: input-modality guard. `:focus-visible` alone was not enough -- when a modal's
+  // close X is tapped (pointer) and focus returns to the opener sidebar button via .focus(), Chromium's
+  // focus-visible heuristic could still paint the yellow ring, so a tapped-then-closed control looked
+  // selected. We track keyboard vs pointer modality at the window level (capture phase, so a pointerdown
+  // -- including the modal close tap -- flips to pointer modality BEFORE focus returns) and only attach the
+  // yellow keyboard ring class while keyboard modality is active. focus:outline-none stays on always.
+  const [keyboardMode, setKeyboardMode] = useState(false);
 
   const navigationOrderStorageKey = useMemo(() => {
     const organizationKey = staff?.organizationId ?? 'unknown-organization';
@@ -236,6 +271,32 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     moduleOrderRef.current = moduleOrder;
   }, [moduleOrder]);
 
+  // Keep the active module fully inside the rounded rail. After logging out and
+  // back in, the scroll container can preserve a previous scrollTop, leaving the
+  // selected icon clipped/floating at the top edge. When the current view
+  // changes or the module list/order settles (e.g. after login), nudge the rail
+  // by the minimum amount so the active button is fully visible. This only moves
+  // the rail's own scrollTop (never the page) and never runs while dragging, so
+  // it does not disturb drag/reorder.
+  useEffect(() => {
+    if (draggingModuleId) {
+      return;
+    }
+    const container = scrollContainerRef.current;
+    const activeButton = moduleButtonRefs.current[currentView];
+    if (!container || !activeButton) {
+      return;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const buttonRect = activeButton.getBoundingClientRect();
+    const margin = 8;
+    if (buttonRect.top < containerRect.top + margin) {
+      container.scrollTop -= (containerRect.top + margin) - buttonRect.top;
+    } else if (buttonRect.bottom > containerRect.bottom - margin) {
+      container.scrollTop += buttonRect.bottom - (containerRect.bottom - margin);
+    }
+  }, [currentView, orderedNavigationModules, draggingModuleId]);
+
   useEffect(() => {
     const rail = railRef.current;
     if (!rail) {
@@ -262,6 +323,27 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
       window.removeEventListener('resize', updateAvailableHeight);
     };
   }, []);
+
+  // Scroll affordance (round 232): the module list scrolls with a hidden scrollbar, so on a touchscreen
+  // there is no visible hint that more icons exist above/below the fold (e.g. Παραγγελίες scrolled out of
+  // view). Track whether the module-scroll region can scroll up/down and show small fade caps accordingly.
+  // Updates on scroll and whenever the module list/order, available height, or current view changes --
+  // each of those can change the scroll geometry.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+    const updateScrollHints = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const threshold = 4;
+      setCanScrollUp(scrollTop > threshold);
+      setCanScrollDown(scrollTop + clientHeight < scrollHeight - threshold);
+    };
+    updateScrollHints();
+    container.addEventListener('scroll', updateScrollHints, { passive: true });
+    return () => container.removeEventListener('scroll', updateScrollHints);
+  }, [currentView, orderedNavigationModules, availableHeight]);
 
   const handleNavClick = (id: string, isLocked: boolean, requiredPlan?: string) => {
     if (id === 'settings') {
@@ -379,58 +461,40 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     }
   };
 
-  // Get color based on module ID for stable, consistent colors
-  // Uses module ID instead of index to prevent color changes when modules are added/removed
+  // EXCEPTION to the white/black/grey/yellow palette: navigation icons keep a
+  // distinct per-module neon identity (supervisor-approved). Stable per module id
+  // so colors don't shift when modules are added/removed.
   const getModuleColor = (moduleId: string, category: string): string => {
-    // Specific color assignments for well-known modules
     const moduleColorMap: Record<string, string> = {
-      // Core modules - blue theme
       dashboard: 'blue',
       orders: 'blue',
       menu: 'green',
       users: 'orange',
       subscription: 'purple',
       settings: 'green',
-
-      // Restaurant vertical - warm colors
       tables: 'orange',
       reservations: 'purple',
-
-      // Hotel vertical - cool colors
       rooms: 'blue',
       housekeeping: 'green',
       guest_billing: 'purple',
-
-      // Salon vertical - vibrant colors
       appointments: 'purple',
       staff_schedule: 'orange',
       service_catalog: 'green',
-
-      // Fast-food vertical - energetic colors
       drive_through: 'orange',
       kiosk: 'green',
       delivery_zones: 'purple',
-
-      // Analytics & reporting - professional colors
       analytics: 'purple',
       reports: 'blue',
-
-      // Customer-facing - friendly colors
       customer_web: 'green',
       customer_app: 'blue',
-
-      // Addon modules
       loyalty: 'purple',
       plugin_integrations: 'green',
       kitchen_display: 'orange',
     };
 
-    // Return mapped color or default based on category
     if (moduleColorMap[moduleId]) {
       return moduleColorMap[moduleId];
     }
-
-    // Fallback based on category
     if (category === 'core') return 'blue';
     if (category === 'vertical') return 'orange';
     return 'purple'; // addon
@@ -676,22 +740,53 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
 
 
+  // Active nav icon shows its distinct neon color (palette exception). Arbitrary hex
+  // is used for blue/orange/purple so the global Tailwind palette remap (which folds
+  // those families to grey/amber) does not neutralise the neon identity. Inactive
+  // stays neutral — no hover dependency, tap/active feedback handled on the button.
+  // Inactive icons are neutral: black in light theme, a dark-safe neutral zinc/grey in
+  // dark theme. ONLY the active/selected route shows its distinct neon color + glow.
+  // Arbitrary hex is used for blue/orange/purple so the global palette remap (blue→grey,
+  // orange→amber, purple→grey) cannot neutralize the active neon; inactive stays
+  // black/grey. No hover dependency — tap/active feedback is on the button (`active:scale-95`).
   const getNeonClass = (color: string, isActive: boolean, theme: string) => {
     if (!isActive) {
-      return theme === 'dark' ? 'text-white' : 'text-black';
+      // Inactive unlocked icons are quiet neutral: black in light, a dark-safe neutral grey in dark
+      // (NOT white-neon, and NOT literal black which is invisible on the black rail). Only the
+      // active/current route gets the per-module neon color + glow below.
+      return theme === 'dark' ? 'text-zinc-400' : 'text-black';
     }
     switch (color) {
       case 'green':
         return 'text-green-500 drop-shadow-[0_0_10px_rgba(34,197,94,0.9)]';
       case 'purple':
-        return 'text-purple-500 drop-shadow-[0_0_10px_rgba(168,85,247,0.9)]';
+        return 'text-[#a855f7] drop-shadow-[0_0_10px_rgba(168,85,247,0.9)]';
       case 'orange':
-        return 'text-orange-500 drop-shadow-[0_0_10px_rgba(251,146,60,0.9)]';
+        return 'text-[#f97316] drop-shadow-[0_0_10px_rgba(251,146,60,0.9)]';
+      case 'yellow':
+        return 'text-yellow-500 drop-shadow-[0_0_10px_rgba(234,179,8,0.9)]';
       case 'blue':
       default:
-        return 'text-blue-500 drop-shadow-[0_0_10px_rgba(59,130,246,0.9)]';
+        return 'text-[#3b82f6] drop-shadow-[0_0_10px_rgba(59,130,246,0.9)]';
     }
   };
+
+  // Window-level modality tracking (capture phase): a keydown means keyboard navigation (show the ring); a
+  // pointerdown anywhere -- including a tap on a modal's close X -- means pointer/touch (hide the ring), and
+  // capture runs before the modal's onClose returns focus to the opener button, so the ring class is gone
+  // before focus lands. The yellow ring is therefore attached only in keyboard modality; the native outline
+  // reset stays on always.
+  useEffect(() => {
+    const onKeyDown = () => setKeyboardMode(true);
+    const onPointerDown = () => setKeyboardMode(false);
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('pointerdown', onPointerDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('pointerdown', onPointerDown, true);
+    };
+  }, []);
+  const sidebarFocusRing = keyboardMode ? SIDEBAR_FOCUS_RING_KEYBOARD : SIDEBAR_FOCUS_BASE;
 
 
   return (
@@ -707,31 +802,55 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
       >
         <div className={`${resolvedTheme === 'dark'
           ? 'bg-black backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.6)] border-r border-amber-400/25'
-          : 'bg-white/90 backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.34)] border-r border-amber-200/70'} max-h-full overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-hide`}
-          ref={scrollContainerRef}
+          : 'bg-white/90 backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.34)] border-r border-amber-200/70'} flex max-h-full flex-col overflow-hidden`}
           style={{
             maxHeight: availableHeight ?? undefined,
-            scrollbarWidth: 'none',
-            msOverflowStyle: 'none',
-            WebkitOverflowScrolling: 'touch',
           }}>
-          <nav className="flex select-none flex-col gap-4">
-            {/* Divider */}
-            <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
+          <nav className="flex min-h-0 flex-1 select-none flex-col gap-4">
+            {/* Top persistent action area: Check In stays reachable without scrolling the module list. */}
+            <div data-navigation-top-actions className="flex shrink-0 flex-col gap-4">
+              {/* Divider */}
+              <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
 
-          {/* Check In Button - Always shows staff list */}
-          <button
-            onClick={onStartShift}
-            data-testid="check-in-btn"
-            className={`w-12 h-12 flex items-center justify-center transition-colors ${resolvedTheme === 'dark' ? 'text-white hover:text-amber-300' : 'text-black hover:text-amber-600'}`}
-            title={t('navigation.checkIn')}
-          >
-            <Clock className="w-5 h-5" strokeWidth={2} />
-          </button>
+              {/* Check In Button - Always shows staff list */}
+              <button
+                onClick={onStartShift}
+                data-testid="check-in-btn"
+                className={`w-12 h-12 flex items-center justify-center transition-transform active:scale-95 ${sidebarFocusRing} ${getNeonClass('yellow', false, resolvedTheme)}`}
+                aria-label={t('navigation.checkIn')}
+              >
+                <Clock className="w-5 h-5" strokeWidth={2} />
+              </button>
 
-          {/* Divider */}
-          <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
+              {/* Divider */}
+              <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
+            </div>
 
+            {/* Module scroll region: ONLY the module list scrolls/drags; the utility actions below stay
+                pinned. scrollContainerRef + the active-module auto-scroll target THIS region, not the rail.
+                The relative affordance frame hosts the top/bottom scroll-hint caps (round 232; round 299
+                dropped the standalone amber pill) -- a subtle neutral edge fade when there is more module
+                list to scroll to, with no coloured dash that could read like an inactive nav item. */}
+            <div data-navigation-scroll-affordance className="relative flex min-h-0 flex-1 flex-col">
+              {/* Top scroll affordance: only when the module list can scroll up. Decorative only
+                  (pointer-events-none + aria-hidden) so it never blocks taps or pollutes accessibility. */}
+              {canScrollUp && (
+                <div
+                  aria-hidden="true"
+                  data-navigation-scroll-hint-top
+                  className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-7 rounded-t-2xl bg-gradient-to-b ${resolvedTheme === 'dark' ? 'from-black via-black/75 to-transparent' : 'from-white via-white/75 to-transparent'}`}
+                />
+              )}
+            <div
+              data-navigation-module-scroll
+              ref={scrollContainerRef}
+              className="flex min-h-0 flex-1 select-none flex-col gap-4 overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-hide"
+              style={{
+                scrollbarWidth: 'none',
+                msOverflowStyle: 'none',
+                WebkitOverflowScrolling: 'touch',
+              }}
+            >
           {/* Navigation Items - Dynamic from ModuleContext */}
           {isLoading ? (
             // Loading skeleton
@@ -753,28 +872,38 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                 const isComingSoon = isModuleComingSoon(module.id);
                 const isDraggingThisModule = draggingModuleId === module.id;
                 const isDraggingAnotherModule = Boolean(draggingModuleId) && !isDraggingThisModule;
+                const moduleLabel = resolveNavigationLabel(t, module.id, module.name);
 
-                // Different titles for locked, coming soon, or unlocked modules
-                let title: string;
+                // Accessible label for locked, coming soon, or unlocked modules. Used as aria-label
+                // only - no native title tooltip, since the POS is touchscreen-first.
+                let accessibleLabel: string;
                 if (isComingSoon) {
-                  title = t('modules.comingSoon', {
-                    module: t(`navigation.${module.id}`, { defaultValue: module.name }),
+                  accessibleLabel = t('modules.comingSoon', {
+                    module: moduleLabel,
                     defaultValue: `${module.name} - Coming Soon`
                   });
                 } else if (isLocked && requiredPlan) {
-                  title = t('modules.lockedModule', {
-                    module: t(`navigation.${module.id}`, { defaultValue: module.name }),
+                  accessibleLabel = t('modules.lockedModule', {
+                    module: moduleLabel,
                     plan: requiredPlan,
                     defaultValue: `${module.name} - Requires ${requiredPlan} plan`
                   });
+                } else if (isActive) {
+                  // Bake the current-page state into the accessible NAME: the Windows UIA tree did not
+                  // surface aria-current as a state for these buttons, so the name itself announces it.
+                  accessibleLabel = t('navigation.currentPage', {
+                    label: moduleLabel,
+                    defaultValue: '{{label}} — Current page',
+                  });
                 } else {
-                  title = t(`navigation.${module.id}`, { defaultValue: module.name });
+                  accessibleLabel = moduleLabel;
                 }
 
                 // Handle click for coming soon modules
                 const handleClick = () => {
                   if (isComingSoon) {
-                    // Coming soon modules are not clickable - just show tooltip
+                    // Coming soon modules are not clickable - they stay disabled with an
+                    // accessible label (aria-label), no tooltip.
                     return;
                   }
                   handleNavClick(module.id, isLocked, requiredPlan);
@@ -802,7 +931,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                     draggable={false}
                     aria-grabbed={isDraggingThisModule}
                     disabled={isComingSoon}
-                    className={`relative w-12 h-12 flex items-center justify-center transition-all duration-150 ease-out ${isComingSoon
+                    className={`relative w-12 h-12 flex items-center justify-center transition-transform duration-150 ease-out active:scale-95 ${sidebarFocusRing} ${isComingSoon
                         ? `opacity-40 cursor-not-allowed ${resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-300'}`
                         : isLocked
                           ? `opacity-60 ${resolvedTheme === 'dark' ? 'text-gray-500' : 'text-gray-400'}`
@@ -816,7 +945,8 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                           : 'cursor-grab active:cursor-grabbing'
                       } ${isDraggingAnotherModule ? 'duration-150 ease-out' : ''}`}
                     style={{ touchAction: isComingSoon ? 'pan-y' : 'none' }}
-                    title={title}
+                    aria-label={accessibleLabel}
+                    aria-current={isActive ? 'page' : undefined}
                   >
                     {getModuleIcon(module.icon || 'Package')}
                     {/* Coming Soon badge for unimplemented modules */}
@@ -840,12 +970,26 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
               )}
             </>
           )}
+            </div>
+              {/* Bottom scroll affordance: only when the module list can scroll down. Decorative only
+                  (pointer-events-none + aria-hidden). */}
+              {canScrollDown && (
+                <div
+                  aria-hidden="true"
+                  data-navigation-scroll-hint-bottom
+                  className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 h-7 rounded-b-2xl bg-gradient-to-t ${resolvedTheme === 'dark' ? 'from-black via-black/75 to-transparent' : 'from-white via-white/75 to-transparent'}`}
+                />
+              )}
+            </div>
 
+            {/* Bottom persistent utility cluster: Z Report (global close-day/report utility), Settings,
+                and Logout stay reachable without scrolling the module list. */}
+            <div data-navigation-utility-actions className="flex shrink-0 flex-col gap-4">
           {/* Z Report Button */}
           <button
             onClick={handleOpenZ}
-            className={`relative w-12 h-12 flex items-center justify-center transition-colors ${getNeonClass('blue', !!isZReportOpen, resolvedTheme)}`}
-            title={t('navigation.zReport')}
+            className={`relative w-12 h-12 flex items-center justify-center transition-transform active:scale-95 ${sidebarFocusRing} ${getNeonClass('yellow', !!isZReportOpen, resolvedTheme)}`}
+            aria-label={t('navigation.zReport')}
           >
             <span className="font-bold text-base">Z</span>
             {hasPendingLocalSubmit && (
@@ -856,10 +1000,10 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           {/* Settings Button */}
           <button
             onClick={handleOpenSettings}
-            className={`w-12 h-12 flex items-center justify-center transition-colors ${getNeonClass('green', false, resolvedTheme)}`}
-            title={t('navigation.settings')}
+            className={`w-12 h-12 flex items-center justify-center transition-transform active:scale-95 ${sidebarFocusRing} ${getNeonClass('yellow', false, resolvedTheme)}`}
+            aria-label={t('navigation.settings')}
           >
-            <Settings className={`w-5 h-5 ${resolvedTheme === 'dark' ? 'text-white' : 'text-black'}`} />
+            <Settings className="w-5 h-5" />
           </button>
 
           {/* Divider */}
@@ -868,10 +1012,11 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           {/* Logout Button */}
           <button
             onClick={onLogout}
-            className="w-12 h-12 rounded-lg flex items-center justify-center border border-red-500/70 bg-transparent text-red-500"
-            title={t('navigation.logout')}>
+            className={`w-12 h-12 flex items-center justify-center border border-red-500/70 bg-transparent text-red-500 transition-transform active:scale-95 ${sidebarFocusRing}`}
+            aria-label={t('navigation.logout')}>
             <LogOut className="w-5 h-5 text-red-500" strokeWidth={2} />
           </button>
+            </div>
 
           </nav>
         </div>

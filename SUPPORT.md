@@ -7,10 +7,31 @@ This guide covers operational support for the native-only `pos-tauri` desktop ru
 ## Fast Triage Checklist
 
 1. Confirm app version from About screen.
-2. Open System Health and capture current status cards.
-3. Export diagnostics bundle.
-4. Collect reproduction steps and timestamps.
-5. Attach bundle + observations to support escalation.
+2. Open Health Status and read the simple first-screen guidance.
+3. If needed, click **Send diagnostics to support**.
+4. Export diagnostics bundle only when support asks for a local file.
+5. Collect reproduction steps and timestamps.
+6. Attach bundle + observations to support escalation.
+
+## Remote Incident Reporting
+
+The POS includes Remote Incident Reporting for serious support/diagnostic states.
+It is outbound-only: the terminal sends a redacted JSON report to the configured
+admin backend with the existing POS terminal authentication. It does not open an
+inbound port and does not allow remote shell, hidden access, command execution,
+raw database editing, or automatic destructive repairs.
+
+Automatic upload is stricter than local export. It excludes raw DB snapshots,
+raw recovery exports, and raw logs. Redaction removes API keys, tokens,
+passwords, PINs, cookies, authorization headers, customer contact details,
+addresses, delivery notes, payment references, and raw payload/data fields.
+
+The operator can also click **Send diagnostics to support** from Health Status.
+Success means support received a redacted report; failure does not block orders.
+The POS should continue working locally.
+
+Backend Telegram alerts are configured only in `admin-dashboard` environment
+variables. Telegram tokens must never be stored in `pos-tauri`.
 
 ## Export Diagnostics Bundle
 
@@ -40,7 +61,17 @@ The diagnostics bundle is intended to be self-identifying. Support should be abl
 
 ## Runtime Health Surface
 
-System Health exposes:
+Health Status first shows a simple operator view:
+
+- whether orders can continue,
+- internet/admin connection,
+- sync waiting/failed/healthy,
+- printer ready/needs attention,
+- whether support was notified.
+
+Technical details are hidden under **Advanced details for support**.
+
+System Health diagnostics still include:
 
 - connection online/offline state,
 - sync backlog and pending queue,

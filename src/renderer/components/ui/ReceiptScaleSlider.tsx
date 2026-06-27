@@ -58,7 +58,7 @@ export const ReceiptScaleSlider: React.FC<ReceiptScaleSliderProps> = ({
               type="button"
               onClick={handleReset}
               disabled={disabled}
-              className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors disabled:text-white/25 disabled:hover:text-white/25"
+              className="min-h-7 rounded-2xl px-1.5 text-[10px] font-semibold text-amber-300 transition-transform active:scale-95 active:bg-amber-400/10 disabled:text-white/25 disabled:active:scale-100"
             >
               {resetLabel}
             </button>
@@ -75,7 +75,7 @@ export const ReceiptScaleSlider: React.FC<ReceiptScaleSliderProps> = ({
         disabled={disabled}
         className="receipt-scale-slider w-full disabled:cursor-not-allowed"
         style={{
-          background: `linear-gradient(to right, rgb(59 130 246 / 0.7) 0%, rgb(59 130 246 / 0.7) ${pct}%, rgb(255 255 255 / 0.08) ${pct}%, rgb(255 255 255 / 0.08) 100%)`,
+          background: `linear-gradient(to right, rgb(245 158 11 / 0.78) 0%, rgb(245 158 11 / 0.78) ${pct}%, rgb(255 255 255 / 0.08) ${pct}%, rgb(255 255 255 / 0.08) 100%)`,
         }}
       />
       <div className="flex justify-between text-[9px] text-white/40 px-0.5">

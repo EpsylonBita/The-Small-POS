@@ -103,7 +103,7 @@ html.dark, html.dark body, html.dark #root {
 @layer components {
   /* Touch-friendly button base */
   .btn-touch {
-    @apply min-h-touch min-w-touch px-4 py-3 rounded-lg font-medium transition-all duration-150 ease-in-out;
+    @apply min-h-touch min-w-touch px-4 py-3 rounded-2xl font-medium transition-all duration-150 ease-in-out;
     @apply active:scale-95 focus:outline-none focus:ring-2 focus:ring-offset-2;
     touch-action: manipulation;
   }
@@ -135,7 +135,7 @@ html.dark, html.dark body, html.dark #root {
   
   /* Touch-friendly input */
   .input-touch {
-    @apply min-h-touch px-4 py-3 border border-gray-300 rounded-lg;
+    @apply min-h-touch px-4 py-3 border border-gray-300 rounded-2xl;
     @apply focus:outline-none focus:ring-2 focus:ring-pos-primary focus:border-transparent;
     @apply transition-all duration-150 ease-in-out;
     font-size: 16px !important; /* Prevent iOS zoom */
@@ -143,7 +143,7 @@ html.dark, html.dark body, html.dark #root {
   
   /* Card component */
   .card {
-    @apply bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6;
+    @apply bg-white rounded-3xl shadow-sm border border-gray-200 p-4 sm:p-6;
   }
   
   /* Order status badges */
@@ -214,7 +214,7 @@ html.dark, html.dark body, html.dark #root {
   
   .modal-touch-content {
     @apply w-full sm:max-w-lg md:max-w-2xl lg:max-w-4xl;
-    @apply rounded-t-2xl sm:rounded-2xl;
+    @apply rounded-t-3xl sm:rounded-3xl;
     @apply max-h-[90vh] sm:max-h-[85vh];
     @apply overflow-hidden;
   }
@@ -244,7 +244,7 @@ html.dark, html.dark body, html.dark #root {
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 0.75rem;
+    border-radius: var(--pos-glass-radius-small);
     padding: 0.75rem 1rem;
     color: var(--modal-c-content);
     opacity: 1;
@@ -315,53 +315,28 @@ html.dark, html.dark body, html.dark #root {
     display: none;
   }
 
+  /* Touchscreen-first: the 2D floor plan still pans and scrolls, but the native
+     scrollbar rails are fully hidden in every engine -- no thin rail, no track, and
+     critically no Chromium/WebView2 arrow-button rails. Pairs with the scrollbar-hide
+     utility on the container. No pointer-only styling lives here. */
   .floor-plan-scrollbar {
-    scrollbar-width: thin;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
 
-  .floor-plan-scrollbar-light {
-    scrollbar-color: rgba(148, 116, 69, 0.42) transparent;
-  }
-
-  .floor-plan-scrollbar-dark {
-    scrollbar-color: rgba(148, 163, 184, 0.42) transparent;
-  }
-
-  .floor-plan-scrollbar::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-
+  .floor-plan-scrollbar::-webkit-scrollbar,
+  .floor-plan-scrollbar::-webkit-scrollbar-button,
   .floor-plan-scrollbar::-webkit-scrollbar-track,
-  .floor-plan-scrollbar::-webkit-scrollbar-corner {
+  .floor-plan-scrollbar::-webkit-scrollbar-corner,
+  .floor-plan-scrollbar::-webkit-scrollbar-thumb {
+    width: 0;
+    height: 0;
+    display: none;
     background: transparent;
   }
 
-  .floor-plan-scrollbar::-webkit-scrollbar-thumb {
-    min-height: 48px;
-    border: 2px solid transparent;
-    border-radius: 999px;
-    background-clip: padding-box;
-  }
-
-  .floor-plan-scrollbar-light::-webkit-scrollbar-thumb {
-    background-color: rgba(148, 116, 69, 0.36);
-  }
-
-  .floor-plan-scrollbar-dark::-webkit-scrollbar-thumb {
-    background-color: rgba(148, 163, 184, 0.34);
-  }
-
-  .floor-plan-scrollbar-light:hover::-webkit-scrollbar-thumb {
-    background-color: rgba(120, 86, 42, 0.52);
-  }
-
-  .floor-plan-scrollbar-dark:hover::-webkit-scrollbar-thumb {
-    background-color: rgba(203, 213, 225, 0.48);
-  }
-  
   /* Full height minus header - with safe area support */
   .h-screen-header {
     height: calc(100vh - 4rem);
@@ -484,4 +459,34 @@ html.dark, html.dark body, html.dark #root {
   .gap-mobile {
     @apply gap-2 sm:gap-3 md:gap-4;
   }
+}
+
+/* Round 328 (live QA, Greek/dark, 1282x802): the Settings > Data > RecoveryPanel selected detail card
+   still leaked a slim native vertical scrollbar rail in the nested Tauri/WebView glass card, even with the
+   generic .scrollbar-hide utility. Hide every WebKit/Chromium scrollbar part robustly for THIS pane only
+   (scoped to its dedicated marker + class) while keeping touch/wheel scrolling fully functional. */
+.recovery-detail-scrollbar-hidden,
+[data-recovery-detail-scroll] {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE / old Edge */
+  -webkit-overflow-scrolling: touch; /* momentum touch scrolling */
+  overscroll-behavior: contain; /* no scroll-chaining to the Settings modal behind this small pane */
+}
+
+.recovery-detail-scrollbar-hidden::-webkit-scrollbar,
+.recovery-detail-scrollbar-hidden::-webkit-scrollbar-button,
+.recovery-detail-scrollbar-hidden::-webkit-scrollbar-track,
+.recovery-detail-scrollbar-hidden::-webkit-scrollbar-track-piece,
+.recovery-detail-scrollbar-hidden::-webkit-scrollbar-corner,
+.recovery-detail-scrollbar-hidden::-webkit-scrollbar-thumb,
+[data-recovery-detail-scroll]::-webkit-scrollbar,
+[data-recovery-detail-scroll]::-webkit-scrollbar-button,
+[data-recovery-detail-scroll]::-webkit-scrollbar-track,
+[data-recovery-detail-scroll]::-webkit-scrollbar-track-piece,
+[data-recovery-detail-scroll]::-webkit-scrollbar-corner,
+[data-recovery-detail-scroll]::-webkit-scrollbar-thumb {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+  background: transparent !important;
 }

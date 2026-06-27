@@ -754,7 +754,7 @@ export function OrderApprovalPanel({
                     type="button"
                     onClick={handleApprove}
                     disabled={isApproving || isDeclining}
-                    className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-green-500/30 bg-green-600/20 text-green-400 hover:bg-green-600/30"
+                    className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-green-500/30 bg-green-600/20 text-green-400 active:bg-green-600/30"
                   >
                     <Check className="h-4 w-4" />
                     {isApproving ? t('orderApprovalPanel.approving', { defaultValue: 'Approving...' }) : t('orderApprovalPanel.approveButton', { defaultValue: 'Approve' })}
@@ -763,7 +763,7 @@ export function OrderApprovalPanel({
                     type="button"
                     onClick={() => setShowDeclineModal(true)}
                     disabled={isApproving || isDeclining}
-                    className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 hover:bg-red-600/30"
+                    className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30"
                   >
                     <XCircle className="h-4 w-4" />
                     {t('orderApprovalPanel.declineButton', { defaultValue: 'Decline' })}
@@ -784,7 +784,7 @@ export function OrderApprovalPanel({
                 <button
                   type="button"
                   onClick={onClose}
-                  className="liquid-glass-modal-button w-full gap-2 border-blue-500/30 bg-blue-600/20 text-blue-400 hover:bg-blue-600/30"
+                  className="liquid-glass-modal-button w-full gap-2 border-blue-500/30 bg-blue-600/20 text-blue-400 active:bg-blue-600/30"
                 >
                   {t('common.actions.close', { defaultValue: 'Close' })}
                 </button>
@@ -1010,7 +1010,7 @@ export function OrderApprovalPanel({
               type="button"
               onClick={handleDecline}
               disabled={isDeclining || !declineReason.trim()}
-              className="liquid-glass-modal-button flex-1 border-red-500/30 bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50"
+              className="liquid-glass-modal-button flex-1 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30 disabled:opacity-50"
             >
               {isDeclining ? t('orderApprovalPanel.declining', { defaultValue: 'Declining...' }) : t('orderApprovalPanel.confirmDecline', { defaultValue: 'Confirm' })}
             </button>

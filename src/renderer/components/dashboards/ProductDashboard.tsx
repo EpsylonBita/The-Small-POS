@@ -251,7 +251,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
       {/* Business Type Header */}
       <div className="flex items-center justify-between" role="banner">
         <div className="flex items-center gap-3">
-          <Boxes className={`w-6 h-6 ${isDark ? 'text-blue-400' : 'text-blue-600'}`} />
+          <Boxes className={`w-6 h-6 ${isDark ? 'text-yellow-300' : 'text-yellow-700'}`} />
           <h1 className={`text-xl md:text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
             {t('dashboard.retailDashboard', { defaultValue: 'Retail Dashboard' })}
           </h1>
@@ -264,10 +264,10 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
         {/* Quick Scan Button */}
         <button
           className={`
-            flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
+            flex items-center justify-center gap-2 px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400
             ${isDark
-              ? 'bg-blue-600 hover:bg-blue-500 text-white'
-              : 'bg-blue-600 hover:bg-blue-700 text-white'
+              ? 'bg-yellow-400 text-black'
+              : 'bg-black text-white'
             }
           `}
         >
@@ -303,10 +303,10 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
           </div>
           <button
             onClick={handleNavigateToInventory}
-            className={`ml-auto px-3 py-1 rounded text-sm font-medium ${
+            className={`ml-auto px-3 py-1.5 rounded-xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
               isDark
-                ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
-                : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                ? 'bg-amber-500/20 text-amber-300'
+                : 'bg-amber-100 text-amber-800'
             }`}
           >
             {t('common.view', { defaultValue: 'View' })}

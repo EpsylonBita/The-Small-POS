@@ -316,8 +316,8 @@ const CustomerDisplayPage: React.FC = () => {
         label: t('customerDisplay.phases.received', 'Received'),
         sentence: t('customerDisplay.sentences.received', 'received'),
         detail: t('customerDisplay.descriptions.received', 'Order received'),
-        color: 'text-sky-400',
-        border: 'border-sky-400/40',
+        color: 'text-yellow-400',
+        border: 'border-yellow-400/40',
         Icon: Clock3,
       };
     },
@@ -481,10 +481,10 @@ const CustomerDisplayPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => void copyTvDisplayLink()}
-                  className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition ${
+                  className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-all active:scale-[0.98] ${
                     isDark
-                      ? 'border-zinc-700 bg-zinc-900 hover:bg-zinc-800'
-                      : 'border-slate-200 bg-white hover:bg-slate-100'
+                      ? 'border-zinc-700 bg-zinc-900 active:bg-zinc-800'
+                      : 'border-slate-200 bg-white active:bg-slate-100'
                   }`}
                 >
                   <Copy className="h-4 w-4" />
@@ -495,7 +495,7 @@ const CustomerDisplayPage: React.FC = () => {
                     type="button"
                     onClick={() => void closeExternalDisplay()}
                     disabled={isDisplayBusy}
-                    className="inline-flex items-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-300 transition hover:bg-red-500/20 disabled:opacity-60"
+                    className="inline-flex items-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-300 transition-all active:scale-[0.98] active:bg-red-500/20 disabled:opacity-60 disabled:active:scale-100"
                   >
                     <X className="h-4 w-4" />
                     {t('customerDisplay.actions.stopExternal', 'Stop External')}
@@ -505,7 +505,11 @@ const CustomerDisplayPage: React.FC = () => {
                     type="button"
                     onClick={() => void openExternalDisplay(availableMonitors[1] || availableMonitors[0])}
                     disabled={isDisplayBusy}
-                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/40 bg-transparent px-3 py-2 text-sm font-semibold text-white transition disabled:opacity-60"
+                    className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-60 disabled:active:scale-100 ${
+                      isDark
+                        ? 'border-amber-400/40 bg-amber-500/10 text-amber-200 active:bg-amber-500/20'
+                        : 'border-amber-300 bg-amber-50 text-amber-800 active:bg-amber-100'
+                    }`}
                   >
                     <ScreenShare className="h-4 w-4" />
                     {t('customerDisplay.actions.externalDisplay', 'External Display')}
@@ -515,13 +519,12 @@ const CustomerDisplayPage: React.FC = () => {
                   type="button"
                   onClick={() => void handleRefresh()}
                   disabled={isRefreshing}
-                  title={t('common.refresh', 'Refresh')}
                   aria-label={t('common.refresh', 'Refresh')}
-                  className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+                  className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm active:scale-95 ${
                     isDark
-                      ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                      : 'border border-black bg-black text-white hover:bg-zinc-800'
-                  } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                      ? 'border border-white/80 bg-white text-black active:bg-zinc-200'
+                      : 'border border-black bg-black text-white active:bg-zinc-800'
+                  } ${isRefreshing ? 'opacity-60 cursor-not-allowed active:scale-100' : ''}`}
                 >
                   <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
                 </button>
@@ -582,7 +585,7 @@ const CustomerDisplayPage: React.FC = () => {
             }`}
           >
             <div className="mb-3 flex items-center gap-2">
-              <Monitor className="h-5 w-5 text-cyan-400" />
+              <Monitor className="h-5 w-5 text-amber-400" />
               <h2 className="font-bold">
                 {t('customerDisplay.external.monitors', 'Connected monitors and TVs')}
               </h2>
@@ -595,10 +598,10 @@ const CustomerDisplayPage: React.FC = () => {
                   type="button"
                   onClick={() => void openExternalDisplay(monitor)}
                   disabled={isDisplayBusy}
-                  className={`min-w-[210px] rounded-xl border px-3 py-3 text-left transition ${
+                  className={`min-w-[210px] rounded-xl border px-3 py-3 text-left transition-all active:scale-[0.98] ${
                     isDark
-                      ? 'border-zinc-700 bg-zinc-900 hover:bg-zinc-800'
-                      : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+                      ? 'border-zinc-700 bg-zinc-900 active:bg-zinc-800'
+                      : 'border-slate-200 bg-slate-50 active:bg-slate-100'
                   } disabled:opacity-60`}
                 >
                   <div className="font-semibold">{monitor.name}</div>
@@ -637,14 +640,24 @@ const CustomerDisplayPage: React.FC = () => {
           } ${externalWindow ? 'p-8' : ''}`}
         >
           {!isLoading && displayOrders.length === 0 ? (
-            <motion.div variants={pageMotionItem} className="flex h-full min-h-[360px] items-center justify-center rounded-xl border border-dashed border-white/15 px-4 text-center text-lg">
+            <motion.div
+              variants={pageMotionItem}
+              className={`flex h-full min-h-[360px] items-center justify-center rounded-2xl border border-dashed px-4 text-center text-lg ${
+                isDark ? 'border-white/15' : 'border-slate-300'
+              }`}
+            >
               {t(
                 'customerDisplay.empty',
                 'No active customer-display orders right now.'
               )}
             </motion.div>
           ) : isLoading ? (
-            <motion.div variants={pageMotionItem} className="flex h-full min-h-[360px] items-center justify-center rounded-xl border border-dashed border-white/15 px-4 text-center text-lg">
+            <motion.div
+              variants={pageMotionItem}
+              className={`flex h-full min-h-[360px] items-center justify-center rounded-2xl border border-dashed px-4 text-center text-lg ${
+                isDark ? 'border-white/15' : 'border-slate-300'
+              }`}
+            >
               {t('customerDisplay.loading', 'Loading customer display...')}
             </motion.div>
           ) : (

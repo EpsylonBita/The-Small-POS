@@ -1,12 +1,12 @@
-import React, { memo, useMemo } from 'react';
+import React, { memo, useEffect, useMemo, useRef } from 'react';
 import type { RestaurantTable, TableStatus } from '../../types/tables';
 import { useI18n } from '../../contexts/i18n-context';
 import {
-  getTableFloorPlanBounds,
+  getTableFloorPlanLayout,
   getTableShapePathForFloorPlan,
-  resolveTableFloorPlanNode,
 } from '../../utils/tableFloorPlan';
 import { resolveTableDisplayStatus } from '../../utils/tableOrderFlow';
+import { formatTableDisplayNumber } from '../../utils/table-display';
 
 interface TableFloorPlanViewProps {
   tables: RestaurantTable[];
@@ -20,7 +20,7 @@ const statusColors: Record<TableStatus, { fill: string; stroke: string; text: st
   available: { fill: '#86efac', stroke: '#16a34a', text: '#14141c' },
   occupied: { fill: '#fca5a5', stroke: '#dc2626', text: '#14141c' },
   reserved: { fill: '#fde68a', stroke: '#d97706', text: '#14141c' },
-  cleaning: { fill: '#c4b5fd', stroke: '#7c3aed', text: '#14141c' },
+  cleaning: { fill: '#d4d4d8', stroke: '#71717a', text: '#14141c' },
   maintenance: { fill: '#fdba74', stroke: '#ea580c', text: '#14141c' },
   unavailable: { fill: '#e9e5e8', stroke: '#7a7186', text: '#14141c' },
 };
@@ -33,25 +33,41 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
   className = '',
 }) => {
   const { t } = useI18n();
+  // Normalized layout: every node is translated so the cluster starts at the
+  // standard padding, so high/offset coordinates no longer open the 2D viewport
+  // on empty leading space.
+  const layout = useMemo(() => getTableFloorPlanLayout(tables), [tables]);
+  const bounds = layout.bounds;
   const nodes = useMemo(
-    () => tables.map((table, index) => ({
-      table,
-      node: resolveTableFloorPlanNode(table, index),
-      status: resolveTableDisplayStatus(table),
+    () => layout.nodes.map((node, index) => ({
+      table: tables[index],
+      node,
+      status: resolveTableDisplayStatus(tables[index]),
     })),
-    [tables],
+    [layout, tables],
   );
-  const bounds = useMemo(
-    () => getTableFloorPlanBounds(tables),
-    [tables],
+
+  // Reset the inner floor-plan scroll to the top-left whenever the visible table
+  // set/layout changes (and on mount). With the normalized layout above, a narrow
+  // filtered set such as one reserved table then opens with that table visible
+  // instead of a blank grid that needs manual inner scrolling.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const layoutSignature = useMemo(
+    () => layout.nodes.map((node) => `${node.id}:${node.x}:${node.y}`).join('|'),
+    [layout],
   );
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = 0;
+      el.scrollLeft = 0;
+    }
+  }, [layoutSignature]);
 
   const statusLabel = (status: TableStatus) =>
     t(`tablesDashboard.tableStatus.${status}`, {
       defaultValue: status.charAt(0).toUpperCase() + status.slice(1),
     });
-  const paxLabel = t('floorPlan.tableProperties.pax', { defaultValue: 'pax' });
-
   if (tables.length === 0) {
     return (
       <div
@@ -69,8 +85,9 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
 
   return (
     <div
+      ref={scrollRef}
       data-testid="tables-floor-plan-view"
-      className={`floor-plan-scrollbar ${isDark ? 'floor-plan-scrollbar-dark' : 'floor-plan-scrollbar-light'} h-full min-h-[360px] overflow-auto rounded-xl ${
+      className={`floor-plan-scrollbar scrollbar-hide h-full min-h-[360px] overflow-auto rounded-xl ${
         isDark ? 'bg-black/20' : 'bg-[#fffdf8]/70'
       } ${className}`}
     >
@@ -132,7 +149,12 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
             const colors = statusColors[status] || statusColors.available;
             const selected = selectedTableId === table.id;
             const path = getTableShapePathForFloorPlan(node.shape, node.width, node.height);
-            const label = String(node.label).startsWith('#') ? String(node.label) : `#${node.label}`;
+            // Display only: route the visible SVG text, aria-label and <title>
+            // through the same shared formatter the list card / TableActionModal
+            // use, so a raw label like "P01" renders as "#TP01" everywhere. The
+            // raw node.label / table value is never mutated (matching/payloads
+            // continue to read it directly).
+            const label = formatTableDisplayNumber(node.label);
             const tableDescription = `${label} ${statusLabel(status)}`;
 
             return (
@@ -200,7 +222,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
                   opacity="0.72"
                   style={{ userSelect: 'none', pointerEvents: 'none' }}
                 >
-                  {node.capacity ?? table.capacity} {paxLabel}
+                  {t('floorPlan.tableProperties.pax', { count: node.capacity ?? table.capacity, defaultValue: '{{count}} pax' })}
                 </text>
               </g>
             );

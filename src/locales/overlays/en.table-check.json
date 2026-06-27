@@ -37,6 +37,8 @@
       "paidAmount": "Paid {{amount}}",
       "total": "Total",
       "totalAmount": "Total {{amount}}",
+      "discount": "Discount",
+      "discountAmount": "Discount {{amount}}",
       "totalAndQty": "Total {{amount}} · Qty {{quantity}}",
       "tips": "Tips",
       "tip": "Tip",
@@ -143,6 +145,10 @@
     }
   },
   "tablesDashboard": {
+    "viewMode": {
+      "list": "List",
+      "floorPlan": "2D"
+    },
     "allFloors": "All floors",
     "floorNumber": "Floor {{floor}}",
     "floor": "Floor",
@@ -169,6 +175,10 @@
     "newOrder": "New order",
     "pay": "Pay",
     "assign": "Assign",
+    "needsCleaning": "Needs cleaning",
+    "outOfService": "Out of service",
+    "markCleaned": "Mark cleaned",
+    "backInService": "Back in service",
     "balance": "Balance",
     "noMatchingTables": "No tables match these filters",
     "time": {

@@ -6,6 +6,7 @@ import { toast } from 'react-hot-toast';
 import { useTheme } from '../../contexts/theme-context';
 import { useBarcodeScannerContext, useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useHardwareManager } from '../../hooks/useHardwareManager';
+import { renderModalPortal } from '../../utils/render-modal-portal';
 
 type ScanSource = 'hardware' | 'camera' | 'manual';
 
@@ -56,8 +57,8 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
     : 'bg-white border-gray-200 text-gray-950 placeholder:text-gray-400';
   const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-500';
   const actionClass = isDark
-    ? 'border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800'
-    : 'border-gray-200 bg-white text-gray-900 hover:bg-gray-100';
+    ? 'border-zinc-700 bg-zinc-900 text-zinc-100 active:bg-zinc-800'
+    : 'border-gray-200 bg-white text-gray-900 active:bg-gray-100';
 
   const cameraDetectorAvailable = useMemo(() => Boolean(getBarcodeDetector()), []);
   const serialScannerConnected = Boolean(hardware.status?.serialScanner?.connected);
@@ -137,8 +138,8 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
 
   if (!open) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+  return renderModalPortal(
+    <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
       <motion.div
         initial={{ opacity: 0, scale: 0.96 }}
         animate={{ opacity: 1, scale: 1 }}
@@ -148,7 +149,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
         <div className={`flex items-start justify-between gap-4 border-b p-5 ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <ScanLine className="h-5 w-5 text-cyan-400" />
+              <ScanLine className="h-5 w-5 text-amber-400" />
               <h2 className="text-lg font-bold">{title}</h2>
             </div>
             <p className={`mt-1 text-sm ${subtleClass}`}>{description}</p>
@@ -164,7 +165,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
 
         <div className="space-y-4 p-5">
           <div className="grid gap-3 md:grid-cols-2">
-            <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}>
+            <div className={`rounded-2xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}>
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="font-semibold">{t('scannerPanel.hardwareScanner', 'Barcode scanner')}</p>
@@ -187,7 +188,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
               )}
             </div>
 
-            <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}>
+            <div className={`rounded-2xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}>
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="font-semibold">{t('scannerPanel.camera', 'Camera')}</p>
@@ -214,14 +215,14 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
           </div>
 
           {includeLoyaltyReader && (
-            <div className={`rounded-xl border px-4 py-3 text-sm ${isDark ? 'border-purple-500/30 bg-purple-500/10 text-purple-100' : 'border-purple-200 bg-purple-50 text-purple-900'}`}>
+            <div className={`rounded-2xl border px-4 py-3 text-sm ${isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
               {loyaltyReaderConnected
                 ? t('scannerPanel.loyaltyReaderConnected', 'Loyalty card reader connected')
                 : t('scannerPanel.loyaltyReaderReady', 'Loyalty card reader will listen while this scanner is open')}
             </div>
           )}
 
-          <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}>
+          <div className={`rounded-2xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}>
             <p className="font-semibold">{t('scannerPanel.scanNow', 'Scan now')}</p>
             <p className={`mt-1 text-xs ${subtleClass}`}>
               {t('scannerPanel.scanHelp', 'Scan with a barcode scanner, use the camera, or type the code manually.')}

@@ -44,22 +44,36 @@ import type {
 import { OrderApprovalPanel } from "./order/OrderApprovalPanel";
 import { OrderConflictBanner } from "./OrderConflictBanner";
 import { LiquidGlassModal } from "./ui/pos-glass-components";
+import {
+  RoomStaySelectorModal,
+  RoomCheckinModal,
+  RoomReservationModal,
+  RoomFloorChips,
+  deriveRoomFloors,
+} from "./modals/RoomStayWorkflowModals";
 import { TableSelector, TableActionModal, TableCheckManagerModal, ReservationForm, TableFloorPlanView } from "./tables";
 import type { CreateReservationDto } from "./tables";
 import {
-  ArrowRightLeft,
+  AlertTriangle,
   Banknote,
-  CheckCircle2,
+  BedDouble,
+  CalendarClock,
+  CalendarPlus,
   Clock3,
+  DoorOpen,
   Layers,
   LayoutGrid,
   Map as MapIcon,
+  Pencil,
   Plus,
   ReceiptText,
   UserCheck,
   Users,
+  UtensilsCrossed,
   WalletCards,
 } from "lucide-react";
+import TableOrderIcon from "./icons/TableOrderIcon";
+import PickupOrderIcon from "./icons/PickupOrderIcon";
 import { toLocalDateString } from "../utils/date";
 import {
   buildChangedReservationUpdate,
@@ -72,6 +86,11 @@ import { useTheme } from "../contexts/theme-context";
 import { useI18n } from "../contexts/i18n-context";
 import { MODULE_IDS, useAcquiredModules } from "../hooks/useAcquiredModules";
 import { useTables } from "../hooks/useTables";
+import { useRooms } from "../hooks/useRooms";
+import { getRoomEffectiveStatus, type Room } from "../services/RoomsService";
+import { RoomsView } from "../pages/verticals/hotel/RoomsView";
+import { AppointmentsView } from "../pages/verticals/salon/AppointmentsView";
+import type { RoomChargeContext } from "./modals/PaymentModal";
 import { useModules } from "../contexts/module-context";
 import toast from "react-hot-toast";
 import { OrderDashboardSkeleton } from "./skeletons";
@@ -89,7 +108,8 @@ import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
 import { useKioskOrderAutoPrint } from "../hooks/useKioskOrderAutoPrint";
 import { openExternalUrl } from "../utils/external-url";
-import { getVisibleOrderNumber } from "../utils/orderNumberUtils";
+import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from "../utils/orderNumberUtils";
+import { formatTableDisplayNumber } from "../utils/table-display";
 import {
   buildSingleDeliveryRouteStop,
   createTerminalSettingGetter,
@@ -142,7 +162,6 @@ import {
 } from "../utils/tableOrderFlow";
 import {
   enqueueTableSessionOpen,
-  isRetryableTableServiceError,
 } from "../utils/tableSessionOfflineQueue";
 
 const INCOMING_ORDER_ALERT_SOUND_URL = new URL(
@@ -319,6 +338,18 @@ const resolveEditableOrderType = (order: Pick<Order, "orderType" | "order_type">
   return "pickup";
 };
 
+// Clean accessible name for an order-type chooser card: the localized title plus its
+// description, but never the title twice when a locale leaves them identical (which
+// produced screen-reader names like "button Παράδοση Παράδοση").
+const composeOrderTypeAriaLabel = (title: string, description: string): string => {
+  const cleanTitle = (title || "").trim();
+  const cleanDescription = (description || "").trim();
+  if (!cleanDescription || cleanDescription.toLowerCase() === cleanTitle.toLowerCase()) {
+    return cleanTitle;
+  }
+  return `${cleanTitle}. ${cleanDescription}`;
+};
+
 const parseDateMs = (value: unknown): number | null => {
   if (!value) return null;
   const parsed = new Date(String(value)).getTime();
@@ -361,18 +392,6 @@ const readTableBalance = (table: RestaurantTable) => {
   return { total, paid, due, tips };
 };
 
-const formatTableCardNumber = (value: unknown): string => {
-  const raw = String(value ?? "").trim();
-  if (!raw) {
-    return "#T";
-  }
-  return raw.startsWith("#")
-    ? raw
-    : /^T/i.test(raw)
-      ? `#${raw}`
-      : `#T${raw}`;
-};
-
 export const OrderDashboard = memo<OrderDashboardProps>(
   ({ className = "", orderFilter }) => {
     const bridge = getBridge();
@@ -409,7 +428,74 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     );
 
     // Module-based feature flags
-    const { hasDeliveryModule, hasTablesModule, hasModule } = useAcquiredModules();
+    const {
+      hasDeliveryModule,
+      hasTablesModule,
+      hasRoomsModule,
+      hasAppointmentsModule,
+      hasServiceCatalogModule,
+      hasModule,
+    } = useAcquiredModules();
+    // Services hub is available when either the appointments or the service-catalog module is owned.
+    // Round 285 (deliberately kept as OR, not tightened): the Services card opens the embedded
+    // AppointmentsView booking flow, but appointment CREATION is independently guarded by the backend
+    // availability/eligibility validation in handleCreateAppointment (preserved) -- so a service-catalog
+    // org that lacks the appointments backend cannot actually persist a booking. Tightening this card to
+    // require the appointments module specifically would hide the Services surface from service-catalog
+    // orgs without backend certainty about the module taxonomy, so the gate stays OR and the real guard
+    // is the booking-time validation. (Room-flow gates below stay strict per their action.)
+    const hasServicesModule = hasAppointmentsModule || hasServiceCatalogModule;
+    // Source-of-truth gates for the New Order -> Room workflow actions: Room Order needs Orders,
+    // Create Reservation needs Reservations. Check-in stays under the Rooms module (the card gate).
+    const hasOrdersModule = hasModule(MODULE_IDS.ORDERS);
+    const hasReservationsModule = hasModule(MODULE_IDS.RESERVATIONS);
+    // New Order modal sizing — pickup is always present; the modal must stay roomy for 4-5 cards.
+    const visibleOrderTypeCardCount =
+      1 +
+      (hasDeliveryModule ? 1 : 0) +
+      (hasTablesModule ? 1 : 0) +
+      (hasRoomsModule ? 1 : 0) +
+      (hasServicesModule ? 1 : 0);
+    const orderTypeModalWidthClass =
+      visibleOrderTypeCardCount >= 5
+        ? "!max-w-5xl"
+        : visibleOrderTypeCardCount === 4
+          ? "!max-w-4xl"
+          : visibleOrderTypeCardCount === 3
+            ? "!max-w-3xl"
+            : visibleOrderTypeCardCount === 2
+              ? "!max-w-xl"
+              : "!max-w-lg";
+    // Round 322: compose the chooser grid intentionally for 4 and 5 cards (live QA: a 3+2 set left a big
+    // empty bottom-right hole). FIVE cards use a 6-col track on lg where each card spans 2 columns, so the
+    // first row holds 3 and the bottom row of 2 is centered (the 4th visible card starts at col 2). FOUR
+    // cards use a clean 4-up row on lg (never 3+1). 1/2/3 keep the existing compact tracks.
+    const orderTypeGridColsClass =
+      visibleOrderTypeCardCount >= 5
+        ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-6"
+        : visibleOrderTypeCardCount === 4
+          ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
+          : visibleOrderTypeCardCount === 3
+            ? "grid-cols-1 sm:grid-cols-3"
+            : visibleOrderTypeCardCount === 2
+              ? "grid-cols-2"
+              : "grid-cols-1";
+    // Each visible card's 1-based position in the live order (Delivery, Pickup, Table, Room, Service).
+    // Pickup is always present; the others are module-gated. Computed by index (not card name) so the
+    // centered layout is correct for any module combination.
+    const deliveryCardVisibleIndex = hasDeliveryModule ? 1 : 0;
+    const pickupCardVisibleIndex = deliveryCardVisibleIndex + 1;
+    const tableCardVisibleIndex = pickupCardVisibleIndex + (hasTablesModule ? 1 : 0);
+    const roomCardVisibleIndex = tableCardVisibleIndex + (hasRoomsModule ? 1 : 0);
+    const serviceCardVisibleIndex = roomCardVisibleIndex + (hasServicesModule ? 1 : 0);
+    // Per-card span/offset for the lg layout: in the 5-card 6-col track every card spans 2, and the 4th
+    // visible card opens the centered bottom row at column 2. Other counts need no per-card class.
+    const orderTypeCardSpanClass = (visibleIndex: number): string =>
+      visibleOrderTypeCardCount >= 5
+        ? visibleIndex === 4
+          ? "lg:col-span-2 lg:col-start-2"
+          : "lg:col-span-2"
+        : "";
     const hasLoyaltyModule = hasModule(MODULE_IDS.LOYALTY);
 
     // Delivery validation hook
@@ -488,6 +574,51 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       organizationId: organizationId || "",
       enabled: Boolean(effectiveBranchId && organizationId),
     });
+
+    // Round 236: rooms data backs the Rooms hub tab count and the Room Order selector.
+    // Realtime is left to the embedded RoomsView (active tab); here we only need a light,
+    // stable snapshot. branchId is blanked when the module is absent so non-hotel orgs
+    // never fetch rooms. Empty identity -> empty list -> count 0 (stable).
+    const roomsHubEnabled = hasRoomsModule && Boolean(effectiveBranchId && organizationId);
+    const {
+      allRooms: hubRooms,
+      stats: hubRoomStats,
+      refetch: refetchHubRooms,
+      updateStatus: updateHubRoomStatus,
+    } = useRooms({
+      branchId: roomsHubEnabled ? effectiveBranchId || "" : "",
+      organizationId: roomsHubEnabled ? organizationId || "" : "",
+      enableRealtime: false,
+    });
+    // Occupied + reserved is the operationally useful "rooms needing attention" count.
+    const roomsHubCount = hubRoomStats.occupiedRooms + hubRoomStats.reservedRooms;
+    // Occupied rooms that actually have an active folio can take a room-charge order.
+    const roomOrderRooms = useMemo(
+      () => hubRooms.filter((room) => getRoomEffectiveStatus(room) === "occupied"),
+      [hubRooms],
+    );
+    // Floor chips for the Room Order picker filter the displayed occupied-room cards.
+    // (The check-in / reservation pickers own their own floor state inside the module.)
+    const [roomOrderFloor, setRoomOrderFloor] = useState<number | "all">("all");
+    const roomOrderFloors = useMemo(() => deriveRoomFloors(roomOrderRooms), [roomOrderRooms]);
+    const visibleRoomOrderRooms = useMemo(
+      () =>
+        roomOrderFloor === "all"
+          ? roomOrderRooms
+          : roomOrderRooms.filter((room) => room.floor === roomOrderFloor),
+      [roomOrderRooms, roomOrderFloor],
+    );
+    // Round 238: the focused New Order -> Room check-in / reservation selectors list only the
+    // eligible rooms (reserved -> check-in, available -> reservation), by effective status so the
+    // candidate set matches the Rooms grid cards.
+    const reservedRoomsForCheckin = useMemo(
+      () => hubRooms.filter((room) => getRoomEffectiveStatus(room) === "reserved"),
+      [hubRooms],
+    );
+    const availableRoomsForReservation = useMemo(
+      () => hubRooms.filter((room) => getRoomEffectiveStatus(room) === "available"),
+      [hubRooms],
+    );
     const activeTableOrdersByNumber = useMemo(() => {
       const map = new Map<string, Order>();
       const activeStatuses = new Set(["pending", "confirmed", "preparing", "ready"]);
@@ -654,8 +785,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           label: t("tablesDashboard.tableStatus.available", "Available"),
           card:
             light
-              ? "border-emerald-300 bg-emerald-50/90 hover:border-emerald-500 hover:shadow-emerald-500/10"
-              : "border-emerald-400/35 bg-emerald-500/10 hover:border-emerald-300/70 hover:shadow-emerald-950/30",
+              ? "border-emerald-300 bg-emerald-50/90"
+              : "border-emerald-400/35 bg-emerald-500/10",
           badge:
             light
               ? "border-emerald-200 bg-emerald-100 text-emerald-700"
@@ -667,21 +798,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           label: t("tablesDashboard.tableStatus.occupied", "Occupied"),
           card:
             light
-              ? "border-blue-300 bg-blue-50/95 hover:border-blue-500 hover:shadow-blue-500/10"
-              : "border-blue-400/45 bg-blue-500/10 hover:border-blue-300/75 hover:shadow-blue-950/35",
+              ? "border-zinc-300 bg-zinc-100/95"
+              : "border-zinc-400/45 bg-zinc-500/10",
           badge:
             light
-              ? "border-blue-200 bg-blue-100 text-blue-700"
-              : "border-blue-400/30 bg-blue-400/10 text-blue-200",
-          accent: "bg-blue-500",
-          value: "text-blue-600 dark:text-blue-300",
+              ? "border-zinc-300 bg-zinc-200 text-zinc-700"
+              : "border-zinc-500/30 bg-zinc-400/10 text-zinc-200",
+          accent: "bg-zinc-800",
+          value: "text-zinc-700 dark:text-zinc-200",
         },
         reserved: {
           label: t("tablesDashboard.tableStatus.reserved", "Reserved"),
           card:
             light
-              ? "border-amber-300 bg-amber-50 hover:border-amber-500 hover:shadow-amber-500/10"
-              : "border-amber-400/40 bg-amber-500/10 hover:border-amber-300/70 hover:shadow-amber-950/30",
+              ? "border-amber-300 bg-amber-50"
+              : "border-amber-400/40 bg-amber-500/10",
           badge:
             light
               ? "border-amber-200 bg-amber-100 text-amber-700"
@@ -693,8 +824,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           label: t("tablesDashboard.tableStatus.cleaning", "Cleaning"),
           card:
             light
-              ? "border-slate-300 bg-slate-50 hover:border-slate-400"
-              : "border-slate-400/25 bg-white/[0.045] hover:border-slate-300/50",
+              ? "border-slate-300 bg-slate-50"
+              : "border-slate-400/25 bg-white/[0.045]",
           badge:
             light
               ? "border-slate-200 bg-slate-100 text-slate-700"
@@ -706,8 +837,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           label: t("tablesDashboard.tableStatus.maintenance", "Maintenance"),
           card:
             light
-              ? "border-orange-300 bg-orange-50 hover:border-orange-500"
-              : "border-orange-400/35 bg-orange-500/10 hover:border-orange-300/65",
+              ? "border-orange-300 bg-orange-50"
+              : "border-orange-400/35 bg-orange-500/10",
           badge:
             light
               ? "border-orange-200 bg-orange-100 text-orange-700"
@@ -719,8 +850,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           label: t("tablesDashboard.tableStatus.unavailable", "Unavailable"),
           card:
             light
-              ? "border-slate-300 bg-slate-100 hover:border-slate-400"
-              : "border-slate-500/25 bg-slate-800/35 hover:border-slate-400/45",
+              ? "border-slate-300 bg-slate-100"
+              : "border-slate-500/25 bg-slate-800/35",
           badge:
             light
               ? "border-slate-300 bg-slate-200 text-slate-700"
@@ -842,6 +973,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // State for new order flow
     const [showOrderTypeModal, setShowOrderTypeModal] = useState(false);
     const [showMenuModal, setShowMenuModal] = useState(false);
+    // Round 236 (Orders hub IA migration) — Room/Service flow state.
+    // roomChargeContext, when set, flows into MenuModal/PaymentModal so a dine-in order can be
+    // charged to the room folio (reuses the existing room-charge payment path; no second cart).
+    const [roomChargeContext, setRoomChargeContext] = useState<RoomChargeContext | null>(null);
+    const [showRoomFlowModal, setShowRoomFlowModal] = useState(false);
+    const [showRoomOrderSelector, setShowRoomOrderSelector] = useState(false);
+    // Round 238: Check-in / Create Reservation run through focused, purpose-built selector + form
+    // modules (NOT an embedded RoomsView / hubPreset). The selector lists only the eligible rooms;
+    // tapping one mounts the matching check-in / reservation form for that room.
+    const [showRoomCheckinSelector, setShowRoomCheckinSelector] = useState(false);
+    const [showRoomReservationSelector, setShowRoomReservationSelector] = useState(false);
+    const [checkinRoom, setCheckinRoom] = useState<Room | null>(null);
+    const [reservationRoom, setReservationRoom] = useState<Room | null>(null);
+    // Bumped to open the embedded AppointmentsView Create modal from New Order -> Services.
+    const [servicesOpenCreateSignal, setServicesOpenCreateSignal] = useState(0);
     const [selectedOrderType, setSelectedOrderType] = useState<
       "pickup" | "delivery" | "dine-in" | null
     >(null);
@@ -891,7 +1037,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [showCustomerInfoModal, setShowCustomerInfoModal] = useState(false);
     const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
     const [customerModalMode, setCustomerModalMode] = useState<
-      "new" | "edit" | "addAddress"
+      "new" | "edit" | "addAddress" | "editAddress"
     >("new");
     const [phoneNumber, setPhoneNumber] = useState("");
     const [isLookingUp, setIsLookingUp] = useState(false);
@@ -960,6 +1106,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       event.stopPropagation();
       scrollTarget.scrollTop = nextScrollTop;
     }, []);
+
+    // Reset the table-card scroll region to the top whenever the active status
+    // filter, floor filter, or view mode changes. Without this, switching to a
+    // narrow filter (e.g. "cleaning" with a single result) keeps the previous
+    // scrollTop, so the filtered card renders clipped under the fixed status/
+    // floor controls. Keyed on the filter/view inputs rather than the visible
+    // card set so live table updates don't yank the scroll position mid-scroll.
+    useEffect(() => {
+      const scrollTarget = tableGridScrollRef.current;
+      if (scrollTarget) {
+        scrollTarget.scrollTop = 0;
+      }
+    }, [tableStatusFilter, effectiveTableFloorFilter, tableViewMode]);
+
     const singlePaymentReasonCodes = useMemo(
       () =>
         new Set([
@@ -1478,6 +1638,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Handle tab change
     const handleTabChange = useCallback(
       (tab: TabId) => {
+        // Source-of-truth gate: ignore taps on module tabs whose module is not acquired, so a stale
+        // or out-of-band tab id can never surface a disabled vertical's content.
+        if (tab === "tables" && !hasTablesModule) return;
+        if (tab === "rooms" && !hasRoomsModule) return;
+        if (tab === "services" && !hasServicesModule) return;
+        if (tab === "delivered" && !hasDeliveryModule) return;
         setActiveTab(tab);
         clearBulkSelection();
         // Ensure global status filter doesn't hide tab contents
@@ -1485,8 +1651,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           setFilter({ status: "all" });
         } catch {}
       },
-      [clearBulkSelection, setFilter],
+      [clearBulkSelection, setFilter, hasTablesModule, hasRoomsModule, hasServicesModule, hasDeliveryModule],
     );
+
+    // If the active vertical tab's module becomes unavailable while selected (e.g. a module is
+    // revoked mid-session), fall back to the always-available Orders tab so no dead/disabled
+    // vertical content stays mounted.
+    useEffect(() => {
+      if (
+        (activeTab === "tables" && !hasTablesModule) ||
+        (activeTab === "rooms" && !hasRoomsModule) ||
+        (activeTab === "services" && !hasServicesModule) ||
+        (activeTab === "delivered" && !hasDeliveryModule)
+      ) {
+        setActiveTab("orders");
+      }
+    }, [activeTab, hasTablesModule, hasRoomsModule, hasServicesModule, hasDeliveryModule]);
 
     // Update tables count when tables data changes
     useEffect(() => {
@@ -1655,6 +1835,86 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
     };
 
+    // --- Round 236: New Order -> Room / Service flows ---------------------------------------
+
+    // New Order -> Room opens a small chooser (Room Order / Check-in / Create Reservation).
+    const handleSelectRoomFlow = () => {
+      setShowOrderTypeModal(false);
+      setShowRoomFlowModal(true);
+    };
+
+    // New Order -> Service switches to the Services hub tab and opens the existing Create
+    // Appointment modal. Its staff/service/day/time availability check is preserved untouched.
+    const handleSelectServiceFlow = () => {
+      setShowOrderTypeModal(false);
+      setActiveTab("services");
+      setServicesOpenCreateSignal((n) => n + 1);
+    };
+
+    // Room flow option 1 — Room Order: choose an occupied room that has an active folio.
+    const handleRoomFlowOrder = () => {
+      setShowRoomFlowModal(false);
+      setRoomOrderFloor("all");
+      setShowRoomOrderSelector(true);
+    };
+
+    // Room flow option 2 — Check-in: open a FOCUSED selector of RESERVED rooms only (no RoomsView
+    // shell, no stats/search/filter/floor hub). Round 238: the rejected behaviour was hosting an
+    // embedded RoomsView/hubPreset in the modal; instead a compact selector picks the room, then the
+    // focused check-in form opens for it. Staff never leave the order-taking view.
+    const handleRoomFlowCheckin = () => {
+      setShowRoomFlowModal(false);
+      setShowRoomCheckinSelector(true);
+    };
+
+    // Room flow option 3 — Create Reservation: focused selector of AVAILABLE rooms only (no RoomsView
+    // shell). Tapping an available room opens the focused reservation form for it.
+    const handleRoomFlowReservation = () => {
+      setShowRoomFlowModal(false);
+      setShowRoomReservationSelector(true);
+    };
+
+    // A valid occupied room (with an active folio) was chosen for a room-charge order: set up a
+    // dine-in cart (so menu pricing follows the table/dine-in branch) whose payment can be charged
+    // to the room folio, then open the normal menu. Reuses the existing roomChargeContext path —
+    // no second cart/payment stack. Rooms without an active folio are disabled in the selector.
+    const handleRoomOrderRoomSelect = (room: Room) => {
+      const activeFolioId = room.activeFolio?.id || null;
+      if (!activeFolioId) return;
+      const guestName = room.activeFolio?.guestName || room.currentGuestName || null;
+      setShowRoomOrderSelector(false);
+      // Clear any stale table flow state so a prior table order can't leak its
+      // table_number / table_id / table_session into this room-charge order.
+      setSelectedTable(null);
+      setTableNumber("");
+      setTableGuestCount(1);
+      setSelectedOrderType("dine-in");
+      setOrderType("dine-in");
+      setRoomChargeContext({
+        roomId: room.id,
+        roomNumber: room.roomNumber,
+        guestName,
+        activeFolioId,
+      });
+      setCustomerInfo({
+        name: guestName
+          ? t("orderFlow.roomGuestCustomer", {
+              room: room.roomNumber,
+              guest: guestName,
+              defaultValue: "Room {{room}} — {{guest}}",
+            })
+          : t("orderFlow.roomCustomer", {
+              room: room.roomNumber,
+              defaultValue: "Room {{room}}",
+            }),
+        phone: "",
+        email: "",
+        address: { street: "", city: "", postalCode: "" },
+        notes: "",
+      });
+      setShowMenuModal(true);
+    };
+
     const tableHasOpenCheck = useCallback(
       (table: RestaurantTable) => tableHasOpenCheckReference(table),
       [],
@@ -1685,12 +1945,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setSelectedOrderType("dine-in");
         setOrderType("dine-in");
         setTableGuestCount(Math.max(1, Math.min(99, Math.trunc(Number(guestCount) || 1))));
+        // Raw table number stays in state for payload / session matching.
         setTableNumber(selectedTable.tableNumber.toString());
         setCustomerInfo({
+          // Visible dine-in label only: use the shared display helper so the
+          // MenuModal header chip reads "Table #TB01" like the grid/action modal,
+          // instead of the raw "P01". The locale string adds no "#" of its own.
           name:
             t("orderFlow.tableCustomer", {
-              table: selectedTable.tableNumber,
-            }) || `Table ${selectedTable.tableNumber}`,
+              table: formatTableDisplayNumber(selectedTable.tableNumber),
+            }) || `Table ${formatTableDisplayNumber(selectedTable.tableNumber)}`,
           phone: "",
           email: "",
           address: {
@@ -1714,6 +1978,51 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
     }, [selectedTable]);
 
+    // Recover a stale reserved table: when a reserved-table action discovers there
+    // is no active reservation, the table's "reserved" status is wrong. Release it
+    // to available, refetch, close the action modal and clear the selection so
+    // staff are not left with management actions that can never succeed.
+    const releaseStaleReservedTable = useCallback(async () => {
+      if (!selectedTable) {
+        return;
+      }
+
+      try {
+        // Durable release: the __release flag keeps the optimistic "available"
+        // projection alive through the immediate (possibly stale) refetch — which
+        // may still report the table reserved — until the server reflects the
+        // released status. Without it useTables deletes the override and the stale
+        // reserved row reappears.
+        const released = await updateTableStatus(selectedTable.id, "available", {
+          __release: true,
+        });
+        await refetchTables();
+        if (released) {
+          toast.success(
+            t("tableActionModal.reservationReleased", {
+              defaultValue: "Reservation no longer active; table released",
+            }),
+          );
+        } else {
+          toast.error(
+            t("tableActionModal.reservationLoadFailed", {
+              defaultValue: "Failed to load reservation",
+            }),
+          );
+        }
+      } catch (error) {
+        console.error("Failed to release stale reserved table:", error);
+        toast.error(
+          t("tableActionModal.reservationLoadFailed", {
+            defaultValue: "Failed to load reservation",
+          }),
+        );
+      } finally {
+        setShowTableActionModal(false);
+        setSelectedTable(null);
+      }
+    }, [refetchTables, selectedTable, t, updateTableStatus]);
+
     const handleTableEditReservation = useCallback(async () => {
       const reservationBranchId = effectiveBranchId || branchId;
       if (!selectedTable || !reservationBranchId || !organizationId) {
@@ -1728,11 +2037,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         reservationsService.setContext(reservationBranchId, organizationId);
         const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
         if (!reservation) {
-          toast.error(
-            t("tableActionModal.reservationNotFound", {
-              defaultValue: "No active reservation found for this table",
-            }),
-          );
+          // Stale reserved table with no active reservation: recover the table
+          // state instead of leaving dead reserved actions on screen.
+          await releaseStaleReservedTable();
           return;
         }
 
@@ -1747,7 +2054,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }),
         );
       }
-    }, [branchId, effectiveBranchId, organizationId, selectedTable, t]);
+    }, [branchId, effectiveBranchId, organizationId, releaseStaleReservedTable, selectedTable, t]);
 
     const handleTableNoShowReservation = useCallback(async () => {
       const reservationBranchId = effectiveBranchId || branchId;
@@ -1763,16 +2070,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         reservationsService.setContext(reservationBranchId, organizationId);
         const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
         if (!reservation) {
-          toast.error(
-            t("tableActionModal.reservationNotFound", {
-              defaultValue: "No active reservation found for this table",
-            }),
-          );
+          // Stale reserved table with no active reservation: recover the table
+          // state instead of leaving dead reserved actions on screen.
+          await releaseStaleReservedTable();
           return;
         }
 
         await reservationsService.updateStatus(reservation.id, "no_show");
-        await updateTableStatus(selectedTable.id, "available");
+        await updateTableStatus(selectedTable.id, "available", { __release: true });
         await refetchTables();
         toast.success(
           t("tableActionModal.noShowSuccess", {
@@ -1789,7 +2094,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }),
         );
       }
-    }, [branchId, effectiveBranchId, organizationId, refetchTables, selectedTable, t, updateTableStatus]);
+    }, [branchId, effectiveBranchId, organizationId, refetchTables, releaseStaleReservedTable, selectedTable, t, updateTableStatus]);
 
     const handleTableCancelReservation = useCallback(async () => {
       const reservationBranchId = effectiveBranchId || branchId;
@@ -1805,11 +2110,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         reservationsService.setContext(reservationBranchId, organizationId);
         const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
         if (!reservation) {
-          toast.error(
-            t("tableActionModal.reservationNotFound", {
-              defaultValue: "No active reservation found for this table",
-            }),
-          );
+          // Stale reserved table with no active reservation: recover the table
+          // state instead of leaving dead reserved actions on screen.
+          await releaseStaleReservedTable();
           return;
         }
 
@@ -1818,7 +2121,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             defaultValue: "Cancelled from POS table actions",
           }),
         );
-        await updateTableStatus(selectedTable.id, "available");
+        await updateTableStatus(selectedTable.id, "available", { __release: true });
         await refetchTables();
         toast.success(
           t("tableActionModal.cancelSuccess", {
@@ -1835,7 +2138,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }),
         );
       }
-    }, [branchId, effectiveBranchId, organizationId, refetchTables, selectedTable, t, updateTableStatus]);
+    }, [branchId, effectiveBranchId, organizationId, refetchTables, releaseStaleReservedTable, selectedTable, t, updateTableStatus]);
 
     const handleTableSetAvailable = useCallback(async () => {
       if (!selectedTable) {
@@ -1964,6 +2267,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowTableActionModal(true);
     }, [openTableCheckManager, tableHasOpenCheck]);
 
+    // Open a new reservation directly for an available table card. The card's
+    // secondary button previously advertised "Assign" but a waiter is session-
+    // scoped (no session = nothing to assign), so the honest available-table action
+    // is to start a reservation. Opens the portalled/blurred ReservationForm.
+    const handleTableReserve = useCallback((table: RestaurantTable) => {
+      setEditingReservation(null);
+      setSelectedTable(table);
+      setShowReservationForm(true);
+    }, []);
+
     const handleTableCheckAddItems = useCallback((table: RestaurantTable, guestCount: number, session: any) => {
       const activeOrderId = session?.active_order_id || table.currentOrderId;
       const targetOrder = activeOrderId
@@ -2010,6 +2323,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowMenuModal(false);
       setSelectedOrderType(null);
       setPickupToDeliveryContext(null);
+      // Round 236: clear any room-charge context so a later non-room order can't inherit it.
+      setRoomChargeContext(null);
       // Reset all state
       setPhoneNumber("");
       setCustomerInfo(null);
@@ -2388,7 +2703,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Handler for "Edit Customer" button - open modal for full edit
     const handleEditCustomer = (customer: any) => {
       setExistingCustomer(customer);
-      setCustomerModalMode("edit");
+      // The address-row pencil passes editAddressId -> open address-only edit mode
+      // so the title/action reflect editing that one address. The full "Edit
+      // Customer" button passes no editAddressId and keeps the full edit mode.
+      setCustomerModalMode(customer?.editAddressId ? "editAddress" : "edit");
       setShowPhoneLookupModal(false);
       setShowAddCustomerModal(true);
     };
@@ -3368,6 +3686,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   current_order_id: result.orderId,
                   table_session_id: sessionId,
                   guest_count: tableGuestCount,
+                  order_total: total,
+                  paid_total: 0,
+                  outstanding_balance: total,
+                  payment_status: "pending",
                   customer_name:
                     persistedCustomerName ||
                     `Table ${selectedTable.tableNumber}`,
@@ -3380,26 +3702,28 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 sessionError,
               );
               let queuedTableSessionRetry = false;
-              if (isRetryableTableServiceError(sessionError)) {
-                try {
-                  await enqueueTableSessionOpen({
-                    organizationId,
-                    branchId: effectiveBranchId || branchId || null,
-                    payload: tableSessionOpenPayload,
-                  });
-                  queuedTableSessionRetry = true;
-                } catch (queueError) {
-                  console.warn(
-                    "[OrderDashboard] Failed to queue table session open:",
-                    queueError,
-                  );
-                }
+              try {
+                await enqueueTableSessionOpen({
+                  organizationId,
+                  branchId: effectiveBranchId || branchId || null,
+                  payload: tableSessionOpenPayload,
+                });
+                queuedTableSessionRetry = true;
+              } catch (queueError) {
+                console.warn(
+                  "[OrderDashboard] Failed to queue table session open:",
+                  queueError,
+                );
               }
               await updateTableStatus(selectedTable.id, "occupied", {
                 action: "assign_order",
                 current_order_id: result.orderId,
                 table_session_id: selectedTable.tableSessionId || null,
                 guest_count: tableGuestCount,
+                order_total: total,
+                paid_total: 0,
+                outstanding_balance: total,
+                payment_status: "pending",
                 customer_name:
                   persistedCustomerName ||
                   `Table ${selectedTable.tableNumber}`,
@@ -3468,6 +3792,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 })
               : t("orderDashboard.orderCreated"),
           );
+          // A saved table order moves the table to "occupied". If the active
+          // status filter no longer matches (e.g. it was "reserved"), the grid
+          // would show an empty "no tables" state even though the save succeeded,
+          // making the table look like it disappeared. Recover by switching the
+          // filter to "occupied" so the saved table stays visible. Leave "all"
+          // and an already-"occupied" filter untouched (the table still matches).
+          if (
+            isTableOrder &&
+            selectedTable &&
+            tableStatusFilter !== "all" &&
+            tableStatusFilter !== "occupied"
+          ) {
+            setTableStatusFilter("occupied");
+          }
           // Refresh orders in background - don't block UI
           silentRefresh().catch((err) =>
             console.debug("[OrderDashboard] Background refresh error:", err),
@@ -4194,19 +4532,23 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         payload: PaymentIntegrityErrorPayload,
       ) => {
         const blocker = payload.blockers?.[0];
+        // Never surface the raw backend English payload (it also leaks the internal
+        // ORD-* id). The handler owns all messaging for a payment-integrity blocker.
         if (!blocker) {
           toast.error(
-            payload.error ||
-              payload.message ||
-              t("orderDashboard.collectPaymentFailed", {
-                defaultValue: "Payment collection is required before continuing.",
-              }),
+            t("orderDashboard.collectPaymentFailed", {
+              defaultValue: "Payment collection is required before continuing.",
+            }),
           );
           return false;
         }
 
+        // Zero-payment blockers (no_persisted_payment) and explicit split blockers
+        // route to the by-amount repair UI, where staff choose cash/card per portion
+        // (never silently forced to cash when card is valid).
         if (
           blocker.reasonCode === "split_payment_incomplete" ||
+          blocker.reasonCode === "no_persisted_payment" ||
           blocker.paymentMethod === "split"
         ) {
           setSinglePaymentCollectionData(null);
@@ -4225,7 +4567,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           setSplitPaymentData(null);
           setSinglePaymentCollectionData({
             orderId: order.id,
-            orderNumber: getVisibleOrderNumber(order),
+            // Visible compact label (e.g. "ORD #00008"), not the internal ORD-* id.
+            orderNumber: formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order)),
             targetStatus,
             method: resolvedMethod,
             blocker,
@@ -4234,11 +4577,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         }
 
         toast.error(
-          payload.error ||
-            payload.message ||
-            t("orderDashboard.collectPaymentFailed", {
-              defaultValue: "Payment collection is required before continuing.",
-            }),
+          t("orderDashboard.collectPaymentFailed", {
+            defaultValue: "Payment collection is required before continuing.",
+          }),
         );
         return false;
       },
@@ -4423,20 +4764,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 "completed",
               );
               if (!result.success) {
-                if (
-                  result.paymentIntegrityPayload &&
+                // A payment-integrity blocker is fully owned by the handler (it opens
+                // the repair UI or shows one localized toast); never emit a second toast.
+                if (result.paymentIntegrityPayload) {
                   handlePaymentIntegrityBlocker(
                     order,
                     "completed",
                     result.paymentIntegrityPayload,
-                  )
-                ) {
+                  );
                   return;
                 }
                 toast.error(
                   result.errorMessage ||
                     t("orderDashboard.markDeliveredFailed", {
-                      orderNumber: order.orderNumber,
+                      orderNumber: formatCompactOrderNumberForDisplay(
+                        getVisibleOrderNumber(order),
+                      ),
                     }),
                 );
                 return;
@@ -4466,20 +4809,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 "delivered",
               );
               if (!result.success) {
-                if (
-                  result.paymentIntegrityPayload &&
+                // A payment-integrity blocker is fully owned by the handler (it opens
+                // the repair UI or shows one localized toast); never emit a second toast.
+                if (result.paymentIntegrityPayload) {
                   handlePaymentIntegrityBlocker(
                     order,
                     "delivered",
                     result.paymentIntegrityPayload,
-                  )
-                ) {
+                  );
                   return;
                 }
                 toast.error(
                   result.errorMessage ||
                     t("orderDashboard.markDeliveredFailed", {
-                      orderNumber: order.orderNumber,
+                      orderNumber: formatCompactOrderNumberForDisplay(
+                        getVisibleOrderNumber(order),
+                      ),
                     }),
                 );
                 return;
@@ -5349,9 +5694,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           <OrderTabsBar
             activeTab={activeTab}
             onTabChange={handleTabChange}
-            orderCounts={orderCounts}
+            orderCounts={{
+              ...orderCounts,
+              rooms: roomsHubCount,
+              // Services count is intentionally 0: appointments data isn't loaded here and the
+              // brief forbids a heavy duplicate fetch just for a tab badge.
+              services: 0,
+            }}
             showDeliveredTab={hasDeliveryModule}
             showTablesTab={hasTablesModule}
+            showRoomsTab={hasRoomsModule}
+            showServicesTab={hasServicesModule}
           />
         </div>
 
@@ -5370,7 +5723,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         {/* Orders Grid or Tables Grid based on active tab */}
         <div className="min-h-0 flex-1 overflow-hidden">
-          {activeTab === "tables" ? (
+          {activeTab === "tables" && hasTablesModule ? (
           <div
             ref={orderGridRef}
             onWheel={handleTableGridWheel}
@@ -5382,19 +5735,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           >
             {displayTables.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
-                <svg
+                <UtensilsCrossed
                   className={`w-16 h-16 mb-4 ${resolvedTheme === "light" ? "text-gray-300" : "text-white/20"}`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={1.5}
-                    d="M12 8.25v-1.5m0 1.5c-1.355 0-2.697.056-4.024.166C6.845 8.51 6 9.473 6 10.608v2.513m6-4.87c1.355 0 2.697.055 4.024.165C17.155 8.51 18 9.473 18 10.608v2.513m-3-4.87v-1.5m-6 1.5v-1.5m12 9.75l-1.5.75a3.354 3.354 0 01-3 0 3.354 3.354 0 00-3 0 3.354 3.354 0 01-3 0 3.354 3.354 0 00-3 0 3.354 3.354 0 01-3 0L3 16.5m15-3.38a48.474 48.474 0 00-6-.37c-2.032 0-4.034.125-6 .37m12 0c.39.049.777.102 1.163.16 1.07.16 1.837 1.094 1.837 2.175v5.17c0 .62-.504 1.124-1.125 1.124H4.125A1.125 1.125 0 013 20.625v-5.17c0-1.08.768-2.014 1.837-2.174A47.78 47.78 0 016 13.12"
-                  />
-                </svg>
+                  strokeWidth={1.5}
+                />
                 <p
                   className={`text-lg font-medium ${resolvedTheme === "light" ? "text-gray-500" : "text-white/50"}`}
                 >
@@ -5408,8 +5752,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 </p>
               </div>
             ) : (
-              <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4">
-                <div className="shrink-0 space-y-3">
+              <div className="flex h-full min-h-0 flex-col gap-3">
+                <div className="shrink-0 space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="grid w-full grid-cols-3 gap-2 sm:w-auto sm:min-w-[390px]">
                     <div
@@ -5501,10 +5845,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         onClick={() => setTableViewMode("list")}
                         className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
                           tableViewMode === "list"
-                            ? "bg-blue-600 text-white"
+                            ? "bg-yellow-400 text-black"
                             : resolvedTheme === "light"
-                              ? "text-slate-700 hover:bg-[#fffaf1]"
-                              : "text-slate-200 hover:bg-white/[0.08]"
+                              ? "text-slate-700 active:bg-[#fffaf1]"
+                              : "text-slate-200 active:bg-white/[0.08]"
                         }`}
                       >
                         <LayoutGrid className="h-4 w-4" />
@@ -5515,10 +5859,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         onClick={() => setTableViewMode("floorplan")}
                         className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
                           tableViewMode === "floorplan"
-                            ? "bg-blue-600 text-white"
+                            ? "bg-yellow-400 text-black"
                             : resolvedTheme === "light"
-                              ? "text-slate-700 hover:bg-[#fffaf1]"
-                              : "text-slate-200 hover:bg-white/[0.08]"
+                              ? "text-slate-700 active:bg-[#fffaf1]"
+                              : "text-slate-200 active:bg-white/[0.08]"
                         }`}
                       >
                         <MapIcon className="h-4 w-4" />
@@ -5540,10 +5884,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         onClick={() => setTableStatusFilter(status)}
                         className={`rounded-xl px-3 py-2 text-sm font-bold transition-all active:scale-95 ${
                           tableStatusFilter === status
-                            ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20"
+                            ? "bg-yellow-400 text-black shadow-lg shadow-yellow-500/20"
                             : resolvedTheme === "light"
-                              ? "bg-[#fffdf8] text-slate-700 ring-1 ring-amber-100/80 hover:bg-[#fff7e8]"
-                              : "bg-white/[0.06] text-slate-200 hover:bg-white/[0.1]"
+                              ? "bg-[#fffdf8] text-slate-700 ring-1 ring-amber-100/80 active:bg-[#fff7e8]"
+                              : "bg-white/[0.06] text-slate-200 active:bg-white/[0.1]"
                         }`}
                       >
                         {status === "all"
@@ -5573,7 +5917,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   }`}
                 >
                   <span
-                    className={`ml-2 mr-1 inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-bold uppercase tracking-wide ${
+                    className={`ml-2 mr-1 inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-bold tracking-wide ${
                       resolvedTheme === "light"
                         ? "text-slate-500"
                         : "text-slate-400"
@@ -5587,10 +5931,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     onClick={() => setTableFloorFilter("all")}
                     className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
                       effectiveTableFloorFilter === "all"
-                        ? "bg-blue-600 text-white"
+                        ? "bg-yellow-400 text-black"
                         : resolvedTheme === "light"
-                          ? "text-slate-700 hover:bg-[#fffaf1]"
-                          : "text-slate-200 hover:bg-white/[0.08]"
+                          ? "text-slate-700 active:bg-[#fffaf1]"
+                          : "text-slate-200 active:bg-white/[0.08]"
                     }`}
                   >
                     {getTableFloorLabel("all")}
@@ -5602,10 +5946,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       onClick={() => setTableFloorFilter(floor)}
                       className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
                         effectiveTableFloorFilter === floor
-                          ? "bg-blue-600 text-white"
+                          ? "bg-yellow-400 text-black"
                           : resolvedTheme === "light"
-                            ? "text-slate-700 hover:bg-[#fffaf1]"
-                            : "text-slate-200 hover:bg-white/[0.08]"
+                            ? "text-slate-700 active:bg-[#fffaf1]"
+                            : "text-slate-200 active:bg-white/[0.08]"
                       }`}
                     >
                       {getTableFloorLabel(floor)}
@@ -5616,12 +5960,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
                 <div
                   data-testid="order-dashboard-table-grid-container"
-                  className="h-[calc(100dvh-30rem)] min-h-56 overflow-hidden"
+                  className="min-h-0 flex-1 overflow-hidden"
                 >
                   <div
                     ref={tableGridScrollRef}
                     data-testid="order-dashboard-table-scroll-region"
-                    className="h-full min-h-0 overflow-y-auto overflow-x-hidden pr-1 scrollbar-hide touch-scroll"
+                    className="h-full min-h-0 overflow-y-auto overflow-x-hidden pb-28 pr-24 scrollbar-hide touch-scroll"
                   >
                   {visibleTableCards.length === 0 ? (
                     <div
@@ -5650,6 +5994,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         tableStatusConfig.available;
                       const balance = readTableBalance(table);
                       const hasOpenCheck = tableHasOpenCheckReference(table);
+                      // Reserved tables (no open check) must keep the existing
+                      // reservation-management path (edit / no-show / cancel) via
+                      // TableActionModal, not the new-reservation shortcut.
+                      const isReservedTable =
+                        !hasOpenCheck && displayStatus === "reserved";
+                      // Cleaning/maintenance/unavailable tables are not ready for guests and must
+                      // not offer guest order actions, even with no open check after payment.
+                      const needsAttention =
+                        !hasOpenCheck &&
+                        (displayStatus === "cleaning" ||
+                          displayStatus === "maintenance" ||
+                          displayStatus === "unavailable");
+                      const attentionActionLabel =
+                        displayStatus === "cleaning"
+                          ? t("tablesDashboard.markCleaned", "Mark cleaned")
+                          : t("tablesDashboard.backInService", "Back in service");
+                      const attentionStatusLabel =
+                        displayStatus === "cleaning"
+                          ? t("tablesDashboard.needsCleaning", "Needs cleaning")
+                          : t("tablesDashboard.outOfService", "Out of service");
                       const paidPercent =
                         balance.total > 0
                           ? Math.min(
@@ -5668,23 +6032,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         table.guestCount || table.capacity || 0;
 
                       return (
-                        <div
+                        <article
                           key={table.id}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => handleTableSelect(table)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              handleTableSelect(table);
-                            }
-                          }}
-                          className={`group min-h-[230px] cursor-pointer rounded-2xl border p-4 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-blue-400/45 ${visual.card}`}
+                          className={`min-h-[180px] rounded-2xl border p-3 backdrop-blur-xl transition-all duration-200 ${visual.card}`}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                               <div
-                                className={`inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide ${
+                                className={`inline-flex items-center gap-1.5 text-xs font-bold tracking-wide ${
                                   resolvedTheme === "light"
                                     ? "text-slate-500"
                                     : "text-slate-400"
@@ -5694,13 +6049,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                                 {getTableFloorLabel(getTableFloorValue(table))}
                               </div>
                               <div
-                                className={`mt-1 truncate text-4xl font-black ${
+                                className={`mt-1 truncate text-2xl font-black ${
                                   resolvedTheme === "light"
                                     ? "text-slate-950"
                                     : "text-white"
                                 }`}
                               >
-                                {formatTableCardNumber(table.tableNumber)}
+                                {formatTableDisplayNumber(table.tableNumber)}
                               </div>
                             </div>
                             <span
@@ -5710,63 +6065,43 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                             </span>
                           </div>
 
-                          <div className="mt-4 grid grid-cols-2 gap-2">
-                            <div
-                              className={`rounded-xl border px-3 py-2 ${
+                          {/* Compact one-line info strip (round 214 v3): the boxed Covers/Waiter tiles
+                              were too tall and let the Greek waiter value wrap; this is a single row of
+                              two chips (covers count + waiter), the waiter chip taking the remaining
+                              width so a value like "Χωρίς ανάθεση" reads on one line without wrapping. */}
+                          <div
+                            className={`mt-2 flex items-center gap-1.5 text-xs ${
+                              resolvedTheme === "light"
+                                ? "text-slate-500"
+                                : "text-slate-400"
+                            }`}
+                          >
+                            <span
+                              className={`inline-flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1 font-bold ${
+                                resolvedTheme === "light"
+                                  ? "border-amber-100/80 bg-[#fffdf8]/80 text-slate-700"
+                                  : "border-white/10 bg-black/20 text-slate-200"
+                              }`}
+                            >
+                              <Users className="h-3.5 w-3.5 shrink-0" />
+                              {guestCount}/{table.capacity}
+                            </span>
+                            <span
+                              className={`inline-flex min-w-0 flex-1 items-center gap-1 rounded-lg border px-2 py-1 font-semibold ${
                                 resolvedTheme === "light"
                                   ? "border-amber-100/80 bg-[#fffdf8]/80"
                                   : "border-white/10 bg-black/20"
-                              }`}
-                            >
-                              <div
-                                className={`flex items-center gap-1 text-xs font-semibold ${
-                                  resolvedTheme === "light"
-                                    ? "text-slate-500"
-                                    : "text-slate-400"
-                                }`}
-                              >
-                                <Users className="h-3.5 w-3.5" />
-                                {t("tablesDashboard.covers", "Covers")}
-                              </div>
-                              <div
-                                className={`mt-1 font-black ${
-                                  resolvedTheme === "light"
-                                    ? "text-slate-950"
+                              } ${
+                                table.currentWaiterName
+                                  ? resolvedTheme === "light"
+                                    ? "text-slate-900"
                                     : "text-white"
-                                }`}
-                              >
-                                {guestCount}/{table.capacity}
-                              </div>
-                            </div>
-                            <div
-                              className={`rounded-xl border px-3 py-2 ${
-                                resolvedTheme === "light"
-                                  ? "border-amber-100/80 bg-[#fffdf8]/80"
-                                  : "border-white/10 bg-black/20"
+                                  : "text-slate-400"
                               }`}
                             >
-                              <div
-                                className={`flex items-center gap-1 text-xs font-semibold ${
-                                  resolvedTheme === "light"
-                                    ? "text-slate-500"
-                                    : "text-slate-400"
-                                }`}
-                              >
-                                <UserCheck className="h-3.5 w-3.5" />
-                                {t("tablesDashboard.waiter", "Waiter")}
-                              </div>
-                              <div
-                                className={`mt-1 truncate font-black ${
-                                  table.currentWaiterName
-                                    ? resolvedTheme === "light"
-                                      ? "text-slate-950"
-                                      : "text-white"
-                                    : "text-slate-400"
-                                }`}
-                              >
-                                {waiterName}
-                              </div>
-                            </div>
+                              <UserCheck className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">{waiterName}</span>
+                            </span>
                           </div>
 
                           {hasOpenCheck ? (
@@ -5822,98 +6157,128 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                                 />
                               </div>
                             </div>
-                          ) : (
+                          ) : null}
+                          {/* The duplicate lower status line (Ready for guests / Needs cleaning) was
+                              removed: the top status badge already carries Available/Cleaning/Out-of-
+                              service, and the attention action button below conveys the cleaning CTA. */}
+
+                          {occupiedSinceLabel || table.currentOrderId ? (
                             <div
-                              className={`mt-4 rounded-xl border px-3 py-3 ${
+                              className={`mt-2 flex flex-wrap items-center gap-2 text-xs ${
                                 resolvedTheme === "light"
-                                  ? "border-emerald-200 bg-[#fffdf8]/80"
-                                  : "border-emerald-400/20 bg-emerald-400/10"
+                                  ? "text-slate-500"
+                                  : "text-slate-400"
                               }`}
                             >
-                              <div className="flex items-center gap-2 text-sm font-black text-emerald-700 dark:text-emerald-300">
-                                <CheckCircle2 className="h-4 w-4" />
-                                {t(
-                                  "tablesDashboard.readyForGuests",
-                                  "Ready for guests",
-                                )}
-                              </div>
+                              {occupiedSinceLabel ? (
+                                <span className="inline-flex items-center gap-1 rounded-lg border border-zinc-400/20 bg-zinc-500/10 px-2 py-1 font-bold text-zinc-700 dark:text-zinc-200">
+                                  <Clock3 className="h-3.5 w-3.5" />
+                                  {occupiedSinceLabel}
+                                </span>
+                              ) : null}
+                              {table.currentOrderId ? (
+                                <span
+                                  className={`inline-flex max-w-full items-center gap-1 rounded-lg border px-2 py-1 font-semibold ${
+                                    resolvedTheme === "light"
+                                      ? "border-amber-100/80 bg-[#fffdf8]/70"
+                                      : "border-white/10 bg-white/[0.04]"
+                                  }`}
+                                >
+                                  <ReceiptText className="h-3.5 w-3.5 shrink-0" />
+                                  <span className="truncate">
+                                    {String(table.currentOrderId).slice(0, 10)}
+                                  </span>
+                                </span>
+                              ) : null}
                             </div>
-                          )}
+                          ) : null}
 
-                          <div
-                            className={`mt-4 flex flex-wrap items-center gap-2 text-xs ${
-                              resolvedTheme === "light"
-                                ? "text-slate-500"
-                                : "text-slate-400"
-                            }`}
-                          >
-                            {occupiedSinceLabel ? (
-                              <span className="inline-flex items-center gap-1 rounded-lg border border-blue-400/20 bg-blue-500/10 px-2 py-1 font-bold text-blue-700 dark:text-blue-200">
-                                <Clock3 className="h-3.5 w-3.5" />
-                                {occupiedSinceLabel}
-                              </span>
-                            ) : null}
-                            {table.currentOrderId ? (
-                              <span
-                                className={`inline-flex max-w-full items-center gap-1 rounded-lg border px-2 py-1 font-semibold ${
+                          {needsAttention ? (
+                            <div className="mt-3 space-y-2">
+                              <div
+                                className={`inline-flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-sm font-black ${
                                   resolvedTheme === "light"
-                                    ? "border-amber-100/80 bg-[#fffdf8]/70"
-                                    : "border-white/10 bg-white/[0.04]"
+                                    ? "border-amber-200 bg-amber-50/80 text-amber-800"
+                                    : "border-amber-400/25 bg-amber-400/10 text-amber-200"
                                 }`}
                               >
-                                <ReceiptText className="h-3.5 w-3.5 shrink-0" />
-                                <span className="truncate">
-                                  {String(table.currentOrderId).slice(0, 10)}
-                                </span>
-                              </span>
-                            ) : null}
-                          </div>
-
-                          <div className="mt-4 grid grid-cols-2 gap-2">
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                handleTableSelect(table);
-                              }}
-                              className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-black transition-all active:scale-95 ${
-                                hasOpenCheck
-                                  ? "bg-blue-600 text-white group-hover:bg-blue-500"
-                                  : "bg-emerald-600 text-white group-hover:bg-emerald-500"
-                              }`}
-                            >
-                              {hasOpenCheck ? (
-                                <WalletCards className="h-4 w-4" />
-                              ) : (
-                                <Plus className="h-4 w-4" />
-                              )}
-                              {hasOpenCheck
-                                ? t("tablesDashboard.openCheck", "Open check")
-                                : t("tablesDashboard.newOrder", "New order")}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                handleTableSelect(table);
-                              }}
-                              className={`inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-black transition-all active:scale-95 ${
-                                resolvedTheme === "light"
-                                  ? "border-amber-100/80 bg-[#fffdf8]/80 text-slate-700 hover:bg-[#fffaf1]"
-                                  : "border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.1]"
-                              }`}
-                            >
-                              {hasOpenCheck ? (
-                                <Banknote className="h-4 w-4" />
-                              ) : (
-                                <ArrowRightLeft className="h-4 w-4" />
-                              )}
-                              {hasOpenCheck
-                                ? t("tablesDashboard.pay", "Pay")
-                                : t("tablesDashboard.assign", "Assign")}
-                            </button>
-                          </div>
-                        </div>
+                                <AlertTriangle className="h-4 w-4 shrink-0" />
+                                {attentionStatusLabel}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleTableSelect(table);
+                                }}
+                                className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-amber-600 px-3 py-2 text-sm font-black text-white transition-all active:scale-95 active:bg-amber-500"
+                              >
+                                <AlertTriangle className="h-4 w-4" />
+                                {attentionActionLabel}
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="mt-2 grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleTableSelect(table);
+                                }}
+                                className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-black transition-all active:scale-95 ${
+                                  hasOpenCheck
+                                    ? "bg-yellow-400 text-black active:bg-yellow-500"
+                                    : "bg-emerald-600 text-white active:bg-emerald-500"
+                                }`}
+                              >
+                                {hasOpenCheck ? (
+                                  <WalletCards className="h-4 w-4" />
+                                ) : (
+                                  <Plus className="h-4 w-4" />
+                                )}
+                                {hasOpenCheck
+                                  ? t("tablesDashboard.openCheck", "Open check")
+                                  : t("tablesDashboard.newOrder", "New order")}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  // Open check -> Pay, reserved -> manage existing
+                                  // reservation (both via TableActionModal); available
+                                  // -> start a new reservation directly.
+                                  if (hasOpenCheck || isReservedTable) {
+                                    handleTableSelect(table);
+                                  } else {
+                                    handleTableReserve(table);
+                                  }
+                                }}
+                                className={`inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-black transition-all active:scale-95 ${
+                                  resolvedTheme === "light"
+                                    ? "border-amber-100/80 bg-[#fffdf8]/80 text-slate-700 active:bg-[#fffaf1]"
+                                    : "border-white/10 bg-white/[0.06] text-slate-200 active:bg-white/[0.1]"
+                                }`}
+                              >
+                                {hasOpenCheck ? (
+                                  <Banknote className="h-4 w-4" />
+                                ) : isReservedTable ? (
+                                  <Pencil className="h-4 w-4" />
+                                ) : (
+                                  <CalendarPlus className="h-4 w-4" />
+                                )}
+                                {hasOpenCheck
+                                  ? t("tablesDashboard.pay", "Pay")
+                                  : isReservedTable
+                                    ? t("tableActionModal.editReservation", {
+                                        defaultValue: "Edit Reservation",
+                                      })
+                                    : t("tableActionModal.newReservation", {
+                                        defaultValue: "New Reservation",
+                                      })}
+                              </button>
+                            </div>
+                          )}
+                        </article>
                       );
                     })}
                   </div>
@@ -5922,6 +6287,33 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 </div>
               </div>
             )}
+          </div>
+        ) : activeTab === "rooms" && hasRoomsModule ? (
+          /* Rooms hub (Round 236) — embedded RoomsView; the bordered card bounds the scroll. */
+          <div
+            className={`h-full min-h-0 overflow-hidden rounded-2xl border shadow-sm transition-colors ${
+              resolvedTheme === "light"
+                ? "border-amber-100/80 bg-[#fffaf1]/90"
+                : "border-white/10 bg-slate-950/45"
+            }`}
+          >
+            {/* Round 237: the Rooms tab is browse-only — no preset. The New Order check-in /
+                reservation flows run in the focused workflow modal below, not via this tab. */}
+            <RoomsView embedded />
+          </div>
+        ) : activeTab === "services" && hasServicesModule ? (
+          /* Services hub (Round 236) — embedded AppointmentsView with its availability check intact. */
+          <div
+            className={`h-full min-h-0 overflow-hidden rounded-2xl border shadow-sm transition-colors ${
+              resolvedTheme === "light"
+                ? "border-amber-100/80 bg-[#fffaf1]/90"
+                : "border-white/10 bg-slate-950/45"
+            }`}
+          >
+            <AppointmentsView
+              embedded
+              openCreateSignal={servicesOpenCreateSignal}
+            />
           </div>
         ) : (
           /* Orders Grid - shown for Orders/Delivered/Canceled tabs */
@@ -5943,17 +6335,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         <FloatingActionButton
           onClick={handleNewOrderClick}
           disabled={!isShiftActive}
-          aria-label={t("orders.newOrder")}
           movable
           positionStorageKey="pos-orders-new-order-fab-position"
           className={`${
             !isShiftActive
               ? "cursor-not-allowed opacity-80"
               : resolvedTheme === "dark"
-                ? "shadow-blue-500/30"
+                ? "shadow-yellow-500/30"
                 : ""
           }`}
-          title={
+          aria-label={
             !isShiftActive
               ? t(
                   "orders.startShiftFirst",
@@ -5968,7 +6359,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           isOpen={showOrderTypeModal}
           onClose={() => setShowOrderTypeModal(false)}
           title={t("orderFlow.selectOrderType") || "Select Order Type"}
-          className="!max-w-lg"
+          className={`${orderTypeModalWidthClass} order-type-transparent-modal`}
+          contentClassName="!p-0 !overflow-visible"
         >
           <div className="p-2">
             {isOrderTypeTransitioning ? (
@@ -5978,20 +6370,45 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   {t("orderFlow.settingUpOrder") || "Setting up order..."}
                 </span>
               </div>
-            ) : (
+            ) : (() => {
+              // Localize each card's title + description once, then reuse for both the visible
+              // text and the explicit aria-label (built via composeOrderTypeAriaLabel so the
+              // accessible name never repeats the title when a locale leaves them identical).
+              const deliveryTitle = t("orderFlow.deliveryOrder") || "Delivery Order";
+              const deliveryDescription = t("modals.orderTypeSelection.deliveryDescription", {
+                defaultValue: "Delivery to customer",
+              });
+              const pickupTitle = t("orderFlow.pickupOrder") || "Pickup Order";
+              const pickupDescription = t("modals.orderTypeSelection.pickupDescription", {
+                defaultValue: "Pickup at store",
+              });
+              const tableTitle = t("orderFlow.tableOrder") || "Table Order";
+              const tableDescription = t("orderFlow.tableDescription") || "Dine-in order";
+              const roomTitle = t("orderFlow.roomOrder", { defaultValue: "Room" });
+              const roomDescription = t("orderFlow.roomDescription", {
+                defaultValue: "Room order, check-in or reservation",
+              });
+              const serviceTitle = t("orderFlow.serviceOrder", { defaultValue: "Service" });
+              const serviceDescription = t("orderFlow.serviceDescription", {
+                defaultValue: "Book an appointment",
+              });
+              return (
               <div
-                className={`grid gap-4 ${hasDeliveryModule && hasTablesModule ? "grid-cols-3" : hasDeliveryModule || hasTablesModule ? "grid-cols-2" : "grid-cols-1"}`}
+                className={`grid gap-4 sm:gap-5 ${orderTypeGridColsClass}`}
               >
                 {/* Delivery Button - Yellow (only if Delivery module acquired) */}
                 {hasDeliveryModule && (
                   <button
+                    type="button"
+                    data-order-type-card="delivery"
                     onClick={() => handleOrderTypeSelect("delivery")}
-                    className="group relative p-6 rounded-2xl border-2 border-yellow-400/30 bg-gradient-to-br from-yellow-500/10 to-yellow-600/5 hover:from-yellow-500/20 hover:to-yellow-600/10 hover:border-yellow-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-yellow-500/20"
+                    aria-label={composeOrderTypeAriaLabel(deliveryTitle, deliveryDescription)}
+                    className={`relative p-6 rounded-2xl border-2 border-[#facc15]/45 bg-[linear-gradient(135deg,rgba(250,204,21,0.16),rgba(234,179,8,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(deliveryCardVisibleIndex)}`}
                   >
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-16 h-16 flex items-center justify-center">
                         <svg
-                          className="w-full h-full text-yellow-400 group-hover:text-yellow-300 transition-colors"
+                          className="w-full h-full text-white"
                           fill="none"
                           stroke="currentColor"
                           viewBox="0 0 24 24"
@@ -6005,13 +6422,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         </svg>
                       </div>
                       <div className="text-center">
-                        <h3 className="text-lg font-bold text-yellow-400 group-hover:text-yellow-300 transition-colors mb-1">
-                          {t("orderFlow.deliveryOrder") || "Delivery Order"}
+                        <h3 className="text-lg font-bold text-yellow-400 transition-colors mb-1">
+                          {deliveryTitle}
                         </h3>
-                        <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                          {t("orderFlow.deliveryDescription", {
-                            defaultValue: "Delivery to customer",
-                          })}
+                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                          {deliveryDescription}
                         </p>
                       </div>
                     </div>
@@ -6020,33 +6435,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
                 {/* Pickup Button - Green (always available) */}
                 <button
+                  type="button"
+                  data-order-type-card="pickup"
                   onClick={() => handleOrderTypeSelect("pickup")}
-                  className="group relative p-6 rounded-2xl border-2 border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 hover:from-green-500/20 hover:to-green-600/10 hover:border-green-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-green-500/20"
+                  aria-label={composeOrderTypeAriaLabel(pickupTitle, pickupDescription)}
+                  className={`relative p-6 rounded-2xl border-2 border-[#34d399]/45 bg-[linear-gradient(135deg,rgba(52,211,153,0.16),rgba(22,163,74,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(pickupCardVisibleIndex)}`}
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
-                      <svg
-                        className="w-full h-full text-green-400 group-hover:text-green-300 transition-colors"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                        strokeWidth="1.5"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M13.5 21v-7.5a.75.75 0 01.75-.75h3a.75.75 0 01.75.75V21m-4.5 0H2.36m11.14 0H18m0 0h3.64m-1.39 0V9.349m-16.5 11.65V9.35m0 0a3.001 3.001 0 003.75-.615A2.993 2.993 0 009.75 9.75c.896 0 1.7-.393 2.25-1.016a2.993 2.993 0 002.25 1.016c.896 0 1.7-.393 2.25-1.016a3.001 3.001 0 003.75.614m-16.5 0a3.004 3.004 0 01-.621-4.72L4.318 3.44A1.5 1.5 0 015.378 3h13.243a1.5 1.5 0 011.06.44l1.19 1.189a3 3 0 01-.621 4.72m-13.5 8.65h3.75a.75.75 0 00.75-.75V13.5a.75.75 0 00-.75-.75H6.75a.75.75 0 00-.75.75v3.75c0 .415.336.75.75.75z"
-                        />
-                      </svg>
+                      <PickupOrderIcon className="w-full h-full text-white" />
                     </div>
                     <div className="text-center">
-                      <h3 className="text-lg font-bold text-green-400 group-hover:text-green-300 transition-colors mb-1">
-                        {t("orderFlow.pickupOrder") || "Pickup Order"}
+                      <h3 className="text-lg font-bold text-green-400 transition-colors mb-1">
+                        {pickupTitle}
                       </h3>
-                      <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                        {t("orderFlow.pickupDescription", {
-                          defaultValue: "Pickup at store",
-                        })}
+                      <p className="text-sm leading-snug text-white/60 transition-colors">
+                        {pickupDescription}
                       </p>
                     </div>
                   </div>
@@ -6055,40 +6459,297 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 {/* Table Button - Blue (only if Tables module acquired) */}
                 {hasTablesModule && (
                   <button
+                    type="button"
+                    data-order-type-card="table"
                     onClick={() => handleOrderTypeSelect("dine-in")}
-                    className="group relative p-6 rounded-2xl border-2 border-blue-400/30 bg-gradient-to-br from-blue-500/10 to-blue-600/5 hover:from-blue-500/20 hover:to-blue-600/10 hover:border-blue-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-blue-500/20"
+                    aria-label={composeOrderTypeAriaLabel(tableTitle, tableDescription)}
+                    className={`relative p-6 rounded-2xl border-2 border-[#60a5fa]/45 bg-[linear-gradient(135deg,rgba(96,165,250,0.16),rgba(37,99,235,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(tableCardVisibleIndex)}`}
                   >
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-16 h-16 flex items-center justify-center">
-                        <svg
-                          className="w-full h-full text-blue-400 group-hover:text-blue-300 transition-colors"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                          strokeWidth="1.5"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M12 8.25v-1.5m0 1.5c-1.355 0-2.697.056-4.024.166C6.845 8.51 6 9.473 6 10.608v2.513m6-4.87c1.355 0 2.697.055 4.024.165C17.155 8.51 18 9.473 18 10.608v2.513m-3-4.87v-1.5m-6 1.5v-1.5m12 9.75l-1.5.75a3.354 3.354 0 01-3 0 3.354 3.354 0 00-3 0 3.354 3.354 0 01-3 0 3.354 3.354 0 00-3 0 3.354 3.354 0 01-3 0L3 16.5m15-3.38a48.474 48.474 0 00-6-.37c-2.032 0-4.034.125-6 .37m12 0c.39.049.777.102 1.163.16 1.07.16 1.837 1.094 1.837 2.175v5.17c0 .62-.504 1.124-1.125 1.124H4.125A1.125 1.125 0 013 20.625v-5.17c0-1.08.768-2.014 1.837-2.174A47.78 47.78 0 016 13.12M12.265 3.11a.375.375 0 11-.53 0L12 2.845l.265.265zm-3 0a.375.375 0 11-.53 0L9 2.845l.265.265zm6 0a.375.375 0 11-.53 0L15 2.845l.265.265z"
-                          />
-                        </svg>
+                        {/* Dine-in / table order icon */}
+                        <TableOrderIcon
+                          className="w-full h-full text-white"
+                          strokeWidth={1.6}
+                          opticalScale={1.62}
+                        />
                       </div>
                       <div className="text-center">
-                        <h3 className="text-lg font-bold text-blue-400 group-hover:text-blue-300 transition-colors mb-1">
-                          {t("orderFlow.tableOrder") || "Table Order"}
+                        <h3 className="text-lg font-bold text-[#60a5fa] transition-colors mb-1">
+                          {tableTitle}
                         </h3>
-                        <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                          {t("orderFlow.tableDescription") || "Dine-in order"}
+                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                          {tableDescription}
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+                )}
+
+                {/* Room Button - Purple (only if Rooms module acquired) — opens the room flow chooser */}
+                {hasRoomsModule && (
+                  <button
+                    type="button"
+                    data-order-type-card="room"
+                    onClick={handleSelectRoomFlow}
+                    aria-label={composeOrderTypeAriaLabel(roomTitle, roomDescription)}
+                    className={`relative p-6 rounded-2xl border-2 border-[#a855f7]/45 bg-[linear-gradient(135deg,rgba(168,85,247,0.16),rgba(126,34,206,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(roomCardVisibleIndex)}`}
+                  >
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-16 h-16 flex items-center justify-center">
+                        <BedDouble className="w-full h-full text-white" strokeWidth={1.5} />
+                      </div>
+                      <div className="text-center">
+                        <h3 className="text-lg font-bold text-[#a855f7] transition-colors mb-1">
+                          {roomTitle}
+                        </h3>
+                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                          {roomDescription}
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+                )}
+
+                {/* Service Button - Teal (only if Appointments/Service Catalog module acquired) */}
+                {hasServicesModule && (
+                  <button
+                    type="button"
+                    data-order-type-card="service"
+                    onClick={handleSelectServiceFlow}
+                    aria-label={composeOrderTypeAriaLabel(serviceTitle, serviceDescription)}
+                    className={`relative p-6 rounded-2xl border-2 border-[#22d3ee]/45 bg-[linear-gradient(135deg,rgba(34,211,238,0.16),rgba(8,145,178,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(serviceCardVisibleIndex)}`}
+                  >
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-16 h-16 flex items-center justify-center">
+                        <CalendarClock className="w-full h-full text-white" strokeWidth={1.5} />
+                      </div>
+                      <div className="text-center">
+                        <h3 className="text-lg font-bold text-[#22d3ee] transition-colors mb-1">
+                          {serviceTitle}
+                        </h3>
+                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                          {serviceDescription}
                         </p>
                       </div>
                     </div>
                   </button>
                 )}
               </div>
+              );
+            })()}
+          </div>
+        </LiquidGlassModal>
+
+        {/* Room Flow Modal (Round 236) — Room Order / Check-in / Create Reservation chooser */}
+        <LiquidGlassModal
+          isOpen={showRoomFlowModal}
+          onClose={() => setShowRoomFlowModal(false)}
+          title={t("orderFlow.roomFlowTitle", { defaultValue: "Room" })}
+          className="!max-w-md"
+        >
+          <div className="grid grid-cols-1 gap-3 p-2">
+            {/* Room Order — only with the Orders module (it charges an order to a room folio). */}
+            {hasOrdersModule && (
+              <button
+                type="button"
+                onClick={handleRoomFlowOrder}
+                aria-label={composeOrderTypeAriaLabel(
+                  t("orderFlow.roomFlowOrder", { defaultValue: "Room Order" }),
+                  t("orderFlow.roomFlowOrderDesc", { defaultValue: "Charge an order to a room" }),
+                )}
+                className="flex min-h-[64px] items-center gap-4 rounded-2xl border-2 border-amber-400/30 bg-gradient-to-br from-amber-500/10 to-amber-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+              >
+                <DoorOpen className="h-7 w-7 shrink-0 text-amber-400" strokeWidth={1.6} />
+                <div>
+                  <h3 className="text-base font-bold text-amber-400">
+                    {t("orderFlow.roomFlowOrder", { defaultValue: "Room Order" })}
+                  </h3>
+                  <p className="text-sm leading-snug text-white/60">
+                    {t("orderFlow.roomFlowOrderDesc", { defaultValue: "Charge an order to a room" })}
+                  </p>
+                </div>
+              </button>
+            )}
+
+            {/* Check-in stays under the Rooms module (the Room card itself is Rooms-gated). */}
+            <button
+              type="button"
+              onClick={handleRoomFlowCheckin}
+              aria-label={composeOrderTypeAriaLabel(
+                t("orderFlow.roomFlowCheckin", { defaultValue: "Check-in" }),
+                t("orderFlow.roomFlowCheckinDesc", { defaultValue: "Check in a reserved room" }),
+              )}
+              className="flex min-h-[64px] items-center gap-4 rounded-2xl border-2 border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+            >
+              <UserCheck className="h-7 w-7 shrink-0 text-green-400" strokeWidth={1.6} />
+              <div>
+                <h3 className="text-base font-bold text-green-400">
+                  {t("orderFlow.roomFlowCheckin", { defaultValue: "Check-in" })}
+                </h3>
+                <p className="text-sm leading-snug text-white/60">
+                  {t("orderFlow.roomFlowCheckinDesc", { defaultValue: "Check in a reserved room" })}
+                </p>
+              </div>
+            </button>
+
+            {/* Create Reservation — only with the Reservations module. */}
+            {hasReservationsModule && (
+              <button
+                type="button"
+                onClick={handleRoomFlowReservation}
+                aria-label={composeOrderTypeAriaLabel(
+                  t("orderFlow.roomFlowReservation", { defaultValue: "Create Reservation" }),
+                  t("orderFlow.roomFlowReservationDesc", { defaultValue: "Reserve an available room" }),
+                )}
+                className="flex min-h-[64px] items-center gap-4 rounded-2xl border-2 border-purple-400/30 bg-gradient-to-br from-purple-500/10 to-purple-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+              >
+                <CalendarPlus className="h-7 w-7 shrink-0 text-[#a855f7]" strokeWidth={1.6} />
+                <div>
+                  <h3 className="text-base font-bold text-[#a855f7]">
+                    {t("orderFlow.roomFlowReservation", { defaultValue: "Create Reservation" })}
+                  </h3>
+                  <p className="text-sm leading-snug text-white/60">
+                    {t("orderFlow.roomFlowReservationDesc", { defaultValue: "Reserve an available room" })}
+                  </p>
+                </div>
+              </button>
             )}
           </div>
         </LiquidGlassModal>
+
+        {/* Room Order Selector (Round 236) — occupied rooms; only those with an active folio are tappable */}
+        <LiquidGlassModal
+          isOpen={showRoomOrderSelector}
+          onClose={() => setShowRoomOrderSelector(false)}
+          title={t("orderFlow.roomOrderTitle", { defaultValue: "Select a room" })}
+          className="!max-w-3xl"
+        >
+          <div className="p-2">
+            {roomOrderRooms.length === 0 ? (
+              <div className="flex flex-col items-center gap-2 py-10 text-center">
+                <BedDouble className="h-12 w-12 text-white/30" strokeWidth={1.5} />
+                <p className="text-sm text-white/60">
+                  {t("orderFlow.roomOrderEmpty", {
+                    defaultValue: "No occupied rooms with an open folio yet",
+                  })}
+                </p>
+                <p className="max-w-xs text-xs text-white/45">
+                  {t("orderFlow.roomOrderEmptyHint", {
+                    defaultValue:
+                      "A room charge needs a checked-in guest with an active folio. Use Check-in first to open one.",
+                  })}
+                </p>
+              </div>
+            ) : (
+              <>
+                <RoomFloorChips
+                  floors={roomOrderFloors}
+                  value={roomOrderFloor}
+                  onChange={setRoomOrderFloor}
+                />
+                {visibleRoomOrderRooms.length === 0 ? (
+                  <div className="flex flex-col items-center gap-2 py-10 text-center">
+                    <BedDouble className="h-12 w-12 text-white/30" strokeWidth={1.5} />
+                    <p className="text-sm text-white/60">
+                      {t("roomsView.noRooms", { defaultValue: "No rooms found" })}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid max-h-[60vh] grid-cols-1 gap-2 overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {visibleRoomOrderRooms.map((room) => {
+                      const folioId = room.activeFolio?.id || null;
+                      const guest = room.activeFolio?.guestName || room.currentGuestName;
+                      return (
+                        <button
+                          key={room.id}
+                          type="button"
+                          disabled={!folioId}
+                          onClick={() => handleRoomOrderRoomSelect(room)}
+                          aria-label={t("orderFlow.roomOrderSelectRoom", {
+                            room: room.roomNumber,
+                            defaultValue: "Room {{room}}",
+                          })}
+                          className={`flex flex-col gap-1 rounded-2xl border-2 px-4 py-3 text-left transition-transform duration-150 ${
+                            folioId
+                              ? "border-amber-400/30 bg-gradient-to-br from-amber-500/10 to-amber-600/5 active:scale-95"
+                              : "border-white/10 bg-white/[0.03] opacity-50 cursor-not-allowed"
+                          }`}
+                        >
+                          <span className="text-base font-bold text-white">
+                            {t("orderFlow.roomOrderSelectRoom", {
+                              room: room.roomNumber,
+                              defaultValue: "Room {{room}}",
+                            })}
+                          </span>
+                          {guest && <span className="text-sm text-white/70">{guest}</span>}
+                          {folioId ? (
+                            <span className="text-xs font-semibold text-amber-300">
+                              {formatCurrency(room.activeFolio?.balance || 0)}
+                            </span>
+                          ) : (
+                            <span className="text-xs font-semibold text-red-400">
+                              {t("orderFlow.roomOrderNoFolio", { defaultValue: "No active folio" })}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </LiquidGlassModal>
+
+        {/* Room Check-in (Round 238) — focused selector of RESERVED rooms only, then the check-in
+            form for the chosen room. NO embedded RoomsView / hubPreset, no stats/search/filter/floor
+            hub chrome. */}
+        <RoomStaySelectorModal
+          isOpen={showRoomCheckinSelector}
+          variant="checkin"
+          rooms={reservedRoomsForCheckin}
+          onClose={() => setShowRoomCheckinSelector(false)}
+          onSelectRoom={(room) => {
+            setShowRoomCheckinSelector(false);
+            setCheckinRoom(room);
+          }}
+        />
+        {checkinRoom && (
+          <RoomCheckinModal
+            room={checkinRoom}
+            branchId={effectiveBranchId || ""}
+            organizationId={organizationId || ""}
+            updateRoomStatus={updateHubRoomStatus}
+            refetchRooms={refetchHubRooms}
+            onClose={() => setCheckinRoom(null)}
+            onCompleted={() => setCheckinRoom(null)}
+          />
+        )}
+
+        {/* Create Reservation (Round 238) — focused selector of AVAILABLE rooms only, then the
+            reservation form for the chosen room. NO embedded RoomsView / hubPreset. */}
+        <RoomStaySelectorModal
+          isOpen={showRoomReservationSelector}
+          variant="reservation"
+          rooms={availableRoomsForReservation}
+          onClose={() => setShowRoomReservationSelector(false)}
+          onSelectRoom={(room) => {
+            setShowRoomReservationSelector(false);
+            setReservationRoom(room);
+          }}
+        />
+        {reservationRoom && (
+          <RoomReservationModal
+            room={reservationRoom}
+            branchId={effectiveBranchId || ""}
+            organizationId={organizationId || ""}
+            updateRoomStatus={updateHubRoomStatus}
+            refetchRooms={refetchHubRooms}
+            onClose={() => setReservationRoom(null)}
+            onCompleted={() => setReservationRoom(null)}
+          />
+        )}
 
         {/* Table Selector Modal (for table orders) */}
         <TableSelector
@@ -6127,6 +6788,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             onRefreshOrders={silentRefresh}
             onClose={() => {
               setShowTableCheckManager(false);
+              // Paying/closing a check can move the table out of the active status
+              // filter (e.g. occupied -> cleaning), which would leave an empty grid.
+              // If the managed table no longer matches the filter, fall back to "all".
+              if (selectedTable && tableStatusFilter !== "all") {
+                const refreshed = tables.find(
+                  (entry) => entry.id === selectedTable.id,
+                );
+                const currentStatus = refreshed
+                  ? resolveTableDisplayStatus(refreshed)
+                  : null;
+                if (currentStatus && currentStatus !== tableStatusFilter) {
+                  setTableStatusFilter("all");
+                }
+              }
               setSelectedTable(null);
             }}
           />
@@ -6253,6 +6928,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderType={selectedOrderType || "pickup"}
           deliveryZoneInfo={deliveryZoneInfo}
           onOrderComplete={handleOrderComplete}
+          roomChargeContext={roomChargeContext}
         />
 
         {/* Split Payment Modal — rendered at OrderDashboard level so it

@@ -11,6 +11,122 @@ import '../../styles/glassmorphism.css'
 
 // Note: cn utility function is imported above
 
+/**
+ * True when the webview itself holds focus. When a native OS menu (e.g. the Tauri
+ * app menu bar / Edit dropdown) opens over the webview, the webview loses focus
+ * (`document.hasFocus()` is false) yet an Escape keydown can still reach our
+ * document-level listener and wrongly dismiss the React modal behind the native
+ * menu. Escape must dismiss only the native menu in that case. Treat a missing
+ * `hasFocus` (SSR/tests) as focused so we never suppress normal Escape behavior.
+ */
+const webviewHasFocus = (): boolean => {
+  if (typeof document === 'undefined' || typeof document.hasFocus !== 'function') {
+    return true
+  }
+  return document.hasFocus()
+}
+
+/**
+ * Shared background accessibility isolation for open glass modals.
+ *
+ * Live QA found that with a glass modal open (e.g. Settings via LiquidGlassModal),
+ * the Windows accessibility tree still exposed the background POS app (sidebar,
+ * order tabs, order rows, New Order) before/around the modal — breaking modal
+ * containment. While ANY glass modal (POSGlassModal / LiquidGlassModal) is mounted,
+ * every `document.body` child that is NOT a modal viewport root is hidden from
+ * assistive tech (`aria-hidden`) and made unfocusable (`inert`, where supported).
+ *
+ * Multiple/nested modals are handled with a module-level ref count plus a saved-state
+ * map: the original `aria-hidden`/`inert` of each touched element is captured exactly
+ * once and only restored when the LAST glass modal releases — so closing a nested
+ * dialog never un-hides the app while another glass modal is still open, and we never
+ * restore a state that a different modal imposed. Modal viewport roots carry
+ * `data-liquid-glass-modal-viewport` and are always skipped, so sibling/nested dialogs
+ * stay reachable.
+ */
+// Exported so other app-level modals (e.g. TableActionModal) can mark their own portal
+// root as a viewport root and reuse the shared isolation below instead of duplicating it.
+export const MODAL_VIEWPORT_ATTR = 'data-liquid-glass-modal-viewport'
+
+interface SavedBackgroundA11yState {
+  ariaHidden: string | null
+  inert: boolean
+}
+
+let backgroundIsolationCount = 0
+const backgroundIsolationSaved = new Map<HTMLElement, SavedBackgroundA11yState>()
+
+const supportsInert = (): boolean =>
+  typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype
+
+const getInert = (node: HTMLElement): boolean =>
+  (node as HTMLElement & { inert?: boolean }).inert === true
+
+const setInert = (node: HTMLElement, value: boolean): void => {
+  ;(node as HTMLElement & { inert?: boolean }).inert = value
+}
+
+// Hide every non-modal body child from AT + focus. Idempotent: a child already saved
+// by an earlier modal is left as-is (its ORIGINAL state stays captured), and modal
+// viewport roots are never touched. Re-scans on each call so a modal that mounts after
+// the first one also isolates any body children that appeared in the meantime.
+const applyBackgroundIsolation = (): void => {
+  if (typeof document === 'undefined' || !document.body) return
+  const canInert = supportsInert()
+  Array.from(document.body.children).forEach((node) => {
+    if (!(node instanceof HTMLElement)) return
+    if (node.hasAttribute(MODAL_VIEWPORT_ATTR)) return
+    if (backgroundIsolationSaved.has(node)) return
+    backgroundIsolationSaved.set(node, {
+      ariaHidden: node.getAttribute('aria-hidden'),
+      inert: canInert ? getInert(node) : false,
+    })
+    node.setAttribute('aria-hidden', 'true')
+    if (canInert) setInert(node, true)
+  })
+}
+
+// Restore every touched element to its captured state and clear the map.
+const restoreBackgroundIsolation = (): void => {
+  const canInert = supportsInert()
+  backgroundIsolationSaved.forEach((saved, node) => {
+    if (saved.ariaHidden === null) {
+      node.removeAttribute('aria-hidden')
+    } else {
+      node.setAttribute('aria-hidden', saved.ariaHidden)
+    }
+    if (canInert) setInert(node, saved.inert)
+  })
+  backgroundIsolationSaved.clear()
+}
+
+const acquireBackgroundIsolation = (): void => {
+  backgroundIsolationCount += 1
+  applyBackgroundIsolation()
+}
+
+const releaseBackgroundIsolation = (): void => {
+  backgroundIsolationCount = Math.max(0, backgroundIsolationCount - 1)
+  if (backgroundIsolationCount === 0) {
+    restoreBackgroundIsolation()
+  }
+}
+
+/**
+ * Isolates the background app from assistive tech while a glass modal is active.
+ * Acquires on mount/activation and releases on cleanup; the ref count keeps the app
+ * isolated until the last glass modal closes.
+ */
+export const useBackgroundAccessibilityIsolation = (active: boolean): void => {
+  React.useEffect(() => {
+    if (!active || typeof document === 'undefined') return
+    acquireBackgroundIsolation()
+    return () => {
+      releaseBackgroundIsolation()
+    }
+  }, [active])
+}
+
 // POS Glass Card Component - Optimized for touch
 interface POSGlassCardProps extends React.HTMLAttributes<HTMLDivElement> {
   children: React.ReactNode
@@ -36,7 +152,7 @@ export const POSGlassCard = React.forwardRef<HTMLDivElement, POSGlassCardProps>(
     const baseClasses = 'liquid-glass-modal-card'
     const variantClass = `liquid-glass-modal-${variant}`
     const interactiveClass = onClick ? 'pos-glass-interactive' : ''
-    const selectedClass = isSelected ? 'ring-2 ring-blue-400 ring-opacity-50' : ''
+    const selectedClass = isSelected ? 'ring-2 ring-yellow-400 ring-opacity-60' : ''
     const loadingClass = isLoading ? 'animate-pulse' : ''
     const sizeClasses = {
       compact: 'p-3',
@@ -140,7 +256,11 @@ export const POSGlassButton = React.forwardRef<HTMLButtonElement, POSGlassButton
           <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
         )}
         {!loading && icon && <span className="flex-shrink-0">{icon}</span>}
-        <span className={cn("flex-1", (icon && !loading) ? "ml-2" : undefined)}>{children}</span>
+        {/* No flex-1 on the label: a growing span fills the button and defeats the
+            base `justify-content: center`, pinning the icon left. Content-sized span
+            lets icon + label center as one optical group (command-button alignment).
+            Icon↔label spacing comes from the base `.liquid-glass-modal-button` gap. */}
+        <span className="min-w-0">{children}</span>
       </button>
     )
   }
@@ -295,7 +415,7 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
   // Handle escape key
   React.useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === 'Escape' && isOpen && webviewHasFocus()) {
         onClose()
       }
     }
@@ -314,6 +434,9 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
     }
   }, [isOpen, onClose])
 
+  // While open, hide the background POS app from assistive tech + focus (shared, ref-counted).
+  useBackgroundAccessibilityIsolation(isOpen)
+
   if (!isOpen || typeof document === 'undefined') return null
 
   const sizeClasses = {
@@ -325,7 +448,7 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
   }
 
   const modalContent = (
-    <div className="liquid-glass-modal-viewport">
+    <div className="liquid-glass-modal-viewport" data-liquid-glass-modal-viewport>
       <div
         className="liquid-glass-modal-backdrop"
         onClick={closeOnBackdrop ? onClose : undefined}
@@ -623,6 +746,11 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
     metadata: blockerMetadata,
   })
 
+  // While mounted (incl. the closing animation), hide the background POS app from assistive
+  // tech + focus. Shared + ref-counted, so nested glass modals stay reachable and the app is
+  // only un-hidden once the last one closes.
+  useBackgroundAccessibilityIsolation(mounted && !isServerRender)
+
   React.useEffect(() => {
     enterActionRef.current = onEnterKey
     enterKeyEnabledRef.current = enterKeyEnabled
@@ -695,7 +823,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
       // Handle Escape key
       const handleEscape = (e: KeyboardEvent) => {
-        if (e.key !== 'Escape' || !closeOnEscape || !isTopMostDialog()) return
+        if (e.key !== 'Escape' || !closeOnEscape || !isTopMostDialog() || !webviewHasFocus()) return
 
         e.preventDefault()
         handleClose()
@@ -837,7 +965,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const showDefaultHeader = !header && !!title;
 
   const modalContent = (
-    <div className="liquid-glass-modal-viewport">
+    <div className="liquid-glass-modal-viewport" data-liquid-glass-modal-viewport>
       {/* Backdrop */}
       <div
         ref={backdropRef}
@@ -980,7 +1108,67 @@ export const POSGlassContainer = React.forwardRef<HTMLDivElement, POSGlassContai
 
 POSGlassContainer.displayName = 'POSGlassContainer'
 
-// POS Glass Toggle Switch - For settings and options
+// POS Glass Switch -- the single shared on/off switch for Settings / peripheral / payment toggles.
+// ONE fixed visible geometry everywhere (58x34 pill, 28px white knob, 3px inset, 24px travel) so no
+// button/native/pseudo differences can make switches look uneven across screens. ON = semantic green
+// glass + soft green glow; OFF = neutral grey glass (light + dark); amber keyboard-focus ring; active
+// tap scale; no hover; never a yellow ON. Rendered as a button[role=switch]; a transparent >=44px touch
+// target wraps the fixed-size visible pill (the pill never changes size).
+interface POSGlassSwitchProps {
+  checked: boolean
+  onChange?: (next: boolean) => void
+  disabled?: boolean
+  id?: string
+  'aria-label'?: string
+  'aria-labelledby'?: string
+  className?: string
+}
+
+export const POSGlassSwitch: React.FC<POSGlassSwitchProps> = ({
+  checked,
+  onChange,
+  disabled = false,
+  id,
+  'aria-label': ariaLabel,
+  'aria-labelledby': ariaLabelledby,
+  className = ''
+}) => (
+  <button
+    type="button"
+    role="switch"
+    id={id}
+    aria-checked={checked}
+    aria-label={ariaLabel}
+    aria-labelledby={ariaLabelledby}
+    disabled={disabled}
+    onClick={() => { if (!disabled) onChange?.(!checked) }}
+    className={cn(
+      'pos-glass-switch group inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center border-0 bg-transparent p-0 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
+      className
+    )}
+  >
+    {/* Visible pill -- fixed geometry, identical markup for every switch */}
+    <span
+      className={cn(
+        'relative inline-flex h-[34px] w-[58px] shrink-0 rounded-full border backdrop-blur-sm transition-all duration-200 group-active:scale-95 group-focus-visible:ring-2 group-focus-visible:ring-amber-400/60',
+        checked
+          ? 'border-green-500/70 bg-green-500 shadow-md shadow-green-500/40'
+          : 'border-black/10 bg-gray-200/80 shadow-inner dark:border-white/15 dark:bg-white/10'
+      )}
+    >
+      <span
+        className={cn(
+          'absolute top-[3px] start-[3px] h-7 w-7 rounded-full bg-white shadow-md shadow-black/20 transition-transform duration-200',
+          checked ? 'translate-x-[24px] rtl:-translate-x-[24px]' : 'translate-x-0'
+        )}
+      />
+    </span>
+  </button>
+)
+
+POSGlassSwitch.displayName = 'POSGlassSwitch'
+
+// POS Glass Toggle Switch - labelled row wrapper around the shared POSGlassSwitch (same visible switch).
 interface POSGlassToggleProps {
   checked: boolean
   onChange: (checked: boolean) => void
@@ -1008,26 +1196,7 @@ export const POSGlassToggle: React.FC<POSGlassToggleProps> = ({
           <div className="text-sm pos-glass-text-secondary">{description}</div>
         )}
       </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        disabled={disabled}
-        onClick={() => onChange(!checked)}
-        className={cn(
-          "relative inline-flex h-8 w-14 items-center rounded-full transition-colors",
-          "liquid-glass-modal-button min-h-0 min-w-0",
-          checked ? "liquid-glass-modal-success" : "liquid-glass-modal-secondary",
-          disabled && "opacity-50 cursor-not-allowed"
-        )}
-      >
-        <span
-          className={cn(
-            "inline-block h-6 w-6 transform rounded-full bg-white shadow-lg transition-transform",
-            checked ? "translate-x-7" : "translate-x-1"
-          )}
-        />
-      </button>
+      <POSGlassSwitch checked={checked} onChange={onChange} disabled={disabled} aria-label={label} />
     </div>
   )
 }

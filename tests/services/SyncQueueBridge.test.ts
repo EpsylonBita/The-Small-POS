@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { SyncQueueBridge } from '../../src/renderer/services/SyncQueueBridge';
 
 type InvokeResponse =
@@ -33,6 +35,20 @@ const buildQueueItem = () => ({
   moduleType: 'orders',
   conflictStrategy: 'server-wins' as const,
   version: 2,
+});
+
+test('SyncQueueBridge default transport sends raw Tauri command args, not positional bridge args', () => {
+  const source = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'services', 'SyncQueueBridge.ts'),
+    'utf8',
+  );
+
+  assert.doesNotMatch(
+    source,
+    /getBridge\(\)\.invoke\(command,\s*args\)/,
+    'sync_queue_enqueue expects { item }, but PlatformBridge.invoke repacks this as { arg0 }',
+  );
+  assert.match(source, /@tauri-apps\/api\/core/);
 });
 
 test('SyncQueueBridge enqueue maps IPC payloads and refreshes pending count', async () => {

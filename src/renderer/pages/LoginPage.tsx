@@ -297,6 +297,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     const clearKey = 'clear';
     const backspaceKey = 'backspace';
     const keypadKeys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', clearKey, '0', backspaceKey];
+    const loginLogoSource = isDark ? logoBlack : logoWhite;
 
 
     return (
@@ -304,11 +305,11 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             initial="hidden"
             animate="show"
             variants={pageMotionContainer}
-            className="min-h-screen min-h-[100dvh] relative flex items-center justify-center overflow-hidden p-4 sm:p-6"
+            className="relative flex h-full min-h-0 items-center justify-center overflow-hidden p-4 sm:p-6"
         >
             <AnimatedBackground />
 
-            <div className="fixed top-3 right-3 sm:top-6 sm:right-6 z-50">
+            <div className="fixed top-3 right-3 sm:top-6 sm:right-6 z-50 flex items-center gap-2">
                 <ThemeToggle />
             </div>
 
@@ -317,14 +318,9 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
 
                 <motion.div variants={pageMotionItem} className="absolute inset-x-0 -top-10 sm:-top-14 z-20 flex justify-center">
                     <img
-                        src={logoWhite}
+                        src={loginLogoSource}
                         alt="The Small"
-                        className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl dark:hidden"
-                    />
-                    <img
-                        src={logoBlack}
-                        alt="The Small"
-                        className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl hidden dark:block"
+                        className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl"
                     />
                 </motion.div>
 
@@ -367,14 +363,14 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                         : item
                             }
                             className={`
-                                h-12 sm:h-14 md:h-16 rounded-xl border transition-all duration-200 font-semibold text-base sm:text-lg
+                                h-12 sm:h-14 md:h-16 rounded-xl border transition-transform duration-150 font-semibold text-base sm:text-lg
                                 flex items-center justify-center
                                 touch-manipulation select-none
                 ${item === clearKey
-                                    ? 'bg-transparent hover:bg-white/10 active:bg-white/15 text-red-500 border-red-500/80 hover:border-red-500'
+                                    ? 'bg-transparent active:bg-yellow-400/10 text-zinc-500 dark:text-zinc-300 border-zinc-400/80'
                                     : item === backspaceKey
-                                        ? 'bg-transparent hover:bg-white/10 active:bg-white/15 text-yellow-400 border-yellow-400/80 hover:border-yellow-400'
-                                        : `bg-white/10 hover:bg-white/20 active:bg-white/30 ${isDark ? 'text-white border-white/20' : 'text-slate-900 border-white/40'}`
+                                        ? 'bg-transparent active:bg-yellow-400/10 text-yellow-500 border-yellow-400/80'
+                                        : `bg-white/10 active:bg-yellow-400/15 ${isDark ? 'text-white border-white/20' : 'text-slate-900 border-white/40'}`
                                 }
                                 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transform
                             `}
@@ -397,7 +393,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     variants={pageMotionItem}
                     onClick={handleLoginClick}
                     disabled={!pin || isLoading || pinResetRequired}
-                    className={`w-full bg-blue-600/80 hover:bg-blue-600 active:bg-blue-700 disabled:bg-white/10 ${isDark ? 'text-white' : 'text-slate-900'} px-4 sm:px-6 py-3 sm:py-4 rounded-xl border border-blue-400/40 transition-all duration-300 disabled:cursor-not-allowed font-semibold text-base sm:text-lg touch-manipulation select-none`}
+                    className={`w-full bg-yellow-400 active:bg-yellow-500 disabled:bg-white/10 text-black px-4 sm:px-6 py-3 sm:py-4 rounded-xl border border-yellow-300/70 transition-transform duration-150 disabled:cursor-not-allowed font-semibold text-base sm:text-lg touch-manipulation select-none active:scale-[0.98]`}
                 >
                     {isLoading ? t('login.loggingIn') : t('login.loginButton')}
                 </motion.button>
@@ -407,7 +403,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                         variants={pageMotionItem}
                         onClick={() => setShowPinSetup(true)}
                         disabled={isLoading}
-                        className={`w-full mt-2 sm:mt-3 bg-green-600/80 hover:bg-green-600 active:bg-green-700 disabled:bg-white/10 ${isDark ? 'text-white' : 'text-slate-900'} px-4 sm:px-6 py-3 sm:py-4 rounded-xl border border-green-400/40 transition-all duration-300 disabled:cursor-not-allowed font-semibold text-base sm:text-lg touch-manipulation select-none`}
+                        className={`w-full mt-2 sm:mt-3 bg-zinc-950 active:bg-black disabled:bg-white/10 text-white dark:bg-white dark:text-black dark:active:bg-zinc-200 px-4 sm:px-6 py-3 sm:py-4 rounded-xl border border-zinc-700 dark:border-white transition-transform duration-150 disabled:cursor-not-allowed font-semibold text-base sm:text-lg touch-manipulation select-none active:scale-[0.98]`}
                     >
                         {t('login.createPin', 'Create PIN')}
                     </motion.button>
@@ -441,10 +437,10 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                             <div className="flex flex-col items-center mb-6">
                                 <div
                                     className={`flex h-14 w-14 items-center justify-center rounded-full mb-3 ${
-                                        isDark ? 'bg-blue-500/15 ring-1 ring-blue-400/30' : 'bg-blue-500/10 ring-1 ring-blue-500/20'
+                                        isDark ? 'bg-amber-500/15 ring-1 ring-amber-400/30' : 'bg-amber-500/10 ring-1 ring-amber-500/20'
                                     }`}
                                 >
-                                    <Lock className={isDark ? 'text-blue-300' : 'text-blue-600'} size={24} aria-hidden="true" />
+                                    <Lock className={isDark ? 'text-amber-300' : 'text-amber-600'} size={24} aria-hidden="true" />
                                 </div>
                                 <h2
                                     id="setup-pin-title"
@@ -552,7 +548,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                             }
                                         }}
                                         disabled={isLoading || newPin.length < 6}
-                                        className="flex-1 liquid-glass-modal-button bg-green-600/20 hover:bg-green-600/30 border border-green-500/30 text-green-200"
+                                        className="flex-1 liquid-glass-modal-button bg-green-600/20 active:bg-green-600/30 border border-green-500/30 text-green-200"
                                     >
                                         {isLoading ? '...' : t('login.savePin', 'Save PIN')}
                                     </button>

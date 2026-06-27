@@ -124,7 +124,7 @@ const ViewLoadingSpinner: React.FC = () => {
 
   return (
     <div className="flex flex-col items-center justify-center h-full p-8">
-      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-400 mb-4"></div>
       <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>
         {t('common.messages.loadingView', { defaultValue: 'Loading view...' })}
       </p>
@@ -401,6 +401,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     // Salon vertical (lazy-loaded)
     appointments: AppointmentsView,
     staff_schedule: StaffScheduleView,
+    services: ServiceCatalogView,
     service_catalog: ServiceCatalogView,
 
     // Fast-food vertical (lazy-loaded)
@@ -480,7 +481,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
 
   return (
     <NavigationProvider currentView={currentView} onViewChange={handleViewChange}>
-      <div className={`relative flex h-screen h-[100dvh] transition-all duration-300 overflow-hidden safe-area-all ${resolvedTheme === 'light'
+      <div className={`relative flex h-full min-h-0 transition-all duration-300 overflow-hidden safe-area-all ${resolvedTheme === 'light'
           ? 'bg-gray-50'
           : 'bg-black'
         } ${className}`}>
@@ -570,14 +571,16 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
                   </div>
                   <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
                     <button
+                      type="button"
                       onClick={() => setShowZReport(true)}
-                      className="px-4 py-2 rounded-lg bg-amber-500 text-black hover:bg-amber-400 transition font-semibold"
+                      className="px-4 py-2 rounded-lg bg-amber-500 text-black transition-transform active:scale-[0.98] active:bg-amber-400 font-semibold"
                     >
                       {t('shift.actions.completeZReport')}
                     </button>
                     <button
+                      type="button"
                       onClick={handleStartShift}
-                      className={`px-4 py-2 rounded-lg transition ${resolvedTheme === 'dark' ? 'bg-gray-700 text-white hover:bg-gray-600' : 'bg-gray-100 text-gray-900 hover:bg-gray-200'}`}
+                      className={`px-4 py-2 rounded-lg transition-transform active:scale-[0.98] ${resolvedTheme === 'dark' ? 'bg-gray-700 text-white active:bg-gray-600' : 'bg-gray-100 text-gray-900 active:bg-gray-200'}`}
                     >
                       {t('navigation.checkIn')}
                     </button>
@@ -605,8 +608,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
                   </div>
                   <div className="mt-4 flex justify-end">
                     <button
+                      type="button"
                       onClick={handleStartShift}
-                      className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition"
+                      className="px-4 py-2 rounded-lg bg-red-600 text-white transition-transform active:scale-[0.98] active:bg-red-700"
                     >
                       {t('navigation.checkIn')}
                     </button>
@@ -620,16 +624,14 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       </div>
 
       {/* Top-right Expenses Button */}
-      {isShiftActive && (
-        <button
-          onClick={() => setShowExpenses(true)}
-          className="fixed top-12 right-3 sm:right-4 z-40 rounded-full p-2 text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)] transition-all duration-200 hover:bg-slate-100/80 hover:scale-105 active:scale-95 dark:hover:bg-white/10"
-          aria-label={t('expense.buttonLabel')}
-          title={t('expense.buttonLabel')}
-        >
-          <ReceiptText className="h-6 w-6" aria-hidden="true" />
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={() => setShowExpenses(true)}
+        className="fixed top-12 right-24 sm:right-28 z-40 rounded-full p-2 text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)] transition-all duration-200 active:scale-95"
+        aria-label={t('expense.buttonLabel')}
+      >
+        <ReceiptText className="h-6 w-6" aria-hidden="true" />
+      </button>
 
       {/* Expenses Modal */}
       <ExpenseModal isOpen={showExpenses} onClose={() => setShowExpenses(false)} />

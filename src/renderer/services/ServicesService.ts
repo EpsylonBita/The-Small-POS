@@ -6,7 +6,7 @@
  */
 
 import { getBridge, isBrowser } from '../../lib';
-import { posApiGet } from '../utils/api-helpers';
+import { posApiDelete, posApiGet, posApiPatch, posApiPost } from '../utils/api-helpers';
 
 export interface Service {
   id: string;
@@ -49,6 +49,22 @@ export interface ServiceStats {
   avgDuration: number;
 }
 
+export interface ServiceMutationInput {
+  name: string;
+  description?: string | null;
+  durationMinutes: number;
+  price: number;
+  categoryId?: string | null;
+  isActive: boolean;
+}
+
+interface ServiceSingleResponse {
+  success?: boolean;
+  service?: any;
+  error?: string;
+  message?: string;
+}
+
 function transformFromAPI(data: any): Service {
   return {
     id: data.id,
@@ -79,6 +95,35 @@ function transformCategoryFromAPI(data: any): ServiceCategory {
     createdAt: data.created_at,
     updatedAt: data.updated_at,
   };
+}
+
+function toApiPayload(input: ServiceMutationInput): Record<string, unknown> {
+  const description = input.description?.trim();
+
+  return {
+    name: input.name.trim(),
+    description: description ? description : null,
+    duration_minutes: Math.max(1, Math.round(input.durationMinutes)),
+    price: Number(input.price) || 0,
+    category_id: input.categoryId || null,
+    is_active: input.isActive,
+  };
+}
+
+function extractServiceResponse(result: { success: boolean; data?: ServiceSingleResponse; error?: string }): Service {
+  if (!result.success) {
+    throw new Error(result.error || 'Service request failed');
+  }
+
+  const payload = (result.data ?? {}) as ServiceSingleResponse;
+  if (payload.success === false) {
+    throw new Error(payload.error || payload.message || 'Service request failed');
+  }
+  if (!payload.service) {
+    throw new Error(payload.error || payload.message || 'Service response did not include a service');
+  }
+
+  return transformFromAPI(payload.service);
 }
 
 class ServicesService {
@@ -185,6 +230,29 @@ class ServicesService {
     }
   }
 
+  async createService(input: ServiceMutationInput): Promise<Service> {
+    const result = await posApiPost<ServiceSingleResponse>('/api/pos/services', toApiPayload(input));
+    return extractServiceResponse(result);
+  }
+
+  async updateService(serviceId: string, input: ServiceMutationInput): Promise<Service> {
+    const result = await posApiPatch<ServiceSingleResponse>(
+      `/api/pos/services/${encodeURIComponent(serviceId)}`,
+      toApiPayload(input),
+    );
+    return extractServiceResponse(result);
+  }
+
+  async deleteService(serviceId: string): Promise<void> {
+    const result = await posApiDelete<{ success?: boolean; error?: string; message?: string }>(
+      `/api/pos/services/${encodeURIComponent(serviceId)}`,
+    );
+
+    if (!result.success || result.data?.success === false) {
+      throw new Error(result.error || result.data?.error || result.data?.message || 'Failed to delete service');
+    }
+  }
+
   calculateStats(services: Service[]): ServiceStats {
     const activeServices = services.filter((service) => service.isActive);
     const totalPrice = services.reduce((sum, service) => sum + service.price, 0);
@@ -193,7 +261,9 @@ class ServicesService {
     return {
       totalServices: services.length,
       activeServices: activeServices.length,
-      avgPrice: services.length > 0 ? Math.round(totalPrice / services.length) : 0,
+      // Preserve cents: averaging decimal prices must not round to whole euros
+      // (a 0.15 service was showing 0.00 in "Avg Price"). Duration stays whole minutes.
+      avgPrice: services.length > 0 ? Math.round((totalPrice / services.length) * 100) / 100 : 0,
       avgDuration: services.length > 0 ? Math.round(totalDuration / services.length) : 0,
     };
   }

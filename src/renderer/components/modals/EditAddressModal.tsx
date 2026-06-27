@@ -98,6 +98,9 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
     }));
   };
 
+  const fieldClass =
+    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-none focus:ring-2 focus:ring-yellow-400/40 dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
+
   return (
     <LiquidGlassModal
       isOpen={isOpen}
@@ -120,7 +123,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                   value={formData.address}
                   onChange={handleChange}
                   required
-                  className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className={fieldClass}
                   placeholder={t('modals.editAddress.streetPlaceholder')}
                 />
               </div>
@@ -135,7 +138,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                   name="postal_code"
                   value={formData.postal_code}
                   onChange={handleChange}
-                  className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className={fieldClass}
                   placeholder={t('modals.editAddress.postalPlaceholder')}
                 />
               </div>
@@ -150,7 +153,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                   name="floor_number"
                   value={formData.floor_number}
                   onChange={handleChange}
-                  className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className={fieldClass}
                   placeholder={t('modals.editAddress.floorPlaceholder')}
                   maxLength={100}
                 />
@@ -170,7 +173,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                   name="address_type"
                   value={formData.address_type}
                   onChange={handleChange}
-                  className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className={fieldClass}
                 >
                   <option value="delivery">{t('modals.editAddress.addressTypes.delivery')}</option>
                   <option value="home">{t('modals.editAddress.addressTypes.home')}</option>
@@ -189,7 +192,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                   value={formData.notes}
                   onChange={handleChange}
                   rows={3}
-                  className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                  className={`${fieldClass} resize-none`}
                   placeholder={t('modals.editAddress.notesPlaceholder')}
                 />
               </div>
@@ -201,7 +204,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                   name="is_default"
                   checked={formData.is_default}
                   onChange={handleChange}
-                  className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                  className="h-5 w-5 rounded-xl border-gray-300 bg-gray-100 text-amber-500 accent-yellow-500 focus:ring-2 focus:ring-yellow-400/40"
                 />
                 <label className="text-sm font-medium liquid-glass-modal-text">
                   {t('modals.editAddress.setDefault')}
@@ -214,14 +217,14 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                   type="button"
                   onClick={onClose}
                   disabled={isLoading}
-                  className="flex-1 px-6 py-3 rounded-lg font-medium transition-all bg-gray-200/80 dark:bg-gray-700/80 liquid-glass-modal-text hover:bg-gray-300/80 dark:hover:bg-gray-600/80 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
                 >
                   {t('modals.editAddress.cancel')}
                 </button>
                 <button
                   type="submit"
                   disabled={isLoading}
-                  className="flex-1 px-6 py-3 rounded-lg font-medium transition-all bg-blue-500/90 dark:bg-blue-600/90 text-white hover:bg-blue-600/90 dark:hover:bg-blue-500/90 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+                  className="liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
                 >
                   {isLoading ? t('modals.editAddress.updating') : t('modals.editAddress.updateAddress')}
                 </button>

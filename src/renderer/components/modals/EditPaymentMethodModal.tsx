@@ -58,10 +58,10 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           type="button"
           onClick={() => setSelectedMethod('cash')}
           disabled={isSaving}
-          className={`w-full p-4 rounded-lg border text-left transition-all duration-200 liquid-glass-modal-text ${
+          className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 liquid-glass-modal-text ${
             selectedMethod === 'cash'
               ? 'border-green-300/70 dark:border-green-400/40 bg-green-100/50 dark:bg-green-500/20'
-              : 'border-green-200/50 dark:border-green-400/30 bg-green-50/40 dark:bg-green-500/10 hover:bg-green-100/50 dark:hover:bg-green-500/20'
+              : 'border-green-200/50 dark:border-green-400/30 bg-green-50/40 dark:bg-green-500/10 active:bg-green-100/50 dark:active:bg-green-500/20'
           } ${isSaving ? 'opacity-70 cursor-not-allowed' : ''}`}
         >
           <div className="font-medium">{t('modals.editPaymentMethod.methods.cash')}</div>
@@ -71,10 +71,10 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           type="button"
           onClick={() => setSelectedMethod('card')}
           disabled={isSaving}
-          className={`w-full p-4 rounded-lg border text-left transition-all duration-200 liquid-glass-modal-text ${
+          className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 liquid-glass-modal-text ${
             selectedMethod === 'card'
-              ? 'border-blue-300/70 dark:border-blue-400/40 bg-blue-100/50 dark:bg-blue-500/20'
-              : 'border-blue-200/50 dark:border-blue-400/30 bg-blue-50/40 dark:bg-blue-500/10 hover:bg-blue-100/50 dark:hover:bg-blue-500/20'
+              ? 'border-amber-300/70 dark:border-amber-400/40 bg-amber-100/50 dark:bg-amber-500/20'
+              : 'border-amber-200/50 dark:border-amber-400/30 bg-amber-50/40 dark:bg-amber-500/10 active:bg-amber-100/50 dark:active:bg-amber-500/20'
           } ${isSaving ? 'opacity-70 cursor-not-allowed' : ''}`}
         >
           <div className="font-medium">{t('modals.editPaymentMethod.methods.card')}</div>
@@ -86,8 +86,8 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           type="button"
           onClick={onClose}
           disabled={isSaving}
-          className={`flex-1 px-4 py-2 border liquid-glass-modal-border liquid-glass-modal-text rounded-lg transition-colors ${
-            isSaving ? 'opacity-70 cursor-not-allowed' : 'hover:bg-white/10 dark:hover:bg-gray-800/20'
+          className={`flex-1 px-4 py-2 rounded-2xl border font-medium flex items-center justify-center min-h-[44px] transition-colors border-red-300/70 bg-red-50 text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 ${
+            isSaving ? 'opacity-70 cursor-not-allowed' : 'active:bg-red-100 dark:active:bg-red-500/15'
           }`}
         >
           {t('modals.editPaymentMethod.cancel')}
@@ -96,10 +96,10 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           type="button"
           onClick={handleSubmit}
           disabled={!hasChanged || isSaving}
-          className={`flex-1 px-4 py-2 rounded-lg font-medium transition-colors ${
+          className={`flex-1 px-4 py-2 rounded-2xl font-medium flex items-center justify-center min-h-[44px] transition-colors ${
             !hasChanged || isSaving
-              ? 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-              : 'bg-blue-500 hover:bg-blue-600 text-white'
+              ? 'bg-zinc-100 text-zinc-400 border border-zinc-200/80 dark:bg-white/[0.06] dark:text-zinc-500 dark:border-white/10 cursor-not-allowed'
+              : 'bg-green-600 active:bg-green-700 text-white'
           }`}
         >
           {isSaving ? t('modals.editPaymentMethod.saving') : t('modals.editPaymentMethod.save')}

@@ -34,7 +34,7 @@ export const ZoneValidationAlert: React.FC<ZoneValidationAlertProps> = ({
     text: resolvedTheme === 'dark' ? '#e5e7eb' : '#1f2937',
     textSecondary: resolvedTheme === 'dark' ? '#9ca3af' : '#6b7280',
     border: resolvedTheme === 'dark' ? '#374151' : '#d1d5db',
-    primary: '#3b82f6',
+    primary: '#ca8a04',
     warning: '#fbbf24'
   };
 
@@ -80,9 +80,9 @@ export const ZoneValidationAlert: React.FC<ZoneValidationAlertProps> = ({
         };
       default:
         return {
-          bg: 'rgba(59, 130, 246, 0.1)',
-          border: '#3b82f6',
-          text: '#3b82f6',
+          bg: 'rgba(113, 113, 122, 0.1)',
+          border: '#71717a',
+          text: '#52525b',
           icon: Info
         };
     }

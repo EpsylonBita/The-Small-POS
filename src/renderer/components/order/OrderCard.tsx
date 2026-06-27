@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { Split } from 'lucide-react';
 import { useTheme } from '../../contexts/theme-context';
 import { OrderStatusControls } from './OrderStatusControls';
+import TableOrderIcon from '../icons/TableOrderIcon';
+import PickupOrderIcon from '../icons/PickupOrderIcon';
 import type { Order, OrderStatus } from '../../types/orders';
 import toast from 'react-hot-toast';
 import { PluginIcon, isExternalPlatform } from '../../utils/plugin-icons';
@@ -14,6 +16,7 @@ import {
   resolveOrderDisplayTitle,
 } from '../../utils/orderDisplay';
 import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../../utils/orderNumberUtils';
+import { formatCurrency } from '../../utils/format';
 import { openExternalUrl } from '../../utils/external-url';
 import {
   buildGoogleMapsDirectionsUrl,
@@ -99,7 +102,7 @@ export const OrderCard = memo<OrderCardProps>(({
     if (diffMinutes <= 30) {
       return 'text-green-500 drop-shadow-[0_0_8px_rgba(34,197,94,0.8)]';
     } else if (diffMinutes <= 40) {
-      return 'text-orange-500 drop-shadow-[0_0_8px_rgba(249,115,22,0.8)]';
+      return 'text-amber-500 drop-shadow-[0_0_8px_rgba(245,158,11,0.8)]';
     } else {
       return 'text-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]';
     }
@@ -182,7 +185,7 @@ export const OrderCard = memo<OrderCardProps>(({
           height={iconSize}
           viewBox="0 0 24 24"
           fill="none"
-          stroke="#f97316"
+          stroke="#d97706"
           strokeWidth="2"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -194,26 +197,28 @@ export const OrderCard = memo<OrderCardProps>(({
           <circle cx="7" cy="18" r="2" />
         </svg>
       );
-    } else {
-      // Store icon for pickup (dine-in, takeaway)
-      const iconColor = resolvedTheme === 'light' ? '#374151' : '#D1D5DB';
+    } else if (orderType === 'dine-in' || orderType === 'dine_in' || orderType === 'table') {
+      // Table / dine-in order: same glyph as the OrderDashboard/OrderFlow chooser (TableOrderIcon)
       return (
-        <svg
-          width={iconSize}
-          height={iconSize}
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={iconColor}
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7" />
-          <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
-          <path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4" />
-          <path d="M2 7h20" />
-          <path d="M22 7v3a2 2 0 0 1-2 2v0a2.18 2.18 0 0 1-2-2v0a2.18 2.18 0 0 1-2 2v0a2.18 2.18 0 0 1-2-2v0a2.18 2.18 0 0 1-2 2v0a2.18 2.18 0 0 1-2-2v0a2.18 2.18 0 0 1-2 2v0a2 2 0 0 1-2-2V7" />
-        </svg>
+        <TableOrderIcon
+          className={`w-6 h-6 ${resolvedTheme === 'light' ? 'text-gray-700' : 'text-gray-300'}`}
+          strokeWidth={1.6}
+        />
+      );
+    } else {
+      // Pickup / takeaway / default: the shared PickupOrderIcon rendered as a PLAIN bag silhouette at
+      // row scale (w-6 h-6, matching the sibling delivery/table icons) with a theme-aware semantic green
+      // stroke (light text-green-600 / dark text-green-400, OrderCard's resolvedTheme idiom) so it stays
+      // readable on the cream/light row and the dark row. The earlier green rounded badge/holder
+      // (the ~28px filled green chip wrapping a white bag, round 213) is gone -- on the live Dashboard
+      // row that filled chip read as a separate boxed treatment apart from the unboxed delivery/table
+      // siblings. No tap animation (no hover, no active scale), never a Store/Package/storefront glyph,
+      // and never a raw ShoppingBag -- the bag always goes through the shared PickupOrderIcon wrapper.
+      return (
+        <PickupOrderIcon
+          className={`w-6 h-6 ${resolvedTheme === 'light' ? 'text-green-600' : 'text-green-400'}`}
+          strokeWidth={2}
+        />
       );
     }
   };
@@ -250,7 +255,7 @@ export const OrderCard = memo<OrderCardProps>(({
           height={iconSize}
           viewBox="0 0 24 24"
           fill="none"
-          stroke="#2563eb"
+          stroke="#52525b"
           strokeWidth="2"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -358,7 +363,52 @@ export const OrderCard = memo<OrderCardProps>(({
 
   // Don't show red glow animation for delivered/completed/cancelled orders
   const isCancelled = orderStatusNormalized === 'cancelled';
-  const deliveryOlderThan40 = orderTypeNormalized === 'delivery' && isRedGlow && !isDeliveredOrCompleted && !isCancelled;
+  const isCanceled = orderStatusNormalized === 'canceled';
+  const isCancelledTerminal = isCancelled || isCanceled;
+  // Terminal (history) rows: completed / delivered / cancelled. These must NOT show the live age-based
+  // elapsed-minute urgency timer or the age-based red/amber left edge -- only a calm timestamp.
+  const isTerminalOrder = isDeliveredOrCompleted || isCancelledTerminal;
+  const deliveryOlderThan40 = orderTypeNormalized === 'delivery' && isRedGlow && !isDeliveredOrCompleted && !isCancelledTerminal;
+
+  // Left edge: age-based urgency only for active orders. Terminal rows use a neutral edge, except cancelled
+  // keeps a calm semantic red (status-based, never age-based).
+  const leftEdgeColorClass = isTerminalOrder
+    ? (isCancelledTerminal ? 'border-l-red-400/50' : 'border-l-white/30')
+    : getLeftEdgeColor(orderCreatedAt);
+
+  // Calm timestamp for terminal rows: prefer the terminal/most-recent time, falling back to created_at only if
+  // nothing else exists. Same-day shows time only; older shows a short date + time. Neutral, never urgent red.
+  const terminalTimestampRaw =
+    (order as any).completed_at || (order as any).completedAt ||
+    (order as any).delivered_at || (order as any).deliveredAt ||
+    (order as any).cancelled_at || (order as any).canceled_at ||
+    (order as any).updated_at || (order as any).updatedAt ||
+    order.created_at || order.createdAt || null;
+  const formatTerminalStamp = (raw: string | null): string | null => {
+    if (!raw) return null;
+    const stamped = new Date(raw);
+    if (Number.isNaN(stamped.getTime())) return null;
+    const time = stamped.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const now = new Date();
+    const sameDay =
+      stamped.getFullYear() === now.getFullYear() &&
+      stamped.getMonth() === now.getMonth() &&
+      stamped.getDate() === now.getDate();
+    return sameDay
+      ? time
+      : `${stamped.toLocaleDateString([], { day: '2-digit', month: '2-digit' })} ${time}`;
+  };
+  const terminalStatusKey =
+    orderStatusNormalized === 'delivered'
+      ? 'delivered'
+      : isCancelledTerminal
+        ? 'cancelled'
+        : 'completed';
+  const terminalStatusLabel = t(`orders.status.${terminalStatusKey}`, { defaultValue: terminalStatusKey });
+  const terminalTimestamp = formatTerminalStamp(terminalTimestampRaw);
+  const terminalTimestampLabel = terminalTimestamp
+    ? `${terminalStatusLabel} ${terminalTimestamp}`
+    : terminalStatusLabel;
 
   // Fallback: resolve address via customer lookup when missing
   // Checks both customer_addresses table and legacy customers.address field
@@ -413,12 +463,12 @@ export const OrderCard = memo<OrderCardProps>(({
   return (
     <div
       className={`relative rounded-2xl sm:rounded-full py-3 sm:py-3 px-3 sm:px-6 cursor-pointer transform transition-all duration-300 backdrop-blur-sm touch-feedback ${resolvedTheme === 'light'
-        ? 'bg-[#fffaf1]/90 border border-amber-100/80 hover:bg-[#fff6e8]/95 hover:border-amber-200/80 shadow-sm hover:shadow-lg active:bg-[#f8ecd9]/95'
-        : 'bg-white/10 border border-white/20 hover:bg-white/15 hover:border-white/30 shadow-lg hover:shadow-xl active:bg-white/20'
+        ? 'bg-[#fffaf1]/90 border border-amber-100/80 shadow-sm active:bg-[#f8ecd9]/95'
+        : 'bg-white/10 border border-white/20 shadow-lg active:bg-white/20'
         } ${deliveryOlderThan40
           ? 'border-red-500/60 shadow-[inset_0_0_15px_rgba(239,68,68,0.6),inset_0_0_30px_rgba(239,68,68,0.4),inset_0_0_50px_rgba(239,68,68,0.25),inset_0_0_80px_rgba(239,68,68,0.15)] animate-pulse'
           : ''
-        } border-l-4 ${deliveryOlderThan40 ? 'border-l-red-500' : getLeftEdgeColor(orderCreatedAt)} ${isSelected ? 'ring-2 ring-blue-400/50 scale-[1.02] shadow-lg' : ''
+        } border-l-4 ${deliveryOlderThan40 ? 'border-l-red-500' : leftEdgeColorClass} ${isSelected ? 'ring-2 ring-blue-400/50 scale-[1.02] shadow-lg' : ''
         }`}
       onClick={() => onSelect(order.id)}
       onDoubleClick={() => onDoubleClick?.(order.id)}
@@ -438,9 +488,15 @@ export const OrderCard = memo<OrderCardProps>(({
                 {readyStatusLabel}
               </span>
             )}
-            <span className={`text-xs sm:text-sm font-medium ${getTimeColorClass(order.created_at || order.createdAt)}`}>
-              {t('orders.time.minutes', { minutes: getElapsedMinutes(order.created_at || order.createdAt) })}
-            </span>
+            {isTerminalOrder ? (
+              <span className={`text-xs sm:text-sm font-medium capitalize ${resolvedTheme === 'light' ? 'text-gray-500' : 'text-white/60'}`}>
+                {terminalTimestampLabel}
+              </span>
+            ) : (
+              <span className={`text-xs sm:text-sm font-medium ${getTimeColorClass(order.created_at || order.createdAt)}`}>
+                {t('orders.time.minutes', { minutes: getElapsedMinutes(order.created_at || order.createdAt) })}
+              </span>
+            )}
             <OrderRoutingBadge routingPath={order.routing_path} />
           </div>
         </div>
@@ -516,7 +572,7 @@ export const OrderCard = memo<OrderCardProps>(({
         <div className="flex flex-col items-center gap-1 sm:gap-2 mr-8 sm:mr-12 flex-shrink-0">
           <span className={`text-base sm:text-xl font-bold ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white/90'
             }`}>
-            €{totalNormalized.toFixed(2)}
+            {formatCurrency(totalNormalized)}
           </span>
           <div className="flex items-center gap-2">
             <OrderTypeIcon orderType={orderTypeNormalized} />
@@ -557,7 +613,9 @@ export const OrderCard = memo<OrderCardProps>(({
               void openExternalUrl(mapsUrl);
             }}
             className={`absolute right-0 top-1/2 -translate-y-1/2 p-4 flex items-center justify-center ${isEnabled ? 'cursor-pointer active:scale-95 active:bg-white/10 rounded-full transition-all' : 'cursor-not-allowed opacity-40'}`}
-            title={isEnabled ? (t('orderCard.getDirections') || 'Get Directions') : disabledReason}
+            role="button"
+            aria-label={isEnabled ? (t('orderCard.getDirections') || 'Get Directions') : disabledReason}
+            aria-disabled={!isEnabled}
           >
             <svg
               width="32"

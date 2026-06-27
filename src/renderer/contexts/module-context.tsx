@@ -26,6 +26,7 @@ import {
   isModuleExcludedFromPos,
   shouldShowInNavigation,
 } from '../../shared/constants/pos-modules';
+import { resolveViewModuleId } from '../utils/module-view-access';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { getCachedTerminalCredentials } from '../services/terminal-credentials';
 
@@ -1094,8 +1095,13 @@ export const getModuleAccessStatic = (
   lockedModules: EnabledModule[],
   moduleId: string
 ): ModuleAccessResult => {
-  const enabledModule = enabledModules.find((m) => m.module.id === moduleId);
-  const lockedModule = lockedModules.find((m) => m.module.id === moduleId);
+  const resolvedModuleId = resolveViewModuleId(moduleId);
+  const matchesModuleId = (candidate: EnabledModule) =>
+    candidate.module.id === moduleId ||
+    candidate.module.id === resolvedModuleId ||
+    resolveViewModuleId(candidate.module.id) === resolvedModuleId;
+  const enabledModule = enabledModules.find(matchesModuleId);
+  const lockedModule = lockedModules.find(matchesModuleId);
 
   if (enabledModule) {
     return {
@@ -1116,7 +1122,7 @@ export const getModuleAccessStatic = (
   }
 
   // Module not found in either list - get metadata directly
-  const metadata = getFallbackModuleMetadata(moduleId as ModuleId);
+  const metadata = getFallbackModuleMetadata(resolvedModuleId as ModuleId);
   return {
     isEnabled: false,
     isLocked: false,

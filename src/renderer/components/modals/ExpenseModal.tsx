@@ -29,6 +29,8 @@ import type {
 } from '../../types';
 import { formatCurrency, formatDateTime } from '../../utils/format';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { translateRoleName } from '../../utils/role-labels';
+import { loadFiscalOrderReportingEntitlement } from '../../utils/fiscal-integration-entitlement';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -48,6 +50,9 @@ interface StaffOption {
   id: string;
   name: string;
   role: string;
+  // Stable role slug (e.g. "cashier") used to localize the visible label via
+  // common.roleNames.*; `role` stays the readable display/custom name fallback.
+  roleSlug?: string;
 }
 
 interface ResolvedCashierContext {
@@ -93,6 +98,19 @@ interface DrawerDropdownOption {
   value: string;
   label: string;
 }
+
+type ShiftExpenseBridgeRow = Partial<ShiftExpense> & {
+  shiftId?: string;
+  staffId?: string;
+  branchId?: string;
+  expenseType?: unknown;
+  receiptNumber?: unknown;
+  approvedBy?: unknown;
+  approvedAt?: unknown;
+  rejectionReason?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+};
 
 const EXPENSE_TYPES: ExpenseType[] = ['supplies', 'maintenance', 'petty_cash', 'refund', 'other'];
 const STAFF_PAYMENT_TYPES: StaffPaymentType[] = ['wage', 'tip', 'bonus', 'advance', 'other'];
@@ -146,6 +164,53 @@ function normalizeExpenseType(value: unknown): ExpenseType {
   return EXPENSE_TYPES.includes(normalized as ExpenseType)
     ? (normalized as ExpenseType)
     : 'other';
+}
+
+function normalizeOptionalText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeStatus(value: unknown): ShiftExpense['status'] {
+  return value === 'approved' || value === 'rejected' || value === 'pending' ? value : 'pending';
+}
+
+function normalizeShiftExpenseRow(value: unknown): ShiftExpense | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const row = value as ShiftExpenseBridgeRow;
+  const id = normalizeOptionalText(row.id);
+  if (!id) {
+    return null;
+  }
+
+  const amount = Number(row.amount ?? 0);
+
+  return {
+    id,
+    shift_id: normalizeOptionalText(row.shift_id ?? row.shiftId) ?? '',
+    staff_id: normalizeOptionalText(row.staff_id ?? row.staffId) ?? '',
+    branch_id: normalizeOptionalText(row.branch_id ?? row.branchId) ?? '',
+    expense_type: normalizeExpenseType(row.expense_type ?? row.expenseType),
+    amount: Number.isFinite(amount) ? amount : 0,
+    description: normalizeOptionalText(row.description) ?? '',
+    receipt_number: normalizeOptionalText(row.receipt_number ?? row.receiptNumber),
+    status: normalizeStatus(row.status),
+    approved_by: normalizeOptionalText(row.approved_by ?? row.approvedBy),
+    approved_at: normalizeOptionalText(row.approved_at ?? row.approvedAt),
+    rejection_reason: normalizeOptionalText(row.rejection_reason ?? row.rejectionReason),
+    created_at: normalizeOptionalText(row.created_at ?? row.createdAt) ?? '',
+    updated_at: normalizeOptionalText(row.updated_at ?? row.updatedAt) ?? '',
+  };
+}
+
+function normalizeShiftExpenses(value: unknown): ShiftExpense[] {
+  return unwrapArray<unknown>(value).map(normalizeShiftExpenseRow).filter((expense): expense is ShiftExpense => Boolean(expense));
+}
+
+function formatExpenseReference(value: string | null | undefined): string {
+  return value?.trim() ?? '';
 }
 
 function getExpenseTypeLabel(
@@ -317,6 +382,14 @@ function normalizeStaffOption(value: unknown): StaffOption | null {
           record.role_name ??
           'Staff',
       ).trim(),
+    roleSlug:
+      primaryRole?.name ||
+      String(
+        (record.role as Record<string, unknown> | undefined)?.name ??
+          record.role_name ??
+          '',
+      ).trim() ||
+      undefined,
   };
 }
 
@@ -350,6 +423,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   const [deletingPaymentId, setDeletingPaymentId] = useState<string | null>(null);
   const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
   const [openDropdown, setOpenDropdown] = useState<DrawerDropdownKey | null>(null);
+  const [canUseExpenseReceiptReference, setCanUseExpenseReceiptReference] = useState(false);
   const [expenseDraft, setExpenseDraft] = useState({
     expenseType: 'other' as ExpenseType,
     amount: '',
@@ -478,6 +552,20 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   );
   const combinedOutflow = totalExpenses + totalStaffPayments;
 
+  // Validation state for the expense form. The hint must match the save button's
+  // enabled/disabled state: when the form is valid (button enabled) no "required"
+  // message is shown, otherwise it explains exactly what is still missing.
+  const expenseAmountValue = parseMoneyInputValue(expenseDraft.amount);
+  const hasExpenseDescription = Boolean(expenseDraft.description.trim());
+  const canSubmitExpense = canRecord && expenseAmountValue > 0 && hasExpenseDescription;
+  const expenseValidationHint = !canRecord
+    ? ''
+    : expenseAmountValue <= 0
+      ? t('modals.expense.invalidAmount', 'Please enter a valid amount')
+      : !hasExpenseDescription
+        ? t('modals.expense.justificationRequired', 'A clear justification is required before saving.')
+        : '';
+
   const recentExpenses = useMemo(
     () =>
       [...expenses]
@@ -500,7 +588,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           sourceId: expense.id,
           kind: 'expense' as const,
           title: expense.description || t('modals.expense.untitledExpense', 'Untitled expense'),
-          subtitle: getExpenseTypeLabel(t, expense.expense_type),
+          subtitle: [
+            getExpenseTypeLabel(t, expense.expense_type),
+            canUseExpenseReceiptReference ? formatExpenseReference(expense.receipt_number) : '',
+          ].filter(Boolean).join(' | '),
           amount: Number(expense.amount || 0),
           createdAt: expense.created_at,
         })),
@@ -514,7 +605,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           createdAt: payment.created_at,
         })),
       ].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()),
-    [expenses, staffPayments, t],
+    [canUseExpenseReceiptReference, expenses, staffPayments, t],
   );
 
   const expenseTypeOptions = useMemo<DrawerDropdownOption[]>(
@@ -548,7 +639,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     options.push(
       ...staffOptions.map((option) => ({
         value: option.id,
-        label: `${option.name} - ${option.role}`,
+        label: `${option.name} - ${translateRoleName(t, option.roleSlug || option.role, option.role)}`,
       })),
     );
 
@@ -573,9 +664,36 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     setDeletingPaymentId(null);
     setEditingPaymentId(null);
     setOpenDropdown(null);
+    setCanUseExpenseReceiptReference(false);
     setExpenseDraft({ expenseType: 'other', amount: '', description: '', receiptNumber: '' });
     setPaymentDraft({ paidToStaffId: '', amount: '', paymentType: 'wage', notes: '' });
     void refreshModalData();
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let cancelled = false;
+
+    const refreshFiscalEntitlement = async () => {
+      const hasFiscalEntitlement = await loadFiscalOrderReportingEntitlement().catch(() => false);
+      if (cancelled) {
+        return;
+      }
+
+      setCanUseExpenseReceiptReference(hasFiscalEntitlement);
+      if (!hasFiscalEntitlement) {
+        setExpenseDraft((current) =>
+          current.receiptNumber ? { ...current, receiptNumber: '' } : current,
+        );
+      }
+    };
+
+    void refreshFiscalEntitlement();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen]);
 
   useEffect(() => {
@@ -821,7 +939,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       bridge.shifts.getExpenses(cashier.id),
       bridge.shifts.getStaffPayments(cashier.id),
     ]);
-    setExpenses(unwrapArray<ShiftExpense>(loadedExpenses));
+    setExpenses(normalizeShiftExpenses(loadedExpenses));
     setStaffPayments(unwrapArray<StaffPayment>(loadedPayments));
   };
 
@@ -957,7 +1075,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         expenseType: expenseDraft.expenseType,
         amount,
         description: expenseDraft.description.trim(),
-        receiptNumber: expenseDraft.receiptNumber.trim() || undefined,
+        receiptNumber: canUseExpenseReceiptReference
+          ? expenseDraft.receiptNumber.trim() || undefined
+          : undefined,
       });
       if (!result.success) {
         throw new Error(result.error || t('modals.expense.recordFailed', 'Failed to record expense'));
@@ -1140,18 +1260,18 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     }
   };
 
-  const drawerSummaryCardClass = 'rounded-3xl border border-neutral-700/70 bg-black/50 p-4 shadow-[0_12px_36px_rgba(0,0,0,0.24)] backdrop-blur-xl dark:border-neutral-700/60 dark:bg-black/50 dark:shadow-[0_18px_48px_rgba(0,0,0,0.34)]';
-  const drawerPanelClass = 'rounded-[28px] border border-neutral-700/70 bg-neutral-950/80 p-6 shadow-[0_18px_50px_rgba(0,0,0,0.24)] dark:border-neutral-700/60 dark:bg-neutral-950/80';
-  const drawerSidePanelClass = 'rounded-[28px] border border-neutral-700/70 bg-neutral-950/80 p-5 shadow-[0_16px_42px_rgba(0,0,0,0.22)] dark:border-neutral-700/60 dark:bg-neutral-950/80';
+  const drawerSummaryCardClass = 'rounded-3xl border border-neutral-700/70 bg-black/50 p-3 shadow-[0_12px_36px_rgba(0,0,0,0.24)] backdrop-blur-xl dark:border-neutral-700/60 dark:bg-black/50 dark:shadow-[0_18px_48px_rgba(0,0,0,0.34)]';
+  const drawerPanelClass = 'rounded-[28px] border border-neutral-700/70 bg-neutral-950/80 p-5 shadow-[0_18px_50px_rgba(0,0,0,0.24)] dark:border-neutral-700/60 dark:bg-neutral-950/80';
+  const drawerSidePanelClass = 'rounded-[28px] border border-neutral-700/70 bg-neutral-950/80 p-3.5 shadow-[0_16px_42px_rgba(0,0,0,0.22)] dark:border-neutral-700/60 dark:bg-neutral-950/80';
   const drawerListItemClass = 'rounded-2xl border border-neutral-700/70 bg-black/35 px-4 py-3 dark:border-neutral-700/60 dark:bg-black/35';
   const drawerActivityItemClass = 'flex items-start justify-between gap-4 rounded-2xl border border-neutral-700/70 bg-black/35 px-4 py-3 shadow-[0_10px_26px_rgba(0,0,0,0.22)] dark:border-neutral-700/60 dark:bg-black/35';
-  const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-neutral-700/70 bg-neutral-900/70 px-6 py-10 text-center dark:border-neutral-700/70 dark:bg-neutral-900/70';
-  const drawerEmptyIconClass = 'mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-neutral-800 text-neutral-400 shadow-[0_10px_25px_rgba(0,0,0,0.24)] dark:bg-neutral-800 dark:text-neutral-400';
+  const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-neutral-700/70 bg-neutral-900/70 px-6 py-4 text-center dark:border-neutral-700/70 dark:bg-neutral-900/70';
+  const drawerEmptyIconClass = 'mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-neutral-800 text-neutral-400 shadow-[0_10px_25px_rgba(0,0,0,0.24)] dark:bg-neutral-800 dark:text-neutral-400';
   const drawerInputClass = 'w-full rounded-2xl border border-neutral-700/80 bg-black px-4 py-3 text-white shadow-inner outline-none transition-colors placeholder:text-neutral-500 focus:border-yellow-400/70 focus:ring-2 focus:ring-yellow-400/15 disabled:cursor-not-allowed disabled:opacity-60';
-  const drawerExpenseSubmitClass = '!border-neutral-700/60 !bg-transparent !font-bold !text-emerald-400 !shadow-none hover:!border-neutral-500 hover:!bg-transparent disabled:!text-emerald-400 disabled:!opacity-100';
-  const drawerStaffPaymentSubmitClass = '!border-neutral-700/60 !bg-transparent !font-bold !text-yellow-400 !shadow-none hover:!border-neutral-500 hover:!bg-transparent disabled:!text-yellow-400 disabled:!opacity-100';
+  const drawerExpenseSubmitClass = '!border-neutral-700/60 !bg-transparent !font-bold !text-emerald-400 !shadow-none active:!scale-[0.98] disabled:!text-emerald-400 disabled:!opacity-100';
+  const drawerStaffPaymentSubmitClass = '!border-neutral-700/60 !bg-transparent !font-bold !text-yellow-400 !shadow-none active:!scale-[0.98] disabled:!text-yellow-400 disabled:!opacity-100';
   const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-neutral-700/80 bg-neutral-950 shadow-[0_18px_44px_rgba(0,0,0,0.42)]';
-  const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-white transition-colors hover:bg-neutral-800 focus:bg-neutral-800 focus:outline-none';
+  const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-white transition-colors active:bg-neutral-800 focus:bg-neutral-800 focus:outline-none';
 
   const renderDrawerDropdown = ({
     dropdownKey,
@@ -1240,8 +1360,8 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
         {label}
       </p>
-      <div className={`mt-3 text-2xl font-black ${accentClass}`}>{value}</div>
-      <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{helper}</p>
+      <div className={`mt-1.5 text-lg font-black ${accentClass}`}>{value}</div>
+      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{helper}</p>
     </div>
   );
 
@@ -1257,8 +1377,8 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           {icon}
         </div>
       )}
-      <h4 className="mt-4 text-lg font-semibold text-slate-900 dark:text-white">{title}</h4>
-      <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{description}</p>
+      <h4 className="mt-2 text-base font-semibold text-slate-900 dark:text-white">{title}</h4>
+      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{description}</p>
     </div>
   );
 
@@ -1304,7 +1424,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   description: item.title,
                 })
               }
-              className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+              className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200"
             >
               <Trash2 className="h-3.5 w-3.5" />
               {t('modals.expense.deleteExpense', 'Delete expense')}
@@ -1320,7 +1440,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     beginEditStaffPayment(payment);
                   }
                 }}
-                className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200 dark:hover:bg-amber-400/15"
+                className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200"
               >
                 <Pencil className="h-3.5 w-3.5" />
                 {t('modals.expense.editStaffPayment', 'Edit payment')}
@@ -1334,7 +1454,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     description: item.title,
                   })
                 }
-                className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 {t('modals.expense.deleteStaffPayment', 'Delete payment')}
@@ -1357,16 +1477,16 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         onClose={onClose}
         title={t('modals.expense.title', 'Drawer Outflows')}
         size="lg"
-        className="!max-w-4xl !w-[90vw] !max-h-[90vh]"
-        contentClassName="space-y-6"
+        className="!max-w-4xl !w-[90vw] !max-h-[95vh]"
+        contentClassName="flex min-h-0 flex-col gap-4"
         ariaLabel={t('modals.expense.title', 'Drawer Outflows')}
       >
       {showCashierAttention && (
         <div
-          className={`rounded-2xl border px-4 py-3 ${
+          className={`shrink-0 rounded-2xl border px-4 py-3 ${
             !cashierShift || cashierShiftSyncBanner?.variant === 'failed'
               ? 'border-amber-300/70 bg-amber-50/90 text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100'
-              : 'border-sky-200/80 bg-sky-50/90 text-sky-900 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-100'
+              : 'border-neutral-300/70 bg-neutral-50/90 text-neutral-900 dark:border-neutral-500/20 dark:bg-neutral-500/10 dark:text-neutral-100'
           }`}
         >
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1419,7 +1539,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         </div>
       )}
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="shrink-0 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap gap-2">
         {([
           { key: 'expenses', label: t('modals.expense.tabs.expenses', 'Expenses'), icon: <Receipt className="h-4 w-4" /> },
@@ -1432,10 +1552,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               key={tab.key}
               type="button"
               onClick={() => setActiveTab(tab.key)}
-              className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-all ${
+              className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-all active:scale-[0.98] ${
                 active
                   ? 'border-yellow-400 bg-yellow-400 text-black shadow-[0_14px_34px_rgba(250,204,21,0.24)]'
-                  : 'border-neutral-700/60 bg-neutral-950/55 text-neutral-200 hover:border-neutral-500 hover:bg-neutral-900 dark:border-neutral-700/60 dark:bg-neutral-950/55 dark:text-neutral-200 dark:hover:border-neutral-500 dark:hover:bg-neutral-900'
+                  : 'border-neutral-700/60 bg-neutral-950/55 text-neutral-200 dark:border-neutral-700/60 dark:bg-neutral-950/55 dark:text-neutral-200'
               }`}
             >
               {tab.icon}
@@ -1460,15 +1580,16 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         )}
       </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide pr-1">
       {activeTab === 'expenses' && (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.18fr)_360px]">
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1.18fr)_360px]">
           <section className={drawerPanelClass}>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
                   {t('modals.expense.expenseFormTitle', 'Record expense')}
                 </p>
-                <h3 className="mt-2 text-2xl font-black text-slate-900 dark:text-white">
+                <h3 className="mt-1 text-xl font-black text-slate-900 dark:text-white">
                   {t('modals.expense.expenseFormHeading', 'Operational expense')}
                 </h3>
                 <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
@@ -1477,7 +1598,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               </div>
             </div>
 
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <div>
                 <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
                   {t('modals.expense.expenseType', 'Expense type')}
@@ -1521,46 +1642,50 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 onChange={(event) => setExpenseDraft((current) => ({ ...current, description: event.target.value }))}
                 placeholder={t('modals.expense.justificationPlaceholder', 'Explain what left the drawer and why it was needed.')}
                 disabled={!canRecord}
-                className={`${drawerInputClass} min-h-[150px] resize-none`}
+                className={`${drawerInputClass} min-h-[92px] resize-none`}
               />
             </div>
 
-            <div className="mt-4">
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                {t('modals.expense.receiptReference', 'Receipt or reference')}
-              </label>
-              <div className="relative">
-                <input
-                  type="text"
-                  value={expenseDraft.receiptNumber}
-                  onChange={(event) => setExpenseDraft((current) => ({ ...current, receiptNumber: event.target.value }))}
-                  placeholder={t('modals.expense.receiptPlaceholder', 'Invoice, receipt, or reference number')}
-                  disabled={!canRecord}
-                  className={`${drawerInputClass} !pl-10`}
-                />
-                <FileText className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            {canUseExpenseReceiptReference && (
+              <div className="mt-4">
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  {t('modals.expense.receiptReference', 'Receipt or reference')}
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={expenseDraft.receiptNumber}
+                    onChange={(event) => setExpenseDraft((current) => ({ ...current, receiptNumber: event.target.value }))}
+                    placeholder={t('modals.expense.receiptPlaceholder', 'Invoice, receipt, or reference number')}
+                    disabled={!canRecord}
+                    className={`${drawerInputClass} !pl-10`}
+                  />
+                  <FileText className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                </div>
               </div>
-            </div>
+            )}
 
-            <div className="mt-6 flex flex-wrap items-center gap-3">
+            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center gap-3 rounded-b-[28px] border-t border-neutral-700/60 bg-neutral-950/90 px-5 py-4 backdrop-blur-xl">
               <POSGlassButton
                 type="button"
                 variant="success"
                 loading={submittingExpense}
-                disabled={!canRecord || parseMoneyInputValue(expenseDraft.amount) <= 0 || !expenseDraft.description.trim()}
+                disabled={!canSubmitExpense}
                 onClick={() => { void handleRecordExpense(); }}
                 icon={<Receipt className="h-4 w-4" />}
                 className={drawerExpenseSubmitClass}
               >
                 {t('modals.expense.recordExpense', 'Record expense')}
               </POSGlassButton>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                {t('modals.expense.justificationRequired', 'A clear justification is required before saving.')}
-              </p>
+              {expenseValidationHint && (
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  {expenseValidationHint}
+                </p>
+              )}
             </div>
           </section>
 
-          <aside className="space-y-4">
+          <aside className="space-y-2.5">
             {renderSummaryCard(
               t('modals.expense.totalExpenses', 'Total expenses'),
               formatCurrency(totalExpenses),
@@ -1580,18 +1705,19 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
                     {t('modals.expense.recentExpenses', 'Recent expenses')}
                   </p>
-                  <h4 className="mt-2 text-lg font-bold text-slate-900 dark:text-white">
+                  <h4 className="mt-1 text-base font-bold text-slate-900 dark:text-white">
                     {t('modals.expense.latestEntries', 'Latest entries')}
                   </h4>
                 </div>
               </div>
 
-              <div className="mt-4 space-y-3">
+              <div className="mt-3 space-y-2.5">
                 {recentExpenses.length > 0 ? recentExpenses.map((expense) => {
                   const expenseTitle =
                     expense.description || t('modals.expense.untitledExpense', 'Untitled expense');
                   const metadata = [
                     getExpenseTypeLabel(t, expense.expense_type),
+                    canUseExpenseReceiptReference ? formatExpenseReference(expense.receipt_number) : '',
                     formatOptionalActivityDateTime(expense.created_at),
                   ].filter(Boolean);
 
@@ -1624,7 +1750,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                                 description: expenseTitle,
                               })
                             }
-                            className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                            className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             {t('modals.expense.deleteExpense', 'Delete expense')}
@@ -1634,7 +1760,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     </div>
                   );
                 }) : renderEmptyState(
-                  <Banknote className="mx-auto block h-10 w-10 text-emerald-400" strokeWidth={2.2} />,
+                  <Banknote className="mx-auto block h-9 w-9 text-emerald-400" strokeWidth={2.2} />,
                   t('modals.expense.noExpenses', 'No expenses recorded yet'),
                   t('modals.expense.noExpensesDetail', 'Recorded expenses will appear here immediately after saving.'),
                   { wrapIcon: false },
@@ -1646,14 +1772,14 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       )}
 
       {activeTab === 'staffPayments' && (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.18fr)_360px]">
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1.18fr)_360px]">
           <section className={drawerPanelClass}>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
                   {t('modals.expense.staffPaymentFormTitle', 'Record staff payment')}
                 </p>
-                <h3 className="mt-2 text-2xl font-black text-slate-900 dark:text-white">
+                <h3 className="mt-1 text-xl font-black text-slate-900 dark:text-white">
                   {t(
                     editingPaymentId ? 'modals.expense.editStaffPaymentTitle' : 'modals.expense.staffPaymentFormHeading',
                     editingPaymentId ? 'Edit staff payment' : 'Staff payout from drawer',
@@ -1668,7 +1794,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               </div>
             </div>
 
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <div>
                 <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
                   {t('modals.expense.selectStaff', 'Pay to staff')}
@@ -1726,7 +1852,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 onChange={(event) => setPaymentDraft((current) => ({ ...current, notes: event.target.value }))}
                 placeholder={t('modals.expense.notesPlaceholder', 'Optional note for payroll, tip settlement, advance, or bonus.')}
                 disabled={!canRecord}
-                className={`${drawerInputClass} min-h-[150px] resize-none`}
+                className={`${drawerInputClass} min-h-[92px] resize-none`}
               />
             </div>
 
@@ -1736,7 +1862,14 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               </div>
             )}
 
-            <div className="mt-6 flex flex-wrap items-center gap-3">
+            <p className="mt-6 text-sm text-slate-500 dark:text-slate-400">
+              {t(
+                'modals.expense.staffPaymentHelper',
+                'Use this for cashier self-payments or payments to other staff from the drawer. Drawer totals update immediately after corrections.',
+              )}
+            </p>
+
+            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center gap-3 rounded-b-[28px] border-t border-neutral-700/60 bg-neutral-950/90 px-5 py-4 backdrop-blur-xl">
               {editingPaymentId && (
                 <POSGlassButton
                   type="button"
@@ -1760,16 +1893,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   editingPaymentId ? 'Save changes' : 'Record staff payment',
                 )}
               </POSGlassButton>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                {t(
-                  'modals.expense.staffPaymentHelper',
-                  'Use this for cashier self-payments or payments to other staff from the drawer. Drawer totals update immediately after corrections.',
-                )}
-              </p>
             </div>
           </section>
 
-          <aside className="space-y-4">
+          <aside className="space-y-2.5">
             {renderSummaryCard(
               t('modals.expense.totalStaffPayments', 'Total staff payments'),
               formatCurrency(totalStaffPayments),
@@ -1789,14 +1916,14 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
                     {t('modals.expense.recentStaffPayments', 'Recent staff payments')}
                   </p>
-                  <h4 className="mt-2 text-lg font-bold text-slate-900 dark:text-white">
+                  <h4 className="mt-1 text-base font-bold text-slate-900 dark:text-white">
                     {t('modals.expense.latestEntries', 'Latest entries')}
                   </h4>
                 </div>
                 <Users className="h-5 w-5 text-amber-500 dark:text-amber-300" />
               </div>
 
-              <div className="mt-4 space-y-3">
+              <div className="mt-3 space-y-2.5">
                 {recentPayments.length > 0 ? recentPayments.map((payment) => (
                   <div key={payment.id} className={drawerListItemClass}>
                     <div className="flex items-start justify-between gap-3">
@@ -1806,7 +1933,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                         </div>
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                           <span>{t(`modals.expense.paymentTypes.${payment.payment_type}`, payment.payment_type)}</span>
-                          {payment.role_type && <><span>•</span><span>{payment.role_type}</span></>}
+                          {payment.role_type && <><span>•</span><span>{translateRoleName(t, payment.role_type)}</span></>}
                           <span>•</span>
                           <span>{formatDateTime(payment.created_at, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
                         </div>
@@ -1821,7 +1948,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                             type="button"
                             disabled={submittingPayment}
                             onClick={() => beginEditStaffPayment(payment)}
-                            className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200 dark:hover:bg-amber-400/15"
+                            className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200"
                           >
                             <Pencil className="h-3.5 w-3.5" />
                             {t('modals.expense.editStaffPayment', 'Edit payment')}
@@ -1835,7 +1962,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                                 description: payment.staff_name || t('common.unknown', 'Unknown'),
                               })
                             }
-                            className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                            className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             {t('modals.expense.deleteStaffPayment', 'Delete payment')}
@@ -1884,7 +2011,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
                   {t('modals.expense.activityTitle', 'Drawer activity')}
                 </p>
-                <h4 className="mt-2 text-lg font-bold text-slate-900 dark:text-white">
+                <h4 className="mt-1 text-base font-bold text-slate-900 dark:text-white">
                   {t('modals.expense.activitySubtitle', 'Expenses and staff payments recorded on this cashier shift')}
                 </h4>
               </div>
@@ -1903,6 +2030,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           </div>
         </div>
       )}
+      </div>
       </LiquidGlassModal>
 
       <ConfirmDialog

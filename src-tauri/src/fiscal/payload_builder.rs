@@ -50,6 +50,7 @@
 //!     concerns. The pos-tauri fix here is the larger of the two
 //!     deliverables.
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -166,7 +167,8 @@ pub fn build_fiscal_receipt_input(
     let payment_method_code = map_to_cis_payment_code(derived_method.as_deref());
     let operator_oib = lookup_operator_oib(conn, header.staff_id.as_deref());
 
-    let business_day_iso = extract_business_day(&header.issued_at);
+    let issued_at = normalize_issued_at(&header.issued_at);
+    let business_day_iso = extract_business_day(&issued_at);
     let sequence_number =
         super::sequence_counter::next_sequence(conn, branch_id, &business_day_iso)?;
 
@@ -175,7 +177,7 @@ pub fn build_fiscal_receipt_input(
         "branchId": branch_id,
         "orderId": order_id,
         "receiptNumber": header.receipt_number,
-        "issuedAt": header.issued_at,
+        "issuedAt": issued_at,
         "totals": {
             "netCents": net_cents,
             "vatCents": tax_cents,
@@ -230,6 +232,39 @@ fn read_order_header(conn: &Connection, order_id: &str) -> Result<OrderHeader, S
     .optional()
     .map_err(|e| format!("read orders header for {order_id}: {e}"))?
     .ok_or_else(|| format!("order {order_id} not found in local DB"))
+}
+
+pub(crate) fn normalize_issued_at(raw: &str) -> String {
+    parse_issued_at(raw)
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn parse_issued_at(raw: &str) -> Option<DateTime<Utc>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.with_timezone(&Utc));
+    }
+
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(trimmed, format) {
+            return Some(Utc.from_utc_datetime(&naive));
+        }
+    }
+
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|naive| Utc.from_utc_datetime(&naive))
 }
 
 fn parse_items_json(json_text: &str) -> Vec<ParsedOrderItem> {
@@ -514,6 +549,33 @@ mod audit_1_tests {
             payload["metadata"].as_object().unwrap().len() > 0,
             "metadata must not be empty post-fix"
         );
+    }
+
+    #[test]
+    fn audit_1_normalizes_sqlite_created_at_for_issued_at() {
+        let conn = make_test_db();
+        conn.execute(
+            "INSERT INTO orders
+                (id, organization_id, receipt_number, items, total_amount,
+                 tax_amount, subtotal, staff_id, tax_rate, created_at)
+             VALUES
+                ('ord-sqlite-date', 'org-1', 'R-SQLITE',
+                 '[{\"menu_item_id\":\"item-A\",\"name\":\"Coffee\",\"quantity\":1,\"total_price\":5.00}]',
+                 5.00, 0.97, 4.03, 'staff-1', 0.24, '2026-06-19 11:35:00')",
+            [],
+        )
+        .expect("insert order with SQLite datetime");
+        conn.execute(
+            "INSERT INTO order_payments
+                (id, order_id, method, amount, status, created_at)
+             VALUES ('pay-sqlite-date', 'ord-sqlite-date', 'cash', 5.00, 'completed', '2026-06-19 11:35:01')",
+            [],
+        )
+        .expect("insert payment");
+
+        let payload = build_fiscal_receipt_input(&conn, "ord-sqlite-date", "branch-1").unwrap();
+
+        assert_eq!(payload["issuedAt"], "2026-06-19T11:35:00.000Z");
     }
 
     #[test]

@@ -45,11 +45,11 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               {/* Edit Customer Info Option */}
               <button
                 onClick={onEditInfo}
-                className="w-full p-4 rounded-lg border text-left transition-all duration-200 border-blue-200/50 dark:border-blue-400/30 bg-white/5 hover:bg-white/10 liquid-glass-modal-text"
+                className="w-full p-4 rounded-2xl border text-left transition-all duration-200 border-white/15 dark:border-white/10 bg-white/5 active:bg-white/10 active:scale-[0.99] liquid-glass-modal-text"
               >
                 <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-lg bg-gray-200/70 dark:bg-zinc-800/80 flex items-center justify-center backdrop-blur-sm">
-                    <svg className="w-6 h-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <div className="w-12 h-12 rounded-2xl bg-gray-200/70 dark:bg-zinc-800/80 flex items-center justify-center backdrop-blur-sm">
+                    <svg className="w-6 h-6 text-gray-600 dark:text-zinc-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                     </svg>
                   </div>
@@ -63,10 +63,10 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               {/* Edit Order Items Option */}
               <button
                 onClick={onEditOrder}
-                className="w-full p-4 rounded-lg border text-left transition-all duration-200 border-green-200/50 dark:border-green-400/30 bg-white/5 hover:bg-white/10 liquid-glass-modal-text"
+                className="w-full p-4 rounded-2xl border text-left transition-all duration-200 border-green-200/50 dark:border-green-400/30 bg-white/5 active:bg-white/10 active:scale-[0.99] liquid-glass-modal-text"
               >
                 <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-lg bg-gray-200/70 dark:bg-zinc-800/80 flex items-center justify-center backdrop-blur-sm">
+                  <div className="w-12 h-12 rounded-2xl bg-gray-200/70 dark:bg-zinc-800/80 flex items-center justify-center backdrop-blur-sm">
                     <svg className="w-6 h-6 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
                     </svg>
@@ -82,14 +82,14 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               <button
                 onClick={onEditPayment}
                 disabled={!canEditPayment}
-                className={`w-full p-4 rounded-lg border text-left transition-all duration-200 liquid-glass-modal-text ${
+                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 liquid-glass-modal-text ${
                   canEditPayment
-                    ? 'border-amber-200/50 dark:border-amber-400/30 bg-white/5 hover:bg-white/10'
+                    ? 'border-amber-200/50 dark:border-amber-400/30 bg-white/5 active:bg-white/10 active:scale-[0.99]'
                     : 'border-gray-200/50 dark:border-white/10 bg-white/5 opacity-70 cursor-not-allowed'
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <div className={`w-12 h-12 rounded-lg flex items-center justify-center backdrop-blur-sm ${
+                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center backdrop-blur-sm ${
                     canEditPayment
                       ? 'bg-gray-200/70 dark:bg-zinc-800/80'
                       : 'bg-gray-200/60 dark:bg-zinc-800/70'
@@ -115,10 +115,10 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               </button>
 
               {orderCount === 1 && (
-                <div className="w-full p-4 rounded-lg border text-left transition-all duration-200 border-violet-200/50 dark:border-violet-400/30 bg-white/5 liquid-glass-modal-text">
+                <div className="w-full p-4 rounded-2xl border text-left transition-all duration-200 border-amber-200/50 dark:border-amber-400/30 bg-white/5 liquid-glass-modal-text">
                   <div className="flex items-center gap-3 mb-3">
-                    <div className="w-12 h-12 rounded-lg bg-gray-200/70 dark:bg-zinc-800/80 flex items-center justify-center backdrop-blur-sm">
-                      <svg className="w-6 h-6 text-violet-600 dark:text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <div className="w-12 h-12 rounded-2xl bg-gray-200/70 dark:bg-zinc-800/80 flex items-center justify-center backdrop-blur-sm">
+                      <svg className="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h11m-8 5h8m-11 5h11m3-10 3 3m0 0-3 3m3-3h-7" />
                       </svg>
                     </div>
@@ -141,10 +141,10 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                           key={type}
                           onClick={() => onChangeOrderType(type)}
                           disabled={isActive}
-                          className={`rounded-lg border px-3 py-2 text-sm font-medium transition-all ${
+                          className={`rounded-xl border px-3 py-2 text-sm font-semibold transition-all ${
                             isActive
-                              ? 'border-violet-500/50 bg-violet-500/20 text-violet-700 dark:text-violet-200 cursor-default'
-                              : 'border-white/20 bg-white/10 hover:bg-white/20'
+                              ? 'border-yellow-400 bg-yellow-400 text-black cursor-default'
+                              : 'border-white/20 bg-white/10 active:bg-white/20'
                           }`}
                         >
                           {label}

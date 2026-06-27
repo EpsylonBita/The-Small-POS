@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
-import { LiquidGlassModal } from '../ui/pos-glass-components'
+import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components'
 
 type ConnectionType = 'bluetooth' | 'serial_usb' | 'network'
 type Protocol = 'generic' | 'zvt' | 'pax'
@@ -40,6 +40,10 @@ interface Props {
   device?: ECRDevice // For editing existing device
   discoveredDevice?: DiscoveredDevice // For creating from discovery
 }
+
+// Round 295: the print-on-terminal / default / enabled switches use the shared POSGlassSwitch (one
+// fixed-geometry green-on/neutral-off glass switch), so they match every other Settings switch. The
+// previous local switch-track class was removed.
 
 export const TerminalConfigModal: React.FC<Props> = ({
   isOpen,
@@ -218,6 +222,17 @@ export const TerminalConfigModal: React.FC<Props> = ({
     }
   }
 
+  // Round 352: the primary action stays disabled until the required VISIBLE fields are filled -- the terminal
+  // name plus the connection field for the CURRENT connection type -- so a touchscreen cashier can't tap Add
+  // into a toast error. handleSubmit keeps its validation/toasts as a safety fallback.
+  const requiredConnectionField =
+    connectionType === 'bluetooth'
+      ? btAddress
+      : connectionType === 'serial_usb'
+        ? serialPort
+        : networkIp
+  const requiredFieldsComplete = name.trim().length > 0 && requiredConnectionField.trim().length > 0
+
   return (
     <LiquidGlassModal
       isOpen={isOpen}
@@ -228,9 +243,44 @@ export const TerminalConfigModal: React.FC<Props> = ({
           : t('ecr.config.addTitle', 'Add Payment Terminal')
       }
       size="md"
-      className="!max-w-lg"
+      footer={
+        <div className="px-8 py-4 border-t liquid-glass-modal-border bg-white/85 dark:bg-black/55 backdrop-blur-xl shadow-[0_-8px_24px_rgba(0,0,0,0.18)]">
+          {/* Round 352: a calm inline hint (amber, on-palette) explains what is missing while Add is disabled.
+              Only shown when required fields are incomplete and not saving, so the footer never feels crowded. */}
+          {!requiredFieldsComplete && !isSaving && (
+            <p
+              data-terminal-required-hint
+              className="mb-2 text-xs font-medium text-amber-700 dark:text-amber-300"
+            >
+              {t('ecr.config.missingRequired', 'Enter the terminal name and connection details to enable Add.')}
+            </p>
+          )}
+          <div className="flex justify-end gap-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex items-center justify-center px-6 py-2 rounded-xl bg-red-500/10 active:bg-red-500/20 text-red-600 dark:text-red-300 font-medium border border-red-500/40 transition-colors active:scale-[0.98]"
+            >
+              {t('common.actions.cancel', 'Cancel')}
+            </button>
+            <button
+              type="submit"
+              form="terminal-config-form"
+              disabled={isSaving || !requiredFieldsComplete}
+              className="inline-flex items-center justify-center px-6 py-2 rounded-xl bg-green-600 active:bg-green-700 text-white font-medium border border-green-600 shadow-sm shadow-green-600/25 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSaving
+                ? t('common.actions.saving', 'Saving...')
+                : isEdit
+                ? t('common.actions.save', 'Save')
+                : t('common.actions.add', 'Add')}
+            </button>
+          </div>
+        </div>
+      }
     >
-      <form onSubmit={handleSubmit} className="space-y-6">
+      {/* Bottom padding clears the pinned footer so the last fields stay reachable. */}
+      <form id="terminal-config-form" onSubmit={handleSubmit} className="space-y-4 pb-28">
         {/* Basic Info */}
         <div className="space-y-4">
           <div>
@@ -242,7 +292,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={t('ecr.config.namePlaceholder', 'e.g., Main Terminal')}
-              className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
             />
           </div>
 
@@ -254,7 +304,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               <select
                 value={connectionType}
                 onChange={(e) => setConnectionType(e.target.value as ConnectionType)}
-                className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
               >
                 <option value="serial_usb">USB/Serial</option>
                 <option value="bluetooth">Bluetooth</option>
@@ -269,7 +319,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               <select
                 value={protocol}
                 onChange={(e) => setProtocol(e.target.value as Protocol)}
-                className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
               >
                 {showLegacyGenericOption && (
                   <option value="generic">
@@ -284,7 +334,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
         </div>
 
         {/* Connection Details */}
-        <div className="space-y-4 p-4 rounded-lg liquid-glass-modal-card">
+        <div className="space-y-4 p-4 rounded-2xl border border-black/10 dark:border-white/10 bg-white/40 dark:bg-white/5 backdrop-blur-sm">
           <h3 className="text-sm font-medium liquid-glass-modal-text">
             {t('ecr.config.connectionDetails', 'Connection Details')}
           </h3>
@@ -300,7 +350,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   value={btAddress}
                   onChange={(e) => setBtAddress(e.target.value)}
                   placeholder="XX:XX:XX:XX:XX:XX"
-                  className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
                 />
               </div>
               <div>
@@ -313,7 +363,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   onChange={(e) => setBtChannel(parseInt(e.target.value) || 1)}
                   min={1}
                   max={30}
-                  className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
                 />
               </div>
             </div>
@@ -330,7 +380,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   value={serialPort}
                   onChange={(e) => setSerialPort(e.target.value)}
                   placeholder="COM3"
-                  className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
                 />
               </div>
               <div>
@@ -340,7 +390,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                 <select
                   value={baudRate}
                   onChange={(e) => setBaudRate(parseInt(e.target.value))}
-                  className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
                 >
                   <option value={9600}>9600</option>
                   <option value={19200}>19200</option>
@@ -363,7 +413,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   value={networkIp}
                   onChange={(e) => setNetworkIp(e.target.value)}
                   placeholder="192.168.1.100"
-                  className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
                 />
               </div>
               <div>
@@ -376,7 +426,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   onChange={(e) => setNetworkPort(parseInt(e.target.value) || 20007)}
                   min={1}
                   max={65535}
-                  className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
                 />
               </div>
             </div>
@@ -394,7 +444,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               value={terminalId}
               onChange={(e) => setTerminalId(e.target.value)}
               placeholder="12345678"
-              className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+              className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
             />
           </div>
           <div>
@@ -406,13 +456,13 @@ export const TerminalConfigModal: React.FC<Props> = ({
               value={merchantId}
               onChange={(e) => setMerchantId(e.target.value)}
               placeholder="123456789012345"
-              className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+              className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
             />
           </div>
         </div>
 
         {/* Settings */}
-        <div className="space-y-4 p-4 rounded-lg liquid-glass-modal-card">
+        <div className="space-y-4 p-4 rounded-2xl border border-black/10 dark:border-white/10 bg-white/40 dark:bg-white/5 backdrop-blur-sm">
           <h3 className="text-sm font-medium liquid-glass-modal-text">
             {t('ecr.config.settings', 'Settings')}
           </h3>
@@ -428,72 +478,48 @@ export const TerminalConfigModal: React.FC<Props> = ({
                 onChange={(e) => setTransactionTimeout(parseInt(e.target.value) || 60)}
                 min={30}
                 max={300}
-                className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
               />
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <input
-              type="checkbox"
+          <div className="flex min-h-[44px] items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+            <span className="text-sm liquid-glass-modal-text">
+              {t('ecr.config.printOnTerminal', 'Print receipt on terminal')}
+            </span>
+            <POSGlassSwitch
               id="printOnTerminal"
               checked={printOnTerminal}
-              onChange={(e) => setPrintOnTerminal(e.target.checked)}
-              className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-blue-500 focus:ring-blue-500"
+              onChange={setPrintOnTerminal}
+              aria-label={t('ecr.config.printOnTerminal', 'Print receipt on terminal')}
             />
-            <label htmlFor="printOnTerminal" className="text-sm liquid-glass-modal-text">
-              {t('ecr.config.printOnTerminal', 'Print receipt on terminal')}
-            </label>
           </div>
 
-          <div className="flex items-center gap-3">
-            <input
-              type="checkbox"
+          <div className="flex min-h-[44px] items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+            <span className="text-sm liquid-glass-modal-text">
+              {t('ecr.config.setDefault', 'Set as default terminal')}
+            </span>
+            <POSGlassSwitch
               id="isDefault"
               checked={isDefault}
-              onChange={(e) => setIsDefault(e.target.checked)}
-              className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-blue-500 focus:ring-blue-500"
+              onChange={setIsDefault}
+              aria-label={t('ecr.config.setDefault', 'Set as default terminal')}
             />
-            <label htmlFor="isDefault" className="text-sm liquid-glass-modal-text">
-              {t('ecr.config.setDefault', 'Set as default terminal')}
-            </label>
           </div>
 
-          <div className="flex items-center gap-3">
-            <input
-              type="checkbox"
+          <div className="flex min-h-[44px] items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+            <span className="text-sm liquid-glass-modal-text">
+              {t('ecr.config.enabled', 'Terminal enabled')}
+            </span>
+            <POSGlassSwitch
               id="enabled"
               checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-              className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-blue-500 focus:ring-blue-500"
+              onChange={setEnabled}
+              aria-label={t('ecr.config.enabled', 'Terminal enabled')}
             />
-            <label htmlFor="enabled" className="text-sm liquid-glass-modal-text">
-              {t('ecr.config.enabled', 'Terminal enabled')}
-            </label>
           </div>
         </div>
 
-        {/* Actions */}
-        <div className="flex justify-end gap-3 pt-4 border-t liquid-glass-modal-border">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-6 py-2 rounded-lg bg-gray-500/10 hover:bg-gray-500/20 liquid-glass-modal-text font-medium border border-gray-500/20 transition-all"
-          >
-            {t('common.cancel', 'Cancel')}
-          </button>
-          <button
-            type="submit"
-            disabled={isSaving}
-            className="px-6 py-2 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 text-blue-600 dark:text-blue-400 font-medium border border-blue-500/30 transition-all disabled:opacity-50"
-          >
-            {isSaving
-              ? t('common.saving', 'Saving...')
-              : isEdit
-              ? t('common.save', 'Save')
-              : t('common.add', 'Add')}
-          </button>
-        </div>
       </form>
     </LiquidGlassModal>
   )

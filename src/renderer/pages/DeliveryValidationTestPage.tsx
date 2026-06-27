@@ -53,26 +53,26 @@ export function DeliveryValidationTestPage() {
   };
 
   return (
-    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-6">
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="min-h-screen bg-black p-6">
       <motion.div variants={pageMotionContainer} className="max-w-4xl mx-auto">
         <motion.h1 variants={pageMotionItem} className="text-3xl font-bold text-white mb-8 text-center">
           Delivery Zone Boundary Validation Test
         </motion.h1>
 
         {/* Test Controls */}
-        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mb-6">
+        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-2xl p-6 mb-6">
           <h2 className="text-xl font-semibold text-white mb-4">Test Controls</h2>
           
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium text-white/90 mb-2">
-                Order Amount (€)
+                Order Amount (EUR)
               </label>
               <input
                 type="number"
                 value={orderAmount}
                 onChange={(e) => setOrderAmount(Number(e.target.value))}
-                className="w-full p-2 bg-white/10 border border-white/20 rounded text-white"
+                className="w-full p-2 bg-white/10 border border-white/20 rounded-2xl text-white"
                 min="0"
                 step="0.50"
               />
@@ -85,7 +85,7 @@ export function DeliveryValidationTestPage() {
               <select
                 value={staffRole}
                 onChange={(e) => setStaffRole(e.target.value as 'staff' | 'manager' | 'admin')}
-                className="w-full p-2 bg-white/10 border border-white/20 rounded text-white"
+                className="w-full p-2 bg-white/10 border border-white/20 rounded-2xl text-white"
               >
                 <option value="staff">Staff</option>
                 <option value="manager">Manager</option>
@@ -97,7 +97,7 @@ export function DeliveryValidationTestPage() {
               <label className="block text-sm font-medium text-white/90 mb-2">
                 Current Address
               </label>
-              <div className="text-sm text-white/70 p-2 bg-white/5 rounded">
+              <div className="text-sm text-white/70 p-2 bg-white/5 rounded-2xl">
                 {address || 'No address entered'}
               </div>
             </div>
@@ -114,7 +114,7 @@ export function DeliveryValidationTestPage() {
                   variants={pageMotionItem}
                   key={index}
                   onClick={() => loadTestAddress(testAddr)}
-                  className="p-3 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-400/30 rounded text-white text-left transition-colors"
+                  className="p-3 bg-amber-500/15 active:bg-amber-500/25 border border-amber-400/30 rounded-2xl text-white text-left transition-transform active:scale-[0.98]"
                 >
                   <div className="font-medium">{testAddr.name}</div>
                   <div className="text-sm text-white/70">{testAddr.address}</div>
@@ -128,7 +128,7 @@ export function DeliveryValidationTestPage() {
         </motion.div>
 
         {/* Delivery Validation Component */}
-        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mb-6">
+        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-2xl p-6 mb-6">
           <h2 className="text-xl font-semibold text-white mb-4">Delivery Validation</h2>
           
           <DeliveryValidationComponent
@@ -137,13 +137,13 @@ export function DeliveryValidationTestPage() {
             onAddressChange={handleAddressChange}
             staffId={`test_${staffRole}`}
             staffRole={staffRole}
-            className="bg-white/5 border border-white/10 rounded-lg p-4"
+            className="bg-white/5 border border-white/10 rounded-2xl p-4"
           />
         </motion.div>
 
         {/* Validation Results */}
         {validationResult && (
-          <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-lg p-6">
+          <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-2xl p-6">
             <h2 className="text-xl font-semibold text-white mb-4">Validation Results</h2>
             
             <div className="space-y-4">
@@ -169,7 +169,7 @@ export function DeliveryValidationTestPage() {
               {validationResult.message && (
                 <div>
                   <span className="text-white/70">Message:</span>
-                  <div className="mt-1 p-3 bg-white/5 rounded text-white/90">
+                  <div className="mt-1 p-3 bg-white/5 rounded-2xl text-white/90">
                     {validationResult.message}
                   </div>
                 </div>
@@ -179,11 +179,11 @@ export function DeliveryValidationTestPage() {
               {validationResult.zone && (
                 <div>
                   <span className="text-white/70">Delivery Zone:</span>
-                  <div className="mt-1 p-3 bg-white/5 rounded">
+                  <div className="mt-1 p-3 bg-white/5 rounded-2xl">
                     <div className="grid grid-cols-2 gap-4 text-sm text-white/90">
                       <div>Name: {validationResult.zone.name}</div>
-                      <div>Fee: {validationResult.zone.deliveryFee}€</div>
-                      <div>Minimum Order: {validationResult.zone.minimumOrderAmount}€</div>
+                      <div>Fee: {validationResult.zone.deliveryFee} EUR</div>
+                      <div>Minimum Order: {validationResult.zone.minimumOrderAmount} EUR</div>
                       <div>
                         Est. Time: {validationResult.zone.estimatedTime.min}-{validationResult.zone.estimatedTime.max} min
                       </div>
@@ -196,13 +196,13 @@ export function DeliveryValidationTestPage() {
               {validationResult.validation && (
                 <div>
                   <span className="text-white/70">Order Validation:</span>
-                  <div className="mt-1 p-3 bg-white/5 rounded">
+                  <div className="mt-1 p-3 bg-white/5 rounded-2xl">
                     <div className="grid grid-cols-2 gap-4 text-sm text-white/90">
-                      <div>Order Amount: {validationResult.validation.orderAmount}€</div>
-                      <div>Estimated Total: {validationResult.validation.estimatedTotal}€</div>
+                      <div>Order Amount: {validationResult.validation.orderAmount} EUR</div>
+                      <div>Estimated Total: {validationResult.validation.estimatedTotal} EUR</div>
                       <div>Meets Minimum: {validationResult.validation.meetsMinimumOrder ? 'Yes' : 'No'}</div>
                       {validationResult.validation.shortfall > 0 && (
-                        <div>Shortfall: {validationResult.validation.shortfall}€</div>
+                        <div>Shortfall: {validationResult.validation.shortfall} EUR</div>
                       )}
                     </div>
                   </div>
@@ -213,7 +213,7 @@ export function DeliveryValidationTestPage() {
               {validationResult.coordinates && (
                 <div>
                   <span className="text-white/70">Coordinates:</span>
-                  <div className="mt-1 p-3 bg-white/5 rounded text-white/90 font-mono text-sm">
+                  <div className="mt-1 p-3 bg-white/5 rounded-2xl text-white/90 font-mono text-sm">
                     {validationResult.coordinates.lat}, {validationResult.coordinates.lng}
                   </div>
                 </div>
@@ -221,10 +221,10 @@ export function DeliveryValidationTestPage() {
 
               {/* Raw JSON */}
               <details className="mt-4">
-                <summary className="text-white/70 cursor-pointer hover:text-white">
+                <summary className="text-white/70 cursor-pointer active:text-white">
                   Raw Validation Response (Click to expand)
                 </summary>
-                <pre className="mt-2 p-3 bg-black/20 rounded text-xs text-white/80 overflow-auto">
+                <pre className="mt-2 p-3 bg-black/20 rounded-2xl text-xs text-white/80 overflow-auto scrollbar-hide">
                   {JSON.stringify(validationResult, null, 2)}
                 </pre>
               </details>
@@ -233,7 +233,7 @@ export function DeliveryValidationTestPage() {
         )}
 
         {/* Instructions */}
-        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-lg p-6 mt-6">
+        <motion.div variants={pageMotionItem} className="bg-white/10 backdrop-blur-sm rounded-2xl p-6 mt-6">
           <h2 className="text-xl font-semibold text-white mb-4">Testing Instructions</h2>
           <div className="space-y-2 text-white/80">
             <p>1. <strong>Test Valid Addresses:</strong> Use "City Center" or "Residential Area" buttons to test addresses within delivery zones.</p>

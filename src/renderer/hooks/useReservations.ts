@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 import { offEvent, onEvent } from '../../lib';
 import {
   reservationsService,
@@ -49,6 +50,7 @@ export function useReservations({
   filters: externalFilters,
   enableRealtime = true,
 }: UseReservationsProps): UseReservationsReturn {
+  const { t } = useTranslation();
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -159,7 +161,7 @@ export function useReservations({
   const createReservation = useCallback(async (data: CreateReservationDto): Promise<Reservation | null> => {
     try {
       const reservation = await reservationsService.createReservation(data);
-      toast.success('Reservation created successfully');
+      toast.success(t('reservationsView.toasts.created', { defaultValue: 'Reservation created successfully' }));
       
       // Add to local state
       setReservations((prev) => 
@@ -170,11 +172,11 @@ export function useReservations({
       
       return reservation;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to create reservation';
+      const message = err instanceof Error ? err.message : t('reservationsView.toasts.createFailed', { defaultValue: 'Failed to create reservation' });
       toast.error(message);
       return null;
     }
-  }, []);
+  }, [t]);
 
   // Update status
   const updateStatus = useCallback(async (
@@ -192,14 +194,16 @@ export function useReservations({
         prev.map((r) => (r.id === reservationId ? updated : r))
       );
       
-      toast.success(`Reservation ${status}`);
+      // Explicit per-status keys (never raw enum concatenation); the English
+      // "Reservation <status>" stays only as the defaultValue safety net.
+      toast.success(t(`reservationsView.toasts.status.${status}`, { defaultValue: `Reservation ${status}` }));
       return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to update status';
+      const message = err instanceof Error ? err.message : t('reservationsView.toasts.updateStatusFailed', { defaultValue: 'Failed to update status' });
       toast.error(message);
       return false;
     }
-  }, []);
+  }, [t]);
 
   // Assign table
   const assignTable = useCallback(async (reservationId: string, tableId: string): Promise<boolean> => {
@@ -211,14 +215,14 @@ export function useReservations({
         prev.map((r) => (r.id === reservationId ? updated : r))
       );
       
-      toast.success('Table assigned');
+      toast.success(t('reservationsView.toasts.tableAssigned', { defaultValue: 'Table assigned' }));
       return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to assign table';
+      const message = err instanceof Error ? err.message : t('reservationsView.toasts.assignTableFailed', { defaultValue: 'Failed to assign table' });
       toast.error(message);
       return false;
     }
-  }, []);
+  }, [t]);
 
   return {
     reservations,

@@ -70,11 +70,11 @@ const severityClasses: Record<
   },
   error: {
     badge:
-      'border border-orange-400/30 bg-orange-500/10 text-orange-700 dark:text-orange-200',
+      'border border-red-400/30 bg-red-500/10 text-red-700 dark:text-red-200',
     panel:
-      'border-orange-200/80 bg-orange-50/80 dark:border-orange-400/25 dark:bg-orange-500/10',
+      'border-red-200/80 bg-red-50/80 dark:border-red-400/25 dark:bg-red-500/10',
     icon: AlertTriangle,
-    iconClass: 'text-orange-600 dark:text-orange-300',
+    iconClass: 'text-red-600 dark:text-red-300',
   },
   warning: {
     badge:
@@ -86,11 +86,11 @@ const severityClasses: Record<
   },
   info: {
     badge:
-      'border border-sky-400/30 bg-sky-500/10 text-sky-700 dark:text-sky-200',
+      'border border-slate-300/80 bg-white/85 text-slate-700 dark:border-white/10 dark:bg-white/[0.06] dark:text-slate-200',
     panel:
-      'border-sky-200/80 bg-sky-50/80 dark:border-sky-400/25 dark:bg-sky-500/10',
+      'border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-white/[0.06]',
     icon: Clock3,
-    iconClass: 'text-sky-600 dark:text-sky-300',
+    iconClass: 'text-slate-600 dark:text-slate-300',
   },
 };
 
@@ -105,15 +105,15 @@ const entityLabelKey: Record<string, string> = {
 
 const actionButtonTone = (action: RecoveryActionDescriptor) => {
   if (action.recommended) {
-    return 'border-emerald-300/80 bg-emerald-50/90 text-emerald-800 hover:bg-emerald-100 dark:border-emerald-400/30 dark:bg-emerald-500/15 dark:text-emerald-100 dark:hover:bg-emerald-500/20';
+    return 'border-emerald-300/80 bg-emerald-50/90 text-emerald-800 active:bg-emerald-100 dark:border-emerald-400/30 dark:bg-emerald-500/15 dark:text-emerald-100 dark:active:bg-emerald-500/20';
   }
   if (action.safetyLevel === 'destructive_server') {
-    return 'border-red-300/80 bg-red-50/90 text-red-700 hover:bg-red-100 dark:border-red-400/25 dark:bg-red-500/10 dark:text-red-200 dark:hover:bg-red-500/15';
+    return 'border-red-300/80 bg-red-50/90 text-red-700 active:bg-red-100 dark:border-red-400/25 dark:bg-red-500/10 dark:text-red-200 dark:active:bg-red-500/15';
   }
   if (action.safetyLevel === 'destructive_local') {
-    return 'border-amber-300/80 bg-amber-50/90 text-amber-700 hover:bg-amber-100 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200 dark:hover:bg-amber-500/15';
+    return 'border-amber-300/80 bg-amber-50/90 text-amber-700 active:bg-amber-100 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200 dark:active:bg-amber-500/15';
   }
-  return 'border-slate-200/90 bg-white/90 text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.09]';
+  return 'border-slate-200/90 bg-white/90 text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.09]';
 };
 
 const buildActionRequest = (
@@ -454,14 +454,15 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     primaryIssue?.actions.find((action) => action.id === 'contactDev') ??
     null;
   const remainingIssueCount = Math.max(visibleIssues.length - (primaryIssue ? 1 : 0), 0);
+  // Cashier-facing summary: show the friendly branch/organization NAME when known, but never fall back to the
+  // raw branchId/organizationId UUID. When no name is available, show a plain "This branch / This business"
+  // label. The raw ids remain available to internal recovery logic, action logs, and diagnostics export.
   const branchDisplayName =
     terminalContext?.branchName?.trim() ||
-    terminalContext?.branchId?.trim() ||
-    '-';
+    t('recovery.center.branchFallback', { defaultValue: 'This branch' });
   const organizationDisplayName =
     terminalContext?.organizationName?.trim() ||
-    terminalContext?.organizationId?.trim() ||
-    '-';
+    t('recovery.center.organizationFallback', { defaultValue: 'This business' });
 
   const runAction = async (
     issue: RecoveryIssue,
@@ -671,7 +672,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
             <button
               type="button"
               onClick={() => void onRefresh()}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-slate-200/90 bg-white px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.09]"
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-slate-200/90 bg-white px-4 text-sm font-semibold text-slate-700 transition-transform active:scale-[0.98] active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.09]"
             >
               <RefreshCw className="h-4 w-4" />
               {t('recovery.actions.refresh.label', {
@@ -689,17 +690,16 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
                 })}
               </div>
               <div className="mt-1 text-xs text-emerald-700/75 dark:text-emerald-100/70">
-                {t('recovery.center.terminalContextLine', {
-                  terminalId: terminalContext?.terminalId || '-',
-                  defaultValue: 'Terminal {{terminalId}}',
+                {t('recovery.center.thisTerminal', {
+                  defaultValue: 'This register',
                 })}
               </div>
             </div>
-            <div className="rounded-[22px] border border-sky-200/80 bg-sky-50 px-4 py-3 dark:border-sky-400/25 dark:bg-sky-500/10">
-              <div className="text-xs font-semibold text-sky-800 dark:text-sky-100">
+            <div className="rounded-[22px] border border-slate-200/80 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/[0.06]">
+              <div className="text-xs font-semibold text-slate-800 dark:text-slate-100">
                 {branchDisplayName}
               </div>
-              <div className="mt-1 text-xs text-sky-700/75 dark:text-sky-100/70">
+              <div className="mt-1 text-xs text-slate-600/80 dark:text-slate-300/75">
                 {organizationDisplayName}
               </div>
             </div>
@@ -760,8 +760,8 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
                 </p>
               </div>
 
-              <div className="rounded-[26px] border border-sky-200 bg-sky-50/90 p-5 dark:border-sky-400/25 dark:bg-sky-500/10">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-sky-800 dark:text-sky-100">
+              <div className="rounded-[26px] border border-slate-200 bg-slate-50/90 p-5 dark:border-white/10 dark:bg-white/[0.06]">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-700 dark:text-slate-200">
                   <ListChecks className="h-4 w-4" />
                   {t('recovery.center.verificationTitle', {
                     defaultValue: 'Check after the fix',
@@ -778,7 +778,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => void onSyncNow()}
-                      className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-sky-600 px-4 text-sm font-black text-white transition hover:bg-sky-500 dark:bg-sky-500 dark:text-slate-950 dark:hover:bg-sky-400"
+                      className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-amber-400 px-4 text-sm font-black text-black transition-transform active:scale-[0.98] active:bg-amber-300"
                     >
                       <RefreshCw className="h-4 w-4" />
                       {t('sync.actions.forceSync', {
@@ -789,7 +789,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
                   <button
                     type="button"
                     onClick={() => void onRefresh()}
-                    className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.09]"
+                    className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition-transform active:scale-[0.98] active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.09]"
                   >
                     <RefreshCw className="h-4 w-4" />
                     {t('recovery.actions.refresh.label', {
@@ -801,8 +801,8 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
             </div>
           ) : (
             <div className="grid gap-4 xl:grid-cols-[1.2fr_0.9fr_0.9fr]">
-              <div className="rounded-[26px] border border-orange-200 bg-orange-50/90 p-5 dark:border-orange-400/25 dark:bg-orange-500/10">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-orange-700 dark:text-orange-200">
+              <div className="rounded-[26px] border border-amber-200 bg-amber-50/90 p-5 dark:border-amber-400/25 dark:bg-amber-500/10">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-700 dark:text-amber-200">
                   <AlertTriangle className="h-4 w-4" />
                   {t('recovery.center.whatBlocksTitle', {
                     defaultValue: 'What is blocking sync',
@@ -827,7 +827,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
                   })}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2 text-xs">
-                  <span className="rounded-full border border-orange-300/70 bg-white/70 px-3 py-1 font-semibold text-orange-800 dark:border-orange-400/30 dark:bg-white/[0.06] dark:text-orange-100">
+                  <span className="rounded-full border border-amber-300/70 bg-white/70 px-3 py-1 font-semibold text-amber-800 dark:border-amber-400/30 dark:bg-white/[0.06] dark:text-amber-100">
                     {primaryIssue.orderNumber || primaryIssue.entityId}
                   </span>
                   {remainingIssueCount > 0 && (
@@ -888,7 +888,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
                         busyActionId === `${primaryIssue.id}:${recommendedAction.id}` ||
                         (recommendedAction.requiresOnline && !navigator.onLine)
                       }
-                      className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 text-sm font-black text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-emerald-500 dark:text-slate-950 dark:hover:bg-emerald-400"
+                      className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 text-sm font-black text-white transition-transform active:scale-[0.98] active:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 dark:bg-emerald-500 dark:text-slate-950 dark:active:bg-emerald-400"
                     >
                       {busyActionId === `${primaryIssue.id}:${recommendedAction.id}` ? (
                         <RefreshCw className="h-4 w-4 animate-spin" />
@@ -908,7 +908,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
                       type="button"
                       onClick={() => handleActionClick(primaryIssue, contactDevAction)}
                       disabled={busyActionId === `${primaryIssue.id}:${contactDevAction.id}`}
-                      className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.09]"
+                      className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition-transform active:scale-[0.98] active:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.09]"
                     >
                       <LifeBuoy className="h-4 w-4" />
                       {t(contactDevAction.labelKey, {
@@ -919,8 +919,8 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
                 </div>
               </div>
 
-              <div className="rounded-[26px] border border-sky-200 bg-sky-50/90 p-5 dark:border-sky-400/25 dark:bg-sky-500/10">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-sky-800 dark:text-sky-100">
+              <div className="rounded-[26px] border border-slate-200 bg-slate-50/90 p-5 dark:border-white/10 dark:bg-white/[0.06]">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-700 dark:text-slate-200">
                   <ListChecks className="h-4 w-4" />
                   {t('recovery.center.verificationTitle', {
                     defaultValue: 'Check after the fix',

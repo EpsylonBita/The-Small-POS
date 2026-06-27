@@ -58,7 +58,7 @@ const editCustomerInputClass =
   'w-full px-4 py-2 rounded-lg border bg-gray-100 dark:bg-zinc-800/80 border-gray-300 dark:border-zinc-600 text-gray-900 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-400/60 dark:focus:ring-white/30 focus:border-gray-500 dark:focus:border-white/50';
 
 const editCustomerSaveButtonClass =
-  'flex-1 px-4 py-3 bg-yellow-400 hover:bg-yellow-300 disabled:bg-gray-500/10 disabled:cursor-not-allowed !text-black disabled:!text-gray-500 font-medium rounded-xl border border-yellow-400 hover:border-yellow-300 disabled:border-gray-500/20 transition-all';
+  'liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed';
 
 export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   isOpen,
@@ -497,13 +497,32 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       title={t('modals.editCustomer.title')}
       size="xl"
       className="!max-w-3xl"
+      footer={(
+        /* Fixed action bar: rendered below the scroll body so Save/Cancel stay visible without scrolling. */
+        <div className="flex gap-3 border-t border-white/15 bg-white/[0.05] px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.03]">
+          <button
+            type="button"
+            onClick={handleClose}
+            className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl"
+          >
+            {t('modals.editCustomer.cancel')}
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={isSaving}
+            className={editCustomerSaveButtonClass}
+          >
+            {isSaving ? t('modals.editCustomer.saving') : t('modals.editCustomer.saveChanges')}
+          </button>
+        </div>
+      )}
     >
-      <div className="overflow-y-auto max-h-[70vh] scrollbar-hide">
-        <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
           {t('modals.editCustomer.updateMessage', { count: orderCount })}
         </p>
 
-        <div className="space-y-4 mb-6">
+        <div className="space-y-4 pb-1">
           <div>
             <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
               {t('modals.editCustomer.customerName')}
@@ -543,33 +562,30 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                 placeholder={
                   hasDeliveryPro
                     ? t('modals.editCustomer.addressPlaceholder')
-                    : t('modals.editCustomer.manualAddressPlaceholder', 'Enter address manually')
+                    : t('modals.editCustomer.manualAddressPlaceholder')
                 }
                 className={`${editCustomerInputClass} pl-10 pr-4`}
               />
               {hasDeliveryPro && isLoadingAddresses && (
                 <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
-                  <div className="w-4 h-4 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin"></div>
+                  <div className="w-4 h-4 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin"></div>
                 </div>
               )}
             </div>
 
             {!hasDeliveryPro && (
               <p className="mt-2 text-xs liquid-glass-modal-text-muted">
-                {t(
-                  'modals.editCustomer.manualAddressEntryHint',
-                  'Delivery zones are disabled for this terminal. Address search and zone validation are off, so the address will be saved manually.'
-                )}
+                {t('modals.editCustomer.manualAddressEntryHint')}
               </p>
             )}
 
             {hasDeliveryPro && addressSuggestions.length > 0 && (
-              <div className="absolute z-[9999] w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-lg shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
+              <div className="absolute z-[9999] w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-2xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {addressSuggestions.map((suggestion, index) => (
                   <button
                     key={suggestion.place_id || index}
                     onClick={() => handleAddressSuggestionClick(suggestion)}
-                    className="w-full px-4 py-3 text-left hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors border-b border-gray-200 dark:border-gray-600 last:border-b-0"
+                    className="w-full px-4 py-3 text-left active:bg-gray-100 dark:active:bg-gray-700 transition-colors border-b border-gray-200 dark:border-gray-600 last:border-b-0"
                   >
                     <div className="flex items-start gap-2">
                       <MapPin className="w-4 h-4 text-gray-400 mt-1 flex-shrink-0" />
@@ -596,7 +612,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               </div>
 
               {isValidatingDelivery && (
-                <div className="flex items-center gap-2 text-blue-500 text-sm">
+                <div className="flex items-center gap-2 text-amber-500 text-sm">
                   <Clock className="w-4 h-4 animate-spin" />
                   {t('modals.addCustomer.validatingAddress')}
                 </div>
@@ -622,7 +638,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               )}
 
               {(validationStatus === 'out_of_zone' || validationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-lg border border-orange-500/30 bg-orange-500/10 p-3">
+                <div className="space-y-2 rounded-2xl border border-orange-500/30 bg-orange-500/10 p-3">
                   <label className="flex items-center gap-2 text-sm text-orange-200">
                     <input
                       type="checkbox"
@@ -703,24 +719,6 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
           </div>
         </div>
 
-        <div className="flex gap-3">
-          <button
-            type="button"
-            onClick={handleClose}
-            className="flex-1 px-4 py-3 bg-gray-500/10 hover:bg-gray-500/20 liquid-glass-modal-text font-medium rounded-xl border border-gray-500/20 transition-all"
-          >
-            {t('modals.editCustomer.cancel')}
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={isSaving}
-            className={editCustomerSaveButtonClass}
-          >
-            {isSaving ? t('modals.editCustomer.saving') : t('modals.editCustomer.saveChanges')}
-          </button>
-        </div>
-      </div>
     </LiquidGlassModal>
   );
 };

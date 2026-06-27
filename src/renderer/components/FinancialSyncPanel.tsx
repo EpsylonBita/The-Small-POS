@@ -523,7 +523,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                     </div>
 
                                     {isDeferred && queueError ? (
-                                      <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+                                      <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3">
                                         <div className="text-sm font-semibold text-amber-700 dark:text-amber-200">
                                           {queueError}
                                         </div>

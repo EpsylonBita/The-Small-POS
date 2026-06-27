@@ -37,6 +37,8 @@
       "paidAmount": "Bezahlt {{amount}}",
       "total": "Gesamt",
       "totalAmount": "Gesamt {{amount}}",
+      "discount": "Rabatt",
+      "discountAmount": "Rabatt {{amount}}",
       "totalAndQty": "Gesamt {{amount}} · Menge {{quantity}}",
       "tips": "Trinkgeld",
       "tip": "Trinkgeld",
@@ -143,6 +145,10 @@
     }
   },
   "tablesDashboard": {
+    "viewMode": {
+      "list": "Liste",
+      "floorPlan": "2D"
+    },
     "allFloors": "Alle Etagen",
     "floorNumber": "Etage {{floor}}",
     "floor": "Etage",
@@ -169,6 +175,10 @@
     "newOrder": "Neue Bestellung",
     "pay": "Zahlen",
     "assign": "Zuweisen",
+    "needsCleaning": "Reinigung nötig",
+    "outOfService": "Außer Betrieb",
+    "markCleaned": "Als gereinigt markieren",
+    "backInService": "Wieder in Betrieb",
     "balance": "Saldo",
     "noMatchingTables": "Keine Tische passen zu diesen Filtern",
     "time": {

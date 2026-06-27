@@ -37,6 +37,8 @@
       "paidAmount": "Πληρωμένο {{amount}}",
       "total": "Σύνολο",
       "totalAmount": "Σύνολο {{amount}}",
+      "discount": "Έκπτωση",
+      "discountAmount": "Έκπτωση {{amount}}",
       "totalAndQty": "Σύνολο {{amount}} · Ποσ. {{quantity}}",
       "tips": "Φιλοδωρήματα",
       "tip": "Φιλοδώρημα",
@@ -143,6 +145,10 @@
     }
   },
   "tablesDashboard": {
+    "viewMode": {
+      "list": "Λίστα",
+      "floorPlan": "2D"
+    },
     "allFloors": "Όλοι οι όροφοι",
     "floorNumber": "Όροφος {{floor}}",
     "floor": "Όροφος",
@@ -169,6 +175,10 @@
     "newOrder": "Νέα παραγγελία",
     "pay": "Πληρωμή",
     "assign": "Ανάθεση",
+    "needsCleaning": "Χρειάζεται καθάρισμα",
+    "outOfService": "Εκτός λειτουργίας",
+    "markCleaned": "Καθαρίστηκε",
+    "backInService": "Επαναφορά σε λειτουργία",
     "balance": "Υπόλοιπο",
     "noMatchingTables": "Δεν υπάρχουν τραπέζια για αυτά τα φίλτρα",
     "time": {

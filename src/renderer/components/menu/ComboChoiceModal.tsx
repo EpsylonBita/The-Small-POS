@@ -36,6 +36,7 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { language } = useI18n();
+  const isDark = resolvedTheme === 'dark';
 
   // State: chosen item for each category_choice slot
   const [choices, setChoices] = useState<Record<number, ChosenComboItem | null>>({});
@@ -145,16 +146,19 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
 
   const comboName = language === 'el' && combo.name_el ? combo.name_el : combo.name_en;
   const footer = (
-    <div className={`p-4 border-t ${
-      resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
+    <div className={`border-t p-4 ${
+      isDark ? 'border-white/10' : 'border-black/10'
     }`}>
       <button
+        type="button"
         onClick={handleConfirm}
         disabled={!allChoicesFilled}
-        className={`w-full py-3 rounded-xl font-semibold transition-all ${
+        className={`w-full rounded-2xl border py-3 font-semibold transition-transform duration-150 ${
           allChoicesFilled
-            ? 'bg-blue-600 text-white hover:bg-blue-700'
-            : 'bg-gray-400 text-gray-500 cursor-not-allowed'
+            ? 'border-green-500/70 bg-green-600 text-white active:scale-[0.98] active:bg-green-700'
+            : isDark
+              ? 'cursor-not-allowed border-white/10 bg-white/[0.06] text-white/35'
+              : 'cursor-not-allowed border-black/10 bg-black/[0.06] text-black/35'
         }`}
       >
         {t('menu.combos.choice.addToCart', 'Add to Cart')}
@@ -169,13 +173,13 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
       title={comboName}
       size="sm"
       className="max-w-lg"
-      contentClassName="p-4 max-h-[60vh] overflow-y-auto"
+      contentClassName="max-h-[60vh] overflow-y-auto p-4 scrollbar-hide"
       footer={footer}
     >
       <div className="space-y-3">
           {loading ? (
             <div className="flex items-center justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-2 border-blue-500 border-t-transparent" />
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-yellow-400 border-t-transparent" />
             </div>
           ) : (
             comboItems.map((item, index) => {
@@ -188,12 +192,12 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                   ? (language === 'el' && item.subcategory.name_el ? item.subcategory.name_el : item.subcategory.name || item.subcategory.name_en || '')
                   : '';
                 return (
-                  <div key={index} className={`flex items-center gap-3 rounded-lg border p-3 ${
-                    resolvedTheme === 'dark' ? 'border-gray-700 bg-gray-750' : 'border-gray-200 bg-gray-50'
+                  <div key={index} className={`flex items-center gap-3 rounded-2xl border p-3 backdrop-blur-sm ${
+                    isDark ? 'border-white/10 bg-white/[0.05]' : 'border-black/10 bg-white/70'
                   }`}>
                     <Check className="w-4 h-4 text-emerald-500 flex-shrink-0" />
                     <span className={`font-medium flex-1 ${
-                      resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
+                      isDark ? 'text-white' : 'text-gray-900'
                     }`}>
                       {item.quantity > 1 && `${item.quantity}x `}{name}
                     </span>
@@ -209,43 +213,44 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
 
               return (
                 <div key={index} className="space-y-1">
-                  <label className={`text-xs font-semibold uppercase tracking-wider ${
-                    resolvedTheme === 'dark' ? 'text-blue-400' : 'text-blue-600'
+                  <label className={`text-xs font-semibold tracking-wide ${
+                    isDark ? 'text-yellow-300' : 'text-yellow-700'
                   }`}>
                     {item.quantity > 1 && `${item.quantity}x `}
                     {t('menu.combos.choice.pickFrom', { category: catName, defaultValue: `Pick from ${catName}` })}
                   </label>
                   <div className="relative">
                     <button
+                      type="button"
                       onClick={() => setOpenDropdown(openDropdown === index ? null : index)}
-                      className={`w-full flex items-center justify-between rounded-lg border p-3 transition-colors ${
+                      className={`flex w-full items-center justify-between rounded-2xl border p-3 text-left transition-transform duration-150 active:scale-[0.99] ${
                         chosen
-                          ? resolvedTheme === 'dark'
-                            ? 'border-blue-500 bg-blue-500/10'
-                            : 'border-blue-400 bg-blue-50'
-                          : resolvedTheme === 'dark'
-                            ? 'border-gray-600 hover:border-gray-500'
-                            : 'border-gray-300 hover:border-gray-400'
+                          ? isDark
+                            ? 'border-yellow-400/70 bg-yellow-400/12'
+                            : 'border-yellow-500/70 bg-yellow-50'
+                          : isDark
+                            ? 'border-white/12 bg-black/20 active:border-white/25 active:bg-white/[0.06]'
+                            : 'border-black/12 bg-white/60 active:border-black/20 active:bg-white/90'
                       }`}
                     >
                       <span className={chosen
-                        ? resolvedTheme === 'dark' ? 'text-white font-medium' : 'text-gray-900 font-medium'
-                        : resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                        ? isDark ? 'text-white font-medium' : 'text-gray-900 font-medium'
+                        : isDark ? 'text-gray-400' : 'text-gray-500'
                       }>
                         {chosen ? chosen.name : t('menu.combos.choice.selectItem', 'Select an item...')}
                       </span>
                       <ChevronDown className={`w-4 h-4 transition-transform ${openDropdown === index ? 'rotate-180' : ''} ${
-                        resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                        isDark ? 'text-gray-400' : 'text-gray-500'
                       }`} />
                     </button>
 
                     {openDropdown === index && (
-                      <div className={`absolute left-0 right-0 mt-1 rounded-lg border shadow-lg z-10 max-h-48 overflow-y-auto scrollbar-hide ${
-                        resolvedTheme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
+                      <div className={`absolute left-0 right-0 z-10 mt-1 max-h-48 overflow-y-auto rounded-2xl border shadow-lg backdrop-blur-xl scrollbar-hide ${
+                        isDark ? 'border-white/10 bg-zinc-950/95' : 'border-black/10 bg-white/95'
                       }`}>
                         {catItems.length === 0 ? (
                           <div className={`p-3 text-sm ${
-                            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                            isDark ? 'text-gray-400' : 'text-gray-500'
                           }`}>
                             {t('menu.combos.choice.noItems', 'No items available')}
                           </div>
@@ -256,23 +261,24 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                             const isSelected = chosen?.subcategory_id === menuItem.id;
                             return (
                               <button
+                                type="button"
                                 key={menuItem.id}
                                 onClick={() => handleSelectItem(index, item, menuItem)}
-                                className={`w-full flex items-center justify-between p-3 text-left transition-colors ${
+                                className={`flex w-full items-center justify-between p-3 text-left transition-transform duration-150 active:scale-[0.99] ${
                                   isSelected
-                                    ? resolvedTheme === 'dark'
-                                      ? 'bg-blue-500/20'
-                                      : 'bg-blue-50'
-                                    : resolvedTheme === 'dark'
-                                      ? 'hover:bg-gray-700'
-                                      : 'hover:bg-gray-50'
+                                    ? isDark
+                                      ? 'bg-yellow-400/14'
+                                      : 'bg-yellow-50'
+                                    : isDark
+                                      ? 'active:bg-white/[0.06]'
+                                      : 'active:bg-black/[0.04]'
                                 }`}
                               >
-                                <span className={resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}>
+                                <span className={isDark ? 'text-white' : 'text-gray-900'}>
                                   {itemName}
                                 </span>
                                 <span className={`text-sm ${
-                                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                                  isDark ? 'text-gray-400' : 'text-gray-500'
                                 }`}>
                                   {formatCurrency(getItemPrice(menuItem))}
                                 </span>

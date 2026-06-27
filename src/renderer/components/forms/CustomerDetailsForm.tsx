@@ -25,6 +25,11 @@ export const CustomerDetailsForm: React.FC<CustomerDetailsFormProps> = ({
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
+  const inputClass = `w-full rounded-2xl border px-3 py-3 transition-colors duration-150 backdrop-blur-sm ${
+    resolvedTheme === 'dark'
+      ? 'border-white/12 bg-black/25 text-white placeholder-white/45 focus:border-yellow-400/80 focus:bg-black/35'
+      : 'border-black/12 bg-white/65 text-gray-950 placeholder-gray-500 focus:border-yellow-500 focus:bg-white/90'
+  } focus:outline-none focus:ring-2 focus:ring-yellow-400/40`;
 
   return (
     <div>
@@ -45,11 +50,7 @@ export const CustomerDetailsForm: React.FC<CustomerDetailsFormProps> = ({
               setCustomerInfo((prev) => ({ ...prev, name: e.target.value }))
             }
             placeholder={t('forms.customerInfo.customerNamePlaceholder')}
-            className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-              resolvedTheme === 'dark'
-                ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-            } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+            className={inputClass}
             required
           />
         </div>
@@ -67,11 +68,7 @@ export const CustomerDetailsForm: React.FC<CustomerDetailsFormProps> = ({
               setCustomerInfo((prev) => ({ ...prev, phone: e.target.value }))
             }
             placeholder={t('forms.customerInfo.phoneNumberPlaceholder')}
-            className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-              resolvedTheme === 'dark'
-                ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-            } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+            className={inputClass}
             required
           />
         </div>
@@ -89,14 +86,10 @@ export const CustomerDetailsForm: React.FC<CustomerDetailsFormProps> = ({
               setCustomerInfo((prev) => ({ ...prev, email: e.target.value }))
             }
             placeholder={t('forms.customerInfo.emailAddressPlaceholder')}
-            className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-              resolvedTheme === 'dark'
-                ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-            } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+            className={inputClass}
           />
         </div>
       </div>
     </div>
   );
-}; 
+};

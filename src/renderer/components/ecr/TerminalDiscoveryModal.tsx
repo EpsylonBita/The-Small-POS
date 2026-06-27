@@ -145,7 +145,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             onClick={() => toggleSearchType('serial_usb')}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
               searchTypes.includes('serial_usb')
-                ? 'bg-blue-500/30 text-blue-300 border border-blue-500/50'
+                ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
                 : 'bg-gray-700/50 text-gray-400 border border-gray-700'
             }`}
           >
@@ -156,7 +156,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             onClick={() => toggleSearchType('bluetooth')}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
               searchTypes.includes('bluetooth')
-                ? 'bg-blue-500/30 text-blue-300 border border-blue-500/50'
+                ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
                 : 'bg-gray-700/50 text-gray-400 border border-gray-700'
             }`}
           >
@@ -167,7 +167,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             onClick={() => toggleSearchType('network')}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
               searchTypes.includes('network')
-                ? 'bg-blue-500/30 text-blue-300 border border-blue-500/50'
+                ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
                 : 'bg-gray-700/50 text-gray-400 border border-gray-700'
             }`}
           >
@@ -180,7 +180,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
         <button
           onClick={handleSearch}
           disabled={isSearching || searchTypes.length === 0}
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-amber-500/20 text-amber-300 active:bg-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isSearching ? (
             <>
@@ -197,7 +197,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
 
         {/* Error message */}
         {error && !isSearching && (
-          <div className="flex items-center gap-3 p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+          <div className="flex items-center gap-3 p-4 rounded-2xl bg-red-500/10 border border-red-500/30">
             <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
             <p className="text-red-400 text-sm">{error}</p>
           </div>
@@ -209,7 +209,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             {warnings.map((warning) => (
               <div
                 key={warning}
-                className="flex items-center gap-3 p-4 rounded-lg bg-amber-500/10 border border-amber-500/30"
+                className="flex items-center gap-3 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30"
               >
                 <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0" />
                 <p className="text-amber-300 text-sm">{t(warning, warning)}</p>
@@ -219,7 +219,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
         )}
 
         {showFiscalHint && (
-          <div className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+          <div className="space-y-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-400" />
               <div className="space-y-1">
@@ -240,7 +240,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             {onOpenCashRegisterSetup && (
               <button
                 onClick={onOpenCashRegisterSetup}
-                className="w-full rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
+                className="w-full rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-sm font-medium text-amber-200 transition-colors active:bg-amber-500/25"
               >
                 {t('ecr.discovery.configureCashRegister', 'Configure Cash Register')}
               </button>
@@ -258,11 +258,11 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
               {devices.map((device, index) => (
                 <div
                   key={`${device.connectionType}-${device.name}-${index}`}
-                  className={`flex items-center justify-between p-4 rounded-lg border transition-colors ${
+                  className={`flex items-center justify-between p-4 rounded-2xl border transition-colors ${
                     device.isConfigured
                       ? 'bg-gray-700/30 border-gray-700/50 opacity-60'
                       : device.isSupported
-                        ? 'bg-gray-700/50 border-gray-700 hover:bg-gray-700/70 cursor-pointer'
+                        ? 'bg-gray-700/50 border-gray-700 active:bg-gray-700/70 cursor-pointer'
                         : 'bg-amber-500/5 border-amber-500/20 opacity-90'
                   }`}
                   onClick={() => {
@@ -321,10 +321,10 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                         e.stopPropagation()
                         onSelect(device)
                       }}
-                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 active:bg-amber-500/30 transition-colors"
                     >
                       <Plus className="w-4 h-4" />
-                      {t('common.add', 'Add')}
+                      {t('common.actions.add', 'Add')}
                     </button>
                   )}
                 </div>
@@ -349,7 +349,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
               isSupported: true,
             })
           }
-            className="w-full py-3 rounded-lg bg-gray-700/50 text-gray-300 hover:bg-gray-700 transition-colors"
+            className="w-full py-3 rounded-lg bg-gray-700/50 text-gray-300 active:bg-gray-700 transition-colors"
           >
             {t('ecr.discovery.addManually', 'Add Terminal Manually')}
           </button>

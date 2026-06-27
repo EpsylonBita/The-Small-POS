@@ -11,6 +11,16 @@ import { offlineUpdateRoomStatus } from './offline-mutations';
 
 // Types
 export type RoomStatus = 'available' | 'occupied' | 'cleaning' | 'maintenance' | 'reserved';
+
+/**
+ * The staff-visible effective status of a room: the server-computed effectiveStatus when
+ * present, otherwise the raw status. The Rooms grid cards/actions, the status filter, and
+ * the dashboard stats must ALL count by this so they never disagree. Manual status updates
+ * normalize effectiveStatus to the chosen status, so an explicit change stays consistent too.
+ */
+export const getRoomEffectiveStatus = (
+  room: { status: RoomStatus; effectiveStatus: RoomStatus | null },
+): RoomStatus => room.effectiveStatus || room.status;
 export type RoomType = 'standard' | 'deluxe' | 'suite' | 'penthouse' | 'accessible';
 
 export interface RoomActiveFolio {
@@ -232,11 +242,14 @@ class RoomsService {
     };
 
     rooms.forEach((r: Room) => {
-      if (r.status === 'available') stats.availableRooms++;
-      if (r.status === 'occupied') stats.occupiedRooms++;
-      if (r.status === 'cleaning') stats.cleaningRooms++;
-      if (r.status === 'maintenance') stats.maintenanceRooms++;
-      if (r.status === 'reserved') stats.reservedRooms++;
+      // Count by the same effective status the grid cards render, so the stat tiles never
+      // disagree with the visible cards (e.g. a reserved room whose raw status is available).
+      const status = getRoomEffectiveStatus(r);
+      if (status === 'available') stats.availableRooms++;
+      if (status === 'occupied') stats.occupiedRooms++;
+      if (status === 'cleaning') stats.cleaningRooms++;
+      if (status === 'maintenance') stats.maintenanceRooms++;
+      if (status === 'reserved') stats.reservedRooms++;
     });
 
     if (stats.totalRooms > 0) {

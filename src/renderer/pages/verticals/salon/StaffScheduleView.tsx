@@ -1,4 +1,5 @@
-import React, { memo, useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import React, { memo, useState, useMemo, useEffect, useCallback, useRef, useId } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import { useTheme } from '../../../contexts/theme-context';
@@ -21,6 +22,8 @@ import {
 import { toast } from 'react-hot-toast';
 import { getBridge, isBrowser } from '../../../../lib';
 import { posApiGet, posApiPost } from '../../../utils/api-helpers';
+import { formatDate, formatTime } from '../../../utils/format';
+import { translateRoleName } from '../../../utils/role-labels';
 import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
 import { offlineCreateStaffShift } from '../../../services/offline-mutations';
 import {
@@ -28,6 +31,11 @@ import {
   STAFF_SCHEDULE_IMPORT_ACCEPT,
   type ImportedScheduleShift,
 } from '../../../utils/staff-schedule-import';
+import {
+  MAX_SHIFT_MINUTES,
+  evaluateShiftDuration,
+  shouldRollEndToNextDay,
+} from '../../../utils/staff-shift-duration';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 interface StaffMember {
@@ -115,19 +123,22 @@ interface ImportRunningShift {
   status?: string;
 }
 
+// Role indicators within the white/black/grey/yellow palette: status hues
+// (admin = red, manager = amber, supervisor/kitchen = green) are kept; the
+// former blue/cyan/teal roles map to a spread of greys to stay distinguishable.
 const ROLE_COLORS: Record<string, string> = {
   admin: '#DC2626',
   manager: '#F59E0B',
   supervisor: '#10B981',
-  staff: '#3B82F6',
-  stylist: '#06B6D4',
-  colorist: '#0EA5E9',
-  nail_tech: '#F97316',
-  receptionist: '#14B8A6',
-  cashier: '#3B82F6',
-  driver: '#0EA5E9',
+  staff: '#3f3f46',
+  stylist: '#71717a',
+  colorist: '#a1a1aa',
+  nail_tech: '#d97706',
+  receptionist: '#52525b',
+  cashier: '#27272a',
+  driver: '#a1a1aa',
   kitchen: '#10B981',
-  server: '#14B8A6',
+  server: '#71717a',
   customer: '#6B7280',
 };
 
@@ -179,11 +190,11 @@ const startOfWeekMonday = (date: Date): Date => {
 };
 
 const formatTimeRange = (start: Date, end: Date | null): string => {
-  const startLabel = start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const startLabel = formatTime(start, { hour: '2-digit', minute: '2-digit' });
   if (!end) {
     return `${startLabel} - ?`;
   }
-  const endLabel = end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const endLabel = formatTime(end, { hour: '2-digit', minute: '2-digit' });
   return `${startLabel} - ${endLabel}`;
 };
 
@@ -209,6 +220,17 @@ const getShiftStartValue = (shift: ScheduleShift): string | undefined =>
 const getShiftEndValue = (shift: ScheduleShift): string | undefined =>
   shift.endTime || shift.end_time || shift.scheduled_end || shift.check_out_time;
 
+// Identity for matching an optimistic shift against the server's version: a staff
+// member plus the start minute. Minute-floored so second/ms differences between
+// the value we sent and the value the server returns still reconcile.
+const getShiftIdentity = (shift: ScheduleShift): string => {
+  const staffId = shift.staffId || shift.staff_id || '';
+  const startValue = getShiftStartValue(shift);
+  const startMs = startValue ? new Date(startValue).getTime() : NaN;
+  const startKey = Number.isFinite(startMs) ? String(Math.floor(startMs / 60000)) : startValue || '';
+  return `${staffId}|${startKey}`;
+};
+
 const normalizeStatus = (status?: string): string => {
   const normalized = (status || 'scheduled').trim().toLowerCase().replace(/\s+/g, '_');
   return SHIFT_STATUS_KEYS.has(normalized) ? normalized : 'scheduled';
@@ -224,6 +246,9 @@ export const StaffScheduleView: React.FC = memo(() => {
 
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [shifts, setShifts] = useState<ScheduleShift[]>([]);
+  // Shifts created this session that the immediate post-create refetch may not see
+  // yet (Tauri read-after-write lag). Held until a later fetch returns the real row.
+  const [optimisticShifts, setOptimisticShifts] = useState<ScheduleShift[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [roleFilter, setRoleFilter] = useState<string>('all');
@@ -245,6 +270,12 @@ export const StaffScheduleView: React.FC = memo(() => {
   const [importingSchedule, setImportingSchedule] = useState(false);
   const [previewWeekOpen, setPreviewWeekOpen] = useState(false);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  // Refs + stable title ids so the portaled modals declare labelled dialog semantics and
+  // join the topmost-[role="dialog"] Escape stack used across the POS modals.
+  const previewDialogRef = useRef<HTMLDivElement>(null);
+  const previewTitleId = useId();
+  const createDialogRef = useRef<HTMLDivElement>(null);
+  const createTitleId = useId();
 
   const isDark = resolvedTheme === 'dark';
   const bridge = getBridge();
@@ -296,7 +327,16 @@ export const StaffScheduleView: React.FC = memo(() => {
 
       if (response.success && Array.isArray(payload.staff)) {
         setStaff(payload.staff);
-        setShifts(Array.isArray(payload.shifts) ? payload.shifts : []);
+        const serverShifts = Array.isArray(payload.shifts) ? payload.shifts : [];
+        setShifts(serverShifts);
+        // Drop optimistic shifts the server now reflects so they don't linger; keep
+        // any the (possibly stale) read hasn't surfaced yet so the grid stays current.
+        const serverIdentities = new Set(serverShifts.map(getShiftIdentity));
+        setOptimisticShifts(prev =>
+          prev.length === 0
+            ? prev
+            : prev.filter(shift => !serverIdentities.has(getShiftIdentity(shift))),
+        );
       } else {
         setError(response.error || payload.error || t('staffSchedule.errors.loadFailed', 'Failed to fetch staff data'));
       }
@@ -378,19 +418,27 @@ export const StaffScheduleView: React.FC = memo(() => {
     return Array.from(roles);
   }, [staff]);
 
-  const roleLabelByName = useMemo(() => {
+  // Raw, data-provided display names per role slug. Used only as the custom-role
+  // fallback for the filter chips: known slugs localize through i18n first, so a
+  // true custom role keeps its real display name while system roles never leak the
+  // English `role_display_name` the API ships.
+  const roleDisplayNameByName = useMemo(() => {
     const labels = new Map<string, string>();
     staff.forEach(member => {
-      if (member.role?.name) {
-        labels.set(member.role.name, member.role.displayName || member.role.name.replace(/_/g, ' '));
+      if (member.role?.name && member.role.displayName) {
+        labels.set(member.role.name, member.role.displayName);
       }
     });
     return labels;
   }, [staff]);
 
-  const getRoleLabel = useCallback((roleName: string) => (
-    roleLabelByName.get(roleName) || roleName.replace(/_/g, ' ')
-  ), [roleLabelByName]);
+  // Role filter chips resolve labels through i18n (common.roleNames.*) for known
+  // slugs and fall back to the custom display name / humanized slug otherwise.
+  // Filtering still keys off the stable role slug; only the visible label changes.
+  const getRoleChipLabel = useCallback(
+    (roleName: string) => translateRoleName(t, roleName, roleDisplayNameByName.get(roleName)),
+    [t, roleDisplayNameByName],
+  );
 
   const filteredStaff = useMemo(() => {
     if (roleFilter === 'all') {
@@ -399,10 +447,22 @@ export const StaffScheduleView: React.FC = memo(() => {
     return staff.filter(member => member.role?.name === roleFilter);
   }, [staff, roleFilter]);
 
+  // Merge server shifts with optimistic ones not yet reflected by the server, so a
+  // freshly created shift stays visible across the immediate (possibly stale)
+  // refetch. Deduped by staff + start so a synced shift never renders twice.
+  const displayShifts = useMemo<ScheduleShift[]>(() => {
+    if (optimisticShifts.length === 0) {
+      return shifts;
+    }
+    const serverIdentities = new Set(shifts.map(getShiftIdentity));
+    const pending = optimisticShifts.filter(shift => !serverIdentities.has(getShiftIdentity(shift)));
+    return pending.length === 0 ? shifts : [...shifts, ...pending];
+  }, [shifts, optimisticShifts]);
+
   const weeklyShifts = useMemo<WeeklyShift[]>(() => {
     const normalized: WeeklyShift[] = [];
 
-    for (const shift of shifts) {
+    for (const shift of displayShifts) {
       const staffId = shift.staffId || shift.staff_id;
       if (!staffId) {
         continue;
@@ -429,7 +489,7 @@ export const StaffScheduleView: React.FC = memo(() => {
         staffId,
         staffName: staffMember?.name || shift.staffName || shift.staff_name || t('staffSchedule.unknownStaff', 'Unknown staff'),
         roleName,
-        roleLabel: staffMember?.role?.displayName || getRoleLabel(roleName),
+        roleLabel: translateRoleName(t, roleName, staffMember?.role?.displayName),
         roleColor: getRoleColor(roleName),
         start,
         end: getShiftEnd(shift),
@@ -439,7 +499,7 @@ export const StaffScheduleView: React.FC = memo(() => {
 
     normalized.sort((a, b) => a.start.getTime() - b.start.getTime());
     return normalized;
-  }, [getRoleLabel, roleFilter, shifts, staffMap, t, weekDateSet]);
+  }, [roleFilter, displayShifts, staffMap, t, weekDateSet]);
 
   const shiftsByDay = useMemo(() => {
     const grouped: Record<string, WeeklyShift[]> = {};
@@ -460,9 +520,9 @@ export const StaffScheduleView: React.FC = memo(() => {
   }, [weekDays, weeklyShifts]);
 
   const weekLabel = useMemo(() => {
-    const startLabel = currentWeekStart.toLocaleDateString([], { day: 'numeric', month: 'short' });
+    const startLabel = formatDate(currentWeekStart, { day: 'numeric', month: 'short' });
     const endDate = weekDays[6] || currentWeekStart;
-    const endLabel = endDate.toLocaleDateString([], { day: 'numeric', month: 'short' });
+    const endLabel = formatDate(endDate, { day: 'numeric', month: 'short' });
     return `${startLabel} - ${endLabel}`;
   }, [currentWeekStart, weekDays]);
 
@@ -492,7 +552,7 @@ export const StaffScheduleView: React.FC = memo(() => {
 
   const getDayLabel = useCallback((day: Date) => {
     const key = DAY_KEYS[day.getDay()];
-    return t(`staffSchedule.days.short.${key}`, day.toLocaleDateString([], { weekday: 'short' }));
+    return t(`staffSchedule.days.short.${key}`, formatDate(day, { weekday: 'short' }));
   }, [t]);
 
   const navigateWeek = (direction: 'prev' | 'next') => {
@@ -524,6 +584,49 @@ export const StaffScheduleView: React.FC = memo(() => {
     setCreateModalOpen(false);
     setCreateModalDate(null);
   };
+
+  // Escape dismisses the add-shift modal (close-only; never while a save is in flight, and
+  // never creating a shift). Only the frontmost [role="dialog"] reacts, so a nested dialog
+  // above it closes first instead of this one being dismissed out of order.
+  useEffect(() => {
+    if (!createModalOpen) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || creatingShift) {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== createDialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      setCreateModalOpen(false);
+      setCreateModalDate(null);
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [createModalOpen, creatingShift]);
+
+  // Escape dismisses the Week Preview modal (close-only), using the same topmost-dialog gate.
+  useEffect(() => {
+    if (!previewWeekOpen) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== previewDialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      setPreviewWeekOpen(false);
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [previewWeekOpen]);
 
   const applyTimePreset = (preset: typeof TIME_PRESETS[number]) => {
     if (createStartDate) {
@@ -557,8 +660,17 @@ export const StaffScheduleView: React.FC = memo(() => {
       return;
     }
 
-    if (new Date(endIso).getTime() <= new Date(startIso).getTime()) {
-      toast.error(t('staffSchedule.validation.endAfterStart', 'End time must be after start time'));
+    const durationCheck = evaluateShiftDuration(startIso, endIso);
+    if (!durationCheck.valid) {
+      if (durationCheck.status === 'tooLong') {
+        toast.error(
+          t('staffSchedule.validation.tooLong', 'Shift duration must be less than {{hours}} hours', {
+            hours: MAX_SHIFT_MINUTES / 60,
+          }),
+        );
+      } else {
+        toast.error(t('staffSchedule.validation.endAfterStart', 'End time must be after start time'));
+      }
       return;
     }
 
@@ -587,6 +699,24 @@ export const StaffScheduleView: React.FC = memo(() => {
           branch_id: branchId || undefined,
         });
       }
+
+      // Optimistically surface the new shift immediately. The post-create refetch
+      // below can read before the write is visible (Tauri read-after-write lag);
+      // this keeps the current week, stats, and unscheduled list correct without a
+      // manual refresh, and is reconciled/pruned once the server returns the row.
+      const optimisticShift: ScheduleShift = {
+        id: `optimistic-${createStaffId}-${startIso}`,
+        staff_id: createStaffId,
+        start_time: startIso,
+        end_time: endIso,
+        status: 'scheduled',
+        notes: createNotes.trim() || undefined,
+      };
+      setOptimisticShifts(prev => {
+        const identity = getShiftIdentity(optimisticShift);
+        const deduped = prev.filter(shift => getShiftIdentity(shift) !== identity);
+        return [...deduped, optimisticShift];
+      });
 
       toast.success(
         isBrowser()
@@ -808,16 +938,30 @@ export const StaffScheduleView: React.FC = memo(() => {
     }
     const start = new Date(startIso);
     const end = new Date(endIso);
-    if (end.getTime() <= start.getTime()) {
+    const durationCheck = evaluateShiftDuration(startIso, endIso);
+    if (durationCheck.status === 'endNotAfterStart') {
       return { valid: false, message: t('staffSchedule.validation.endAfterStart', 'End time must be after start time') };
     }
-    const durationMinutes = Math.round((end.getTime() - start.getTime()) / 60000);
+    if (durationCheck.status === 'tooLong') {
+      return {
+        valid: false,
+        message: t('staffSchedule.validation.tooLong', 'Shift duration must be less than {{hours}} hours', {
+          hours: MAX_SHIFT_MINUTES / 60,
+        }),
+      };
+    }
+    const durationMinutes = durationCheck.durationMinutes ?? Math.round((end.getTime() - start.getTime()) / 60000);
     const hours = Math.floor(durationMinutes / 60);
     const minutes = durationMinutes % 60;
-    const durationLabel = minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+    // Duration units are localized per language (Greek uses its own units, not h/m).
+    // Reuse the existing `shift.duration` format for the hours+minutes case and a
+    // focused hours-only counterpart so the minutes-zero label stays compact.
+    const durationLabel = minutes === 0
+      ? t('shift.durationHoursOnly', '{{hours}}h', { hours })
+      : t('shift.duration', '{{hours}}h {{minutes}}m', { hours, minutes });
     return {
       valid: true,
-      message: `${start.toLocaleDateString([], { day: '2-digit', month: 'short' })} ${start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} -> ${end.toLocaleDateString([], { day: '2-digit', month: 'short' })} ${end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${durationLabel})`,
+      message: `${formatDate(start, { day: '2-digit', month: 'short' })} ${formatTime(start, { hour: '2-digit', minute: '2-digit' })} -> ${formatDate(end, { day: '2-digit', month: 'short' })} ${formatTime(end, { hour: '2-digit', minute: '2-digit' })} (${durationLabel})`,
     };
   }, [createStartDate, createStartHour, createStartMinute, createEndDate, createEndHour, createEndMinute, t]);
 
@@ -827,6 +971,11 @@ export const StaffScheduleView: React.FC = memo(() => {
   const softPanelClass = isDark
     ? 'bg-zinc-900/70 border-zinc-800'
     : 'bg-slate-50 border-slate-200';
+  // Frosted-glass shell for the local modals (Preview Week / Create Shift) - distinct
+  // from panelClass (used by the solid on-page sections) so only the dialogs go glass.
+  const modalPanelClass = isDark
+    ? 'bg-black/60 border-white/10 ring-1 ring-white/15 text-zinc-100 backdrop-blur-2xl shadow-2xl shadow-black/50'
+    : 'bg-white/60 border-white/70 ring-1 ring-white/60 text-slate-950 backdrop-blur-2xl shadow-2xl shadow-black/30';
   const mutedTextClass = isDark ? 'text-zinc-400' : 'text-slate-600';
   const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-none transition-colors focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/25 ${
     isDark
@@ -835,14 +984,14 @@ export const StaffScheduleView: React.FC = memo(() => {
   }`;
   const iconButtonClass = `inline-flex h-11 w-11 items-center justify-center rounded-xl border transition-colors ${
     isDark
-      ? 'bg-zinc-900 border-zinc-700 text-zinc-100 hover:bg-zinc-800'
-      : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
+      ? 'bg-zinc-900 border-zinc-700 text-zinc-100 active:bg-zinc-800'
+      : 'bg-white border-slate-300 text-slate-800 active:bg-slate-100'
   }`;
-  const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-yellow-400 px-4 py-3 text-sm font-semibold text-black transition-colors hover:bg-yellow-300 disabled:bg-yellow-400/60 disabled:text-black/60';
+  const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-yellow-400 px-4 py-3 text-sm font-semibold text-black transition-colors active:bg-yellow-300 disabled:bg-yellow-400/60 disabled:text-black/60';
   const secondaryButtonClass = `inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold transition-colors disabled:opacity-60 ${
     isDark
-      ? 'bg-zinc-900 border-zinc-700 text-zinc-100 hover:bg-zinc-800'
-      : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
+      ? 'bg-zinc-900 border-zinc-700 text-zinc-100 active:bg-zinc-800'
+      : 'bg-white border-slate-300 text-slate-800 active:bg-slate-100'
   }`;
 
   if (loading) {
@@ -868,7 +1017,7 @@ export const StaffScheduleView: React.FC = memo(() => {
           <p className={`text-sm ${isDark ? 'text-red-300' : 'text-red-700'}`}>{error}</p>
           <button
             onClick={fetchStaffData}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white transition-colors"
+            className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-red-600 active:bg-red-500 text-white transition-transform active:scale-95"
           >
             <RefreshCw className="w-4 h-4" />
             {t('common.actions.retry', 'Retry')}
@@ -877,6 +1026,13 @@ export const StaffScheduleView: React.FC = memo(() => {
       </motion.div>
     );
   }
+
+  const renderModalPortal = (modal: React.ReactNode) => {
+    if (typeof document !== 'undefined' && document.body) {
+      return createPortal(modal, document.body);
+    }
+    return modal;
+  };
 
   return (
     <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full min-h-0 overflow-hidden ${isDark ? 'text-zinc-100' : 'text-slate-950'}`}>
@@ -909,7 +1065,6 @@ export const StaffScheduleView: React.FC = memo(() => {
                 type="button"
                 onClick={() => navigateWeek('prev')}
                 aria-label={t('staffSchedule.actions.previousWeek', 'Previous week')}
-                title={t('staffSchedule.actions.previousWeek', 'Previous week')}
                 className={iconButtonClass}
               >
                 <ChevronLeft className="h-5 w-5" />
@@ -924,7 +1079,6 @@ export const StaffScheduleView: React.FC = memo(() => {
                 type="button"
                 onClick={() => navigateWeek('next')}
                 aria-label={t('staffSchedule.actions.nextWeek', 'Next week')}
-                title={t('staffSchedule.actions.nextWeek', 'Next week')}
                 className={iconButtonClass}
               >
                 <ChevronRight className="h-5 w-5" />
@@ -933,7 +1087,6 @@ export const StaffScheduleView: React.FC = memo(() => {
                 type="button"
                 onClick={fetchStaffData}
                 aria-label={refreshScheduleLabel}
-                title={refreshScheduleLabel}
                 className={iconButtonClass}
               >
                 <RefreshCw className="h-5 w-5" />
@@ -980,28 +1133,28 @@ export const StaffScheduleView: React.FC = memo(() => {
           ) : null}
 
           <motion.div variants={pageMotionContainer} className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <motion.div variants={pageMotionItem} className={`rounded-xl border p-3 ${softPanelClass}`}>
+            <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.totalStaff', 'Total Staff')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
                 <Users className="h-5 w-5 text-yellow-400" />
                 {filteredStaff.length}
               </p>
             </motion.div>
-            <motion.div variants={pageMotionItem} className={`rounded-xl border p-3 ${softPanelClass}`}>
+            <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.scheduledThisWeek', 'Scheduled This Week')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
                 <UserCheck className="h-5 w-5 text-emerald-500" />
                 {scheduledStaffCount}
               </p>
             </motion.div>
-            <motion.div variants={pageMotionItem} className={`rounded-xl border p-3 ${softPanelClass}`}>
+            <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.todayShifts', 'Today Shifts')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
                 <Clock className="h-5 w-5 text-amber-500" />
                 {todayShiftsCount}
               </p>
             </motion.div>
-            <motion.div variants={pageMotionItem} className={`rounded-xl border p-3 ${softPanelClass}`}>
+            <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.unscheduled', 'Unscheduled')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
                 <Briefcase className="h-5 w-5 text-fuchsia-500" />
@@ -1010,17 +1163,17 @@ export const StaffScheduleView: React.FC = memo(() => {
             </motion.div>
           </motion.div>
 
-          <motion.div variants={pageMotionContainer} className="mt-4 flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+          <motion.div variants={pageMotionContainer} className="mt-4 flex max-w-full flex-wrap gap-2 pb-1">
             <motion.button
               variants={pageMotionItem}
               type="button"
               onClick={() => setRoleFilter('all')}
-              className={`shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold transition-colors ${
+              className={`rounded-xl border px-4 py-2 text-center text-sm font-semibold leading-tight transition-colors ${
                 roleFilter === 'all'
                   ? 'bg-yellow-400 border-yellow-400 text-black'
                   : isDark
-                    ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800'
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                    ? 'bg-zinc-900 border-zinc-700 text-zinc-300 active:bg-zinc-800'
+                    : 'bg-white border-slate-300 text-slate-700 active:bg-slate-100'
               }`}
             >
               {t('staffSchedule.filters.all', 'All roles')}
@@ -1031,15 +1184,15 @@ export const StaffScheduleView: React.FC = memo(() => {
                 key={role}
                 type="button"
                 onClick={() => setRoleFilter(role)}
-                className={`shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold capitalize transition-colors ${
+                className={`rounded-xl border px-4 py-2 text-center text-sm font-semibold leading-tight transition-colors ${
                   roleFilter === role
                     ? 'bg-yellow-400 border-yellow-400 text-black'
                     : isDark
-                      ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800'
-                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                      ? 'bg-zinc-900 border-zinc-700 text-zinc-300 active:bg-zinc-800'
+                      : 'bg-white border-slate-300 text-slate-700 active:bg-slate-100'
                 }`}
               >
-                {getRoleLabel(role)}
+                {getRoleChipLabel(role)}
               </motion.button>
             ))}
           </motion.div>
@@ -1065,7 +1218,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                     <motion.article
                       variants={pageMotionItem}
                       key={dayKey}
-                      className={`flex min-h-64 overflow-hidden flex-col rounded-xl border transition-colors ${
+                      className={`flex min-h-64 overflow-hidden flex-col rounded-2xl border transition-colors ${
                         today
                           ? isDark
                             ? 'bg-yellow-950/20 border-yellow-500 shadow-[0_0_0_1px_rgba(250,204,21,0.35)]'
@@ -1087,7 +1240,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                               )}
                             </div>
                             <p className={`text-xs ${mutedTextClass}`}>
-                              {day.toLocaleDateString([], { day: '2-digit', month: 'short' })}
+                              {formatDate(day, { day: '2-digit', month: 'short' })}
                             </p>
                           </div>
                           <div className="flex shrink-0 items-center gap-1.5">
@@ -1102,11 +1255,10 @@ export const StaffScheduleView: React.FC = memo(() => {
                               type="button"
                               onClick={() => openCreateModal(day)}
                               aria-label={t('staffSchedule.addShiftForDay', 'Add shift for this day')}
-                              title={t('staffSchedule.addShiftForDay', 'Add shift for this day')}
                               className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border transition-colors ${
                                 isDark
-                                  ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800'
-                                  : 'bg-white border-slate-300 hover:bg-slate-100'
+                                  ? 'bg-zinc-900 border-zinc-700 active:bg-zinc-800'
+                                  : 'bg-white border-slate-300 active:bg-slate-100'
                               }`}
                             >
                               <Plus className="h-4 w-4" />
@@ -1120,10 +1272,10 @@ export const StaffScheduleView: React.FC = memo(() => {
                           <button
                             type="button"
                             onClick={() => openCreateModal(day)}
-                            className={`flex h-full min-h-28 w-full flex-col items-center justify-center rounded-xl border border-dashed px-3 py-6 text-center text-sm transition-colors ${
+                            className={`flex h-full min-h-28 w-full flex-col items-center justify-center rounded-2xl border border-dashed px-3 py-6 text-center text-sm transition-colors ${
                               isDark
-                                ? 'border-zinc-700 text-zinc-500 hover:border-yellow-500 hover:text-yellow-200'
-                                : 'border-slate-300 text-slate-500 hover:border-yellow-300 hover:text-yellow-700'
+                                ? 'border-zinc-700 text-zinc-500 active:border-yellow-500 active:text-yellow-200'
+                                : 'border-slate-300 text-slate-500 active:border-yellow-300 active:text-yellow-700'
                             }`}
                           >
                             <Plus className="mb-2 h-5 w-5" />
@@ -1179,9 +1331,9 @@ export const StaffScheduleView: React.FC = memo(() => {
                       type="button"
                       onClick={() => openCreateModal(defaultCreateDate, member.id)}
                       className={`inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors ${
-                        isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                        isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-slate-300 text-slate-700 active:bg-slate-100'
                       }`}
-                      title={t('staffSchedule.addShiftForStaff', 'Add shift for this staff member')}
+                      aria-label={`${t('staffSchedule.addShiftForStaff', 'Add shift for this staff member')}: ${member.name}`}
                     >
                       <Plus className="h-3.5 w-3.5" />
                       {member.name}
@@ -1194,18 +1346,24 @@ export const StaffScheduleView: React.FC = memo(() => {
         </motion.div>
       </motion.div>
 
-      {previewWeekOpen && (
+      {previewWeekOpen && renderModalPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button
             type="button"
             aria-label={t('staffSchedule.actions.close', 'Close')}
-            className="absolute inset-0 bg-black/60"
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
             onClick={() => setPreviewWeekOpen(false)}
           />
-          <div className={`relative flex max-h-[calc(100vh-2rem)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border ${panelClass}`}>
+          <div
+            ref={previewDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={previewTitleId}
+            className={`relative flex max-h-[calc(100vh-2rem)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border ${modalPanelClass}`}
+          >
             <div className={`flex items-start justify-between gap-3 border-b p-4 md:p-5 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}>
               <div className="min-w-0">
-                <h3 className="text-xl font-semibold md:text-2xl">
+                <h3 id={previewTitleId} className="text-xl font-semibold md:text-2xl">
                   {t('staffSchedule.previewWeek.title', 'Week preview')}
                 </h3>
                 <p className={`mt-1 text-sm ${mutedTextClass}`}>
@@ -1224,7 +1382,7 @@ export const StaffScheduleView: React.FC = memo(() => {
 
             <div className="min-h-0 overflow-y-auto scrollbar-hide p-4 md:p-5">
               {weeklyPreviewRows.length === 0 ? (
-                <div className={`flex min-h-48 items-center justify-center rounded-xl border border-dashed text-center text-sm ${isDark ? 'border-zinc-700 text-zinc-400' : 'border-slate-300 text-slate-500'}`}>
+                <div className={`flex min-h-48 items-center justify-center rounded-2xl border border-dashed text-center text-sm ${isDark ? 'border-zinc-700 text-zinc-400' : 'border-slate-300 text-slate-500'}`}>
                   {t('staffSchedule.previewWeek.empty', 'No active staff are scheduled for this week.')}
                 </div>
               ) : (
@@ -1244,7 +1402,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                           >
                             <div>{getDayLabel(day)}</div>
                             <div className="mt-0.5 font-normal normal-case">
-                              {day.toLocaleDateString([], { day: '2-digit', month: 'short' })}
+                              {formatDate(day, { day: '2-digit', month: 'short' })}
                             </div>
                           </div>
                         );
@@ -1259,7 +1417,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                         <div className={`border-r p-3 ${isDark ? 'border-zinc-800 bg-zinc-950/60' : 'border-slate-200 bg-white'}`}>
                           <p className="truncate text-sm font-semibold">{row.staff.name}</p>
                           <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
-                            {row.staff.role?.displayName || row.staff.role?.name || t('staffSchedule.roles.staff', 'Staff')}
+                            {translateRoleName(t, row.staff.role?.name || 'staff', row.staff.role?.displayName)}
                           </p>
                           {(row.staff.staffCode || row.staff.staff_code) ? (
                             <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
@@ -1291,7 +1449,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                                   {dayShifts.map(shift => (
                                     <div
                                       key={`preview-${shift.id}`}
-                                      className={`rounded-lg border-l-4 px-2 py-2 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'}`}
+                                      className={`rounded-2xl border-l-4 px-2 py-2 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'}`}
                                       style={{ borderLeftColor: shift.roleColor }}
                                     >
                                       <p className="text-base font-bold leading-tight">{formatTimeRange(shift.start, shift.end)}</p>
@@ -1312,20 +1470,26 @@ export const StaffScheduleView: React.FC = memo(() => {
         </div>
       )}
 
-      {createModalOpen && createModalDate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      {createModalOpen && createModalDate && renderModalPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 pb-4 pt-10">
           <button
             type="button"
             aria-label={t('staffSchedule.actions.close', 'Close')}
-            className="absolute inset-0 bg-black/60"
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
             onClick={closeCreateModal}
           />
-          <div className={`relative max-h-[calc(100vh-2rem)] w-full max-w-3xl overflow-y-auto scrollbar-hide rounded-2xl border p-5 md:p-6 ${panelClass}`}>
-            <div className="flex items-start justify-between gap-3 mb-4">
+          <div
+            ref={createDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={createTitleId}
+            className={`relative flex h-[calc(100vh-3.5rem)] max-h-[calc(100vh-3.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border ${modalPanelClass}`}
+          >
+            <div className={`flex items-start justify-between gap-3 shrink-0 border-b ${isDark ? 'border-zinc-800' : 'border-gray-200'} p-5 md:p-6`}>
               <div>
-                <h3 className="text-2xl font-semibold">{t('staffSchedule.addShift', 'Add Shift')}</h3>
+                <h3 id={createTitleId} className="text-2xl font-semibold">{t('staffSchedule.addShift', 'Add Shift')}</h3>
                 <p className={`text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-                  {createModalDate.toLocaleDateString([], { weekday: 'long', day: '2-digit', month: 'short' })}
+                  {formatDate(createModalDate, { weekday: 'long', day: '2-digit', month: 'short' })}
                 </p>
               </div>
               <button
@@ -1338,7 +1502,7 @@ export const StaffScheduleView: React.FC = memo(() => {
               </button>
             </div>
 
-            <div className="space-y-4">
+            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide space-y-4 p-5 md:p-6">
               <label className="block">
                 <span className={`text-sm font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                   {t('staffSchedule.fields.staff', 'Staff')}
@@ -1351,7 +1515,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                   <option value="">{t('staffSchedule.selectStaff', 'Select staff')}</option>
                   {filteredStaff.map(member => (
                     <option key={member.id} value={member.id}>
-                      {member.name} ({member.role?.displayName || member.role?.name || t('staffSchedule.roles.staff', 'Staff')})
+                      {member.name} ({translateRoleName(t, member.role?.name || 'staff', member.role?.displayName)})
                     </option>
                   ))}
                 </select>
@@ -1364,7 +1528,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                     type="button"
                     onClick={() => applyTimePreset(preset)}
                     className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
-                      isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-slate-300 hover:bg-slate-100'
+                      isDark ? 'bg-zinc-900 border-zinc-700 active:bg-zinc-800' : 'bg-white border-slate-300 active:bg-slate-100'
                     }`}
                   >
                     {t(`staffSchedule.presets.${preset.key}`, preset.key)}
@@ -1373,7 +1537,7 @@ export const StaffScheduleView: React.FC = memo(() => {
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <div className={`rounded-xl border p-4 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
+                <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
                   <p className={`text-sm font-medium mb-3 ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>
                     {t('staffSchedule.fields.startDateTime', 'Start (date & time)')}
                   </p>
@@ -1404,7 +1568,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                   </div>
                 </div>
 
-                <div className={`rounded-xl border p-4 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
+                <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
                   <p className={`text-sm font-medium mb-3 ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>
                     {t('staffSchedule.fields.endDateTime', 'End (date & time)')}
                   </p>
@@ -1436,12 +1600,23 @@ export const StaffScheduleView: React.FC = memo(() => {
                       type="button"
                       onClick={() => {
                         if (!createStartDate) return;
+                        // Only roll the end date forward for a genuine overnight wrap
+                        // (end time at/before start time). A same-day shift keeps its
+                        // end date so the shortcut can't create a 24h+ shift.
+                        const rollToNextDay = shouldRollEndToNextDay(
+                          createStartHour,
+                          createStartMinute,
+                          createEndHour,
+                          createEndMinute,
+                        );
                         const endDay = new Date(`${createStartDate}T00:00:00`);
-                        endDay.setDate(endDay.getDate() + 1);
+                        if (rollToNextDay) {
+                          endDay.setDate(endDay.getDate() + 1);
+                        }
                         setCreateEndDate(toDateInputValue(endDay));
                       }}
-                      className={`w-full px-3 py-2 rounded-lg border text-sm ${
-                        isDark ? 'bg-zinc-950 border-zinc-700 hover:bg-zinc-800 text-zinc-300' : 'bg-white border-gray-300 hover:bg-gray-100 text-gray-700'
+                      className={`w-full px-3 py-2 rounded-2xl border text-sm ${
+                        isDark ? 'bg-zinc-950 border-zinc-700 active:bg-zinc-800 text-zinc-300' : 'bg-white border-gray-300 active:bg-gray-100 text-gray-700'
                       }`}
                     >
                       {t('staffSchedule.nextDayShortcut', 'Set end date to next day')}
@@ -1476,13 +1651,13 @@ export const StaffScheduleView: React.FC = memo(() => {
               </label>
             </div>
 
-            <div className="flex items-center justify-end gap-3 mt-6">
+            <div className={`flex items-center justify-end gap-3 shrink-0 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'} p-5 md:p-6`}>
               <button
                 type="button"
                 onClick={closeCreateModal}
                 disabled={creatingShift}
                 className={`px-5 py-3 rounded-xl border text-base ${
-                  isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-gray-100 border-gray-300 hover:bg-gray-200'
+                  isDark ? 'bg-zinc-900 border-zinc-700 active:bg-zinc-800' : 'bg-gray-100 border-gray-300 active:bg-gray-200'
                 }`}
               >
                 {t('common.actions.cancel', 'Cancel')}

@@ -105,8 +105,8 @@ const getStatusInfo = (state?: DeviceState) => {
       return {
         label: 'Busy',
         icon: Loader2,
-        color: 'text-blue-400',
-        bg: 'bg-blue-500/20',
+        color: 'text-amber-400',
+        bg: 'bg-amber-500/20',
         spin: true,
       }
     default:
@@ -133,7 +133,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
     const isConnecting = status?.state === 'connecting'
 
     return (
-      <div className="rounded-lg p-3 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border hover:bg-white/10 dark:hover:bg-gray-800/30 transition-all">
+      <div className="rounded-2xl p-3 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border transition-all">
         <div className="flex items-center justify-between gap-3">
           {/* Left: Icon + Info */}
           <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -146,7 +146,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
                   {device.name}
                 </span>
                 {device.isDefault && (
-                  <span title={t('ecr.defaultTerminal', 'Default Terminal')}>
+                  <span role="img" aria-label={t('ecr.defaultTerminal', 'Default Terminal')}>
                     <Star
                       size={12}
                       className="text-yellow-400 fill-yellow-400 flex-shrink-0"
@@ -181,8 +181,8 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             {isConnected ? (
               <button
                 onClick={onDisconnect}
-                className="p-1.5 rounded-md text-red-400 hover:bg-red-500/20 transition-colors"
-                title={t('ecr.actions.disconnect', 'Disconnect')}
+                className="p-1.5 rounded-md text-red-400 active:bg-red-500/20 transition-colors"
+                aria-label={t('ecr.actions.disconnect', 'Disconnect')}
               >
                 <WifiOff size={14} />
               </button>
@@ -190,8 +190,8 @@ export const TerminalCardCompact: React.FC<Props> = memo(
               <button
                 onClick={onConnect}
                 disabled={isConnecting}
-                className="p-1.5 rounded-md text-green-400 hover:bg-green-500/20 transition-colors disabled:opacity-50"
-                title={t('ecr.actions.connect', 'Connect')}
+                className="p-1.5 rounded-md text-green-400 active:bg-green-500/20 transition-colors disabled:opacity-50"
+                aria-label={t('ecr.actions.connect', 'Connect')}
               >
                 {isConnecting ? (
                   <Loader2 size={14} className="animate-spin" />
@@ -205,8 +205,8 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             {!device.isDefault && (
               <button
                 onClick={onSetDefault}
-                className="p-1.5 rounded-md liquid-glass-modal-text-muted hover:text-yellow-400 hover:bg-yellow-500/20 transition-colors"
-                title={t('ecr.actions.setDefault', 'Set as Default')}
+                className="p-1.5 rounded-md liquid-glass-modal-text-muted active:text-yellow-400 active:bg-yellow-500/20 transition-colors"
+                aria-label={t('ecr.actions.setDefault', 'Set as Default')}
               >
                 <Star size={14} />
               </button>
@@ -215,8 +215,8 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             {/* Edit Button */}
             <button
               onClick={onEdit}
-              className="p-1.5 rounded-md liquid-glass-modal-text-muted hover:liquid-glass-modal-text hover:bg-white/10 transition-colors"
-              title={t('ecr.actions.edit', 'Edit')}
+              className="p-1.5 rounded-md liquid-glass-modal-text-muted active:bg-white/10 transition-colors"
+              aria-label={t('ecr.actions.edit', 'Edit')}
             >
               <Settings size={14} />
             </button>
@@ -224,8 +224,8 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             {/* Delete Button */}
             <button
               onClick={onDelete}
-              className="p-1.5 rounded-md text-red-400/60 hover:text-red-400 hover:bg-red-500/20 transition-colors"
-              title={t('ecr.actions.delete', 'Delete')}
+              className="p-1.5 rounded-md text-red-400/60 active:text-red-400 active:bg-red-500/20 transition-colors"
+              aria-label={t('ecr.actions.delete', 'Delete')}
             >
               <Trash2 size={14} />
             </button>

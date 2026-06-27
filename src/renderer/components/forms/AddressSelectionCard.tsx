@@ -55,7 +55,7 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
     if (isValidating) {
       return {
         Icon: Clock,
-        color: resolvedTheme === 'dark' ? 'text-blue-400' : 'text-blue-500',
+        color: resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-600',
         label: t('delivery.validation.validating')
       };
     }
@@ -86,10 +86,10 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
   const validationIndicator = getValidationIndicator();
 
   return (
-    <div className={`relative p-6 rounded-2xl border transition-all duration-300 backdrop-blur-sm ${
+    <div className={`relative rounded-3xl border p-6 backdrop-blur-xl transition-transform duration-150 active:scale-[0.99] ${
       resolvedTheme === 'dark'
-        ? 'bg-gray-700/30 border-gray-600/30 hover:bg-gray-700/50 hover:border-gray-500/50'
-        : 'bg-white/30 border-gray-200/30 hover:bg-white/50 hover:border-gray-300/50'
+        ? 'border-white/12 bg-black/25 active:bg-black/35'
+        : 'border-black/10 bg-white/55 active:bg-white/75'
     } ${!validationResult?.deliveryAvailable && validationResult ? 'opacity-75' : ''} ${className}`}>
       {/* Validation Status Badge (top) */}
       {validationResult?.zone && orderType === 'delivery' && (
@@ -108,10 +108,10 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
       {/* Address Header */}
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center space-x-3">
-          <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-            resolvedTheme === 'dark' ? 'bg-blue-600/20' : 'bg-blue-100/60'
+          <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+            resolvedTheme === 'dark' ? 'bg-yellow-400/18' : 'bg-yellow-200/80'
           }`}>
-            <MapPin className="w-5 h-5 text-blue-500" />
+            <MapPin className={resolvedTheme === 'dark' ? 'h-5 w-5 text-yellow-300' : 'h-5 w-5 text-yellow-700'} />
           </div>
           <div>
             <h3 className={`font-semibold ${
@@ -132,32 +132,36 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
           <div className="flex space-x-2">
             {onEdit && (
               <button
+                type="button"
+                aria-label={t('common.actions.edit', 'Edit')}
                 onClick={(e) => {
                   e.stopPropagation();
                   onEdit(address);
                 }}
-                className={`p-2 rounded-lg transition-all duration-200 ${
+                className={`rounded-2xl p-2 transition-transform duration-150 active:scale-95 ${
                   resolvedTheme === 'dark'
-                    ? 'text-gray-400 hover:text-gray-200 hover:bg-gray-600/50'
-                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'
+                    ? 'text-gray-300 active:bg-white/10'
+                    : 'text-gray-700 active:bg-black/10'
                 }`}
               >
-                <Edit className="w-4 h-4" />
+                <Edit className="h-4 w-4" aria-hidden="true" />
               </button>
             )}
             {onDelete && (
               <button
+                type="button"
+                aria-label={t('common.actions.delete', 'Delete')}
                 onClick={(e) => {
                   e.stopPropagation();
                   onDelete(address);
                 }}
-                className={`p-2 rounded-lg transition-all duration-200 ${
+                className={`rounded-2xl p-2 transition-transform duration-150 active:scale-95 ${
                   resolvedTheme === 'dark'
-                    ? 'text-red-400 hover:text-red-300 hover:bg-red-500/20'
-                    : 'text-red-500 hover:text-red-700 hover:bg-red-100/50'
+                    ? 'text-red-300 active:bg-red-500/18'
+                    : 'text-red-600 active:bg-red-100'
                 }`}
               >
-                <Trash2 className="w-4 h-4" />
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
               </button>
             )}
           </div>
@@ -203,8 +207,8 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
                 ? 'bg-green-600/20 text-green-400'
                 : 'bg-green-100 text-green-700'
               : resolvedTheme === 'dark'
-                ? 'bg-blue-600/20 text-blue-400'
-                : 'bg-blue-100 text-blue-700'
+                ? 'bg-white/10 text-gray-200'
+                : 'bg-gray-100 text-gray-700'
           }`}>
             {address.address_type} {address.is_default && t('delivery.address.default')}
           </div>
@@ -270,12 +274,12 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
       {/* Out of Zone Warning */}
       {!validationResult?.deliveryAvailable && validationResult && orderType === 'delivery' && (
         <div className="mt-4 pt-4 border-t border-gray-200/20">
-          <div className={`flex items-center space-x-2 px-3 py-2 rounded-lg ${
+          <div className={`flex items-center space-x-2 rounded-2xl px-3 py-2 ${
             resolvedTheme === 'dark'
               ? 'bg-yellow-600/20 text-yellow-400'
               : 'bg-yellow-100 text-yellow-700'
           }`}>
-            <AlertTriangle className="w-4 h-4" />
+            <AlertTriangle className="h-4 w-4" aria-hidden="true" />
             <span className="text-sm font-medium">{t('delivery.validation.outsideArea')}</span>
           </div>
         </div>
@@ -293,7 +297,7 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
       {/* Selection Indicator */}
       <div className="mt-4 pt-4 border-t border-gray-200/20">
         <div className={`text-center text-sm font-medium ${
-          resolvedTheme === 'dark' ? 'text-blue-400' : 'text-blue-600'
+          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-700'
         }`}>
           {t('delivery.address.clickToSelect')}
         </div>

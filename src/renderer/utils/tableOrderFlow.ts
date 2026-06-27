@@ -1,4 +1,5 @@
 import type { TableStatus } from '../types/tables';
+import { formatTableDisplayNumber } from './table-display';
 
 type ServiceOrderType = 'pickup' | 'delivery' | 'dine-in';
 
@@ -197,6 +198,47 @@ export function isTableServiceOrder(order: OrderLike | null | undefined): boolea
   );
 }
 
+/**
+ * Staff-facing display number for a table-service order's pseudo-customer.
+ *
+ * Dine-in/table orders use the table as their "customer". Return the shared table
+ * display number (e.g. "B01" -> "#TB01", "P01" -> "#TP01", "T06" -> "#T06") so
+ * callers render it through the orderFlow.tableCustomer translation
+ * ("Table {{table}}" / "Τραπέζι {{table}}"), matching the table grid,
+ * TableActionModal, ReservationForm and floor plan. Returns null for non-table
+ * orders (pickup/delivery/normal) so their real customer name is preserved.
+ *
+ * Display only — never changes stored data or backend matching. Uses the raw
+ * table_number for formatting (normalizeTableNumberForMatch only handles numeric
+ * tables, so it would drop the letter in alphanumeric tables like "B01").
+ */
+export function resolveTableServiceCustomerNumber(order: OrderLike | null | undefined): string | null {
+  if (!isTableServiceOrder(order)) {
+    return null;
+  }
+
+  // Prefer the raw table_number (preserves the letter in alphanumeric tables).
+  const rawTableNumber = String(order?.table_number ?? order?.tableNumber ?? '').trim();
+  if (rawTableNumber) {
+    return formatTableDisplayNumber(rawTableNumber);
+  }
+
+  // Numeric tables can still be recovered from the match-normalizer.
+  const numericTable = getTableNumberForTableServiceOrder(order);
+  if (numericTable) {
+    return formatTableDisplayNumber(numericTable);
+  }
+
+  // Last resort: a table-like trailing token inside the pseudo-customer name
+  // ("Table B01" / "Τραπέζι B01" / "Τραπέζι #TB01"). Guarded to a token that
+  // contains a digit so real customer names are never reformatted.
+  const token = String(order?.customer_name ?? order?.customerName ?? '')
+    .trim()
+    .split(/\s+/)
+    .pop() ?? '';
+  return /\d/.test(token) ? formatTableDisplayNumber(token) : null;
+}
+
 export function shouldShowInStandardOrderLane(order: OrderLike): boolean {
   if (isTableServiceOrder(order)) {
     return false;
@@ -372,6 +414,17 @@ export function shouldApplyOptimisticTableOverride(
     }
   }
 
+  // A release override (table cleared after a final payment, or a stale reserved
+  // table released by staff) keeps the table shown as released while a stale
+  // read-after-write refetch still reports an active pre-release status. The prior
+  // status may be 'occupied' (settlement) OR 'reserved' (stale reservation), so
+  // keep the override until the server reflects a released/terminal status, then
+  // drop it (the next clean refetch shows available/cleaning on its own).
+  if ((override as { __released?: boolean }).__released === true) {
+    const serverStatus = normalizeTableStatus(table.status);
+    return serverStatus === 'occupied' || serverStatus === 'reserved';
+  }
+
   return true;
 }
 
@@ -380,8 +433,16 @@ export function shouldBypassPaymentForTableOrder(input: {
   tableNumber?: string | number | null;
   editMode?: boolean;
   ghostMode?: boolean;
+  hasRoomCharge?: boolean;
 }): boolean {
   if (input.editMode || input.ghostMode) {
+    return false;
+  }
+
+  // Round 236: room-charge orders intentionally reuse orderType='dine-in' for table/dine-in
+  // pricing, but they must still open PaymentModal so the room_charge tender can be selected and
+  // charged to the room folio. Never apply the table-payment bypass in that case.
+  if (input.hasRoomCharge) {
     return false;
   }
 
@@ -438,7 +499,15 @@ export function buildTableSessionOpenPayload(input: {
     orderData.client_request_id,
     orderId,
   );
-  const activeOrderId = isUuidLike(orderId) ? orderId : null;
+  const remoteOrderId = firstTextReference(
+    orderResult.id,
+    orderResult.order_id,
+    orderResult.orderId,
+    orderData.supabase_id,
+    orderData.supabaseId,
+  );
+  const activeOrderReference = remoteOrderId || orderId;
+  const activeOrderId = isUuidLike(activeOrderReference) ? activeOrderReference : null;
   const eventReference = clientOrderId || orderId || firstTextReference(input.table.id, input.table.tableNumber) || 'open';
 
   return {
@@ -464,6 +533,9 @@ export function buildOptimisticOccupiedTable<T extends object>(
     tableSessionId?: string | null;
     guestCount?: unknown;
     occupiedSince?: string | null;
+    orderTotal?: unknown;
+    paidTotal?: unknown;
+    tipTotal?: unknown;
   },
 ): T & {
   status: 'occupied';
@@ -471,7 +543,32 @@ export function buildOptimisticOccupiedTable<T extends object>(
   tableSessionId: string | null;
   guestCount: number;
   occupiedSince?: string;
+  unpaidBalance?: number;
+  balance?: {
+    order_total: number;
+    paid_total: number;
+    tip_total: number;
+    outstanding_balance: number;
+    payment_status: string;
+  };
 } {
+  const orderTotal = Math.max(0, readMoney(input.orderTotal));
+  const paidTotal = Math.max(0, readMoney(input.paidTotal));
+  const tipTotal = Math.max(0, readMoney(input.tipTotal));
+  const outstandingBalance = Number(Math.max(0, orderTotal - paidTotal).toFixed(2));
+  const balance = orderTotal > 0
+    ? {
+        unpaidBalance: outstandingBalance,
+        balance: {
+          order_total: orderTotal,
+          paid_total: paidTotal,
+          tip_total: tipTotal,
+          outstanding_balance: outstandingBalance,
+          payment_status: outstandingBalance <= 0.005 ? 'paid' : paidTotal > 0 ? 'partially_paid' : 'pending',
+        },
+      }
+    : {};
+
   return {
     ...table,
     status: 'occupied',
@@ -479,13 +576,15 @@ export function buildOptimisticOccupiedTable<T extends object>(
     tableSessionId: input.tableSessionId || null,
     guestCount: normalizeGuestCount(input.guestCount),
     ...(input.occupiedSince ? { occupiedSince: input.occupiedSince } : {}),
+    ...balance,
   };
 }
 
 export function buildReleasedTableAfterSettlement<T extends object>(
   table: T,
+  releaseStatus: Extract<TableStatus, 'available' | 'cleaning'> = 'available',
 ): T & {
-  status: 'available';
+  status: Extract<TableStatus, 'available' | 'cleaning'>;
   currentOrderId?: undefined;
   tableSessionId: null;
   guestCount: null;
@@ -495,7 +594,7 @@ export function buildReleasedTableAfterSettlement<T extends object>(
 } {
   return {
     ...table,
-    status: 'available',
+    status: releaseStatus,
     currentOrderId: undefined,
     tableSessionId: null,
     guestCount: null,

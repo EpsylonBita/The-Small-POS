@@ -196,7 +196,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
         {/* Order Items */}
         <div className="space-y-3">
           {items.map((item) => (
-            <div key={item.id} className="border liquid-glass-modal-border rounded-lg p-4 bg-gray-50/50 dark:bg-gray-800/50">
+            <div key={item.id} className="border liquid-glass-modal-border rounded-2xl p-4 bg-gray-50/50 dark:bg-gray-800/50">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex-1">
                   <h4 className="font-medium liquid-glass-modal-text">{item.name}</h4>
@@ -206,8 +206,10 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                 {/* Quantity Controls */}
                 <div className="flex items-center gap-3">
                   <button
+                    type="button"
                     onClick={() => updateItemQuantity(item.id, item.quantity - 1)}
-                    className="w-8 h-8 rounded-full bg-red-100/50 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200/50 dark:hover:bg-red-900/50 transition-colors flex items-center justify-center"
+                    aria-label={t('common.decrease', 'Decrease')}
+                    className="w-8 h-8 rounded-full bg-red-100/50 dark:bg-red-900/30 text-red-600 dark:text-red-400 active:bg-red-200/50 dark:active:bg-red-900/50 transition-transform duration-150 active:scale-95 flex items-center justify-center"
                   >
                     -
                   </button>
@@ -221,17 +223,21 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                   />
 
                   <button
+                    type="button"
                     onClick={() => updateItemQuantity(item.id, item.quantity + 1)}
-                    className="w-8 h-8 rounded-full bg-green-100/50 dark:bg-green-900/30 text-green-600 dark:text-green-400 hover:bg-green-200/50 dark:hover:bg-green-900/50 transition-colors flex items-center justify-center"
+                    aria-label={t('common.increase', 'Increase')}
+                    className="w-8 h-8 rounded-full bg-green-100/50 dark:bg-green-900/30 text-green-600 dark:text-green-400 active:bg-green-200/50 dark:active:bg-green-900/50 transition-transform duration-150 active:scale-95 flex items-center justify-center"
                   >
                     +
                   </button>
 
                   <button
+                    type="button"
                     onClick={() => removeItem(item.id)}
-                    className="w-8 h-8 rounded-full bg-gray-500/20 hover:bg-red-500/20 liquid-glass-modal-text hover:text-red-600 transition-colors flex items-center justify-center"
+                    aria-label={t('common.remove', 'Remove')}
+                    className="w-8 h-8 rounded-full bg-gray-500/20 active:bg-red-500/20 liquid-glass-modal-text active:text-red-600 transition-transform duration-150 active:scale-95 flex items-center justify-center"
                   >
-                    ×
+                    x
                   </button>
                 </div>
               </div>
@@ -259,7 +265,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
           {/* Loading state */}
           {isLoadingItems && (
             <div className="flex items-center justify-center py-8">
-              <svg className="animate-spin h-8 w-8 text-blue-500" fill="none" viewBox="0 0 24 24">
+              <svg className="animate-spin h-8 w-8 text-yellow-400" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>

@@ -112,13 +112,13 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
       {/* Loading State */}
       {isLoading && (
         <div className="flex justify-center py-8">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-yellow-400"></div>
         </div>
       )}
 
       {/* Error State */}
       {error && (
-        <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-6">
+        <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 mb-6">
           {error}
         </div>
       )}
@@ -137,6 +137,7 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
             const isDisabled = driver.assignable === false;
             return (
               <button
+                type="button"
                 key={driver.id}
                 onClick={() => handleDriverSelect(driver)}
                 disabled={isDisabled}

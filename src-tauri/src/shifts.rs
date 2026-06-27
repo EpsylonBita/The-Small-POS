@@ -2135,19 +2135,19 @@ pub fn get_expenses(db: &DbState, shift_id: &str) -> Result<Value, String> {
         .query_map(params![shift_id], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
-                "shiftId": row.get::<_, String>(1)?,
-                "staffId": row.get::<_, String>(2)?,
-                "branchId": row.get::<_, String>(3)?,
-                "expenseType": row.get::<_, String>(4)?,
+                "shift_id": row.get::<_, String>(1)?,
+                "staff_id": row.get::<_, String>(2)?,
+                "branch_id": row.get::<_, String>(3)?,
+                "expense_type": row.get::<_, String>(4)?,
                 "amount": Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
                 "description": row.get::<_, String>(6)?,
-                "receiptNumber": row.get::<_, Option<String>>(7)?,
+                "receipt_number": row.get::<_, Option<String>>(7)?,
                 "status": row.get::<_, String>(8)?,
-                "approvedBy": row.get::<_, Option<String>>(9)?,
-                "approvedAt": row.get::<_, Option<String>>(10)?,
-                "rejectionReason": row.get::<_, Option<String>>(11)?,
-                "createdAt": row.get::<_, String>(12)?,
-                "updatedAt": row.get::<_, String>(13)?,
+                "approved_by": row.get::<_, Option<String>>(9)?,
+                "approved_at": row.get::<_, Option<String>>(10)?,
+                "rejection_reason": row.get::<_, Option<String>>(11)?,
+                "created_at": row.get::<_, String>(12)?,
+                "updated_at": row.get::<_, String>(13)?,
             }))
         })
         .map_err(|e| e.to_string())?;

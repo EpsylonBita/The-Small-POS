@@ -47,7 +47,7 @@ export const RefundAttributionFields: React.FC<RefundAttributionFieldsProps> = (
             onClick={() => onRefundMethodChange('card')}
             className={`liquid-glass-modal-button justify-center gap-2 text-sm ${
               refundMethod === 'card'
-                ? 'bg-blue-600/20 text-blue-300 border-blue-500/30'
+                ? 'bg-amber-600/20 text-amber-300 border-amber-500/30'
                 : ''
             } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
           >

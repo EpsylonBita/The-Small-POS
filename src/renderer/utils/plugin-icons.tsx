@@ -66,7 +66,7 @@ const PLUGIN_COLORS: Record<OrderPlugin, string> = {
   tripadvisor: '#00AF87', // TripAdvisor green
   airbnb: '#FF5A5F',    // Airbnb pink/red
   pos: '#6B7280',       // Gray for internal
-  kiosk: '#2563EB',     // Blue for kiosk-origin orders
+  kiosk: '#CA8A04',     // Yellow for kiosk-origin orders
   web: '#6B7280',       // Gray for internal
   'android-ios': '#6B7280', // Gray for internal
 };

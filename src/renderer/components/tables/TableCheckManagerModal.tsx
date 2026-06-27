@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import {
   ArrowRightLeft,
@@ -34,6 +34,20 @@ import {
   findTableOrderForTable,
   normalizeGuestCount,
 } from '../../utils/tableOrderFlow';
+import {
+  buildUnpaidAmountByItemId,
+  applyTableCheckOrderLevelDiscount,
+  mergeRemoteTableCheckItemsWithLocalAdjustments,
+  resolveTableCheckOrderTotal,
+  resolveTableCheckItemDiscount,
+  scopeTableCheckItemsToActiveAllocations,
+  sumTableCheckLineTotals,
+  sumTableCheckItemDiscounts,
+} from '../../utils/tableCheckPayments';
+import { formatCurrency } from '../../utils/format';
+import { formatTableDisplayNumber } from '../../utils/table-display';
+import { translateRoleName } from '../../utils/role-labels';
+import { renderModalPortal } from '../../utils/render-modal-portal';
 import {
   beginBatchItemSelection,
   clearMissingBatchItemSelection,
@@ -94,6 +108,7 @@ interface TableSessionAllocation {
   quantity?: number | string | null;
   paid_quantity?: number | string | null;
   status?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 interface TableSessionDetails {
@@ -178,7 +193,8 @@ const sheetMotion = {
   transition: { duration: 0.16, ease: 'easeOut' },
 } as const;
 
-const money = (value: unknown) => `€${Number(value || 0).toFixed(2)}`;
+// Locale-aware currency so the Greek app reads "16,65 €", not a hardcoded "€16.65".
+const money = (value: unknown) => formatCurrency(Number(value || 0));
 
 const parseMoneyInput = (value: string): number => {
   const parsed = Number(value.replace(',', '.'));
@@ -234,16 +250,81 @@ const itemDisplayName = (item: TableSessionOrderItem, fallback = 'Item'): string
   return item.name || item.menu_item_name || fallback;
 };
 
+const buildTransferPricingPayload = (
+  item: TableSessionOrderItem,
+  quantity: number,
+): Record<string, number | boolean> => {
+  const boundedQuantity = Math.max(0, Number(quantity || 0));
+  const sourceQuantity = itemQuantity(item);
+  const effectiveUnitPrice = Number(itemUnitPrice(item).toFixed(2));
+  const effectiveTotalPrice = Number((effectiveUnitPrice * boundedQuantity).toFixed(2));
+  const originalUnitPrice = Math.max(
+    effectiveUnitPrice,
+    Number(item.original_unit_price ?? item.originalUnitPrice ?? effectiveUnitPrice) || effectiveUnitPrice,
+  );
+  const lineDiscount = resolveTableCheckItemDiscount(item);
+  const discountAmount = Number(((lineDiscount * boundedQuantity) / sourceQuantity).toFixed(2));
+  const isPriceOverridden =
+    item.is_price_overridden === true ||
+    item.isPriceOverridden === true ||
+    discountAmount > 0.009 ||
+    Math.abs(originalUnitPrice - effectiveUnitPrice) > 0.005;
+
+  return {
+    effective_unit_price: effectiveUnitPrice,
+    effective_total_price: effectiveTotalPrice,
+    original_unit_price: Number(originalUnitPrice.toFixed(2)),
+    discount_amount: discountAmount,
+    is_price_overridden: isPriceOverridden,
+  };
+};
+
+const emitTableSessionBalanceUpdate = (
+  tableId: string | null | undefined,
+  session: TableSessionDetails | null | undefined,
+  guestCount?: unknown,
+) => {
+  if (!tableId || !session) {
+    return;
+  }
+
+  const orderTotal = Number(session.balance?.order_total ?? session.order?.total_amount ?? 0) || 0;
+  const paidTotal = Number(session.balance?.paid_total ?? 0) || 0;
+  const tipTotal = Number(session.balance?.tip_total ?? 0) || 0;
+
+  emitCompatEvent('table-session-balance-updated', {
+    tableId,
+    orderId: session.active_order_id || session.order?.id || null,
+    tableSessionId: session.id || null,
+    guestCount: guestCount ?? session.guest_count ?? null,
+    occupiedSince: session.opened_at || null,
+    orderTotal,
+    paidTotal,
+    tipTotal,
+  });
+};
+
 const localSessionIdPrefix = 'local-table-session:';
 const glassSurfaceClass =
   'rounded-xl border liquid-glass-modal-border bg-white/55 shadow-[0_14px_36px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:bg-black/20 dark:shadow-[0_18px_42px_rgba(2,6,23,0.35)]';
 const glassSubtleSurfaceClass =
   'rounded-xl border liquid-glass-modal-border bg-white/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] backdrop-blur-xl dark:bg-white/[0.045]';
 const glassInputClass = 'liquid-glass-modal-input w-full';
-const glassSelectClass = 'liquid-glass-modal-input w-full';
 
 const isLocalSessionId = (sessionId: string | null | undefined): boolean =>
   typeof sessionId === 'string' && sessionId.startsWith(localSessionIdPrefix);
+
+function isOutstandingTableSessionBalanceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('cannot close a table session with an outstanding balance') ||
+    (
+      normalized.includes('outstanding_balance') &&
+      normalized.includes('paid_total')
+    )
+  );
+}
 
 const readOrderTotal = (order: Order): number =>
   Number((order as any).total_amount ?? (order as any).totalAmount ?? 0) || 0;
@@ -272,6 +353,8 @@ const localOrderItems = (order: Order, itemFallback = 'Item'): TableSessionOrder
       total_price: totalPrice,
       original_unit_price: item.original_unit_price ?? item.originalUnitPrice ?? unitPrice,
       is_price_overridden: item.is_price_overridden === true || item.isPriceOverridden === true,
+      discount: item.discount,
+      discountAmount: item.discountAmount ?? item.discount_amount,
       special_instructions: item.special_instructions || item.specialInstructions || null,
       notes: item.notes || null,
     };
@@ -283,7 +366,7 @@ const buildLocalSessionFromOrder = (table: RestaurantTable, order: Order, itemFa
   const paymentStatus = readOrderPaymentStatus(order);
   const paidTotal = readOrderPaidTotal(order);
   const isSettled = paymentStatus === 'paid' || paymentStatus === 'completed';
-  const orderItems = localOrderItems(order, itemFallback);
+  const orderItems = applyTableCheckOrderLevelDiscount(localOrderItems(order, itemFallback), orderTotal) as TableSessionOrderItem[];
   const sessionId =
     (table.tableSessionId as string | null | undefined) ||
     ((order as any).tableSessionId as string | null | undefined) ||
@@ -358,20 +441,56 @@ const mergeSessionWithLocalOrder = (
   const localTotal = Number(localSession.balance?.order_total ?? 0) || 0;
   const localPaid = Number(localSession.balance?.paid_total ?? 0) || 0;
   const localTips = Number(localSession.balance?.tip_total ?? 0) || 0;
+  const hasLocalOrderItems = (localSession.order?.order_items?.length || 0) > 0;
+  const remoteOrderItems = remoteSession.order?.order_items || [];
+  const remoteAllocations = remoteSession.items || [];
+  const hasRemoteAllocationScope = remoteAllocations.some(allocation => Boolean(allocation.order_item_id));
+  const scopedRemoteOrderItems = hasRemoteAllocationScope
+    ? scopeTableCheckItemsToActiveAllocations(remoteOrderItems, remoteAllocations) as TableSessionOrderItem[]
+    : remoteOrderItems;
+  const localOrderItemsForDisplay = localSession.order?.order_items || [];
+  const shouldDecorateScopedItemsWithLocalOrder =
+    hasLocalOrderItems && (!hasRemoteAllocationScope || scopedRemoteOrderItems.length > 0);
+  const mergedOrderItems = shouldDecorateScopedItemsWithLocalOrder
+    ? mergeRemoteTableCheckItemsWithLocalAdjustments(scopedRemoteOrderItems, localOrderItemsForDisplay) as TableSessionOrderItem[]
+    : scopedRemoteOrderItems;
+  const useLocalAllocations = hasLocalOrderItems && !hasRemoteAllocationScope && scopedRemoteOrderItems.length === 0;
+  const remoteItemsWereScoped = hasRemoteAllocationScope && scopedRemoteOrderItems.length !== remoteOrderItems.length;
 
-  if (localTotal <= remoteTotal + 0.001 && localPaid <= remotePaid + 0.001 && localTips <= remoteTips + 0.001) {
+  if (!hasLocalOrderItems && !remoteItemsWereScoped && localTotal <= remoteTotal + 0.001 && localPaid <= remotePaid + 0.001 && localTips <= remoteTips + 0.001) {
     return remoteSession;
   }
 
-  const orderTotal = Number(Math.max(remoteTotal, localTotal).toFixed(2));
-  const paidTotal = Number(Math.max(remotePaid, localPaid).toFixed(2));
-  const tipTotal = Number(Math.max(remoteTips, localTips).toFixed(2));
+  // An order-level discount lives on the order total, not the per-line prices, so
+  // the raw scoped line sum would resurrect the pre-discount subtotal. Prefer the
+  // local (canonical charged) order total, fall back to the remote session total,
+  // and distribute it across the scoped lines. applyTableCheckOrderLevelDiscount is
+  // idempotent, so this is a no-op when the lines already carry the discount.
+  const authoritativeOrderTotal = localTotal > 0 ? localTotal : remoteTotal;
+  const discountedOrderItems = (
+    hasRemoteAllocationScope
+      ? applyTableCheckOrderLevelDiscount(mergedOrderItems || [], authoritativeOrderTotal)
+      : mergedOrderItems
+  ) as TableSessionOrderItem[];
+  const orderTotal = hasRemoteAllocationScope
+    ? sumTableCheckLineTotals(discountedOrderItems)
+    : resolveTableCheckOrderTotal({
+        remoteTotal,
+        localTotal,
+        hasLocalOrderItems,
+      });
+  const paidTotal = hasRemoteAllocationScope
+    ? Number(remotePaid.toFixed(2))
+    : Number(Math.max(remotePaid, localPaid).toFixed(2));
+  const tipTotal = hasRemoteAllocationScope
+    ? Number(remoteTips.toFixed(2))
+    : Number(Math.max(remoteTips, localTips).toFixed(2));
   const outstanding = Number(Math.max(0, orderTotal - paidTotal).toFixed(2));
   const paymentStatus = outstanding <= 0.01 ? 'paid' : paidTotal > 0 ? 'partially_paid' : 'pending';
 
   return {
     ...remoteSession,
-    active_order_id: localSession.active_order_id || remoteSession.active_order_id,
+    active_order_id: remoteSession.active_order_id || localSession.active_order_id,
     guest_count: remoteSession.guest_count ?? localSession.guest_count,
     opened_at: remoteSession.opened_at || localSession.opened_at,
     status: outstanding <= 0.01 ? 'settled' : paidTotal > 0 ? 'partially_paid' : remoteSession.status,
@@ -385,15 +504,36 @@ const mergeSessionWithLocalOrder = (
     },
     order: {
       ...(remoteSession.order || localSession.order || { id: String(localOrder.id) }),
-      id: localSession.order?.id || remoteSession.order?.id || String(localOrder.id),
+      id: remoteSession.order?.id || localSession.order?.id || String(localOrder.id),
       order_number: localSession.order?.order_number || remoteSession.order?.order_number || null,
       total_amount: orderTotal,
       payment_status: paymentStatus,
-      order_items: localTotal >= remoteTotal ? localSession.order?.order_items : remoteSession.order?.order_items,
+      order_items: discountedOrderItems,
     },
-    items: localTotal >= remoteTotal ? localSession.items : remoteSession.items,
+    items: useLocalAllocations ? localSession.items : remoteSession.items,
   };
 };
+
+// Local bridge lookups must never block the table check. A promise that hangs
+// (never settles) would never reach try/catch/finally, leaving the modal stuck on
+// the loading spinner. This races the lookup against a short timer and resolves to
+// the fallback on hang OR rejection, so the load always proceeds.
+const LOCAL_LOOKUP_TIMEOUT_MS = 2000;
+function resolveWithTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs = LOCAL_LOOKUP_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const finish = (value: T) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(fallback), timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); finish(value); },
+      () => { clearTimeout(timer); finish(fallback); },
+    );
+  });
+}
 
 const fetchBridgeOrders = async (): Promise<Order[]> => {
   try {
@@ -546,6 +686,92 @@ const FormField: React.FC<FormFieldProps> = ({ label, children }) => (
   </label>
 );
 
+interface FieldGroupProps {
+  label: string;
+  labelId: string;
+  children: React.ReactNode;
+}
+
+// Non-<label> field wrapper for composite controls (the TableDestinationPicker
+// listbox). A <label> must not wrap multiple interactive option buttons — that
+// folds the field label into every option's accessible name (the live
+// "Τραπέζι προορισμού Τραπέζι #TP01" double-announce). Here the label is a
+// <span id> referenced by the inner listbox via aria-labelledby instead.
+const FieldGroup: React.FC<FieldGroupProps> = ({ label, labelId, children }) => (
+  <div role="group" aria-labelledby={labelId}>
+    <span id={labelId} className="text-xs font-medium liquid-glass-modal-text-muted">
+      {label}
+    </span>
+    <div className="mt-1">{children}</div>
+  </div>
+);
+
+interface TableDestinationPickerProps {
+  value: string;
+  onChange: (tableId: string) => void;
+  options: RestaurantTable[];
+  optionLabel: (table: RestaurantTable) => string;
+  emptyLabel: string;
+  labelledBy: string;
+}
+
+// Dark-mode-safe replacement for the native table-picker dropdown. On
+// Windows/Tauri the native popup renders as an unstyleable light-gray menu with
+// low-contrast text that escapes the dark glass modal, so the destination list is
+// a custom listbox of explicitly-colored buttons inside the portal-level
+// secondary sheet. Selection still emits the raw table id (value/onChange) — only
+// the visible label goes through optionLabel — so writes, matching and the
+// disabled-until-selected gating are unchanged.
+const TableDestinationPicker: React.FC<TableDestinationPickerProps> = ({
+  value,
+  onChange,
+  options,
+  optionLabel,
+  emptyLabel,
+  labelledBy,
+}) => {
+  if (options.length === 0) {
+    return (
+      <p
+        role="status"
+        aria-labelledby={labelledBy}
+        className="rounded-xl border liquid-glass-modal-border bg-white/35 px-3 py-2 text-sm liquid-glass-modal-text-muted backdrop-blur-xl dark:bg-white/[0.045]"
+      >
+        {emptyLabel}
+      </p>
+    );
+  }
+
+  return (
+    <div
+      role="listbox"
+      aria-labelledby={labelledBy}
+      className="max-h-44 space-y-1 overflow-y-auto rounded-xl border liquid-glass-modal-border bg-white/35 p-1.5 backdrop-blur-xl dark:bg-white/[0.045]"
+    >
+      {options.map(option => {
+        const selected = value === option.id;
+        return (
+          <button
+            key={option.id}
+            type="button"
+            role="option"
+            aria-selected={selected}
+            onClick={() => onChange(option.id)}
+            className={`flex min-h-10 w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors ${
+              selected
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-gray-900 hover:bg-black/5 dark:text-zinc-100 dark:hover:bg-white/10'
+            }`}
+          >
+            <span className="truncate">{optionLabel(option)}</span>
+            {selected ? <Check className="h-4 w-4 shrink-0" /> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+};
+
 interface ActionButtonProps {
   children: React.ReactNode;
   onClick?: () => void;
@@ -599,49 +825,81 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
   children,
   footer,
   closeLabel = 'Close',
-}) => (
-  <motion.div
-    className="absolute inset-0 z-10 flex items-center justify-center bg-black/35 p-4 backdrop-blur-md dark:bg-black/55"
-    initial={{ opacity: 0 }}
-    animate={{ opacity: 1 }}
-    exit={{ opacity: 0 }}
-  >
+}) => {
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const sheetTitleId = useId();
+
+  // Escape closes ONLY this nested sheet - it is the topmost [role="dialog"] while
+  // open, so the parent table-account modal self-suppresses and stays open. Routes
+  // through onClose (closeSecondaryModal); it never submits a payment or clicks
+  // Cash/Card (those are buttons inside the sheet body).
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== sheetRef.current) {
+        return;
+      }
+      event.preventDefault();
+      onClose();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+
+  return renderModalPortal(
+    // Secondary sheets mount at document.body (above the main table-check modal,
+    // z 20000) with a full-viewport blurred backdrop, per the founder rule that
+    // every modal opens outside the container and blurs the rest of the screen.
     <motion.div
-      {...sheetMotion}
-      className="liquid-glass-modal-shell !w-full !max-w-2xl overflow-hidden"
+      className="fixed inset-0 z-[20050] flex items-center justify-center bg-black/35 p-4 backdrop-blur-md dark:bg-black/55"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
     >
-      <div className="liquid-glass-modal-header px-5 py-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border liquid-glass-modal-border bg-white/15 text-blue-700 backdrop-blur-xl dark:text-blue-300">
-            {icon}
+      <motion.div
+        {...sheetMotion}
+        ref={sheetRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={sheetTitleId}
+        className="liquid-glass-modal-shell !w-full !max-w-2xl overflow-hidden"
+      >
+        <div className="liquid-glass-modal-header px-5 py-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border liquid-glass-modal-border bg-white/15 text-blue-700 backdrop-blur-xl dark:text-blue-300">
+              {icon}
+            </div>
+            <div className="min-w-0">
+              <h3 id={sheetTitleId} className="truncate text-lg font-semibold liquid-glass-modal-title">{title}</h3>
+              {subtitle ? (
+                typeof subtitle === 'string' || typeof subtitle === 'number' ? (
+                  <p className="truncate text-sm liquid-glass-modal-text-muted">{subtitle}</p>
+                ) : (
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                    {subtitle}
+                  </div>
+                )
+              ) : null}
+            </div>
           </div>
-          <div className="min-w-0">
-            <h3 className="truncate text-lg font-semibold liquid-glass-modal-title">{title}</h3>
-            {subtitle ? (
-              typeof subtitle === 'string' || typeof subtitle === 'number' ? (
-                <p className="truncate text-sm liquid-glass-modal-text-muted">{subtitle}</p>
-              ) : (
-                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                  {subtitle}
-                </div>
-              )
-            ) : null}
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="liquid-glass-modal-close"
+            aria-label={closeLabel}
+          >
+            <X className="h-5 w-5" />
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="liquid-glass-modal-close"
-          aria-label={closeLabel}
-        >
-          <X className="h-5 w-5" />
-        </button>
-      </div>
-      <div className="space-y-4 p-5 liquid-glass-modal-content">{children}</div>
-      {footer ? <div className="border-t liquid-glass-modal-border px-5 py-4">{footer}</div> : null}
+        <div className="space-y-4 p-5 liquid-glass-modal-content">{children}</div>
+        {footer ? <div className="border-t liquid-glass-modal-border px-5 py-4">{footer}</div> : null}
+      </motion.div>
     </motion.div>
-  </motion.div>
-);
+  );
+};
 
 export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   isOpen,
@@ -688,12 +946,46 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   const [batchSelectedItemIds, setBatchSelectedItemIds] = useState<string[]>([]);
   const pressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTriggeredRef = useRef(false);
+  const mainDialogRef = useRef<HTMLDivElement>(null);
+  const mainTitleId = useId();
+
+  // Escape closes the table-account modal, matching the fixed table/room modals.
+  // Only the topmost [role="dialog"] responds, so while a nested secondary sheet
+  // (e.g. the payment sheet) is open this self-suppresses and the sheet closes
+  // first. Routes through the close-only onClose prop and never settles/pays.
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== mainDialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      onClose();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [isOpen, onClose]);
 
   const outstanding = Number(session?.balance?.outstanding_balance || 0);
   const paidTotal = Number(session?.balance?.paid_total || 0);
   const orderTotal = Number(session?.balance?.order_total || session?.order?.total_amount || 0);
   const tipTotal = Number(session?.balance?.tip_total || 0);
-  const orderItems = useMemo(() => session?.order?.order_items || [], [session?.order?.order_items]);
+  // Single display derivation: distribute any order-level discount onto the line
+  // items so per-item unpaid amounts, the summary, the discount line and payment
+  // defaults all reflect the discounted balance instead of the pre-discount
+  // subtotal. Idempotent - a no-op when the lines already carry the discount.
+  const orderItems = useMemo(() => {
+    const items = session?.order?.order_items || [];
+    const target = Number(session?.balance?.order_total ?? session?.order?.total_amount ?? 0) || 0;
+    return applyTableCheckOrderLevelDiscount(items, target) as TableSessionOrderItem[];
+  }, [session?.order?.order_items, session?.balance?.order_total, session?.order?.total_amount]);
+  const discountTotal = useMemo(() => sumTableCheckItemDiscounts(orderItems), [orderItems]);
   const availableTables = useMemo(
     () => tables.filter(candidate => candidate.id !== table?.id && candidate.status === 'available'),
     [table?.id, tables],
@@ -759,39 +1051,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     return map;
   }, [orderItems, paidQuantityByItemId, session?.items]);
 
-  const unpaidAmountByItemId = useMemo(() => {
-    const itemSpecificPaidById = new Map<string, number>();
-    let itemSpecificPaidTotal = 0;
-
-    for (const paidItem of paidItemRecords) {
-      const itemIndex = Number(paidItem.itemIndex ?? paidItem.item_index ?? -1);
-      const item = Number.isInteger(itemIndex) && itemIndex >= 0 ? orderItems[itemIndex] : null;
-      if (!item) {
-        continue;
-      }
-
-      const amount = Math.max(0, Number(paidItem.itemAmount ?? paidItem.item_amount ?? 0) || 0);
-      itemSpecificPaidTotal = Number((itemSpecificPaidTotal + amount).toFixed(2));
-      itemSpecificPaidById.set(
-        item.id,
-        Number(((itemSpecificPaidById.get(item.id) || 0) + amount).toFixed(2)),
-      );
-    }
-
-    let tableLevelPaidRemainder = Math.max(0, Number((paidTotal - itemSpecificPaidTotal).toFixed(2)));
-    const map = new Map<string, number>();
-
-    for (const item of orderItems) {
-      const lineTotal = itemLineTotal(item);
-      const itemSpecificPaid = itemSpecificPaidById.get(item.id) || 0;
-      const unpaidAfterItemPayments = Math.max(0, Number((lineTotal - itemSpecificPaid).toFixed(2)));
-      const tableLevelAllocation = Math.min(tableLevelPaidRemainder, unpaidAfterItemPayments);
-      tableLevelPaidRemainder = Number((tableLevelPaidRemainder - tableLevelAllocation).toFixed(2));
-      map.set(item.id, Number(Math.max(0, unpaidAfterItemPayments - tableLevelAllocation).toFixed(2)));
-    }
-
-    return map;
-  }, [orderItems, paidItemRecords, paidTotal]);
+  const unpaidAmountByItemId = useMemo(
+    () => buildUnpaidAmountByItemId(orderItems, paidItemRecords, paidTotal, itemLineTotal),
+    [orderItems, paidItemRecords, paidTotal],
+  );
 
   const selectedTransferItem =
     (transferItemId ? orderItems.find(item => item.id === transferItemId) : null) ||
@@ -848,6 +1111,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       const covers = normalizeGuestCount(nextSession.guest_count || table.guestCount || 1);
       setGuestCount(covers);
       setPaymentAmount(Number(nextSession.balance?.outstanding_balance || 0).toFixed(2));
+      emitTableSessionBalanceUpdate(table.id, nextSession, covers);
       setTargetTableId('');
       setMergeTableId('');
       const firstItem = nextSession.order?.order_items?.[0];
@@ -856,20 +1120,43 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       setItemPayQuantity('1');
     };
 
-    const localOrderFromState =
-      findOpenTableOrderForTable(localOrders as any[], table) ||
-      (table.currentOrderId ? findTableOrderForTable(localOrders as any[], table) : null);
-    const bridgeOrders = await fetchBridgeOrders();
-    const localOrder =
-      findOpenTableOrderForTable(bridgeOrders as any[], table) ||
-      localOrderFromState ||
-      (table.currentOrderId ? findTableOrderForTable(bridgeOrders as any[], table) : null);
-    const localFallback = localOrder ? buildLocalSessionFromOrder(table, localOrder, translatedItemFallback) : null;
-    const localPaymentSnapshot = await fetchLocalPaymentSnapshot(localOrder?.id);
-    setPaymentHistory(localPaymentSnapshot.payments);
-    setPaidItemRecords(localPaymentSnapshot.paidItems);
+    let localOrder: Order | null = null;
+    let localFallback: TableSessionDetails | null = null;
+    let localOrderRepairId = '';
 
     try {
+      const localOrderFromState =
+        findOpenTableOrderForTable(localOrders as any[], table) ||
+        (table.currentOrderId ? findTableOrderForTable(localOrders as any[], table) : null);
+
+      // Local bridge order lookup — time-bounded so a hung/failed/rejecting promise
+      // degrades to the in-memory local orders instead of stranding the modal on the
+      // loading spinner (a never-settling promise never reaches try/catch/finally).
+      const bridgeOrders = (await resolveWithTimeout(fetchBridgeOrders(), [] as Order[])) as any[];
+
+      localOrder =
+        findOpenTableOrderForTable(bridgeOrders, table) ||
+        localOrderFromState ||
+        (table.currentOrderId ? findTableOrderForTable(bridgeOrders, table) : null);
+      localFallback = localOrder ? buildLocalSessionFromOrder(table, localOrder, translatedItemFallback) : null;
+      localOrderRepairId = localOrder
+        ? String(
+            (localOrder as any).supabase_id ??
+              (localOrder as any).supabaseId ??
+              localOrder.id ??
+              ''
+          ).trim()
+        : '';
+
+      // Local payment snapshot — time-bounded too; on hang/failure use an empty
+      // snapshot so the check still loads.
+      const localPaymentSnapshot = await resolveWithTimeout(
+        fetchLocalPaymentSnapshot(localOrder?.id),
+        { payments: [], paidItems: [] },
+      );
+      setPaymentHistory(localPaymentSnapshot.payments);
+      setPaidItemRecords(localPaymentSnapshot.paidItems);
+
       let sessionId = table.tableSessionId;
       if (!sessionId) {
         try {
@@ -889,10 +1176,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         }
       }
 
-      if (!sessionId && table.currentOrderId) {
+      const repairOrderReference = table.currentOrderId || localOrderRepairId;
+
+      if (!sessionId && repairOrderReference) {
         const repairPayload = buildTableSessionOpenPayload({
           table,
-          orderId: table.currentOrderId,
+          orderId: repairOrderReference,
           orderData: localOrder as any,
           guestCount: table.guestCount || 1,
           customerName: tr('labels.tableNumber', 'Table {{number}}', { number: table.tableNumber }),
@@ -1091,6 +1380,19 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     setSecondaryModal('transfer-item');
   };
 
+  const openMoveTableModal = () => {
+    // Always start with no destination so a canceled prior selection cannot carry
+    // into the next move attempt; the final action stays disabled until reselected.
+    setTargetTableId('');
+    setSecondaryModal('move-table');
+  };
+
+  const openMergeTableModal = () => {
+    // Mirror the move opener: clear any stale merge target on open.
+    setMergeTableId('');
+    setSecondaryModal('merge-table');
+  };
+
   const clearBatchSelection = () => {
     setBatchSelectedItemIds([]);
   };
@@ -1204,6 +1506,72 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const closeSettledTableAfterPayment = async () => {
+    if (!session || !table?.id) {
+      return;
+    }
+
+    const requestBody = {
+      action: 'close',
+      status: 'closed',
+      release_status: 'cleaning',
+      force: true,
+      client_event_id: `pos-tauri-table-close-${session.id}-${Date.now()}`,
+    };
+
+    const emitCleaningRelease = () => {
+      emitCompatEvent('table-session-settled', {
+        tableId: table.id,
+        tableSessionId: session.id,
+        orderId: session.active_order_id,
+        releaseStatus: 'cleaning',
+      });
+    };
+
+    try {
+      if (isSessionLocalOnly) {
+        await enqueueTableSessionUpdate({
+          organizationId: table.organizationId,
+          branchId: table.branchId,
+          sessionId: session.id,
+          payload: requestBody,
+        });
+      } else {
+        const result = await posApiPatch<{ success?: boolean; session?: TableSessionDetails; error?: string }>(
+          `/api/pos/table-sessions/${encodeURIComponent(session.id)}`,
+          requestBody,
+        );
+        if (!result.success || result.data?.success === false) {
+          throw new Error(result.error || result.data?.error || tr('errors.sessionUpdateFailed', 'Table session update failed'));
+        }
+      }
+    } catch (error) {
+      if (isRetryableTableServiceError(error) || isOutstandingTableSessionBalanceError(error)) {
+        try {
+          await enqueueTableSessionUpdate({
+            organizationId: table.organizationId,
+            branchId: table.branchId,
+            sessionId: session.id,
+            payload: requestBody,
+          });
+        } catch (queueError) {
+          console.warn('[TableCheckManagerModal] Failed to queue settled table close:', queueError);
+        }
+      } else {
+        console.error('[TableCheckManagerModal] Failed to close settled table:', error);
+        toast.error(error instanceof Error ? error.message : tr('errors.sessionUpdateFailed', 'Table session update failed'));
+      }
+    }
+
+    emitCleaningRelease();
+    closeSecondaryModal();
+    onClose();
+    void Promise.all([
+      Promise.resolve(onRefreshTables()),
+      Promise.resolve(onRefreshOrders()),
+    ]).catch(() => undefined);
   };
 
   const recordPayment = async (
@@ -1361,18 +1729,15 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           ...current,
         ]);
       }
-      if (isFullySettledAfterPayment && table?.id) {
-        emitCompatEvent('table-session-settled', {
-          tableId: table.id,
-          tableSessionId: session.id,
-          orderId: session.active_order_id,
-        });
-      }
       toast.success(tr('messages.paymentRecorded', '{{method}} payment recorded', {
         method: method === 'cash' ? tr('paymentMethods.cash', 'Cash') : tr('paymentMethods.card', 'Card'),
       }));
-      closeSecondaryModal();
-      await refreshAll().catch(() => undefined);
+      if (isFullySettledAfterPayment) {
+        await closeSettledTableAfterPayment();
+      } else {
+        closeSecondaryModal();
+        await refreshAll().catch(() => undefined);
+      }
       return true;
     } catch (error) {
       console.error('[TableCheckManagerModal] Payment failed:', error);
@@ -1504,6 +1869,25 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     void saveUpdatedOrderItems(nextItems, tr('messages.discountApplied', 'Discount applied'));
   };
 
+  const emitTargetTransferBalanceUpdate = (nextTargetTableId: string, movedTotal: number) => {
+    const targetTable = tables.find(candidate => candidate.id === nextTargetTableId);
+    const existingBalance = targetTable?.balance || null;
+    const existingOrderTotal = Math.max(0, Number(existingBalance?.order_total ?? 0) || 0);
+    const existingPaidTotal = Math.max(0, Number(existingBalance?.paid_total ?? 0) || 0);
+    const existingTipTotal = Math.max(0, Number(existingBalance?.tip_total ?? 0) || 0);
+
+    emitCompatEvent('table-session-balance-updated', {
+      tableId: nextTargetTableId,
+      orderId: session?.active_order_id || session?.order?.id || targetTable?.currentOrderId || null,
+      tableSessionId: targetTable?.tableSessionId || null,
+      guestCount: targetTable?.guestCount ?? table?.guestCount ?? 1,
+      occupiedSince: targetTable?.occupiedSince || new Date().toISOString(),
+      orderTotal: Number((existingOrderTotal + Math.max(0, movedTotal)).toFixed(2)),
+      paidTotal: existingPaidTotal,
+      tipTotal: existingTipTotal,
+    });
+  };
+
   const transferItem = async () => {
     if (!session || !selectedTransferItem || !targetTableId) {
       toast.error(tr('errors.selectItemAndTargetTable', 'Select an item and target table.'));
@@ -1527,6 +1911,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       target_table_id: targetTableId,
       source_table_id: table?.id,
       target_seat_number: transferSeatNumber ? normalizeGuestCount(transferSeatNumber) : null,
+      ...buildTransferPricingPayload(selectedTransferItem, requestedQuantity),
       client_event_id: `pos-tauri-table-item-transfer-${session.id}-${Date.now()}`,
     };
     try {
@@ -1537,7 +1922,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       if (!result.success || result.data?.success === false) {
         throw new Error(result.error || result.data?.error || tr('errors.itemTransferFailed', 'Item transfer failed'));
       }
-      setSession(result.data?.source_session || session);
+      const nextSourceSession = result.data?.source_session || session;
+      setSession(nextSourceSession);
+      emitTableSessionBalanceUpdate(table?.id, nextSourceSession, nextSourceSession.guest_count ?? table?.guestCount);
+      emitTargetTransferBalanceUpdate(targetTableId, Number((itemUnitPrice(selectedTransferItem) * requestedQuantity).toFixed(2)));
       toast.success(tr('messages.itemMoved', 'Item moved to target table'));
       closeSecondaryModal();
       await refreshAll();
@@ -1596,6 +1984,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       target_table_id: targetTableId,
       source_table_id: table?.id,
       target_seat_number: transferSeatNumber ? normalizeGuestCount(transferSeatNumber) : null,
+      ...buildTransferPricingPayload(entry.item, entry.itemQuantity),
       client_event_id: `pos-tauri-table-batch-transfer-${session.id}-${entry.item.id}-${Date.now()}-${index}`,
     }));
 
@@ -1614,7 +2003,14 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
       if (nextSourceSession) {
         setSession(nextSourceSession);
+        emitTableSessionBalanceUpdate(table?.id, nextSourceSession, nextSourceSession.guest_count ?? table?.guestCount);
       }
+      emitTargetTransferBalanceUpdate(
+        targetTableId,
+        Number(batchUnpaidItemEntries.reduce((sum, entry) => {
+          return sum + itemUnitPrice(entry.item) * entry.itemQuantity;
+        }, 0).toFixed(2)),
+      );
       toast.success(tr('messages.batchItemsMoved', '{{count}} items moved to target table', { count: transferPayloads.length }));
       clearBatchSelection();
       closeSecondaryModal();
@@ -1721,7 +2117,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     .filter(link => !link.released_at)
     .map(link => {
       const linked = tables.find(candidate => candidate.id === link.table_id);
-      return linked ? `T${linked.tableNumber}` : link.table_id?.slice(0, 6);
+      return linked ? formatTableDisplayNumber(linked.tableNumber) : link.table_id?.slice(0, 6);
     })
     .filter(Boolean);
 
@@ -1755,10 +2151,11 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       <div className="liquid-glass-modal-backdrop" aria-hidden="true" />
       <motion.div
         {...panelMotion}
+        ref={mainDialogRef}
         className="liquid-glass-modal-shell relative flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
-        aria-label={tr('aria.tableCheck', 'Table {{number}} check', { number: table.tableNumber })}
+        aria-labelledby={mainTitleId}
       >
         <div className="liquid-glass-modal-header px-5 py-4">
           <div className="flex min-w-0 items-center gap-3">
@@ -1766,8 +2163,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               <Receipt className="h-5 w-5" />
             </div>
             <div className="min-w-0">
-              <h2 className="truncate text-xl font-semibold liquid-glass-modal-title">
-                {tr('title', 'Table {{number}} Check', { number: table.tableNumber })}
+              <h2 id={mainTitleId} className="truncate text-xl font-semibold liquid-glass-modal-title">
+                {tr('title', 'Table {{number}} Check', { number: formatTableDisplayNumber(table.tableNumber) })}
               </h2>
               <p className="truncate text-sm liquid-glass-modal-text-muted">{mainSubtitle}</p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -1886,6 +2283,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       const paidQuantity = Math.max(0, Number(item.quantity || 0) - availableQuantity);
                       const unpaidAmount = unpaidAmountByItemId.get(item.id) ?? Number((itemUnitPrice(item) * availableQuantity).toFixed(2));
                       const paidAmount = Math.max(0, Number((itemLineTotal(item) - unpaidAmount).toFixed(2)));
+                      const itemDiscountAmount = resolveTableCheckItemDiscount(item);
                       const itemPaid = availableQuantity <= 0;
                       const isSelectedForBatch = batchSelectedItemIds.includes(item.id);
                       return (
@@ -1925,8 +2323,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                             <Check className="h-3.5 w-3.5" />
                           </span>
                           <div className="min-w-0">
-                            <p className="truncate text-base font-semibold liquid-glass-modal-text">{itemDisplayName(item, translatedItemFallback)}</p>
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs liquid-glass-modal-text-muted">
+                            <p className="truncate text-base font-semibold text-gray-900 dark:text-white">{itemDisplayName(item, translatedItemFallback)}</p>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-zinc-300">
                               <span>{tr('labels.quantityShortValue', 'Qty {{quantity}}', { quantity: Number(item.quantity || 0) })}</span>
                               <span className="h-1 w-1 rounded-full bg-slate-500/40 dark:bg-white/25" />
                               <span className={itemPaid ? 'text-emerald-700 dark:text-emerald-300' : undefined}>
@@ -1942,10 +2340,14 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                                   </span>
                                 </>
                               ) : null}
-                              {item.is_price_overridden || item.discount || item.discountAmount ? (
+                              {item.is_price_overridden || item.discount || item.discountAmount || itemDiscountAmount > 0.009 ? (
                                 <>
                                   <span className="h-1 w-1 rounded-full bg-slate-500/40 dark:bg-white/25" />
-                                  <span className="text-emerald-700 dark:text-emerald-300">{tr('labels.adjusted', 'Adjusted')}</span>
+                                  <span className="text-emerald-700 dark:text-emerald-300">
+                                    {itemDiscountAmount > 0.009
+                                      ? tr('labels.discountAmount', 'Discount {{amount}}', { amount: money(itemDiscountAmount) })
+                                      : tr('labels.adjusted', 'Adjusted')}
+                                  </span>
                                 </>
                               ) : null}
                             </div>
@@ -1961,19 +2363,19 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                                     {tr('labels.paidAmount', 'Paid {{amount}}', { amount: money(paidAmount) })}
                                   </p>
                                 ) : null}
-                                <p className="text-xs liquid-glass-modal-text-muted">
+                                <p className="text-xs text-gray-600 dark:text-zinc-300">
                                   {tr('labels.totalAmount', 'Total {{amount}}', { amount: money(itemLineTotal(item)) })}
                                 </p>
                               </>
                             ) : (
                               <>
                                 <p className="text-base font-semibold text-emerald-700 dark:text-emerald-300">{tr('labels.paid', 'Paid')}</p>
-                                <p className="text-xs liquid-glass-modal-text-muted">
+                                <p className="text-xs text-gray-600 dark:text-zinc-300">
                                   {tr('labels.totalAmount', 'Total {{amount}}', { amount: money(itemLineTotal(item)) })}
                                 </p>
                               </>
                             )}
-                            <p className="text-xs liquid-glass-modal-text-muted">
+                            <p className="text-xs text-gray-600 dark:text-zinc-300">
                               {tr('labels.eachAmount', '{{amount}} each', { amount: money(itemUnitPrice(item)) })}
                             </p>
                           </div>
@@ -1993,6 +2395,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 <p className="mt-1 text-4xl font-semibold liquid-glass-modal-text">{money(outstanding)}</p>
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   <MetricTile label={tr('labels.total', 'Total')} value={money(orderTotal)} />
+                  {discountTotal > 0.009 ? (
+                    <MetricTile label={tr('labels.discount', 'Discount')} value={money(discountTotal)} tone="due" />
+                  ) : null}
                   <MetricTile label={tr('labels.paid', 'Paid')} value={money(paidTotal)} tone="paid" />
                   <MetricTile label={tr('labels.tips', 'Tips')} value={money(tipTotal)} tone="tip" />
                   <button
@@ -2056,11 +2461,11 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   <Users className="h-4 w-4" />
                   {tr('actions.perPerson', 'Per Person')}
                 </ActionButton>
-                <ActionButton onClick={() => setSecondaryModal('move-table')}>
+                <ActionButton onClick={openMoveTableModal}>
                   <ArrowRightLeft className="h-4 w-4" />
                   {tr('actions.move', 'Move')}
                 </ActionButton>
-                <ActionButton onClick={() => setSecondaryModal('merge-table')} tone="purple">
+                <ActionButton onClick={openMergeTableModal} tone="purple">
                   <Shuffle className="h-4 w-4" />
                   {tr('actions.merge', 'Merge')}
                 </ActionButton>
@@ -2203,20 +2608,16 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               closeLabel={tr('actions.close', 'Close')}
             >
               <div className="grid grid-cols-2 gap-3">
-                <FormField label={tr('labels.targetTable', 'Target Table')}>
-                  <select
+                <FieldGroup label={tr('labels.targetTable', 'Target Table')} labelId="table-check-batch-target">
+                  <TableDestinationPicker
                     value={targetTableId}
-                    onChange={(event) => setTargetTableId(event.target.value)}
-                    className={glassSelectClass}
-                  >
-                    <option value="">{tr('labels.selectTable', 'Select table')}</option>
-                    {availableTables.map(candidate => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {tr('labels.tableNumber', 'Table {{number}}', { number: candidate.tableNumber })}
-                      </option>
-                    ))}
-                  </select>
-                </FormField>
+                    onChange={setTargetTableId}
+                    options={availableTables}
+                    optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
+                    emptyLabel={tr('labels.selectTable', 'Select table')}
+                    labelledBy="table-check-batch-target"
+                  />
+                </FieldGroup>
                 <FormField label={tr('labels.seat', 'Seat')}>
                   <input
                     value={transferSeatNumber}
@@ -2454,20 +2855,16 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               closeLabel={tr('actions.close', 'Close')}
             >
               <div className="grid grid-cols-2 gap-3">
-                <FormField label={tr('labels.targetTable', 'Target Table')}>
-                  <select
+                <FieldGroup label={tr('labels.targetTable', 'Target Table')} labelId="table-check-transfer-target">
+                  <TableDestinationPicker
                     value={targetTableId}
-                    onChange={(event) => setTargetTableId(event.target.value)}
-                    className={glassSelectClass}
-                  >
-                    <option value="">{tr('labels.selectTable', 'Select table')}</option>
-                    {availableTables.map(candidate => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {tr('labels.tableNumber', 'Table {{number}}', { number: candidate.tableNumber })}
-                      </option>
-                    ))}
-                  </select>
-                </FormField>
+                    onChange={setTargetTableId}
+                    options={availableTables}
+                    optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
+                    emptyLabel={tr('labels.selectTable', 'Select table')}
+                    labelledBy="table-check-transfer-target"
+                  />
+                </FieldGroup>
                 <FormField label={tr('labels.quantityShort', 'Qty')}>
                   <input
                     value={transferQuantity}
@@ -2495,25 +2892,21 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           {secondaryModal === 'move-table' ? (
             <SecondarySheet
               title={tr('actions.moveTable', 'Move Table')}
-              subtitle={tr('labels.fromTable', 'From table {{number}}', { number: table.tableNumber })}
+              subtitle={tr('labels.fromTable', 'From table {{number}}', { number: formatTableDisplayNumber(table.tableNumber) })}
               icon={<ArrowRightLeft className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
             >
-              <FormField label={tr('labels.targetTable', 'Target Table')}>
-                <select
+              <FieldGroup label={tr('labels.targetTable', 'Target Table')} labelId="table-check-move-target">
+                <TableDestinationPicker
                   value={targetTableId}
-                  onChange={(event) => setTargetTableId(event.target.value)}
-                  className={glassSelectClass}
-                >
-                  <option value="">{tr('labels.selectTable', 'Select table')}</option>
-                  {availableTables.map(candidate => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {tr('labels.tableNumber', 'Table {{number}}', { number: candidate.tableNumber })}
-                    </option>
-                  ))}
-                </select>
-              </FormField>
+                  onChange={setTargetTableId}
+                  options={availableTables}
+                  optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
+                  emptyLabel={tr('labels.selectTable', 'Select table')}
+                  labelledBy="table-check-move-target"
+                />
+              </FieldGroup>
               <ActionButton
                 onClick={() => targetTableId && void patchSession(
                   { action: 'move_table', target_table_id: targetTableId, release_source_tables: true },
@@ -2532,25 +2925,21 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           {secondaryModal === 'merge-table' ? (
             <SecondarySheet
               title={tr('actions.mergeTable', 'Merge Table')}
-              subtitle={tr('labels.intoTable', 'Into table {{number}}', { number: table.tableNumber })}
+              subtitle={tr('labels.intoTable', 'Into table {{number}}', { number: formatTableDisplayNumber(table.tableNumber) })}
               icon={<Shuffle className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
             >
-              <FormField label={tr('labels.table', 'Table')}>
-                <select
+              <FieldGroup label={tr('labels.table', 'Table')} labelId="table-check-merge-target">
+                <TableDestinationPicker
                   value={mergeTableId}
-                  onChange={(event) => setMergeTableId(event.target.value)}
-                  className={glassSelectClass}
-                >
-                  <option value="">{tr('labels.selectTable', 'Select table')}</option>
-                  {availableTables.map(candidate => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {tr('labels.tableNumber', 'Table {{number}}', { number: candidate.tableNumber })}
-                    </option>
-                  ))}
-                </select>
-              </FormField>
+                  onChange={setMergeTableId}
+                  options={availableTables}
+                  optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
+                  emptyLabel={tr('labels.selectTable', 'Select table')}
+                  labelledBy="table-check-merge-target"
+                />
+              </FieldGroup>
               <ActionButton
                 onClick={() => mergeTableId && void patchSession(
                   { action: 'merge_table', table_ids: [mergeTableId] },
@@ -2569,7 +2958,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           {secondaryModal === 'assign-waiter' ? (
             <SecondarySheet
               title={tr('actions.assignWaiter', 'Assign Waiter')}
-              subtitle={tr('labels.tableNumber', 'Table {{number}}', { number: table.tableNumber })}
+              subtitle={tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(table.tableNumber) })}
               icon={<UserCheck className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
@@ -2588,12 +2977,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   {selectedWaiterId === '' ? <Check className="h-4 w-4 text-blue-700 dark:text-blue-300" /> : null}
                 </button>
                 {isLoadingWaiters ? (
-                  <div className="flex items-center justify-center rounded-xl border liquid-glass-modal-border px-3 py-6 liquid-glass-modal-text-muted">
+                  <div className="flex items-center justify-center rounded-2xl border liquid-glass-modal-border px-3 py-6 liquid-glass-modal-text-muted">
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     {tr('messages.loadingStaff', 'Loading staff...')}
                   </div>
                 ) : waiterOptions.length === 0 ? (
-                  <div className="rounded-xl border liquid-glass-modal-border px-3 py-6 text-center liquid-glass-modal-text-muted">
+                  <div className="rounded-2xl border liquid-glass-modal-border px-3 py-6 text-center liquid-glass-modal-text-muted">
                     {tr('messages.noWaitersAvailable', 'No active staff available.')}
                   </div>
                 ) : (
@@ -2611,7 +3000,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       <span className="min-w-0">
                         <span className="block truncate font-semibold liquid-glass-modal-text">{waiter.name}</span>
                         <span className="block truncate text-xs liquid-glass-modal-text-muted">
-                          {waiter.role || tr('labels.staffMember', 'Staff member')}
+                          {translateRoleName(t, waiter.role || '', staffMemberFallbackLabel)}
                         </span>
                       </span>
                       {selectedWaiterId === waiter.id ? <Check className="h-4 w-4 text-blue-700 dark:text-blue-300" /> : null}
@@ -2629,7 +3018,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           {secondaryModal === 'covers' ? (
             <SecondarySheet
               title={tr('labels.covers', 'Covers')}
-              subtitle={tr('labels.tableNumber', 'Table {{number}}', { number: table.tableNumber })}
+              subtitle={tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(table.tableNumber) })}
               icon={<Users className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}

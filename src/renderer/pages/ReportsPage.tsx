@@ -129,13 +129,13 @@ const ReportsPage: React.FC = () => {
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.4, delay }}
-      className={`p-6 rounded-xl ${
+      className={`p-6 rounded-2xl ${
         isDark ? 'bg-gray-800/50 backdrop-blur-md' : 'bg-white/80 backdrop-blur-md'
-      } shadow-lg border ${isDark ? 'border-gray-700/50' : 'border-gray-200/50'} hover:shadow-xl transition-shadow`}
+      } shadow-lg border ${isDark ? 'border-gray-700/50' : 'border-gray-200/50'}`}
     >
       <div className="flex items-center justify-between mb-4">
-        <div className={`p-3 rounded-lg ${color}`}>
-          <Icon className="w-6 h-6 text-white" />
+        <div className={`p-3 rounded-2xl ${color}`}>
+          <Icon className={`w-6 h-6 ${color.includes('yellow') || color.includes('amber') ? 'text-black' : 'text-white'}`} />
         </div>
       </div>
       <h3 className={`text-sm font-medium mb-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -156,7 +156,7 @@ const ReportsPage: React.FC = () => {
         <div className="max-w-7xl mx-auto">
           <div className="flex items-center justify-center h-96">
             <div className="text-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-yellow-400 mx-auto mb-4"></div>
               <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>
                 {t('common.messages.loadingData')}
               </p>
@@ -168,7 +168,7 @@ const ReportsPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-screen overflow-y-auto p-6 ${isDark ? 'bg-gray-900 text-white' : 'bg-[#fdfaf5] text-gray-900'}`}>
+    <div className={`h-screen overflow-y-auto scrollbar-hide p-6 ${isDark ? 'bg-gray-900 text-white' : 'bg-[#fdfaf5] text-gray-900'}`}>
       <div className="max-w-7xl mx-auto pb-8">
         {/* Header */}
         <motion.div
@@ -177,7 +177,7 @@ const ReportsPage: React.FC = () => {
           transition={{ duration: 0.5 }}
           className="mb-8"
         >
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          <h1 className={`text-4xl font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
             {t('reports.title')}
           </h1>
           <p className={`text-lg ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -199,7 +199,7 @@ const ReportsPage: React.FC = () => {
               isDark
                 ? 'bg-gray-800/50 border-gray-700 text-white backdrop-blur-md'
                 : 'bg-white/80 border-gray-300 text-gray-900 backdrop-blur-md'
-            } focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-lg transition-all`}
+            } focus:ring-2 focus:ring-yellow-400 focus:border-transparent shadow-lg transition-all`}
           >
             <option value="today">{t('reports.period.today')}</option>
             <option value="week">{t('reports.period.thisWeek')}</option>
@@ -220,16 +220,18 @@ const ReportsPage: React.FC = () => {
               }}
               className={`px-6 py-3 rounded-xl border ${
                 isDark
-                  ? 'border-gray-700 text-gray-300 hover:bg-gray-800/50 backdrop-blur-md'
-                  : 'border-gray-300 text-gray-700 hover:bg-gray-50/80 backdrop-blur-md'
-              } transition-all shadow-lg flex items-center gap-2`}
+                  ? 'border-gray-700 bg-gray-800/50 text-gray-100 backdrop-blur-md'
+                  : 'border-gray-300 bg-white/80 text-gray-800 backdrop-blur-md'
+              } transition-transform duration-150 active:scale-[0.98] shadow-lg flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400`}
             >
               <Download className="w-5 h-5" />
               {t('reports.actions.exportCSV')}
             </button>
             <button
               onClick={() => setShowZReport(true)}
-              className="px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl transition-all shadow-lg flex items-center gap-2"
+              className={`px-6 py-3 rounded-xl transition-transform duration-150 active:scale-[0.98] shadow-lg flex items-center gap-2 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+                isDark ? 'bg-yellow-400 text-black' : 'bg-black text-white'
+              }`}
             >
               <FileText className="w-5 h-5" />
               {t('reports.actions.generateZReport')}
@@ -244,7 +246,7 @@ const ReportsPage: React.FC = () => {
             title={t('reports.metrics.totalOrders')}
             value={todayStats?.totalOrders ?? 0}
             subtitle={t('reports.trends.ordersChange')}
-            color="bg-gradient-to-br from-blue-500 to-blue-600"
+            color={isDark ? 'bg-yellow-400' : 'bg-black'}
             delay={0.1}
           />
           <MetricCard
@@ -260,7 +262,7 @@ const ReportsPage: React.FC = () => {
             title={t('reports.orders.avgOrderValue')}
             value={formatMoney(todayStats?.avgOrderValue ?? 0)}
             subtitle={t('reports.trends.avgOrderChange')}
-            color="bg-gradient-to-br from-purple-500 to-purple-600"
+            color={isDark ? 'bg-zinc-700' : 'bg-zinc-800'}
             delay={0.2}
           />
           <MetricCard
@@ -268,7 +270,7 @@ const ReportsPage: React.FC = () => {
             title={`${t('common.status.completed')} Rate`}
             value={`${todayStats?.completionRate ?? 0}%`}
             subtitle={t('reports.trends.completionRateChange')}
-            color="bg-gradient-to-br from-orange-500 to-orange-600"
+            color="bg-amber-400"
             delay={0.25}
           />
         </div>
@@ -327,7 +329,7 @@ const ReportsPage: React.FC = () => {
               } shadow-lg border ${isDark ? 'border-gray-700/50' : 'border-gray-200/50'}`}
             >
               <div className="flex items-center gap-3 mb-4">
-                <div className="p-3 rounded-lg bg-gradient-to-br from-green-500 to-green-600">
+                <div className="p-3 rounded-2xl bg-gradient-to-br from-green-500 to-green-600">
                   <CreditCard className="w-6 h-6 text-white" />
                 </div>
                 <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -351,7 +353,7 @@ const ReportsPage: React.FC = () => {
               } shadow-lg border ${isDark ? 'border-gray-700/50' : 'border-gray-200/50'}`}
             >
               <div className="flex items-center gap-3 mb-4">
-                <div className="p-3 rounded-lg bg-gradient-to-br from-blue-500 to-blue-600">
+                <div className="p-3 rounded-2xl bg-zinc-800">
                   <CreditCard className="w-6 h-6 text-white" />
                 </div>
                 <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -375,8 +377,8 @@ const ReportsPage: React.FC = () => {
               } shadow-lg border ${isDark ? 'border-gray-700/50' : 'border-gray-200/50'}`}
             >
               <div className="flex items-center gap-3 mb-4">
-                <div className="p-3 rounded-lg bg-gradient-to-br from-purple-500 to-purple-600">
-                  <Package className="w-6 h-6 text-white" />
+                <div className="p-3 rounded-2xl bg-amber-400">
+                  <Package className="w-6 h-6 text-black" />
                 </div>
                 <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
                   {t('reports.deliveryOrders')}

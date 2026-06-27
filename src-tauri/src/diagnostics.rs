@@ -928,6 +928,53 @@ fn redact_value_for_export(value: Value, enabled: bool) -> Value {
     redact_sensitive_fields(value)
 }
 
+pub(crate) fn redact_remote_diagnostics_value(value: Value) -> Value {
+    redact_sensitive_fields(value)
+}
+
+#[allow(dead_code)]
+pub fn export_remote_incident_bundle(db: &DbState, output_dir: &Path) -> Result<String, String> {
+    export_diagnostics_with_options(
+        db,
+        output_dir,
+        DiagnosticsExportOptions {
+            include_logs: false,
+            redact_sensitive: true,
+        },
+    )
+}
+
+fn scrub_sensitive_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len().min(512));
+    for word in value.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        let scrubbed = if lower.contains('@') && lower.contains('.') {
+            "[REDACTED_EMAIL]"
+        } else {
+            let digit_count = word.chars().filter(|c| c.is_ascii_digit()).count();
+            let phone_shaped = word.chars().all(|c| {
+                c.is_ascii_digit() || matches!(c, '+' | '-' | '(' | ')' | '.' | '/')
+            });
+            if phone_shaped && digit_count >= 8 {
+                "[REDACTED_PHONE]"
+            } else {
+                word
+            }
+        };
+
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push_str(scrubbed);
+        if output.len() >= 2000 {
+            output.truncate(2000);
+            output.push_str("...");
+            break;
+        }
+    }
+    output
+}
+
 fn redact_sensitive_fields(value: Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -944,6 +991,7 @@ fn redact_sensitive_fields(value: Value) -> Value {
         Value::Array(items) => {
             Value::Array(items.into_iter().map(redact_sensitive_fields).collect())
         }
+        Value::String(value) => Value::String(scrub_sensitive_string(&value)),
         other => other,
     }
 }
@@ -954,12 +1002,56 @@ fn should_redact_key(key: &str) -> bool {
     if non_secret_presence_markers.contains(&normalized.as_str()) {
         return false;
     }
+    let sensitive_exact = [
+        "auth",
+        "access_token",
+        "refresh_token",
+        "customer_name",
+        "customername",
+        "customer_phone",
+        "customerphone",
+        "customer_email",
+        "customeremail",
+        "phone",
+        "email",
+        "address",
+        "street_address",
+        "delivery_address",
+        "deliveryaddress",
+        "delivery_notes",
+        "deliverynotes",
+        "note",
+        "notes",
+        "payment_ref",
+        "paymentref",
+        "payment_reference",
+        "transaction_ref",
+        "transactionref",
+        "payload",
+        "raw_payload",
+        "rawpayload",
+        "raw",
+        "data",
+        "body",
+        "headers",
+        "card_number",
+        "cardnumber",
+    ];
+    if sensitive_exact.contains(&normalized.as_str())
+        || normalized.ends_with("_payload")
+        || normalized.ends_with("payload")
+        || normalized.ends_with("_raw")
+    {
+        return true;
+    }
     let sensitive_markers = [
         "api_key",
         "apikey",
+        "api-key",
         "secret",
         "password",
         "token",
+        "bearer",
         "authorization",
         "cookie",
         "pin",

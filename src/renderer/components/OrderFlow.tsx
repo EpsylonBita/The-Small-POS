@@ -28,9 +28,12 @@ import type { DeliveryBoundaryValidationResponse } from '../../shared/types/deli
 import type { RestaurantTable } from '../types/tables';
 import { ActivityTracker } from '../services/ActivityTracker';
 import { toLocalDateString } from '../utils/date';
+import { formatTableDisplayNumber } from '../utils/table-display';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { AlertTriangle } from 'lucide-react';
+import TableOrderIcon from './icons/TableOrderIcon';
+import PickupOrderIcon from './icons/PickupOrderIcon';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
 import {
   getCachedTerminalCredentials,
@@ -145,6 +148,17 @@ const toLatLngCoordinates = (
  * Complete Order Flow Component
  * Handles the full order creation workflow from type selection to completion
  */
+// Compose an order-type card's accessible name: title + description, but avoid repeating the title when the
+// description is empty or equal (mirrors OrderDashboard's helper so both order-taking paths announce identically).
+const composeOrderTypeAriaLabel = (title: string, description: string): string => {
+  const cleanTitle = (title || '').trim();
+  const cleanDescription = (description || '').trim();
+  if (!cleanDescription || cleanDescription.toLowerCase() === cleanTitle.toLowerCase()) {
+    return cleanTitle;
+  }
+  return `${cleanTitle}. ${cleanDescription}`;
+};
+
 const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = false, showFab = true }) => {
   const bridge = getBridge();
   const { t } = useI18n();
@@ -571,7 +585,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       setTableNumber(selectedTable.tableNumber.toString());
       const tableCustomer: Customer = {
         id: 'table-customer',
-        name: t('orderFlow.tableCustomer', { table: selectedTable.tableNumber }) || `Table ${selectedTable.tableNumber}`,
+        name: t('orderFlow.tableCustomer', { table: formatTableDisplayNumber(selectedTable.tableNumber) }) || `Table ${formatTableDisplayNumber(selectedTable.tableNumber)}`,
         phone: '',
         email: '',
         addresses: []
@@ -1168,6 +1182,29 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     }
   }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment]);
 
+  // Order-type chooser ergonomics aligned with the main OrderDashboard modal (Round 346): modal width + grid
+  // scale to the number of visible cards (pickup always present; delivery/tables optional), and each card
+  // exposes a localized title/description + composed aria-label.
+  const visibleOrderTypeCardCount = 1 + (hasDeliveryModule ? 1 : 0) + (hasTablesModule ? 1 : 0);
+  const orderTypeModalWidthClass =
+    visibleOrderTypeCardCount === 3
+      ? '!max-w-3xl'
+      : visibleOrderTypeCardCount === 2
+        ? '!max-w-xl'
+        : '!max-w-lg';
+  const orderTypeGridColsClass =
+    visibleOrderTypeCardCount === 3
+      ? 'grid-cols-1 sm:grid-cols-3'
+      : visibleOrderTypeCardCount === 2
+        ? 'grid-cols-2'
+        : 'grid-cols-1';
+  const deliveryTitle = t('orderFlow.deliveryOrder');
+  const deliveryDescription = t('modals.orderTypeSelection.deliveryDescription');
+  const pickupTitle = t('orderFlow.pickupOrder');
+  const pickupDescription = t('modals.orderTypeSelection.pickupDescription');
+  const tableTitle = t('orderFlow.tableOrder');
+  const tableDescription = t('orderFlow.tableDescription');
+
   return (
     <div className={`order-flow ${className}`}>
       {/* Floating Action Button for New Order - hidden when order creation is disabled */}
@@ -1175,9 +1212,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         <FloatingActionButton
           onClick={handleStartNewOrder}
           disabled={!isShiftActive}
-          aria-label={t('orderFlow.startNewOrder')}
-          title={!isShiftActive ? t('orders.startShiftFirst', 'Start a shift first to create orders') : undefined}
-          className={!isShiftActive ? 'bg-gray-400 cursor-not-allowed opacity-50 hover:scale-100 hover:bg-gray-400' : ''}
+          aria-label={!isShiftActive ? t('orders.startShiftFirst', 'Start a shift first to create orders') : t('orderFlow.startNewOrder')}
+          className={!isShiftActive ? 'bg-gray-400 cursor-not-allowed opacity-50' : ''}
         />
       )}
 
@@ -1186,8 +1222,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         isOpen={isOrderTypeModalOpen}
         onClose={() => setIsOrderTypeModalOpen(false)}
         title={t('orderFlow.selectOrderType')}
-        size="sm"
-        className="!max-w-md"
+        className={`${orderTypeModalWidthClass} order-type-transparent-modal`}
+        contentClassName="!p-0 !overflow-visible"
       >
         <div>
           {isTransitioning ? (
@@ -1196,25 +1232,28 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               <span className="ml-3 text-white/70">{t('orderFlow.settingUpOrder')}</span>
             </div>
           ) : (
-            <div className={`grid gap-4 ${hasDeliveryModule && hasTablesModule ? 'grid-cols-3' : hasDeliveryModule || hasTablesModule ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            <div className={`grid gap-4 sm:gap-5 ${orderTypeGridColsClass}`}>
               {/* Delivery Button - Yellow (only if Delivery module acquired) */}
               {hasDeliveryModule && (
                 <button
+                  type="button"
+                  data-order-type-card="delivery"
                   onClick={() => handleSelectOrderType('delivery')}
-                  className="group relative p-6 rounded-2xl border-2 border-yellow-400/30 bg-gradient-to-br from-yellow-500/10 to-yellow-600/5 hover:from-yellow-500/20 hover:to-yellow-600/10 hover:border-yellow-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-yellow-500/20"
+                  aria-label={composeOrderTypeAriaLabel(deliveryTitle, deliveryDescription)}
+                  className="relative p-6 rounded-2xl border-2 border-[#facc15]/45 bg-[linear-gradient(135deg,rgba(250,204,21,0.16),rgba(234,179,8,0.06))] transition-transform duration-150 active:scale-95"
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
-                      <svg className="w-full h-full text-yellow-400 group-hover:text-yellow-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="1.5">
+                      <svg className="w-full h-full text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="1.5">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 18.75a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h6m-9 0H3.375a1.125 1.125 0 01-1.125-1.125V14.25m17.25 4.5a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h1.125c.621 0 1.129-.504 1.09-1.124a17.902 17.902 0 00-3.213-9.193 2.056 2.056 0 00-1.58-.86H14.25M16.5 18.75h-2.25m0-11.177v-.958c0-.568-.422-1.048-.987-1.106a48.554 48.554 0 00-10.026 0 1.106 1.106 0 00-.987 1.106v7.635m12-6.677v6.677m0 4.5v-4.5m0 0h-12" />
                       </svg>
                     </div>
                     <div className="text-center">
-                      <h3 className="text-lg font-bold text-yellow-400 group-hover:text-yellow-300 transition-colors mb-1">
-                        {t('orderFlow.deliveryOrder')}
+                      <h3 className="text-lg font-bold text-yellow-400 transition-colors mb-1">
+                        {deliveryTitle}
                       </h3>
-                      <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                        {t('modals.orderTypeSelection.deliveryDescription')}
+                      <p className="text-sm leading-snug text-white/60 transition-colors">
+                        {deliveryDescription}
                       </p>
                     </div>
                   </div>
@@ -1223,21 +1262,22 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
               {/* Pickup Button - Green (always available) */}
               <button
+                type="button"
+                data-order-type-card="pickup"
                 onClick={() => handleSelectOrderType('pickup')}
-                className="group relative p-6 rounded-2xl border-2 border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 hover:from-green-500/20 hover:to-green-600/10 hover:border-green-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-green-500/20"
+                aria-label={composeOrderTypeAriaLabel(pickupTitle, pickupDescription)}
+                className="relative p-6 rounded-2xl border-2 border-[#34d399]/45 bg-[linear-gradient(135deg,rgba(52,211,153,0.16),rgba(22,163,74,0.06))] transition-transform duration-150 active:scale-95"
               >
                 <div className="flex flex-col items-center gap-3">
                   <div className="w-16 h-16 flex items-center justify-center">
-                    <svg className="w-full h-full text-green-400 group-hover:text-green-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="1.5">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 21v-7.5a.75.75 0 01.75-.75h3a.75.75 0 01.75.75V21m-4.5 0H2.36m11.14 0H18m0 0h3.64m-1.39 0V9.349m-16.5 11.65V9.35m0 0a3.001 3.001 0 003.75-.615A2.993 2.993 0 009.75 9.75c.896 0 1.7-.393 2.25-1.016a2.993 2.993 0 002.25 1.016c.896 0 1.7-.393 2.25-1.016a3.001 3.001 0 003.75.614m-16.5 0a3.004 3.004 0 01-.621-4.72L4.318 3.44A1.5 1.5 0 015.378 3h13.243a1.5 1.5 0 011.06.44l1.19 1.189a3 3 0 01-.621 4.72m-13.5 8.65h3.75a.75.75 0 00.75-.75V13.5a.75.75 0 00-.75-.75H6.75a.75.75 0 00-.75.75v3.75c0 .415.336.75.75.75z" />
-                    </svg>
+                    <PickupOrderIcon className="w-full h-full text-white" />
                   </div>
                   <div className="text-center">
-                    <h3 className="text-lg font-bold text-green-400 group-hover:text-green-300 transition-colors mb-1">
-                      {t('orderFlow.pickupOrder')}
+                    <h3 className="text-lg font-bold text-green-400 transition-colors mb-1">
+                      {pickupTitle}
                     </h3>
-                    <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                      {t('modals.orderTypeSelection.pickupDescription')}
+                    <p className="text-sm leading-snug text-white/60 transition-colors">
+                      {pickupDescription}
                     </p>
                   </div>
                 </div>
@@ -1246,29 +1286,27 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               {/* Table Button - Blue (only if Tables module acquired) */}
               {hasTablesModule && (
                 <button
+                  type="button"
+                  data-order-type-card="table"
                   onClick={() => handleSelectOrderType('dine-in')}
-                  className="group relative p-6 rounded-2xl border-2 border-blue-400/30 bg-gradient-to-br from-blue-500/10 to-blue-600/5 hover:from-blue-500/20 hover:to-blue-600/10 hover:border-blue-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-blue-500/20"
+                  aria-label={composeOrderTypeAriaLabel(tableTitle, tableDescription)}
+                  className="relative p-6 rounded-2xl border-2 border-[#60a5fa]/45 bg-[linear-gradient(135deg,rgba(96,165,250,0.16),rgba(37,99,235,0.06))] transition-transform duration-150 active:scale-95"
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
-                      {/* Round restaurant table icon */}
-                      <svg className="w-full h-full text-blue-400 group-hover:text-blue-300 transition-colors" fill="currentColor" viewBox="0 0 24 24">
-                        {/* Round table top (ellipse for 3D effect) */}
-                        <ellipse cx="12" cy="6" rx="8" ry="3" />
-                        {/* Table cloth/body */}
-                        <path d="M4 6c0 0 1 6 8 6s8-6 8-6c0 1.5-2 5-8 5S4 7.5 4 6z" />
-                        {/* Table pedestal */}
-                        <rect x="10" y="12" width="4" height="6" rx="0.5" />
-                        {/* Table base */}
-                        <ellipse cx="12" cy="19" rx="4" ry="1.2" />
-                      </svg>
+                      {/* Dine-in / table order icon */}
+                      <TableOrderIcon
+                        className="w-full h-full text-white"
+                        strokeWidth={1.6}
+                        opticalScale={1.62}
+                      />
                     </div>
                     <div className="text-center">
-                      <h3 className="text-lg font-bold text-blue-400 group-hover:text-blue-300 transition-colors mb-1">
-                        {t('orderFlow.tableOrder')}
+                      <h3 className="text-lg font-bold text-[#60a5fa] transition-colors mb-1">
+                        {tableTitle}
                       </h3>
-                      <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                        {t('orderFlow.tableDescription')}
+                      <p className="text-sm leading-snug text-white/60 transition-colors">
+                        {tableDescription}
                       </p>
                     </div>
                   </div>

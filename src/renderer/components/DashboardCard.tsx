@@ -41,9 +41,9 @@ const CARD_COLORS: Record<DashboardCardColor, {
   text: { light: string; dark: string };
 }> = {
   blue: {
-    bg: { light: 'bg-blue-50', dark: 'bg-blue-900/40' },
-    icon: { light: 'text-blue-600', dark: 'text-blue-400' },
-    text: { light: 'text-blue-700', dark: 'text-blue-300' },
+    bg: { light: 'bg-amber-50', dark: 'bg-amber-900/30' },
+    icon: { light: 'text-amber-700', dark: 'text-amber-300' },
+    text: { light: 'text-amber-800', dark: 'text-amber-200' },
   },
   brown: {
     bg: { light: 'bg-amber-50', dark: 'bg-amber-900/40' },
@@ -61,9 +61,9 @@ const CARD_COLORS: Record<DashboardCardColor, {
     text: { light: 'text-red-700', dark: 'text-red-300' },
   },
   purple: {
-    bg: { light: 'bg-purple-50', dark: 'bg-purple-900/40' },
-    icon: { light: 'text-purple-600', dark: 'text-purple-400' },
-    text: { light: 'text-purple-700', dark: 'text-purple-300' },
+    bg: { light: 'bg-zinc-100', dark: 'bg-zinc-800/60' },
+    icon: { light: 'text-zinc-700', dark: 'text-zinc-300' },
+    text: { light: 'text-zinc-900', dark: 'text-zinc-100' },
   },
   amber: {
     bg: { light: 'bg-amber-50', dark: 'bg-amber-900/40' },
@@ -154,10 +154,10 @@ export const DashboardCard = memo<DashboardCardProps>(({
       className={`
         dashboard-card
         ${bgClass}
-        rounded-xl border p-6
+        rounded-2xl border p-6
         shadow-sm
         ${isDark ? 'border-gray-700/50' : 'border-gray-200'}
-        ${onClick && !disabled ? 'cursor-pointer hover:opacity-90 transition-all hover:scale-[1.02] active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500' : ''}
+        ${onClick && !disabled ? 'cursor-pointer transition-transform active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-400' : ''}
         ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
         ${className}
       `}

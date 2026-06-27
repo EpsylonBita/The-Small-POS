@@ -50,8 +50,10 @@ function CallerIdToastContent({
           <p className="text-xs text-zinc-400 font-mono">{event.callerNumber}</p>
         </div>
         <button
+          type="button"
           onClick={() => toast.dismiss(toastId)}
-          className="flex-shrink-0 p-1 rounded hover:bg-white/10 transition-colors"
+          aria-label={t('common.actions.close', 'Close')}
+          className="flex-shrink-0 rounded-lg p-1 transition-transform active:scale-95 active:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
         >
           <X className="w-4 h-4 text-zinc-500" />
         </button>
@@ -69,21 +71,23 @@ function CallerIdToastContent({
         {hasCustomer ? (
           <>
             <button
+              type="button"
               onClick={() => {
                 toast.dismiss(toastId)
                 onViewCustomer?.(event.customer!.id)
               }}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-white/10 hover:bg-white/20 text-zinc-200 transition-colors"
+              className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-white/10 px-3 py-1.5 text-xs font-medium text-zinc-200 transition-transform active:scale-[0.98] active:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
             >
               <User className="w-3.5 h-3.5" />
               {t('callerid.popup.viewCustomer', 'View')}
             </button>
             <button
+              type="button"
               onClick={() => {
                 toast.dismiss(toastId)
                 onStartOrder?.(event)
               }}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-green-600 hover:bg-green-500 text-white transition-colors"
+              className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white transition-transform active:scale-[0.98] active:bg-green-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300/80"
             >
               <ShoppingCart className="w-3.5 h-3.5" />
               {t('callerid.popup.startOrder', 'Start Order')}
@@ -91,11 +95,12 @@ function CallerIdToastContent({
           </>
         ) : (
           <button
+            type="button"
             onClick={() => {
               toast.dismiss(toastId)
               onAddCustomer?.(event.callerNumber)
             }}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+            className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition-transform active:scale-[0.98] active:bg-amber-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200"
           >
             <UserPlus className="w-3.5 h-3.5" />
             {t('callerid.popup.addCustomer', 'Add Customer')}

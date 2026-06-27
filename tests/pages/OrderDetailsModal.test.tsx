@@ -84,7 +84,8 @@ test('OrderDetailsModal gives cancelled pickup orders a clear three-card layout'
     assert.doesNotMatch(html, /ORD-11052026-00004/);
     assert.doesNotMatch(html, /bg-gradient-to-br/);
     assert.match(html, /absolute right-4 top-3/);
-    assert.match(html, /px-6 pb-6 pt-16/);
+    // Compact restyle: the scroll body uses px-6 pt-16 pb-24 (was px-6 pb-6 pt-16).
+    assert.match(html, /px-6 pt-16 pb-24/);
     assert.doesNotMatch(html, /overflow-hidden p-6 pr-24/);
     assert.match(html, /border-red-500\/70[\s\S]*bg-black[\s\S]*text-center[\s\S]*text-red-400[\s\S]*Cancellation Reason[\s\S]*text-2xl[\s\S]*text-white[\s\S]*deleted/);
   } finally {
@@ -123,7 +124,8 @@ test('OrderDetailsModal formats kiosk order numbers and hides routing metadata n
     assert.doesNotMatch(html, /Service Notes/);
     assert.match(html, /Payment Method/);
     assert.match(html, /Payment status: Pending/);
-    assert.match(html, /flex h-5 w-5 shrink-0 items-center justify-center text-blue-600/);
+    // Compact restyle: the Payment Method info icon is semantic emerald (was blue).
+    assert.match(html, /flex h-5 w-5 shrink-0 items-center justify-center text-emerald-600/);
     assert.doesNotMatch(html, /flex h-11 w-11 items-center justify-center rounded-2xl/);
     assert.doesNotMatch(html, /bg-blue-500\/15/);
     assert.doesNotMatch(html, /bg-sky-500\/15/);
@@ -158,6 +160,24 @@ test('OrderDetailsModal keeps item totals and history labels visually clean', ()
   assert.match(source, /text-yellow-500 dark:text-yellow-300/);
   assert.match(source, /text-xs font-semibold text-emerald-600 dark:text-emerald-300/);
   assert.doesNotMatch(source, /rounded-full border border-emerald-300\/70 bg-emerald-50 px-3 py-1/);
+});
+
+// Touch POS scrollbar policy: the inner item list used a styled native `custom-scrollbar`; it now
+// uses the same hidden rail as the modal body. Every scroll region keeps its scroll but hides the
+// native scrollbar.
+test('OrderDetailsModal scroll regions use the hidden touch rail (no custom-scrollbar)', () => {
+  const source = readFileSync(orderDetailsModalPath, 'utf8');
+
+  assert.doesNotMatch(source, /custom-scrollbar/, 'custom-scrollbar must be replaced by scrollbar-hide');
+  // The inner item list keeps overflow-y-auto (scroll preserved) but hides the rail.
+  assert.match(source, /flex-1 overflow-y-auto space-y-3 scrollbar-hide/);
+
+  const classAttrs = source.match(/className=(?:"[^"]*"|\{`[^`]*`\})/g) ?? [];
+  const scrollers = classAttrs.filter((cls) => /\boverflow-y-auto\b/.test(cls));
+  assert.ok(scrollers.length >= 2, `expected the order-details scroll regions, found ${scrollers.length}`);
+  for (const cls of scrollers) {
+    assert.match(cls, /\bscrollbar-hide\b/, `order-details scroll region must hide its native scrollbar: ${cls}`);
+  }
 });
 
 test('OrderDetailsModal shows a history empty state for pickup orders without customer contact data', () => {

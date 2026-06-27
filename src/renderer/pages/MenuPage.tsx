@@ -128,22 +128,22 @@ const MenuPage: React.FC = () => {
   const buildCategoryObjects = (categoriesData: any[]) => {
     const getCategoryIcon = (name: string): string => {
       const iconMap: Record<string, string> = {
-        'crepes': '🥞',
-        'waffles': '🧇',
-        'toasts': '🍞',
-        'beverages': '🥤',
-        'desserts': '🧁',
-        'salads': '🥗',
-        'my crepe': '🎨',
-        'my waffle': '🎨',
-        'my toast': '🎨'
+        'crepes': '\u{1F95E}',
+        'waffles': '\u{1F9C7}',
+        'toasts': '\u{1F35E}',
+        'beverages': '\u{1F964}',
+        'desserts': '\u{1F370}',
+        'salads': '\u{1F957}',
+        'my crepe': '\u{1F3A8}',
+        'my waffle': '\u{1F3A8}',
+        'my toast': '\u{1F3A8}'
       };
-      return iconMap[name.toLowerCase()] || '🍽️';
+      return iconMap[name.toLowerCase()] || '\u{1F37D}\uFE0F';
     };
 
     const defaultCategories = [
-      { id: "all", name: t('menu.categories.allItems'), icon: "🍽️" },
-      { id: "featured", name: t('menu.categories.featured'), icon: "⭐" }
+      { id: "all", name: t('menu.categories.allItems'), icon: "\u{1F37D}\uFE0F" },
+      { id: "featured", name: t('menu.categories.featured'), icon: "\u2B50" }
     ];
 
     return [
@@ -497,15 +497,22 @@ const MenuPage: React.FC = () => {
   };
 
   return (
-    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="min-h-screen bg-gray-50 p-4">
+    <motion.div
+      initial="hidden"
+      animate="show"
+      variants={pageMotionContainer}
+      className={`min-h-screen p-4 ${resolvedTheme === 'dark' ? 'bg-black text-white' : 'bg-white text-gray-900'}`}
+    >
       <motion.div variants={pageMotionContainer} className="max-w-7xl mx-auto">
         {/* Header */}
         <motion.div variants={pageMotionItem} className="mb-6">
           <motion.div variants={pageMotionItem} className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold text-gray-900">{t('menu.title')}</h1>
+            <h1 className={`text-2xl font-bold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>{t('menu.title')}</h1>
             <button
               onClick={() => navigate('/orders')}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              className={`px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+                resolvedTheme === 'dark' ? 'bg-yellow-400 text-black' : 'bg-black text-white'
+              }`}
             >
               {t('orders.viewOrders')}
             </button>
@@ -514,8 +521,10 @@ const MenuPage: React.FC = () => {
           {/* Order Type Display */}
           <motion.div variants={pageMotionItem} className="mt-4 flex items-center justify-between">
             <div className="flex items-center space-x-4">
-              <span className="text-sm font-medium text-gray-700">{t('orders.fields.orderType')}</span>
-              <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">
+              <span className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>{t('orders.fields.orderType')}</span>
+              <span className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                resolvedTheme === 'dark' ? 'bg-yellow-400/20 text-yellow-200' : 'bg-yellow-100 text-yellow-900'
+              }`}>
                 {orderType === 'dine-in' ? t('orders.type.dineIn') : orderType === 'pickup' ? t('orders.type.pickup') : t('orders.type.delivery')}
               </span>
             </div>
@@ -556,14 +565,16 @@ const MenuPage: React.FC = () => {
                   </p>
                   <button
                     onClick={handleSyncMenu}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    className={`px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+                      resolvedTheme === 'dark' ? 'bg-yellow-400 text-black' : 'bg-black text-white'
+                    }`}
                   >
                     {t('menu.sync.syncNow')}
                   </button>
                 </motion.div>
               </motion.div>
             ) : (
-              <motion.div variants={pageMotionItem} className={`rounded-lg shadow-lg overflow-hidden ${
+              <motion.div variants={pageMotionItem} className={`rounded-2xl shadow-lg overflow-hidden ${
                 resolvedTheme === 'dark' ? 'bg-gray-800' : 'bg-white'
               }`}>
                 {/* Category Tabs */}

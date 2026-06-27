@@ -1230,6 +1230,14 @@ fn load_net_paid_for_order(conn: &rusqlite::Connection, order_id: &str) -> Resul
 }
 
 fn determine_edit_settlement_required_action(paid_total: f64, next_total: f64) -> &'static str {
+    // Unpaid/pending orders carry no settlement: a product edit just adjusts the
+    // still-open balance, so it must never force an immediate collect/refund prompt
+    // (the live "no-op edit opens Extra Payment for the full unpaid total" defect).
+    // Only orders that already have money applied (paid / partially paid) settle a
+    // delta against what was paid.
+    if paid_total <= 0.01 {
+        return "none";
+    }
     if paid_total + 0.01 < next_total {
         "collect"
     } else if paid_total > next_total + 0.01 {
@@ -4735,6 +4743,27 @@ mod transition_tests {
             "refund"
         );
         assert_eq!(determine_edit_settlement_required_action(6.9, 6.9), "none");
+    }
+
+    #[test]
+    fn determine_edit_settlement_required_action_unpaid_orders_never_settle() {
+        // Unpaid/pending order (no payment applied): a no-op edit keeps the same
+        // total and a real edit changes it — neither may force collect/refund.
+        // This is the live #00014 defect: a no-op edit on an €18.50 unpaid pickup
+        // order opened an Extra Payment prompt for the full amount.
+        assert_eq!(determine_edit_settlement_required_action(0.0, 18.5), "none");
+        assert_eq!(determine_edit_settlement_required_action(0.0, 0.0), "none");
+        assert_eq!(determine_edit_settlement_required_action(0.0, 25.0), "none");
+        // Boundary: a residual cent of paid total is still treated as unpaid.
+        assert_eq!(
+            determine_edit_settlement_required_action(0.01, 18.5),
+            "none"
+        );
+        // Partially paid still collects the remaining delta as before.
+        assert_eq!(
+            determine_edit_settlement_required_action(5.0, 18.5),
+            "collect"
+        );
     }
 
     #[test]

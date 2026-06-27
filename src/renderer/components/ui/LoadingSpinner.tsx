@@ -37,8 +37,8 @@ export const LoadingSpinner = memo<LoadingSpinnerProps>(({
     switch (variant) {
       case 'primary':
         return isDark 
-          ? 'border-blue-400 border-t-transparent'
-          : 'border-blue-600 border-t-transparent';
+          ? 'border-amber-400 border-t-transparent'
+          : 'border-amber-500 border-t-transparent';
       case 'secondary':
         return isDark
           ? 'border-gray-400 border-t-transparent'
@@ -49,8 +49,8 @@ export const LoadingSpinner = memo<LoadingSpinnerProps>(({
           : 'border-green-600 border-t-transparent';
       default:
         return isDark
-          ? 'border-blue-400 border-t-transparent'
-          : 'border-blue-600 border-t-transparent';
+          ? 'border-amber-400 border-t-transparent'
+          : 'border-amber-500 border-t-transparent';
     }
   };
 

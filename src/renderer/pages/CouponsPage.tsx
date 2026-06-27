@@ -30,6 +30,7 @@ import { getBridge, isBrowser } from '../../lib';
 import { offlineSetCouponActive, offlineUpsertCoupon } from '../services/offline-mutations';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 import { ScanDevicePanel } from '../components/scanner/ScanDevicePanel';
+import { renderModalPortal } from '../utils/render-modal-portal';
 
 interface Coupon {
   id: string;
@@ -501,7 +502,11 @@ const CouponsPage: React.FC = () => {
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             onClick={() => setShowScanPanel(true)}
-            className="h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 bg-transparent text-white border border-cyan-500/40"
+            className={`h-10 px-4 rounded-2xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] inline-flex items-center gap-2 ${
+              isDark
+                ? 'border border-yellow-400/70 bg-yellow-400/10 text-yellow-100 active:bg-yellow-400/20'
+                : 'border border-yellow-400/70 bg-yellow-50 text-yellow-700 active:bg-yellow-100'
+            }`}
           >
             <ScanLine className="w-4 h-4" />
             {t('coupons.scan.button', 'Scan')}
@@ -509,19 +514,18 @@ const CouponsPage: React.FC = () => {
           <button
             onClick={openCreateModal}
             disabled={saveAction.disabled}
-            title={saveAction.message || undefined}
-            className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
+            className={`h-10 px-4 rounded-2xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] inline-flex items-center gap-2 ${
               isDark
-                ? 'bg-zinc-100 text-black border border-zinc-200 hover:bg-white'
-                : 'bg-white text-black border border-gray-300 hover:bg-gray-100'
-            } disabled:opacity-50 disabled:cursor-not-allowed`}
+                ? 'bg-yellow-400 text-black border border-yellow-300 active:bg-yellow-300'
+                : 'bg-black text-white border border-black active:bg-zinc-800'
+            } disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100`}
           >
             <Plus className="w-4 h-4" />
             {t('coupons.create', 'New Coupon')}
           </button>
           <button
             onClick={() => setShowActiveOnly((prev) => !prev)}
-            className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors ${
+            className={`h-10 px-4 rounded-2xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] ${
               showActiveOnly
                 ? isDark
                   ? 'bg-zinc-100 text-black border border-zinc-200'
@@ -535,13 +539,12 @@ const CouponsPage: React.FC = () => {
             type="button"
             onClick={() => void fetchCoupons()}
             disabled={loading}
-            title={t('common.refresh', 'Refresh')}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-sm ${
               isDark
-                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                : 'border border-black bg-black text-white hover:bg-zinc-800'
-            } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
+                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
+            } ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -552,10 +555,10 @@ const CouponsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-xl ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'} border`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'} border`}
         >
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+            <div className={`flex h-10 w-10 items-center justify-center rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
               <CheckCircle className="w-5 h-5 text-green-500" />
             </div>
             <div>
@@ -570,10 +573,10 @@ const CouponsPage: React.FC = () => {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
-          className={`p-4 rounded-xl ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'} border`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'} border`}
         >
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+            <div className={`flex h-10 w-10 items-center justify-center rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
               <Ticket className="w-5 h-5 text-yellow-500" />
             </div>
             <div>
@@ -587,7 +590,7 @@ const CouponsPage: React.FC = () => {
       </div>
       </div>
 
-      <div className={`flex items-center gap-2 px-4 h-12 rounded-xl mb-4 border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+      <div className={`flex items-center gap-2 px-4 h-12 rounded-2xl mb-4 border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <Search className="w-4 h-4 text-gray-400" />
         <input
           type="text"
@@ -599,7 +602,7 @@ const CouponsPage: React.FC = () => {
       </div>
 
       {filteredCoupons.length === 0 ? (
-        <div className={`p-8 rounded-xl text-center border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+        <div className={`p-8 rounded-2xl text-center border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
           <Ticket className="w-12 h-12 mx-auto mb-4 text-gray-400" />
           <h3 className="text-lg font-semibold mb-2">{t('coupons.noCoupons', 'No Coupons Found')}</h3>
           <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
@@ -620,7 +623,7 @@ const CouponsPage: React.FC = () => {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: idx * 0.04 }}
-                className={`rounded-xl border p-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} ${!isValid ? 'opacity-70' : ''}`}
+                className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} ${!isValid ? 'opacity-70' : ''}`}
               >
                 <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
                   <div className="min-w-0">
@@ -628,7 +631,8 @@ const CouponsPage: React.FC = () => {
                       <span className={`font-mono font-extrabold text-xl tracking-wide ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{coupon.code}</span>
                       <button
                         onClick={() => copyCode(coupon.code, coupon.id)}
-                        className={`p-1.5 rounded-lg ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`}
+                        aria-label={t('common.copy', 'Copy')}
+                        className={`p-1.5 rounded-2xl transition-transform duration-150 active:scale-95 ${isDark ? 'active:bg-zinc-800' : 'active:bg-gray-100'}`}
                       >
                         {copiedId === coupon.id ? (
                           <Check className={`w-4 h-4 ${isDark ? 'text-zinc-200' : 'text-green-500'}`} />
@@ -661,7 +665,7 @@ const CouponsPage: React.FC = () => {
                   </div>
 
                   <div className={`grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-2xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="text-[11px] text-zinc-400">{t('coupons.discountValue', 'Discount')}</div>
                       <div className="font-semibold mt-0.5 flex items-center gap-1">
                         {coupon.discount_type === 'percentage' ? (
@@ -674,19 +678,19 @@ const CouponsPage: React.FC = () => {
                           : formatMoney(coupon.discount_value)}
                       </div>
                     </div>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-2xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="text-[11px] text-zinc-400">{t('coupons.minOrder', 'Min Order')}</div>
                       <div className="font-semibold mt-0.5">
                         {(coupon.min_order_amount ?? 0) > 0 ? formatMoney(coupon.min_order_amount || 0) : '-'}
                       </div>
                     </div>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-2xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="text-[11px] text-zinc-400">{t('coupons.usage', 'Usage')}</div>
                       <div className="font-semibold mt-0.5">
                         {coupon.usage_limit ? `${coupon.usage_count} / ${coupon.usage_limit}` : t('common.unlimited', 'Unlimited')}
                       </div>
                     </div>
-                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                    <div className={`rounded-2xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="text-[11px] text-zinc-400">{t('coupons.expires', 'Expires')}</div>
                       <div className={`font-semibold mt-0.5 flex items-center gap-1 ${expired ? 'text-red-400' : ''}`}>
                         <Calendar className="w-3 h-3" />
@@ -699,9 +703,8 @@ const CouponsPage: React.FC = () => {
                     <button
                       onClick={() => openEditModal(coupon)}
                       disabled={busy || saveAction.disabled}
-                      title={saveAction.message || t('common.edit', 'Edit')}
-                      className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
-                        isDark ? 'bg-zinc-900 border border-zinc-700 hover:bg-zinc-800' : 'bg-white border border-gray-300 hover:bg-gray-100'
+                      className={`h-9 px-3 rounded-2xl text-sm inline-flex items-center gap-1.5 transition-transform duration-150 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100 ${
+                        isDark ? 'bg-zinc-900 border border-zinc-700 active:bg-zinc-800' : 'bg-white border border-gray-300 active:bg-gray-100'
                       }`}
                     >
                       <Edit3 className="w-4 h-4" />
@@ -710,13 +713,12 @@ const CouponsPage: React.FC = () => {
                     <button
                       onClick={() => handleToggleActive(coupon)}
                       disabled={busy || toggleAction.disabled}
-                      title={toggleAction.message || (coupon.is_active ? t('common.deactivate', 'Deactivate') : t('common.activate', 'Activate'))}
-                      className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
+                      className={`h-9 px-3 rounded-2xl text-sm inline-flex items-center gap-1.5 transition-transform duration-150 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100 ${
                         coupon.is_active
                           ? 'bg-transparent text-amber-300 border border-amber-500/40'
                           : isDark
-                            ? 'bg-zinc-900 text-zinc-100 border border-zinc-700 hover:bg-zinc-800'
-                            : 'bg-white text-black border border-gray-300 hover:bg-gray-100'
+                            ? 'bg-zinc-900 text-zinc-100 border border-zinc-700 active:bg-zinc-800'
+                            : 'bg-white text-black border border-gray-300 active:bg-gray-100'
                       }`}
                     >
                       {coupon.is_active ? <XCircle className="w-4 h-4" /> : <CheckCircle className="w-4 h-4" />}
@@ -725,9 +727,8 @@ const CouponsPage: React.FC = () => {
                     <button
                       onClick={() => handleDelete(coupon)}
                       disabled={busy || deleteAction.disabled}
-                      title={deleteAction.message || t('common.delete', 'Delete')}
-                      className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
-                        isDark ? 'bg-zinc-900 border border-zinc-700 hover:bg-zinc-800 text-red-400' : 'bg-white border border-gray-300 hover:bg-gray-100 text-red-600'
+                      className={`h-9 px-3 rounded-2xl text-sm inline-flex items-center gap-1.5 transition-transform duration-150 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100 ${
+                        isDark ? 'bg-zinc-900 border border-zinc-700 active:bg-zinc-800 text-red-400' : 'bg-white border border-gray-300 active:bg-gray-100 text-red-600'
                       }`}
                     >
                       <Trash2 className="w-4 h-4" />
@@ -741,8 +742,8 @@ const CouponsPage: React.FC = () => {
         </div>
       )}
 
-      {showModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={closeModal}>
+      {showModal && renderModalPortal(
+        <div className="fixed inset-0 z-[1200] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4" onClick={closeModal}>
           <motion.div
             initial={{ opacity: 0, scale: 0.96 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -757,7 +758,7 @@ const CouponsPage: React.FC = () => {
 
             <div className="p-5 space-y-4">
               {saveAction.disabled && (
-                <div className={`rounded-xl border px-3 py-2 text-sm ${
+                <div className={`rounded-2xl border px-3 py-2 text-sm ${
                   isDark
                     ? 'bg-amber-500/10 border-amber-500/30 text-amber-100'
                     : 'bg-amber-50 border-amber-300 text-amber-900'
@@ -772,7 +773,7 @@ const CouponsPage: React.FC = () => {
                     value={form.code}
                     onChange={(e) => setForm((prev) => ({ ...prev, code: e.target.value.toUpperCase() }))}
                     disabled={saveAction.disabled}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder="SAVE10"
                   />
                 </label>
@@ -782,7 +783,7 @@ const CouponsPage: React.FC = () => {
                     value={form.discount_type}
                     onChange={(e) => setForm((prev) => ({ ...prev, discount_type: e.target.value as 'percentage' | 'fixed' }))}
                     disabled={saveAction.disabled}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   >
                     <option value="percentage">{t('coupons.percentage', 'Percentage')}</option>
                     <option value="fixed">{t('coupons.fixed', 'Fixed Amount')}</option>
@@ -800,7 +801,7 @@ const CouponsPage: React.FC = () => {
                     value={form.discount_value}
                     onChange={(e) => setForm((prev) => ({ ...prev, discount_value: e.target.value }))}
                     disabled={saveAction.disabled}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   />
                 </label>
                 <label className="text-sm">
@@ -812,7 +813,7 @@ const CouponsPage: React.FC = () => {
                     value={form.min_order_amount}
                     onChange={(e) => setForm((prev) => ({ ...prev, min_order_amount: e.target.value }))}
                     disabled={saveAction.disabled}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder="0"
                   />
                 </label>
@@ -828,7 +829,7 @@ const CouponsPage: React.FC = () => {
                     value={form.usage_limit}
                     onChange={(e) => setForm((prev) => ({ ...prev, usage_limit: e.target.value }))}
                     disabled={saveAction.disabled}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder={t('common.optional', 'Optional')}
                   />
                 </label>
@@ -839,7 +840,7 @@ const CouponsPage: React.FC = () => {
                     value={form.expires_at}
                     onChange={(e) => setForm((prev) => ({ ...prev, expires_at: e.target.value }))}
                     disabled={saveAction.disabled}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   />
                 </label>
               </div>
@@ -850,7 +851,7 @@ const CouponsPage: React.FC = () => {
                   value={form.name}
                   onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
                   disabled={saveAction.disabled}
-                  className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                  className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                 />
               </label>
 
@@ -861,7 +862,7 @@ const CouponsPage: React.FC = () => {
                   value={form.description}
                   onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
                   disabled={saveAction.disabled}
-                  className={`w-full px-3 py-2 rounded-lg border resize-none ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                  className={`w-full px-3 py-2 rounded-2xl border resize-none ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                 />
               </label>
 
@@ -882,19 +883,14 @@ const CouponsPage: React.FC = () => {
               <button
                 onClick={closeModal}
                 disabled={saving}
-                className={`px-4 py-2 rounded-lg ${isDark ? 'bg-zinc-800 hover:bg-zinc-700' : 'bg-gray-200 hover:bg-gray-300'} disabled:opacity-50`}
+                className={`px-4 py-2 rounded-2xl transition-transform duration-150 active:scale-[0.98] ${isDark ? 'border border-red-500/25 bg-red-500/10 text-red-200 active:bg-red-500/15' : 'border border-red-300/70 bg-red-50 text-red-700 active:bg-red-100'} disabled:opacity-50 disabled:active:scale-100`}
               >
                 {t('common.cancel', 'Cancel')}
               </button>
               <button
                 onClick={handleSaveCoupon}
                 disabled={saving || saveAction.disabled}
-                title={saveAction.message || undefined}
-                className={`px-4 py-2 rounded-lg disabled:opacity-50 inline-flex items-center gap-2 font-semibold ${
-                  isDark
-                    ? 'bg-zinc-100 text-black border border-zinc-200 hover:bg-white'
-                    : 'bg-white text-black border border-gray-300 hover:bg-gray-100'
-                }`}
+                className="px-4 py-2 rounded-2xl disabled:opacity-50 disabled:active:scale-100 inline-flex items-center gap-2 font-semibold bg-green-600 active:bg-green-700 text-white transition-transform duration-150 active:scale-[0.98]"
               >
                 {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
                 {editingCoupon ? t('common.save', 'Save') : t('common.create', 'Create')}

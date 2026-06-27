@@ -11,14 +11,20 @@
  * **Validates: Requirements 4.2**
  */
 
-import React, { memo, useState, useCallback, useEffect } from 'react';
-import { useTheme } from '../../contexts/theme-context';
+import React, { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useI18n } from '../../contexts/i18n-context';
 import type { RestaurantTable } from '../../types/tables';
 import { reservationsService, type Reservation } from '../../services/ReservationsService';
 import { useSystemClock } from '../../hooks/useSystemClock';
 import { toLocalDateString } from '../../utils/date';
-import { X, Calendar, Clock, Users, Phone, User, MessageSquare, AlertCircle, AlertTriangle } from 'lucide-react';
+import { renderModalPortal } from '../../utils/render-modal-portal';
+import { formatTableDisplayNumber } from '../../utils/table-display';
+import { formatDate, formatTime } from '../../utils/format';
+import {
+  resolveReservationStart,
+  selectUpcomingTableReservations,
+} from '../../utils/reservationFormWarnings';
+import { X, Calendar, Clock, Users, Phone, User, MessageSquare, AlertCircle, AlertTriangle, Minus, Plus } from 'lucide-react';
 
 export interface CreateReservationDto {
   customerName: string;
@@ -32,7 +38,7 @@ export interface CreateReservationDto {
 export interface ReservationFormProps {
   tableId: string;
   tableCapacity: number;
-  tableNumber: number;
+  tableNumber: string | number;
   initialReservation?: Reservation | null;
   onSubmit: (data: CreateReservationDto) => Promise<void>;
   onCancel: () => void;
@@ -87,9 +93,7 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
   isOpen
 }) => {
   const { t } = useI18n();
-  const { resolvedTheme } = useTheme();
   const now = useSystemClock();
-  const isDark = resolvedTheme === 'dark';
   const isEditing = Boolean(initialReservation);
 
   // Form state
@@ -108,16 +112,26 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
   const [showConflictWarning, setShowConflictWarning] = useState(false);
   const [existingReservations, setExistingReservations] = useState<Reservation[]>([]);
 
-  // Load existing reservations for this table on mount
+  // Load existing reservations for this table on mount (kept raw; the displayed
+  // warning derives the relevant upcoming subset below).
   useEffect(() => {
     if (isOpen && tableId) {
       reservationsService.getReservationsForTable(tableId).then((reservations) => {
-        setExistingReservations(
-          reservations.filter((reservation) => reservation.id !== initialReservation?.id),
-        );
+        setExistingReservations(reservations);
       });
     }
-  }, [isOpen, tableId, initialReservation?.id]);
+  }, [isOpen, tableId]);
+
+  // Only warn about reservations that are still relevant (today or future),
+  // excluding the one being edited - never stale past pending/confirmed rows.
+  const upcomingReservations = useMemo(
+    () =>
+      selectUpcomingTableReservations(existingReservations, {
+        now,
+        excludeId: initialReservation?.id ?? null,
+      }),
+    [existingReservations, now, initialReservation?.id],
+  );
 
   useEffect(() => {
     if (!isOpen) {
@@ -228,6 +242,12 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
     return Object.keys(newErrors).length === 0;
   }, [customerName, customerPhone, reservationDate, reservationTime, partySize, tableCapacity, t]);
 
+  // Clear a single field's validation error as soon as the user edits it, so a
+  // required-field error does not stay active after a value has been entered.
+  const clearFieldError = useCallback((field: keyof ReservationFormErrors) => {
+    setErrors((prev) => (prev[field] ? { ...prev, [field]: undefined } : prev));
+  }, []);
+
   // Handle form submission
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
@@ -269,80 +289,104 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
   }, []);
 
   // Handle cancel
+  const dialogRef = useRef<HTMLDivElement>(null);
+
   const handleCancel = useCallback(() => {
     resetForm();
     onCancel();
   }, [resetForm, onCancel]);
+
+  // Escape closes the reservation form, matching the rest of the app-level POS modals.
+  // Only the topmost [role="dialog"] responds, so a dialog opened above this form closes
+  // first and an underlying modal (e.g. TableActionModal) is never dismissed instead.
+  // This routes through handleCancel (reset + onCancel) and never submits/creates.
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== dialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      handleCancel();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [isOpen, handleCancel]);
 
   if (!isOpen) return null;
 
   // Check if party size exceeds capacity for warning display
   const capacityWarning = partySize > tableCapacity;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+  return renderModalPortal(
+    <div className="fixed inset-0 z-[1200] flex items-center justify-center">
       {/* Backdrop */}
-      <div 
+      <div
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
         onClick={handleCancel}
       />
 
-      {/* Modal */}
-      <div className={`relative w-full max-w-lg mx-4 rounded-2xl shadow-2xl ${
-        isDark ? 'bg-gray-900 border border-white/10' : 'bg-white'
-      }`}>
-        {/* Header */}
-        <div className={`flex items-center justify-between p-4 border-b ${
-          isDark ? 'border-white/10' : 'border-gray-200'
-        }`}>
+      {/* Modal -- shared liquid-glass shell so the reservation form matches the TableSelector /
+          TableActionModal / Settings glass modals: premium blurred translucent glass, 28px rounded
+          corners, soft edge/glow, shared open animation. Portal/z-[1200]/Escape behaviour is unchanged. */}
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reservation-form-title"
+        data-reservation-form
+        className="liquid-glass-modal-shell relative mx-4 flex w-full max-w-lg max-h-[90vh] flex-col"
+      >
+        {/* Header (shared glass header/title/close tokens; lucide X, labelled close) */}
+        <div className="liquid-glass-modal-header">
           <div>
-            <h2 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+            <h2 id="reservation-form-title" className="liquid-glass-modal-title">
               {isEditing
                 ? t('reservationForm.editTitle', { defaultValue: 'Edit Reservation' })
                 : t('reservationForm.title', { defaultValue: 'New Reservation' })}
             </h2>
-            <p className={`text-sm mt-1 ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
-              {t('reservationForm.subtitle', { 
-                defaultValue: 'Table #{{tableNumber}} • Capacity: {{capacity}} guests',
-                tableNumber,
-                capacity: tableCapacity
+            <p className="mt-1 text-sm liquid-glass-modal-text-muted">
+              {t('reservationForm.subtitle', {
+                // Same shared display label as the dashboard/TableActionModal
+                // (e.g. "#TP01"). The locale string no longer adds its own "#".
+                tableNumber: formatTableDisplayNumber(tableNumber),
+                capacity: tableCapacity,
+                guests: t('reservationForm.guests', { count: tableCapacity }),
               })}
             </p>
           </div>
           <button
+            type="button"
             onClick={handleCancel}
-            className={`p-2 rounded-lg transition-colors ${
-              isDark 
-                ? 'hover:bg-white/10 text-white/70 hover:text-white' 
-                : 'hover:bg-gray-100 text-gray-500 hover:text-gray-700'
-            }`}
+            className="liquid-glass-modal-close active:scale-95"
+            aria-label={t('common.actions.close', { defaultValue: 'Close' })}
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="p-4 space-y-4">
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+          {/* Scrollable body (glass content, hidden scrollbar) keeps header/footer from clipping */}
+          <div className="liquid-glass-modal-content scrollbar-hide flex-1 min-h-0 overflow-y-auto space-y-4">
           {/* Customer Name - Required (Requirements 4.1) */}
           <div>
-            <label className={`block text-sm font-medium mb-1 ${
-              isDark ? 'text-white/80' : 'text-gray-700'
-            }`}>
+            <label className="mb-1 block text-sm font-medium liquid-glass-modal-text">
               <User className="w-4 h-4 inline mr-1" />
               {t('reservationForm.customerName', { defaultValue: 'Customer Name' })} *
             </label>
             <input
               type="text"
               value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
+              onChange={(e) => { setCustomerName(e.target.value); clearFieldError('customerName'); }}
               placeholder={t('reservationForm.customerNamePlaceholder', { defaultValue: 'Enter customer name' })}
-              className={`w-full px-4 py-2 rounded-lg border transition-colors ${
-                errors.customerName
-                  ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
-                  : isDark
-                    ? 'bg-white/5 border-white/10 text-white placeholder-white/40 focus:border-purple-500'
-                    : 'bg-gray-50 border-gray-200 text-gray-900 placeholder-gray-400 focus:border-purple-500'
-              } focus:outline-none focus:ring-2 focus:ring-purple-500/20`}
+              className={`liquid-glass-modal-input w-full ${errors.customerName ? '!border-red-500' : ''}`}
             />
             {errors.customerName && (
               <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
@@ -354,24 +398,16 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
 
           {/* Phone Number - Required (Requirements 4.1) */}
           <div>
-            <label className={`block text-sm font-medium mb-1 ${
-              isDark ? 'text-white/80' : 'text-gray-700'
-            }`}>
+            <label className="mb-1 block text-sm font-medium liquid-glass-modal-text">
               <Phone className="w-4 h-4 inline mr-1" />
               {t('reservationForm.phone', { defaultValue: 'Phone Number' })} *
             </label>
             <input
               type="tel"
               value={customerPhone}
-              onChange={(e) => setCustomerPhone(e.target.value)}
+              onChange={(e) => { setCustomerPhone(e.target.value); clearFieldError('customerPhone'); }}
               placeholder={t('reservationForm.phonePlaceholder', { defaultValue: '+30 XXX XXX XXXX' })}
-              className={`w-full px-4 py-2 rounded-lg border transition-colors ${
-                errors.customerPhone
-                  ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
-                  : isDark
-                    ? 'bg-white/5 border-white/10 text-white placeholder-white/40 focus:border-purple-500'
-                    : 'bg-gray-50 border-gray-200 text-gray-900 placeholder-gray-400 focus:border-purple-500'
-              } focus:outline-none focus:ring-2 focus:ring-purple-500/20`}
+              className={`liquid-glass-modal-input w-full ${errors.customerPhone ? '!border-red-500' : ''}`}
             />
             {errors.customerPhone && (
               <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
@@ -385,24 +421,16 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
           <div className="grid grid-cols-2 gap-4">
             {/* Date */}
             <div>
-              <label className={`block text-sm font-medium mb-1 ${
-                isDark ? 'text-white/80' : 'text-gray-700'
-              }`}>
+              <label className="mb-1 block text-sm font-medium liquid-glass-modal-text">
                 <Calendar className="w-4 h-4 inline mr-1" />
                 {t('reservationForm.date', { defaultValue: 'Date' })} *
               </label>
               <input
                 type="date"
                 value={reservationDate}
-                onChange={(e) => setReservationDate(e.target.value)}
+                onChange={(e) => { setReservationDate(e.target.value); clearFieldError('reservationDate'); }}
                 min={minDate}
-                className={`w-full px-4 py-2 rounded-lg border transition-colors ${
-                  errors.reservationDate
-                    ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
-                    : isDark
-                      ? 'bg-white/5 border-white/10 text-white focus:border-purple-500'
-                      : 'bg-gray-50 border-gray-200 text-gray-900 focus:border-purple-500'
-                } focus:outline-none focus:ring-2 focus:ring-purple-500/20`}
+                className={`liquid-glass-modal-input w-full ${errors.reservationDate ? '!border-red-500' : ''}`}
               />
               {errors.reservationDate && (
                 <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
@@ -414,23 +442,15 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
 
             {/* Time */}
             <div>
-              <label className={`block text-sm font-medium mb-1 ${
-                isDark ? 'text-white/80' : 'text-gray-700'
-              }`}>
+              <label className="mb-1 block text-sm font-medium liquid-glass-modal-text">
                 <Clock className="w-4 h-4 inline mr-1" />
                 {t('reservationForm.time', { defaultValue: 'Time' })} *
               </label>
               <input
                 type="time"
                 value={reservationTime}
-                onChange={(e) => setReservationTime(e.target.value)}
-                className={`w-full px-4 py-2 rounded-lg border transition-colors ${
-                  errors.reservationTime
-                    ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
-                    : isDark
-                      ? 'bg-white/5 border-white/10 text-white focus:border-purple-500'
-                      : 'bg-gray-50 border-gray-200 text-gray-900 focus:border-purple-500'
-                } focus:outline-none focus:ring-2 focus:ring-purple-500/20`}
+                onChange={(e) => { setReservationTime(e.target.value); clearFieldError('reservationTime'); }}
+                className={`liquid-glass-modal-input w-full ${errors.reservationTime ? '!border-red-500' : ''}`}
               />
               {errors.reservationTime && (
                 <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
@@ -443,56 +463,49 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
 
           {/* Party Size - Required (Requirements 4.1, 4.2) */}
           <div>
-            <label className={`block text-sm font-medium mb-1 ${
-              isDark ? 'text-white/80' : 'text-gray-700'
-            }`}>
+            <label className="mb-1 block text-sm font-medium liquid-glass-modal-text">
               <Users className="w-4 h-4 inline mr-1" />
               {t('reservationForm.partySize', { defaultValue: 'Number of Guests' })} *
             </label>
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => setPartySize(Math.max(1, partySize - 1))}
-                className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
-                  isDark
-                    ? 'bg-white/10 hover:bg-white/20 text-white'
-                    : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
-                }`}
+                onClick={() => {
+                  setPartySize(Math.max(1, partySize - 1));
+                  clearFieldError('partySize');
+                }}
+                className="inline-flex h-11 w-11 items-center justify-center rounded-xl border liquid-glass-modal-border liquid-glass-modal-text transition active:scale-95 active:bg-black/5 dark:active:bg-white/10"
+                aria-label={t('reservationForm.decreaseGuests', { defaultValue: 'Decrease guests' })}
               >
-                -
+                <Minus className="h-4 w-4" />
               </button>
               <input
                 type="number"
                 value={partySize}
-                onChange={(e) => setPartySize(Math.max(1, parseInt(e.target.value) || 1))}
+                onChange={(e) => { setPartySize(Math.max(1, parseInt(e.target.value) || 1)); clearFieldError('partySize'); }}
                 min={1}
-                className={`w-20 px-4 py-2 rounded-lg border text-center transition-colors ${
-                  errors.partySize || capacityWarning
-                    ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
-                    : isDark
-                      ? 'bg-white/5 border-white/10 text-white focus:border-purple-500'
-                      : 'bg-gray-50 border-gray-200 text-gray-900 focus:border-purple-500'
-                } focus:outline-none focus:ring-2 focus:ring-purple-500/20`}
+                aria-label={t('reservationForm.partySize', { defaultValue: 'Number of Guests' })}
+                className={`liquid-glass-modal-input w-20 text-center ${errors.partySize || capacityWarning ? '!border-red-500' : ''}`}
               />
               <button
                 type="button"
-                onClick={() => setPartySize(partySize + 1)}
-                className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
-                  isDark
-                    ? 'bg-white/10 hover:bg-white/20 text-white'
-                    : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
-                }`}
+                onClick={() => {
+                  setPartySize(partySize + 1);
+                  clearFieldError('partySize');
+                }}
+                className="inline-flex h-11 w-11 items-center justify-center rounded-xl border liquid-glass-modal-border liquid-glass-modal-text transition active:scale-95 active:bg-black/5 dark:active:bg-white/10"
+                aria-label={t('reservationForm.increaseGuests', { defaultValue: 'Increase guests' })}
               >
-                +
+                <Plus className="h-4 w-4" />
               </button>
-              <span className={`text-sm ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
-                {t('reservationForm.guests', { defaultValue: 'guests' })}
+              <span className="text-sm liquid-glass-modal-text-muted">
+                {t('reservationForm.guests', { count: partySize })}
               </span>
             </div>
             {(errors.partySize || capacityWarning) && (
               <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
                 <AlertCircle className="w-3 h-3" />
-                {errors.partySize || t('reservationForm.errors.partySizeExceedsCapacity', { 
+                {errors.partySize || t('reservationForm.errors.partySizeExceedsCapacity', {
                   defaultValue: 'Party size exceeds table capacity of {{capacity}}',
                   capacity: tableCapacity
                 })}
@@ -502,44 +515,49 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
 
           {/* Special Requests - Optional */}
           <div>
-            <label className={`block text-sm font-medium mb-1 ${
-              isDark ? 'text-white/80' : 'text-gray-700'
-            }`}>
+            <label className="mb-1 block text-sm font-medium liquid-glass-modal-text">
               <MessageSquare className="w-4 h-4 inline mr-1" />
               {t('reservationForm.specialRequests', { defaultValue: 'Special Requests' })}
             </label>
             <textarea
               value={specialRequests}
               onChange={(e) => setSpecialRequests(e.target.value)}
-              placeholder={t('reservationForm.specialRequestsPlaceholder', { 
-                defaultValue: 'Any special requests or notes...' 
+              placeholder={t('reservationForm.specialRequestsPlaceholder', {
+                defaultValue: 'Any special requests or notes...'
               })}
               rows={3}
-              className={`w-full px-4 py-2 rounded-lg border transition-colors resize-none ${
-                isDark
-                  ? 'bg-white/5 border-white/10 text-white placeholder-white/40 focus:border-purple-500'
-                  : 'bg-gray-50 border-gray-200 text-gray-900 placeholder-gray-400 focus:border-purple-500'
-              } focus:outline-none focus:ring-2 focus:ring-purple-500/20`}
+              className="liquid-glass-modal-input w-full resize-none"
             />
           </div>
 
-          {/* Existing Reservations Warning */}
-          {existingReservations.length > 0 && (
-            <div className={`p-3 rounded-lg ${isDark ? 'bg-blue-500/10 border border-blue-500/30' : 'bg-blue-50 border border-blue-200'}`}>
+          {/* Existing Reservations Warning (upcoming only, localized date/time). Amber info
+              panel; ASCII-safe list markers via list-disc (no literal bullet glyph). */}
+          {upcomingReservations.length > 0 && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/30 dark:bg-amber-500/10">
               <div className="flex items-start gap-2">
-                <AlertTriangle className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
+                <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className={`text-sm font-medium ${isDark ? 'text-blue-400' : 'text-blue-700'}`}>
+                  <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
                     {t('reservationForm.existingReservations', { defaultValue: 'This table has existing reservations:' })}
                   </p>
-                  <ul className={`mt-1 text-xs space-y-1 ${isDark ? 'text-blue-300/80' : 'text-blue-600'}`}>
-                    {existingReservations.slice(0, 3).map((res) => (
-                      <li key={res.id}>
-                        • {res.reservationDate} at {res.reservationTime} - {res.customerName} ({res.partySize} guests)
-                      </li>
-                    ))}
-                    {existingReservations.length > 3 && (
-                      <li>... and {existingReservations.length - 3} more</li>
+                  <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-amber-700 dark:text-amber-200/80">
+                    {upcomingReservations.slice(0, 3).map((res) => {
+                      const start = resolveReservationStart(res);
+                      return (
+                        <li key={res.id}>
+                          {t('reservationForm.existingReservationItem', {
+                            date: start ? formatDate(start) : res.reservationDate,
+                            time: start
+                              ? formatTime(start, { hour: '2-digit', minute: '2-digit' })
+                              : res.reservationTime,
+                            customer: res.customerName,
+                            guests: t('reservationForm.guestCount', { count: res.partySize }),
+                          })}
+                        </li>
+                      );
+                    })}
+                    {upcomingReservations.length > 3 && (
+                      <li>{t('reservationForm.andMore', { count: upcomingReservations.length - 3 })}</li>
                     )}
                   </ul>
                 </div>
@@ -547,30 +565,39 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
             </div>
           )}
 
-          {/* Conflict Warning */}
+          {/* Conflict Warning (semantic red; ASCII-safe list markers) */}
           {showConflictWarning && conflictingReservations.length > 0 && (
-            <div className={`p-3 rounded-lg ${isDark ? 'bg-red-500/10 border border-red-500/30' : 'bg-red-50 border border-red-200'}`}>
+            <div className="rounded-2xl border border-red-200 bg-red-50 p-3 dark:border-red-500/30 dark:bg-red-500/10">
               <div className="flex items-start gap-2">
                 <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className={`text-sm font-medium ${isDark ? 'text-red-400' : 'text-red-700'}`}>
+                  <p className="text-sm font-medium text-red-700 dark:text-red-400">
                     {t('reservationForm.conflictWarning', { defaultValue: 'Time conflict detected!' })}
                   </p>
-                  <p className={`mt-1 text-xs ${isDark ? 'text-red-300/80' : 'text-red-600'}`}>
-                    {t('reservationForm.conflictDescription', { 
-                      defaultValue: 'There is already a reservation at this time:' 
+                  <p className="mt-1 text-xs text-red-600 dark:text-red-300/80">
+                    {t('reservationForm.conflictDescription', {
+                      defaultValue: 'There is already a reservation at this time:'
                     })}
                   </p>
-                  <ul className={`mt-1 text-xs ${isDark ? 'text-red-300/80' : 'text-red-600'}`}>
-                    {conflictingReservations.map((res) => (
-                      <li key={res.id}>
-                        • {res.reservationTime} - {res.customerName} ({res.partySize} guests)
-                      </li>
-                    ))}
+                  <ul className="mt-1 list-disc pl-5 text-xs text-red-600 dark:text-red-300/80">
+                    {conflictingReservations.map((res) => {
+                      const start = resolveReservationStart(res);
+                      return (
+                        <li key={res.id}>
+                          {t('reservationForm.conflictItem', {
+                            time: start
+                              ? formatTime(start, { hour: '2-digit', minute: '2-digit' })
+                              : res.reservationTime,
+                            customer: res.customerName,
+                            guests: t('reservationForm.guestCount', { count: res.partySize }),
+                          })}
+                        </li>
+                      );
+                    })}
                   </ul>
-                  <p className={`mt-2 text-xs ${isDark ? 'text-red-300/80' : 'text-red-600'}`}>
-                    {t('reservationForm.conflictAction', { 
-                      defaultValue: 'Please choose a different time or cancel the existing reservation first.' 
+                  <p className="mt-2 text-xs text-red-600 dark:text-red-300/80">
+                    {t('reservationForm.conflictAction', {
+                      defaultValue: 'Please choose a different time or cancel the existing reservation first.'
                     })}
                   </p>
                 </div>
@@ -578,29 +605,27 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
             </div>
           )}
 
-          {/* Action Buttons */}
-          <div className="flex gap-3 pt-2">
+          </div>
+
+          {/* Action Buttons - pinned footer so it never clips. Cancel = red, Create/Save = green. */}
+          <div className="flex gap-3 p-4 border-t flex-shrink-0 liquid-glass-modal-border">
             <button
               type="button"
               onClick={handleCancel}
-              className={`flex-1 py-3 rounded-xl font-medium transition-colors ${
-                isDark
-                  ? 'bg-white/10 hover:bg-white/20 text-white'
-                  : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
-              }`}
+              className="flex-1 inline-flex min-h-[44px] items-center justify-center rounded-xl border border-red-500/50 bg-red-500/10 font-medium text-red-600 transition active:scale-[0.98] active:bg-red-500/20 dark:text-red-300"
             >
               {t('reservationForm.cancel', { defaultValue: 'Cancel' })}
             </button>
             <button
               type="submit"
               disabled={isSubmitting || capacityWarning || showConflictWarning}
-              className={`flex-1 py-3 rounded-xl font-medium transition-colors ${
+              className={`flex-1 inline-flex min-h-[44px] items-center justify-center rounded-xl font-medium text-white transition active:scale-[0.98] ${
                 isSubmitting || capacityWarning || showConflictWarning
-                  ? 'bg-purple-500/50 text-white/50 cursor-not-allowed'
-                  : 'bg-purple-600 hover:bg-purple-700 text-white'
+                  ? 'cursor-not-allowed bg-green-600/40 text-white/60'
+                  : 'bg-green-600 active:bg-green-700 shadow-lg shadow-green-600/25'
               }`}
             >
-              {isSubmitting 
+              {isSubmitting
                 ? isEditing
                   ? t('reservationForm.saving', { defaultValue: 'Saving...' })
                   : t('reservationForm.creating', { defaultValue: 'Creating...' })

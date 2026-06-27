@@ -27,6 +27,7 @@ import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 import { openExternalUrl } from '../utils/external-url';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
+import { renderModalPortal } from '../utils/render-modal-portal';
 import {
   Truck,
   MapPin,
@@ -278,7 +279,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({
   return (
     <motion.div
       variants={pageMotionItem}
-      className={`rounded-xl border overflow-hidden ${
+      className={`rounded-2xl border overflow-hidden ${
         isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'
       }`}
     >
@@ -293,7 +294,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({
               #{delivery.orderNumber}
             </span>
             <div
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-2xl text-xs font-medium"
               style={{ backgroundColor: statusConfig.bgColor, color: statusConfig.color }}
             >
               <StatusIcon className="w-3 h-3" />
@@ -347,12 +348,12 @@ const DeliveryCard = memo<DeliveryCardProps>(({
             <span>•</span>
             <span className="font-medium">€{delivery.orderTotal.toFixed(2)}</span>
             {delivery.paymentStatus === 'paid' && (
-              <span className={`px-2 py-0.5 rounded text-xs font-medium ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-200' : 'bg-gray-100 text-gray-700 border border-gray-300'}`}>
+              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-200' : 'bg-gray-100 text-gray-700 border border-gray-300'}`}>
                 PAID
               </span>
             )}
             {delivery.paymentStatus === 'cod' && (
-              <span className={`px-2 py-0.5 rounded text-xs font-medium ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-300' : 'bg-gray-100 text-gray-700 border border-gray-300'}`}>
+              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-300' : 'bg-gray-100 text-gray-700 border border-gray-300'}`}>
                 COD
               </span>
             )}
@@ -361,7 +362,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({
 
         {/* Driver Info (if assigned) */}
         {delivery.driverName && (
-          <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-lg ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+          <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-2xl ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
             <Truck className={`w-4 h-4 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`} />
             <span className={`text-sm font-medium ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>{delivery.driverName}</span>
           </div>
@@ -371,10 +372,10 @@ const DeliveryCard = memo<DeliveryCardProps>(({
         {nextAction && (
           <button
             onClick={handleAction}
-            className={`w-full py-2.5 rounded-lg font-medium transition-all hover:opacity-90 active:scale-[0.98] ${
+            className={`w-full py-2.5 rounded-xl font-medium transition-all duration-200 active:scale-[0.98] ${
               isDark
-                ? 'bg-zinc-100 text-black hover:bg-white'
-                : 'bg-black text-white hover:bg-zinc-800'
+                ? 'bg-zinc-100 text-black active:bg-white'
+                : 'bg-black text-white active:bg-zinc-800'
             }`}
           >
             {nextAction.label}
@@ -423,15 +424,18 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+  return renderModalPortal(
+    <div className="fixed inset-0 z-[1200] flex items-center justify-center">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
 
       {/* Modal */}
-      <div
-        className={`relative w-full max-w-lg mx-4 rounded-2xl shadow-2xl max-h-[80vh] flex flex-col ${
-          isDark ? 'bg-zinc-950 border border-zinc-800' : 'bg-white border border-gray-200'
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.15 }}
+        className={`relative w-full max-w-lg mx-4 rounded-2xl shadow-2xl shadow-black/40 max-h-[80vh] flex flex-col backdrop-blur-2xl ring-1 ${
+          isDark ? 'bg-black/60 border border-white/10 ring-white/15' : 'bg-white/60 border border-white/70 ring-white/60'
         }`}
       >
         {/* Header */}
@@ -446,14 +450,15 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
           </div>
           <button
             onClick={onClose}
-            className={`p-2 rounded-lg ${isDark ? 'hover:bg-zinc-800 text-zinc-400' : 'hover:bg-gray-100 text-gray-500'}`}
+            aria-label={t('common.close', 'Close')}
+            className={`p-2 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 active:scale-95 ${isDark ? 'active:bg-zinc-800 text-zinc-400' : 'active:bg-gray-100 text-gray-500'}`}
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Driver List */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 overflow-y-auto scrollbar-hide p-4">
           {availableDrivers.length === 0 ? (
             <div className={`text-center py-8 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               <Users className="w-12 h-12 mx-auto mb-3 opacity-50" />
@@ -466,12 +471,12 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
                 <button
                   key={driver.id}
                   onClick={() => setSelectedDriverId(driver.id)}
-                  className={`w-full p-3 rounded-xl border-2 transition-all text-left ${
+                  className={`w-full p-3 rounded-2xl border-2 transition-all duration-150 active:scale-[0.99] text-left ${
                     selectedDriverId === driver.id
                       ? isDark ? 'border-zinc-500 bg-zinc-900' : 'border-gray-400 bg-gray-100'
                       : isDark
-                      ? 'border-zinc-800 hover:border-zinc-700 bg-black'
-                      : 'border-gray-200 hover:border-gray-300 bg-gray-50'
+                      ? 'border-zinc-800 active:border-zinc-700 bg-black'
+                      : 'border-gray-200 active:border-gray-300 bg-gray-50'
                   }`}
                 >
                   <div className="flex items-center gap-3">
@@ -501,9 +506,9 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
           <button
             onClick={handleAssign}
             disabled={!selectedDriverId}
-            className={`w-full py-3 rounded-xl font-medium transition-all ${
+            className={`w-full py-3 rounded-xl font-medium transition-all duration-200 ${
               selectedDriverId
-                ? isDark ? 'bg-zinc-100 text-black hover:bg-white' : 'bg-black text-white hover:bg-zinc-800'
+                ? isDark ? 'bg-zinc-100 text-black active:bg-white active:scale-[0.98]' : 'bg-black text-white active:bg-zinc-800 active:scale-[0.98]'
                 : isDark
                 ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
@@ -512,7 +517,7 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
             {t('delivery.assignSelected', 'Assign Selected Driver')}
           </button>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 });
@@ -827,13 +832,12 @@ const DeliveryPage: React.FC = () => {
             type="button"
             onClick={handleRefresh}
             disabled={isRefreshing}
-            title={t('common.refresh', 'Refresh')}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
               isDark
-                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                : 'border border-black bg-black text-white hover:bg-zinc-800'
-            } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
+                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
+            } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
@@ -843,19 +847,19 @@ const DeliveryPage: React.FC = () => {
       {/* Stats Row */}
       <motion.div variants={pageMotionItem} className="px-6 pb-4">
         <motion.div variants={pageMotionContainer} className="flex gap-3 overflow-x-auto scrollbar-hide">
-          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-2xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.total', 'Total')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.total}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-2xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.pending', 'Pending')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.pending}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-2xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.inTransit', 'In Transit')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.inTransit}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-2xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.availableDrivers', 'Available Drivers')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.availableDrivers}</div>
           </motion.div>
@@ -864,18 +868,18 @@ const DeliveryPage: React.FC = () => {
 
       {/* Filter Tabs */}
       <motion.div variants={pageMotionItem} className="px-6 pb-4">
-        <motion.div variants={pageMotionContainer} className={`flex gap-1 p-1 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-100'}`}>
+        <motion.div variants={pageMotionContainer} className={`flex gap-1 p-1 rounded-2xl ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-100'}`}>
           {FILTER_TABS.map(tab => (
             <motion.button
               variants={pageMotionItem}
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+              className={`flex-1 px-3 py-2 rounded-2xl text-sm font-medium transition-transform active:scale-[0.98] ${
                 activeTab === tab.id
                   ? isDark ? 'bg-zinc-100 text-black shadow' : 'bg-black text-white shadow'
                   : isDark
-                  ? 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
-                  : 'text-gray-600 hover:text-gray-900 hover:bg-white'
+                  ? 'text-zinc-400 active:text-zinc-100 active:bg-zinc-800'
+                  : 'text-gray-600 active:text-gray-900 active:bg-white'
               }`}
             >
               {t(`delivery.filter.${tab.id}`, tab.label)}
@@ -886,7 +890,7 @@ const DeliveryPage: React.FC = () => {
 
       {/* Error Banner */}
       {error && (
-        <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
+        <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
           <AlertTriangle className="w-5 h-5 text-red-500" />
           <p className="text-red-500 text-sm">{error}</p>
         </motion.div>

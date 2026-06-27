@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -14,8 +14,11 @@ const WINDOW_ZOOM_STEP: f64 = 0.1;
 const WINDOW_ZOOM_MIN: f64 = 0.5;
 const WINDOW_ZOOM_MAX: f64 = 2.0;
 
-static WINDOW_ZOOM_LEVELS: LazyLock<Mutex<HashMap<String, f64>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static WINDOW_ZOOM_LEVELS: OnceLock<Mutex<HashMap<String, f64>>> = OnceLock::new();
+
+fn window_zoom_levels() -> &'static Mutex<HashMap<String, f64>> {
+    WINDOW_ZOOM_LEVELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn value_to_text(value: Value) -> Option<String> {
     match value {
@@ -68,6 +71,19 @@ fn current_window_state(window: &tauri::Window) -> Value {
     })
 }
 
+fn parse_window_position_payload(arg0: Option<Value>) -> Result<(i32, i32), String> {
+    let payload = arg0.ok_or_else(|| "Missing window position payload".to_string())?;
+    let x = crate::value_i64(&payload, &["x", "left"])
+        .ok_or_else(|| "Missing window x position".to_string())?;
+    let y = crate::value_i64(&payload, &["y", "top"])
+        .ok_or_else(|| "Missing window y position".to_string())?;
+
+    Ok((
+        x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+    ))
+}
+
 fn emit_window_state_changed(window: &tauri::Window) {
     let _ = window.emit("window_state_changed", current_window_state(window));
 }
@@ -80,7 +96,7 @@ fn current_webview_window(window: &tauri::Window) -> Result<tauri::WebviewWindow
 }
 
 fn current_zoom_scale(window: &tauri::Window) -> f64 {
-    WINDOW_ZOOM_LEVELS
+    window_zoom_levels()
         .lock()
         .ok()
         .and_then(|levels| levels.get(window.label()).copied())
@@ -92,7 +108,7 @@ fn set_window_zoom(window: &tauri::Window, scale: f64) -> Result<(), String> {
     let webview = current_webview_window(window)?;
     webview.set_zoom(clamped).map_err(|e| e.to_string())?;
 
-    if let Ok(mut levels) = WINDOW_ZOOM_LEVELS.lock() {
+    if let Ok(mut levels) = window_zoom_levels().lock() {
         levels.insert(window.label().to_string(), clamped);
     }
 
@@ -323,6 +339,33 @@ pub async fn show_notification(arg0: Option<Value>) -> Result<Value, String> {
     let (title, body) = parse_notification_payload(arg0);
     info!(title = %title, body = %body, "show-notification requested");
     Ok(serde_json::json!({ "success": true }))
+}
+
+#[tauri::command]
+pub async fn window_start_drag(window: tauri::Window) -> Result<(), String> {
+    window.start_dragging().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn window_get_position(window: tauri::Window) -> Result<Value, String> {
+    let position = window.outer_position().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "x": position.x,
+        "y": position.y,
+    }))
+}
+
+#[tauri::command]
+pub async fn window_set_position(
+    window: tauri::Window,
+    arg0: Option<Value>,
+) -> Result<(), String> {
+    let (x, y) = parse_window_position_payload(arg0)?;
+    window
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

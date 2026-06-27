@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../../hooks/useFeatures';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { ActivityTracker } from '../../services/ActivityTracker';
@@ -101,10 +102,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     2 + (onSplitPayment ? 1 : 0) + (canUseRoomCharge ? 1 : 0);
   const paymentGridClass =
     paymentOptionCount >= 4
-      ? 'grid-cols-2 xl:grid-cols-4'
+      ? 'grid-cols-2'
       : paymentOptionCount === 3
         ? 'grid-cols-3'
         : 'grid-cols-2';
+  const paymentGridGapClass = paymentOptionCount === 3 ? 'gap-4' : 'gap-6';
+  const paymentOptionPaddingClass = paymentOptionCount === 3 ? 'p-4' : 'p-6';
+  const paymentMethodLabelBaseClass =
+    'w-full text-center text-sm font-bold uppercase leading-tight tracking-normal hyphens-none whitespace-normal transition-colors duration-300';
 
   // Check if order is below minimum (only if a minimum is set)
   const isBelowMinimum = minimumOrderAmount > 0 && orderTotal < minimumOrderAmount;
@@ -328,13 +333,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         {/* Order Total with Discount Breakdown */}
         <div className="text-center mb-8">
           {(discountAmount > 0 || showDeliveryFee) && (
-            <div className="mb-4 space-y-2 p-4 rounded-xl bg-white/5 border border-white/10">
+            <div className="mb-4 space-y-2 p-4 rounded-2xl bg-white/5 border border-white/10">
               <div className="flex justify-between text-sm">
                 <span className="liquid-glass-modal-text-muted">
                   {t('payment.fields.subtotal')}
                 </span>
                 <span className="liquid-glass-modal-text font-medium">
-                  €{subtotalBeforeDiscount.toFixed(2)}
+                  {formatCurrency(subtotalBeforeDiscount)}
                 </span>
               </div>
               {discountAmount > 0 && (
@@ -343,7 +348,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     {t('modals.payment.discount')}
                   </span>
                   <span className="text-green-500 dark:text-green-400 font-medium">
-                    -€{discountAmount.toFixed(2)}
+                    -{formatCurrency(discountAmount)}
                   </span>
                 </div>
               )}
@@ -353,7 +358,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     {t('payment.fields.deliveryFee')}
                   </span>
                   <span className="liquid-glass-modal-text font-medium">
-                    €{deliveryFee.toFixed(2)}
+                    {formatCurrency(deliveryFee)}
                   </span>
                 </div>
               )}
@@ -364,21 +369,21 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             {discountAmount > 0 ? t('modals.payment.finalAmount') : t('modals.payment.totalAmount')}
           </p>
           <p className="text-4xl font-bold text-emerald-500 dark:text-emerald-400 tracking-tight">
-            €{orderTotal.toFixed(2)}
+            {formatCurrency(orderTotal)}
           </p>
         </div>
 
         {/* Step: Minimum Order Warning */}
         {currentStep === 'minimum_warning' && (
           <div className="space-y-4">
-            <div className="flex items-center gap-3 p-4 rounded-xl bg-orange-500/10 border border-orange-500/30">
+            <div className="flex items-center gap-3 p-4 rounded-2xl bg-orange-500/10 border border-orange-500/30">
               <AlertTriangle className="w-8 h-8 text-orange-400 flex-shrink-0" />
               <div>
                 <h3 className="font-semibold text-orange-400">
                   {t('modals.payment.belowMinimumTitle', 'Minimum Order Not Met')}
                 </h3>
                 <p className="text-sm text-orange-300/80">
-                  {t('modals.payment.belowMinimumMessage', 'Order amount is below minimum order amount of €{{amount}}', { amount: minimumOrderAmount.toFixed(2) })}
+                  {t('modals.payment.belowMinimumMessage', 'Order amount is below minimum order amount of {{amount}}', { amount: formatCurrency(minimumOrderAmount) })}
                 </p>
               </div>
             </div>
@@ -386,13 +391,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             <div className="flex gap-3">
               <button
                 onClick={handleClose}
-                className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 hover:bg-gray-500/30 liquid-glass-modal-text"
+                className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 active:bg-gray-500/30 liquid-glass-modal-text"
               >
                 {t('modals.payment.cancel')}
               </button>
               <button
                 onClick={handleSkipMinimumWarning}
-                className="liquid-glass-modal-button flex-1 font-medium bg-orange-600/20 hover:bg-orange-600/30 text-orange-400 border-orange-500/30"
+                className="liquid-glass-modal-button flex-1 font-medium bg-orange-600/20 active:bg-orange-600/30 text-orange-400 border-orange-500/30"
               >
                 {t('modals.payment.skip', 'Skip')}
               </button>
@@ -403,7 +408,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         {currentStep === 'payment_selection' && (
           <div className="relative">
             {isFeatureLoading ? (
-              <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/10 w-full">
+              <div className="flex items-center gap-3 p-4 rounded-2xl bg-white/5 border border-white/10 w-full">
                 <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white/70 animate-spin flex-shrink-0" />
                 <div>
                   <h3 className="font-semibold liquid-glass-modal-text">
@@ -415,44 +420,44 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 </div>
               </div>
             ) : !hasAnyPaymentMethod ? (
-              <div className="flex items-center gap-3 p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 w-full">
+              <div className="flex items-center gap-3 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 w-full">
                 <AlertTriangle className="w-6 h-6 text-amber-400 flex-shrink-0" />
                 <div>
                   <h3 className="font-semibold text-amber-400">
-                    {t('terminal.messages.noPaymentMethods', 'No payment methods available')}
+                    {t('settings.terminal.messages.noPaymentMethods', 'No payment methods available')}
                   </h3>
                   <p className="text-sm text-amber-300/80">
-                    {t('terminal.messages.contactManager', 'Contact your manager for configuration changes.')}
+                    {t('settings.terminal.messages.contactManager', 'Contact your manager for configuration changes.')}
                   </p>
                 </div>
               </div>
             ) : (
-              <div className={`grid gap-6 ${paymentGridClass}`}>
+              <div className={`grid ${paymentGridGapClass} ${paymentGridClass}`}>
                 {/* Cash Option */}
                 <button
                   onClick={() => canUseCash && handlePaymentMethodSelect('cash')}
                   disabled={!canUseCash || isProcessingPayment}
-                  className={`group relative flex flex-col items-center justify-center p-10 rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                  className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                     ${!canUseCash || isProcessingPayment
                       ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                      : 'border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 hover:from-green-500/20 hover:to-green-600/10 hover:border-green-400/50 hover:scale-105 hover:shadow-xl hover:shadow-green-500/20 active:scale-100'
+                      : 'border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 active:scale-[0.98]'
                     }`}
                 >
                   <Banknote
-                    className={`w-20 h-20 mb-3 transition-all duration-300 group-hover:scale-110
-                      ${!canUseCash || isProcessingPayment ? 'text-gray-400' : 'text-green-400 group-hover:text-green-300'}`}
+                    className={`w-20 h-20 mb-3 transition-all duration-300
+                      ${!canUseCash || isProcessingPayment ? 'text-gray-400' : 'text-green-400'}`}
                     strokeWidth={1.5}
                   />
 
-                  <span className={`text-2xl font-bold tracking-wide uppercase transition-colors duration-300
-                    ${!canUseCash || isProcessingPayment ? 'text-gray-400' : 'text-green-400 group-hover:text-green-300'}`}
+                  <span className={`${paymentMethodLabelBaseClass}
+                    ${!canUseCash || isProcessingPayment ? 'text-gray-400' : 'text-green-400'}`}
                   >
                     {t('modals.payment.cashSimple', 'CASH')}
                   </span>
 
                   {isMobileWaiter && !canUseCash && (
                     <p className="text-xs text-amber-400 mt-2 text-center">
-                      {t('terminal.messages.cashDrawerMainOnly', 'Cash handled by Main POS')}
+                      {t('settings.terminal.messages.cashDrawerMainOnly', 'Cash handled by Main POS')}
                     </p>
                   )}
                 </button>
@@ -461,27 +466,27 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 <button
                   onClick={() => canUseCard && handlePaymentMethodSelect('card')}
                   disabled={!canUseCard || isProcessingPayment}
-                  className={`group relative flex flex-col items-center justify-center p-10 rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                  className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                     ${!canUseCard || isProcessingPayment
                       ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                      : 'border-blue-400/30 bg-gradient-to-br from-blue-500/10 to-blue-600/5 hover:from-blue-500/20 hover:to-blue-600/10 hover:border-blue-400/50 hover:scale-105 hover:shadow-xl hover:shadow-blue-500/20 active:scale-100'
+                      : 'border-slate-400/30 bg-gradient-to-br from-slate-500/10 to-slate-600/5 active:scale-[0.98]'
                     }`}
                 >
                   <CreditCard
-                    className={`w-20 h-20 mb-3 transition-all duration-300 group-hover:scale-110
-                      ${!canUseCard || isProcessingPayment ? 'text-gray-400' : 'text-blue-400 group-hover:text-blue-300'}`}
+                    className={`w-20 h-20 mb-3 transition-all duration-300
+                      ${!canUseCard || isProcessingPayment ? 'text-gray-400' : 'text-slate-200'}`}
                     strokeWidth={1.5}
                   />
 
-                  <span className={`text-2xl font-bold tracking-wide uppercase transition-colors duration-300
-                    ${!canUseCard || isProcessingPayment ? 'text-gray-400' : 'text-blue-400 group-hover:text-blue-300'}`}
+                  <span className={`${paymentMethodLabelBaseClass}
+                    ${!canUseCard || isProcessingPayment ? 'text-gray-400' : 'text-slate-200'}`}
                   >
                     {t('modals.payment.cardSimple', 'CARD')}
                   </span>
 
                   {!canUseCard && (
                     <p className="text-xs text-amber-400 mt-2 text-center">
-                      {t('terminal.messages.featureDisabled', 'Feature disabled for this terminal')}
+                      {t('settings.terminal.messages.featureDisabled', 'Feature disabled for this terminal')}
                     </p>
                   )}
                 </button>
@@ -490,20 +495,20 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <button
                     onClick={() => handlePaymentMethodSelect('room_charge')}
                     disabled={isProcessingPayment}
-                    className={`group relative flex flex-col items-center justify-center p-10 rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                    className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                       ${isProcessingPayment
                         ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-amber-400/30 bg-gradient-to-br from-amber-500/10 to-amber-600/5 hover:from-amber-500/20 hover:to-amber-600/10 hover:border-amber-400/50 hover:scale-105 hover:shadow-xl hover:shadow-amber-500/20 active:scale-100'
+                        : 'border-amber-400/30 bg-gradient-to-br from-amber-500/10 to-amber-600/5 active:scale-[0.98]'
                       }`}
                   >
                     <BedDouble
-                      className={`w-20 h-20 mb-3 transition-all duration-300 group-hover:scale-110
-                        ${isProcessingPayment ? 'text-gray-400' : 'text-amber-400 group-hover:text-amber-300'}`}
+                      className={`w-20 h-20 mb-3 transition-all duration-300
+                        ${isProcessingPayment ? 'text-gray-400' : 'text-amber-400'}`}
                       strokeWidth={1.5}
                     />
 
-                    <span className={`text-2xl font-bold tracking-wide uppercase transition-colors duration-300
-                      ${isProcessingPayment ? 'text-gray-400' : 'text-amber-400 group-hover:text-amber-300'}`}
+                    <span className={`${paymentMethodLabelBaseClass}
+                      ${isProcessingPayment ? 'text-gray-400' : 'text-amber-400'}`}
                     >
                       {t('modals.payment.roomChargeSimple', 'ROOM')}
                     </span>
@@ -520,20 +525,20 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <button
                     onClick={() => { onSplitPayment(); }}
                     disabled={isProcessingPayment}
-                    className={`group relative flex flex-col items-center justify-center p-10 rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                    className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                       ${isProcessingPayment
                         ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-purple-400/30 bg-gradient-to-br from-purple-500/10 to-purple-600/5 hover:from-purple-500/20 hover:to-purple-600/10 hover:border-purple-400/50 hover:scale-105 hover:shadow-xl hover:shadow-purple-500/20 active:scale-100'
+                        : 'border-slate-400/30 bg-gradient-to-br from-slate-500/10 to-slate-600/5 active:scale-[0.98]'
                       }`}
                   >
                     <Split
-                      className={`w-20 h-20 mb-3 transition-all duration-300 group-hover:scale-110
-                        ${isProcessingPayment ? 'text-gray-400' : 'text-purple-400 group-hover:text-purple-300'}`}
+                      className={`w-20 h-20 mb-3 transition-all duration-300
+                        ${isProcessingPayment ? 'text-gray-400' : 'text-slate-200'}`}
                       strokeWidth={1.5}
                     />
 
-                    <span className={`text-2xl font-bold tracking-wide uppercase transition-colors duration-300
-                      ${isProcessingPayment ? 'text-gray-400' : 'text-purple-400 group-hover:text-purple-300'}`}
+                    <span className={`${paymentMethodLabelBaseClass}
+                      ${isProcessingPayment ? 'text-gray-400' : 'text-slate-200'}`}
                     >
                       {t('modals.payment.splitSimple', 'SPLIT')}
                     </span>
@@ -552,7 +557,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             )}
 
             {roomChargeFallback && !isProcessingPayment && (
-              <div className="mt-4 flex items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+              <div className="mt-4 flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
                 <AlertTriangle className="h-5 w-5 flex-shrink-0 text-amber-400" />
                 <p className="text-sm text-amber-300">
                   {t(
@@ -585,7 +590,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             </div>
 
             {cashReceived && (
-              <div className={`p-4 rounded-xl border-2 transition-colors ${
+              <div className={`p-4 rounded-2xl border-2 transition-colors ${
                 hasEnoughCash
                   ? 'bg-green-500/10 border-green-400/30'
                   : 'bg-red-500/10 border-red-400/30'
@@ -595,7 +600,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     {t('modals.payment.totalAmount')}
                   </span>
                   <span className="font-bold liquid-glass-modal-text">
-                    €{orderTotal.toFixed(2)}
+                    {formatCurrency(orderTotal)}
                   </span>
                 </div>
                 <div className="flex justify-between items-center mb-2">
@@ -603,7 +608,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     {t('modals.payment.cashReceived', 'Cash Received')}
                   </span>
                   <span className="font-bold liquid-glass-modal-text">
-                    €{cashAmount.toFixed(2)}
+                    {formatCurrency(cashAmount)}
                   </span>
                 </div>
                 <div className="border-t border-white/10 pt-2 mt-2"></div>
@@ -616,7 +621,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <span className={`text-2xl font-bold ${
                     hasEnoughCash ? 'text-green-400' : 'text-red-400'
                   }`}>
-                    {hasEnoughCash ? `€${changeAmount.toFixed(2)}` : t('modals.payment.insufficient', 'Insufficient')}
+                    {hasEnoughCash ? formatCurrency(changeAmount) : t('modals.payment.insufficient', 'Insufficient')}
                   </span>
                 </div>
               </div>
@@ -626,7 +631,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               <button
                 onClick={handleBackToPaymentSelection}
                 disabled={isProcessingPayment}
-                className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 hover:bg-gray-500/30 liquid-glass-modal-text"
+                className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 active:bg-gray-500/30 liquid-glass-modal-text"
               >
                 {t('common.actions.back', 'Back')}
               </button>
@@ -635,7 +640,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 disabled={!hasEnoughCash || isProcessingPayment}
                 className={`liquid-glass-modal-button flex-1 font-medium ${
                   hasEnoughCash && !isProcessingPayment
-                    ? 'bg-green-600/20 hover:bg-green-600/30 text-green-400 border-green-500/30'
+                    ? 'bg-green-600/20 active:bg-green-600/30 text-green-400 border-green-500/30'
                     : 'bg-gray-500/20 text-gray-400 cursor-not-allowed opacity-50'
                 }`}
               >

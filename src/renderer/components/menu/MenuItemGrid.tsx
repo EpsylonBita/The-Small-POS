@@ -6,6 +6,7 @@ import { MenuItemCard } from './MenuItemCard';
 import { ComboCard } from './ComboCard';
 import { menuService, MenuItem } from '../../services/MenuService';
 import { AlertTriangle, Utensils, X } from 'lucide-react';
+import { formatCurrency } from '../../utils/format';
 import type { MenuCombo } from '@shared/types/combo';
 import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
 
@@ -312,8 +313,8 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
               onClick={onSyncMenu}
               className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                 resolvedTheme === 'dark'
-                  ? 'bg-blue-600 text-white hover:bg-blue-700'
-                  : 'bg-blue-500 text-white hover:bg-blue-600'
+                  ? 'bg-yellow-400 text-black active:bg-yellow-500'
+                  : 'bg-yellow-400 text-black active:bg-yellow-500'
               }`}
             >
               {t('menu.grid.syncMenuData')}
@@ -346,8 +347,8 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
               onClick={onSyncMenu}
               className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                 resolvedTheme === 'dark'
-                  ? 'bg-blue-600 text-white hover:bg-blue-700'
-                  : 'bg-blue-500 text-white hover:bg-blue-600'
+                  ? 'bg-yellow-400 text-black active:bg-yellow-500'
+                  : 'bg-yellow-400 text-black active:bg-yellow-500'
               }`}
             >
               {t('menu.grid.syncMenuData')}
@@ -386,7 +387,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                 <span className={`mt-1 block text-lg font-bold ${
                   resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
                 }`}>
-                  {preview.item.is_customizable ? t('menu.item.from') : ''}€{preview.item.price.toFixed(2)}
+                  {preview.item.is_customizable ? t('menu.item.from') : ''}{formatCurrency(preview.item.price)}
                 </span>
               </div>
               <button
@@ -394,8 +395,8 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                 onClick={() => setPreview(null)}
                 className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border transition-colors ${
                   resolvedTheme === 'dark'
-                    ? 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
-                    : 'border-black/10 bg-black/5 text-gray-600 hover:bg-black/10 hover:text-gray-950'
+                    ? 'border-white/10 bg-white/5 text-zinc-300 active:bg-white/10 active:text-white'
+                    : 'border-black/10 bg-black/5 text-gray-600 active:bg-black/10 active:text-gray-950'
                 }`}
                 aria-label={t('common.actions.close')}
               >

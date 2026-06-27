@@ -188,7 +188,7 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
               onAddressChange={handleAddressChange}
               staffId={staffId}
               staffRole={staffRole}
-              className="bg-white/5 border border-white/10 rounded-lg p-4"
+              className="bg-white/5 border border-white/10 rounded-2xl p-4"
             />
           ) : (
             <>
@@ -206,10 +206,10 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
         </div>
 
         {/* Order Type Display */}
-        <div className="p-3 bg-white/10 dark:bg-gray-800/20 rounded-lg border liquid-glass-modal-border">
+        <div className="p-3 bg-white/10 dark:bg-gray-800/20 rounded-2xl border liquid-glass-modal-border">
           <div className="flex items-center justify-between">
             <span className="text-sm font-medium liquid-glass-modal-text">{t('modals.customerInfo.orderType')}:</span>
-            <span className="text-sm font-semibold text-blue-300 capitalize">
+            <span className="text-sm font-semibold text-amber-500 dark:text-amber-300 capitalize">
               {orderType.replace('-', ' ')}
             </span>
           </div>
@@ -218,14 +218,14 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
         {/* Action Buttons */}
         <div className="flex space-x-3 mt-6">
           <POSGlassButton
-            variant="secondary"
+            variant="error"
             onClick={onClose}
             className="flex-1"
           >
             {t('modals.customerInfo.cancel')}
           </POSGlassButton>
           <POSGlassButton
-            variant="primary"
+            variant="success"
             onClick={handleSave}
             className={`flex-1 ${!canProceed && orderType === 'delivery' ? 'opacity-50 cursor-not-allowed' : ''}`}
             disabled={!canProceed && orderType === 'delivery'}

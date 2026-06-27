@@ -251,3 +251,43 @@ export function formatCompactOrderNumberForDisplay(orderNumber: string, createdA
 
   return normalized;
 }
+
+/**
+ * Internal (non-business) order identifier: a uuid-tail order number
+ * (ORD-YYYYMMDD-<32 hex>). These are not staff-facing business numbers.
+ */
+const INTERNAL_HASH_ORDER_NUMBER = /^[A-Za-z]+-\d{8}-[a-f0-9]{32}$/i;
+
+/**
+ * True when the value is a real, staff-facing business order number that compacts
+ * to a meaningful "#NNNN" — i.e. ORD-YYYYMMDD-NNNN or a kiosk number. Internal
+ * fallbacks (a uuid-tail or a bare id slice) return false.
+ */
+export function isBusinessOrderNumber(value?: string | null): boolean {
+  const candidate = (value || '').trim();
+  if (!candidate || INTERNAL_HASH_ORDER_NUMBER.test(candidate)) {
+    return false;
+  }
+  return (
+    /^[A-Za-z]+-\d{8}-\d+$/.test(candidate) || // ORD-YYYYMMDD-NNNN
+    /^[A-Za-z]+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\d+$/.test(candidate) || // kiosk business period
+    /^K[A-Za-z]*-\d+$/i.test(candidate) // kiosk short
+  );
+}
+
+/**
+ * Resolve which order number to keep when merging a remote row over a local one
+ * for the same order: never let an internal id/hash fallback overwrite an existing
+ * real business order number. Falls back to whichever value is present otherwise.
+ */
+export function resolveMergedOrderNumber(
+  existing?: string | null,
+  incoming?: string | null,
+): string {
+  const existingValue = (existing || '').trim();
+  const incomingValue = (incoming || '').trim();
+  if (isBusinessOrderNumber(existingValue) && !isBusinessOrderNumber(incomingValue)) {
+    return existingValue;
+  }
+  return incomingValue || existingValue;
+}

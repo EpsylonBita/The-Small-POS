@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { resolveOrderCompletionOutcome } from '../../src/renderer/utils/orderCompletionOutcome';
+// Explicit .ts so this leaf-util import resolves under both the esbuild parity suite and a
+// focused standalone `node --test` run (Node ESM does not auto-resolve extensionless paths).
+import { resolveOrderCompletionOutcome } from '../../src/renderer/utils/orderCompletionOutcome.ts';
 
 // Regression contract for the checkout failure path (2026-06-10 review):
 // handleOrderComplete used to be typed `any → Promise<void>` and resolved
@@ -91,6 +93,22 @@ test('OrderDashboard.handleOrderComplete resolves an explicit boolean and succes
 
   assert.match(handler, /return finishOrderCompletion\(true\);/);
   assert.match(handler, /return finishOrderCompletion\(false\);/);
+});
+
+test('OrderDashboard queues table-session open after any saved table-order session failure', () => {
+  const source = rendererSource('components', 'OrderDashboard.tsx');
+  const tableSessionFallback = sliceBetween(
+    source,
+    '[OrderDashboard] Table session open failed, falling back to table status assignment:',
+    'await updateTableStatus(selectedTable.id, "occupied", {',
+  );
+
+  assert.match(tableSessionFallback, /await enqueueTableSessionOpen\(/);
+  assert.doesNotMatch(
+    tableSessionFallback,
+    /if \(isRetryableTableServiceError\(sessionError\)\) \{/,
+    'after the order is already saved locally, table-session open should be queued for retry instead of dropping unclassified API errors',
+  );
 });
 
 test('OrderFlow.handleOrderComplete resolves an explicit boolean on every checkout path', () => {
@@ -206,5 +224,76 @@ test('ProductCatalogModal keeps the cart and reports failure when onOrderComplet
     rendererSource('components', 'OrderFlow.tsx'),
     /<ProductCatalogModal[\s\S]{0,500}?onOrderComplete=\{handleOrderComplete\}/,
     'OrderFlow must wire its boolean-resolving handleOrderComplete into ProductCatalogModal',
+  );
+});
+
+// Regression contract for the unpaid-completion blocker (2026-06-21 review):
+// `no_persisted_payment` zero-payment blockers fell through to a raw English
+// payload toast (leaking the internal ORD-* id), and the caller emitted a second
+// duplicate toast. They must instead route to the localized by-amount repair UI.
+test('OrderDashboard routes no_persisted_payment to the by-amount repair UI, not a raw payload toast', () => {
+  const source = rendererSource('components', 'OrderDashboard.tsx');
+  const handler = sliceBetween(
+    source,
+    'const handlePaymentIntegrityBlocker = useCallback(',
+    'const retryBlockedStatusTransition = useCallback(',
+  );
+
+  // no_persisted_payment is handled with the split/by-amount repair (staff choose
+  // cash/card per portion), alongside split_payment_incomplete.
+  assert.match(
+    handler,
+    /blocker\.reasonCode === "split_payment_incomplete" \|\|\s*blocker\.reasonCode === "no_persisted_payment" \|\|\s*blocker\.paymentMethod === "split"/,
+  );
+  assert.match(handler, /setSplitPaymentData\(\s*buildStatusBlockerSplitPaymentData\(order, targetStatus, blocker\),?\s*\)/);
+
+  // The raw backend payload (English + ORD-* id) is never toasted; the handler
+  // falls back to a localized message instead.
+  assert.doesNotMatch(handler, /payload\.error \|\|\s*payload\.message/);
+  assert.match(handler, /t\("orderDashboard\.collectPaymentFailed"/);
+
+  // The single-payment repair shows the visible compact order label, not ORD-*.
+  assert.match(
+    handler,
+    /orderNumber: formatCompactOrderNumberForDisplay\(getVisibleOrderNumber\(order\)\)/,
+  );
+});
+
+test('OrderDashboard never emits a second toast when a payment-integrity blocker is handled', () => {
+  const source = rendererSource('components', 'OrderDashboard.tsx');
+
+  // The status-completion callers must return right after delegating to the blocker
+  // handler (which owns the messaging), instead of `&&`-ing on its return value and
+  // then falling through to a second toast.error.
+  const handledReturns =
+    source.match(
+      /if \(result\.paymentIntegrityPayload\) \{\s*handlePaymentIntegrityBlocker\([\s\S]*?\);\s*return;\s*\}/g,
+    ) ?? [];
+  assert.ok(
+    handledReturns.length >= 2,
+    `both bulk status paths must return after handling the blocker; found ${handledReturns.length}`,
+  );
+
+  // The old fall-through shape (`payload && handler() ` guarding the early return)
+  // that produced the duplicate raw toast is gone.
+  assert.doesNotMatch(
+    source,
+    /result\.paymentIntegrityPayload &&\s*handlePaymentIntegrityBlocker\(/,
+  );
+
+  // collectPaymentFailed is a real localized key in every POS locale.
+  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+    const value = JSON.parse(
+      readFileSync(path.join(process.cwd(), 'src', 'locales', `${lng}.json`), 'utf8'),
+    ).orderDashboard.collectPaymentFailed;
+    assert.equal(typeof value, 'string', `${lng} missing orderDashboard.collectPaymentFailed`);
+    assert.ok(value.length > 0, `${lng} empty orderDashboard.collectPaymentFailed`);
+  }
+  const en = JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', 'en.json'), 'utf8'));
+  const el = JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', 'el.json'), 'utf8'));
+  assert.notEqual(
+    el.orderDashboard.collectPaymentFailed,
+    en.orderDashboard.collectPaymentFailed,
+    'Greek collectPaymentFailed must be a real translation',
   );
 });

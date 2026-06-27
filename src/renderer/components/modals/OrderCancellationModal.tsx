@@ -57,6 +57,26 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
       closeOnBackdrop={true}
       closeOnEscape={true}
       initialFocusRef={reasonInputRef}
+      footer={(
+        /* Fixed glass action bar: neutral safe close + red destructive confirm (disabled until a reason is given). */
+        <div className="flex gap-3 border-t border-white/15 bg-white/[0.05] px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.03]">
+          <button
+            type="button"
+            onClick={handleClose}
+            className="liquid-glass-modal-button liquid-glass-modal-secondary flex-1 rounded-xl"
+          >
+            {t('modals.orderCancellation.keepOrder')}
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirm}
+            disabled={!cancelReason.trim()}
+            className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
+          >
+            {t('modals.orderCancellation.confirm')}
+          </button>
+        </div>
+      )}
     >
       <p className="liquid-glass-modal-text-muted mb-6">
         {t('modals.orderCancellation.message', { count: orderCount })}
@@ -78,28 +98,6 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         <div className="text-xs liquid-glass-modal-text-muted mt-1">
           {t('modals.orderCancellation.characterCount', { current: cancelReason.length, max: 500 })}
         </div>
-      </div>
-
-      <div className="flex gap-3">
-        <button
-          onClick={handleClose}
-          className="flex-1 px-4 py-2 border liquid-glass-modal-border liquid-glass-modal-text hover:bg-white/10 dark:hover:bg-gray-800/20 rounded-lg transition-colors"
-        >
-          {t('modals.orderCancellation.cancel')}
-        </button>
-        <button
-          onClick={handleConfirm}
-          disabled={!cancelReason.trim()}
-          className={`
-            flex-1 px-4 py-2 rounded-lg font-medium transition-colors
-            ${cancelReason.trim()
-              ? 'bg-red-500 hover:bg-red-600 text-white'
-              : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-            }
-          `}
-        >
-          {t('modals.orderCancellation.confirm')}
-        </button>
       </div>
     </LiquidGlassModal>
   );

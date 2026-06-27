@@ -36,17 +36,17 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
     const config = {
         info: {
             icon: Info,
-            color: 'text-blue-400',
-            bg: 'bg-blue-500/10',
-            border: 'border-blue-500/20',
-            shadow: 'shadow-blue-500/5'
+            color: 'text-amber-300',
+            bg: 'bg-amber-500/10',
+            border: 'border-amber-500/20',
+            shadow: 'shadow-amber-500/5'
         },
         warning: {
             icon: AlertTriangle,
-            color: 'text-yellow-400',
-            bg: 'bg-yellow-500/10',
-            border: 'border-yellow-500/20',
-            shadow: 'shadow-yellow-500/5'
+            color: 'text-amber-300',
+            bg: 'bg-amber-500/10',
+            border: 'border-amber-500/20',
+            shadow: 'shadow-amber-500/5'
         },
         error: {
             icon: XCircle,
@@ -113,7 +113,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
                         <div className="mt-2">
                             <button
                                 onClick={() => setIsExpanded(!isExpanded)}
-                                className="flex items-center gap-1 text-xs text-white/50 hover:text-white/80 transition-colors"
+                                className="flex min-h-8 items-center gap-1 rounded-xl px-2 text-xs font-semibold text-white/55 transition-transform active:scale-[0.98] active:bg-white/10 active:text-white/85"
                                 aria-expanded={isExpanded}
                             >
                                 {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
@@ -132,7 +132,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
                 {onClose && (
                     <button
                         onClick={onClose}
-                        className="shrink-0 p-1 text-white/40 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                        className="shrink-0 rounded-xl p-1.5 text-white/45 transition-transform active:scale-95 active:bg-white/10 active:text-white"
                         aria-label="Close alert"
                     >
                         <X className="w-4 h-4" />

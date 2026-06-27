@@ -277,7 +277,7 @@ export const SinglePaymentCollectionModal: React.FC<
             </p>
             <p className="mt-2 flex items-center gap-2 text-base font-semibold text-white">
               {method === 'card' ? (
-                <CreditCard className="h-4 w-4 text-sky-300" />
+                <CreditCard className="h-4 w-4 text-slate-300" />
               ) : (
                 <Banknote className="h-4 w-4 text-emerald-300" />
               )}
@@ -304,7 +304,7 @@ export const SinglePaymentCollectionModal: React.FC<
             type="button"
             onClick={handleCollect}
             disabled={isProcessing || amountToCollect <= 0.009}
-            className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-emerald-400/20 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-emerald-400/20 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-100 transition active:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isProcessing ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -325,7 +325,7 @@ export const SinglePaymentCollectionModal: React.FC<
             type="button"
             onClick={onClose}
             disabled={isProcessing}
-            className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white/80 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white/80 transition active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {t('common.cancel', { defaultValue: 'Cancel' })}
           </button>

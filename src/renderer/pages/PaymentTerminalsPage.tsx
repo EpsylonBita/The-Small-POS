@@ -446,10 +446,13 @@ interface StatsCardProps {
 }
 
 const StatsCard = memo<StatsCardProps>(({ label, value, icon: Icon, color, isDark }) => (
-  <motion.div variants={pageMotionItem} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}>
+  <motion.div
+    variants={pageMotionItem}
+    className={`p-4 rounded-2xl border backdrop-blur-sm ${isDark ? 'border-white/10 bg-white/5' : 'border-black/5 bg-white/70'}`}
+  >
     <div className="flex items-center gap-3">
       <div
-        className="w-10 h-10 rounded-lg flex items-center justify-center"
+        className="w-10 h-10 rounded-xl flex items-center justify-center"
         style={{ backgroundColor: `${color}20` }}
       >
         <Icon size={20} style={{ color }} />
@@ -816,7 +819,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
       >
         <div className="text-center">
           <Loader2
-            className={`w-8 h-8 animate-spin mx-auto mb-3 ${isDark ? 'text-blue-400' : 'text-blue-500'}`}
+            className={`w-8 h-8 animate-spin mx-auto mb-3 ${isDark ? 'text-amber-400' : 'text-amber-500'}`}
           />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
             {t('ecr.loading', 'Loading payment terminals...')}
@@ -852,7 +855,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
             <div className="flex items-center gap-3">
               {/* Online Status */}
               <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg ${
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-2xl ${
                   isOnline
                     ? isDark
                       ? 'bg-green-500/20 text-green-400'
@@ -873,29 +876,28 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                 type="button"
                 onClick={handleRefresh}
                 disabled={isRefreshing}
-                title={t('common.refresh', 'Refresh')}
                 aria-label={t('common.refresh', 'Refresh')}
-                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
                   isDark
-                    ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                    : 'border border-black bg-black text-white hover:bg-zinc-800'
-                } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                    ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
+                    : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
+                } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
               >
                 <RefreshCw size={20} className={isRefreshing ? 'animate-spin' : ''} />
               </button>
 
-              {/* Discover Button */}
+              {/* Discover Button (amber glass = utility/search) */}
               <button
                 onClick={() => setShowDiscoveryModal(true)}
                 disabled={discoverAction.disabled}
-                title={discoverAction.message || undefined}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                aria-label={discoverAction.disabled && discoverAction.message ? discoverAction.message : undefined}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} disabled:opacity-50 disabled:cursor-not-allowed active:scale-95`}
               >
                 <Search size={18} />
                 {t('ecr.discover', 'Discover')}
               </button>
 
-              {/* Add Manual Button */}
+              {/* Add Manual Button (semantic green = primary create) */}
               <button
                 onClick={() => {
                   setEditingDevice(undefined)
@@ -903,8 +905,8 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                   setShowConfigModal(true)
                 }}
                 disabled={discoverAction.disabled}
-                title={discoverAction.message || undefined}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-green-100 text-green-600 hover:bg-green-200'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                aria-label={discoverAction.disabled && discoverAction.message ? discoverAction.message : undefined}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-white transition-all border border-green-500 bg-green-600 active:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
               >
                 <Plus size={18} />
                 {t('ecr.addManual', 'Add Terminal')}
@@ -922,7 +924,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
             label={t('ecr.stats.total', 'Total')}
             value={stats.total}
             icon={CreditCard}
-            color="#6366f1"
+            color="#ca8a04"
             isDark={isDark}
           />
           <StatsCard
@@ -952,7 +954,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
         {devices.length === 0 && (
           <motion.div
             variants={pageMotionItem}
-            className={`text-center py-12 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}
+            className={`text-center py-12 rounded-3xl border backdrop-blur-sm ${isDark ? 'border-white/10 bg-white/5' : 'border-black/5 bg-white/70'}`}
           >
             <CreditCard
               size={48}
@@ -969,8 +971,8 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
             <button
               onClick={() => setShowDiscoveryModal(true)}
               disabled={discoverAction.disabled}
-              title={discoverAction.message || undefined}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isDark ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'} disabled:opacity-50 disabled:cursor-not-allowed`}
+              aria-label={discoverAction.disabled && discoverAction.message ? discoverAction.message : undefined}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} disabled:opacity-50 disabled:cursor-not-allowed active:scale-95`}
             >
               <Search size={18} />
               {t('ecr.discoverTerminals', 'Discover Terminals')}
@@ -1003,7 +1005,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
         {devices.length > 0 && (
           <motion.div
             variants={pageMotionItem}
-            className={`mt-6 p-6 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}
+            className={`mt-6 p-6 rounded-2xl border backdrop-blur-sm ${isDark ? 'border-white/10 bg-white/5' : 'border-black/5 bg-white/70'}`}
           >
             <h3
               className={`font-semibold mb-4 ${isDark ? 'text-white' : 'text-gray-900'}`}
@@ -1024,8 +1026,8 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                     key={device.id}
                     onClick={() => handleTestPayment(device.id)}
                     disabled={statuses[device.id]?.state !== 'connected' || testAction.disabled}
-                    title={testAction.message || undefined}
-                    className={`px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'}`}
+                    aria-label={testAction.disabled && testAction.message ? testAction.message : undefined}
+                    className={`inline-flex items-center justify-center px-4 py-2 rounded-xl text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 ${isDark ? 'border border-white/10 bg-white/5 text-zinc-200 active:bg-white/10' : 'border border-black/10 bg-white/70 text-zinc-700 active:bg-black/5'}`}
                   >
                     {t('ecr.testPayment.button', 'Test {{name}}', { name: device.name })}
                   </button>

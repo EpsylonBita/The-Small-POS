@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
-import { LiquidGlassModal } from '../ui/pos-glass-components'
+import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
 import { Activity, AlertTriangle, ChefHat, ChevronDown, CreditCard, FileText, Info, Package, Pencil, Printer, Receipt, Tag, Trash2, Truck, UserCheck, Wine, XCircle } from 'lucide-react'
 import { getBridge, offEvent, onEvent } from '../../../lib'
@@ -11,6 +11,27 @@ import PrinterSetupWizard from './PrinterSetupWizard'
 import { ReceiptScaleSlider } from '../ui/ReceiptScaleSlider'
 import { PrinterSupportEntryPoint } from '../support/PrinterSupportEntryPoint'
 import { buildPrinterSupportContext } from '../../support'
+
+// Semantic form-action buttons (round 158): solid-green Save, soft-red Cancel — sized to
+// match liquidGlassModalButton('*','md'|'sm'). Tap/focus feedback only, no hover. Soft red
+// (not solid) so Cancel is not confused with a destructive Delete.
+const SAVE_BTN_MD =
+  'inline-flex items-center justify-center gap-2 rounded-xl border border-green-500 bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed'
+const SAVE_BTN_SM =
+  'inline-flex items-center justify-center gap-2 rounded-xl border border-green-500 bg-green-600 px-3 py-1.5 text-sm font-semibold text-white shadow-md shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed'
+const CANCEL_BTN_MD =
+  'inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-700 dark:text-red-300 transition-transform duration-150 active:scale-[0.98] active:bg-red-500/20 disabled:opacity-50'
+
+// The receipt live-preview renders inside an <iframe srcDoc={...}>. That iframe hosts
+// its OWN document, so the parent container's `scrollbar-hide` utility cannot reach the
+// iframe body's native scrollbar -- on this touchscreen POS that leaked as a bright
+// native vertical rail on the right edge of the preview (Round 288, Greek/light QA).
+// We prepend this CSS to the preview HTML so the iframe document hides its own scrollbar
+// in every engine (Firefox `scrollbar-width`, legacy Edge `-ms-overflow-style`, WebKit/
+// Chromium `::-webkit-scrollbar`) while STILL scrolling. It only suppresses scrollbar
+// chrome -- it never touches margins, fonts, dimensions, or the rendered receipt content.
+const PREVIEW_HIDE_SCROLLBAR_STYLE =
+  '<style>html,body{scrollbar-width:none;-ms-overflow-style:none;}html::-webkit-scrollbar,body::-webkit-scrollbar{width:0;height:0;display:none;}</style>'
 
 // Types matching the printer module types
 type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi' | 'system'
@@ -279,7 +300,8 @@ const verificationTone = (value: unknown): string => {
   const status = normalizeVerificationStatus(value)
   if (status === 'verified') return 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
   if (status === 'degraded') return 'bg-amber-500/10 border-amber-500/30 text-amber-200'
-  if (status === 'candidate') return 'bg-blue-500/10 border-blue-500/30 text-blue-200'
+  // candidate = pending/needs-verification (informational) -> amber, not blue
+  if (status === 'candidate') return 'bg-amber-500/10 border-amber-400/30 text-amber-100'
   return 'bg-white/5 border-white/10 liquid-glass-modal-text-muted'
 }
 
@@ -295,7 +317,7 @@ const StatusIndicator: React.FC<{ state: PrinterState }> = ({ state }) => {
     error: 'bg-red-500',
     busy: 'bg-yellow-500',
     degraded: 'bg-amber-400',
-    unverified: 'bg-blue-400',
+    unverified: 'bg-amber-400',
     unresolved: 'bg-orange-400',
   }
   return (
@@ -1315,7 +1337,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
       if (!textScaleAutoSwitchToastShownRef.current) {
         toast(t(
           'settings.printer.textScaleAutoSwitchToast',
-          'Precise receipt sizing uses Raster Exact. The draft preview switched automatically.',
+          'Text-size changes switch this draft to image-like receipt mode so preview and print can match.',
         ))
         textScaleAutoSwitchToastShownRef.current = true
       }
@@ -1372,7 +1394,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
     <button
       type="button"
       onClick={() => toggleSection(key)}
-      className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/5 hover:bg-white/8 transition-colors"
+      className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/5 transition-colors"
     >
       <span className="text-xs font-semibold text-white/90 uppercase tracking-wider">
         {t(labelKey, labelDefault)}
@@ -1387,66 +1409,63 @@ const PrinterSettingsModal: React.FC<Props> = ({
     const label = t(`settings.printer.receiptActions.${camelCase(key)}`, key)
     const stateLabel = enabled ? t('common.active', 'Active') : t('common.inactive', 'Inactive')
 
+    // Round 301: the bespoke warm-pill switch is replaced by the shared POSGlassSwitch (green-on /
+    // neutral-off, 58x34, no hover), matching the Round 295 Settings switch family. The whole row/card is
+    // tappable for touchscreen convenience -- its onClick + cursor/active feedback toggle the action once --
+    // while POSGlassSwitch remains the accessible button[role=switch] carrying the aria-label + checked
+    // state. The switch is wrapped in a stopPropagation span so a tap on the switch toggles exactly once via
+    // POSGlassSwitch.onChange and does not also bubble to the row tap (no double-toggle); the row is a div,
+    // not a button, so there are no nested buttons. The enabled row/icon/state/AUTO accent uses semantic
+    // emerald (green ON); the warm accent stays for selected tabs/buttons only.
     return (
-      <button
+      <div
         key={key}
-        type="button"
         onClick={() => handleReceiptActionToggle(key)}
-        className={`group flex min-h-[4.25rem] w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors ${
+        className={`flex min-h-[4.25rem] w-full cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all active:scale-[0.99] ${
           enabled
-            ? 'border-emerald-300/45 bg-white/[0.025] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] hover:bg-white/[0.04]'
-            : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.055]'
+            ? 'border-emerald-400/40 bg-emerald-500/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
+            : 'border-white/10 bg-white/[0.03]'
         }`}
-        aria-checked={enabled}
-        aria-label={`${label}: ${stateLabel}`}
-        role="switch"
       >
         <span
           className={`flex h-8 w-8 shrink-0 items-center justify-center ${
-            enabled ? 'text-emerald-200' : 'text-white/45'
+            enabled ? 'text-emerald-300' : 'text-white/45'
           }`}
           aria-hidden="true"
         >
           <Icon className="h-5 w-5" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className={`block whitespace-normal break-words text-sm font-semibold leading-tight ${enabled ? 'text-emerald-50' : 'text-white/70'}`}>
+          <span className={`block whitespace-normal break-words text-sm font-semibold leading-tight ${enabled ? 'text-white' : 'text-white/70'}`}>
             {label}
           </span>
           <span className="mt-1 flex flex-wrap items-center gap-2">
             <span
               className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${
-                enabled ? 'text-emerald-100/90' : 'text-white/35'
+                enabled ? 'text-emerald-200/90' : 'text-white/35'
               }`}
             >
               {stateLabel}
             </span>
             <span
               className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${
-                enabled ? 'border-emerald-300/30 bg-transparent text-emerald-100/80' : 'border-transparent bg-white/[0.06] text-white/35'
+                enabled ? 'border-emerald-300/35 bg-transparent text-emerald-200/90' : 'border-transparent bg-white/[0.06] text-white/35'
               }`}
             >
               AUTO
             </span>
           </span>
         </span>
-        <span
-          className={`relative flex h-6 w-12 shrink-0 items-center rounded-full border transition-colors ${
-            enabled
-              ? 'border-emerald-300 bg-emerald-500'
-              : 'border-white/12 bg-black/25 text-white/45'
-          }`}
-          aria-hidden="true"
-        >
-          <span
-            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full border border-white/70 bg-white shadow-sm transition-transform ${
-              enabled
-                ? 'translate-x-6'
-                : 'translate-x-0'
-            }`}
+        {/* The whole row toggles (touch UX); stopPropagation here means a tap on the switch toggles exactly
+            once via POSGlassSwitch.onChange instead of also bubbling to the row's onClick. */}
+        <span onClick={(event) => event.stopPropagation()}>
+          <POSGlassSwitch
+            checked={enabled}
+            onChange={() => handleReceiptActionToggle(key)}
+            aria-label={`${label}: ${stateLabel}`}
           />
         </span>
-      </button>
+      </div>
     )
   }
 
@@ -1462,8 +1481,8 @@ const PrinterSettingsModal: React.FC<Props> = ({
       <div className="inline-flex rounded-lg bg-white/5 border border-white/10 p-1">
         <button
           onClick={() => setSetupMode('quick')}
-          className={`px-3 py-1.5 text-xs rounded-md transition ${
-            setupMode === 'quick' ? 'bg-blue-500/20 text-blue-200' : 'liquid-glass-modal-text-muted'
+          className={`px-3 py-1.5 text-xs rounded-md transition active:scale-95 ${
+            setupMode === 'quick' ? 'bg-amber-500/20 text-amber-100' : 'liquid-glass-modal-text-muted'
           }`}
           type="button"
         >
@@ -1471,8 +1490,8 @@ const PrinterSettingsModal: React.FC<Props> = ({
         </button>
         <button
           onClick={() => setSetupMode('expert')}
-          className={`px-3 py-1.5 text-xs rounded-md transition ${
-            setupMode === 'expert' ? 'bg-blue-500/20 text-blue-200' : 'liquid-glass-modal-text-muted'
+          className={`px-3 py-1.5 text-xs rounded-md transition active:scale-95 ${
+            setupMode === 'expert' ? 'bg-amber-500/20 text-amber-100' : 'liquid-glass-modal-text-muted'
           }`}
           type="button"
         >
@@ -1480,7 +1499,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
         </button>
       </div>
 
-      <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs text-blue-100">
+      <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
         {t(
           'settings.printer.verificationFirstHint',
           'Use Quick Setup first. It verifies a working transport and encoding path before you rely on a printer in live service.',
@@ -1543,7 +1562,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                     <div className="font-medium liquid-glass-modal-text">
                       {printer.name}
                       {printer.isDefault && (
-                        <span className="ml-2 text-xs bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded">
+                        <span className="ml-2 text-xs bg-amber-500/20 text-amber-200 px-2 py-0.5 rounded">
                           {t('settings.printer.default')}
                         </span>
                       )}
@@ -1638,7 +1657,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
         </button>
       </div>
 
-      <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+      <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
         {t(
           'settings.printer.discoveredOnlyHint',
           'Discovery does not mean printable yet. Complete the verification wizard before using a discovered printer in service.',
@@ -1704,20 +1723,34 @@ const PrinterSettingsModal: React.FC<Props> = ({
     const previewBadgeText = preview?.isExactPreview
       ? t('settings.printer.previewExact', 'Exact preview')
       : t('settings.printer.previewApproximate', 'Approximate preview')
-    const previewDetails = preview
-      ? `${preview.effectiveTemplate || formData.receiptTemplate} / ${preview.effectiveRenderMode || formData.classicRenderMode}`
-      : `${formData.receiptTemplate} / ${formData.classicRenderMode}`
+    // Display-only: map known template/render-mode values to localized short
+    // labels; fall back to the raw value for any unknown value. No data change.
+    const previewTemplateValue = preview?.effectiveTemplate || formData.receiptTemplate
+    const previewRenderModeValue = preview?.effectiveRenderMode || formData.classicRenderMode
+    const previewTemplateLabel =
+      previewTemplateValue === 'classic'
+        ? t('settings.printer.previewTemplateClassic', 'Classic')
+        : previewTemplateValue === 'modern'
+          ? t('settings.printer.previewTemplateModern', 'Modern')
+          : String(previewTemplateValue)
+    const previewRenderModeLabel =
+      previewRenderModeValue === 'text'
+        ? t('settings.printer.previewRenderModeText', 'Text')
+        : previewRenderModeValue === 'raster_exact'
+          ? t('settings.printer.previewRenderModeRasterExact', 'Raster Exact')
+          : String(previewRenderModeValue)
+    const previewDetails = `${previewTemplateLabel} / ${previewRenderModeLabel}`
     const textScaleHint = textScaleDisabled
       ? t(
         'settings.printer.textScaleModernUnavailable',
-        'Modern layout uses fixed typography. Switch to Classic Raster Exact to adjust receipt text size.',
+        'Modern receipts use fixed text size. Switch to Classic + Image-like receipt to adjust text size.',
       )
       : formData.role === 'receipt' &&
         formData.receiptTemplate === 'classic' &&
         formData.classicRenderMode === 'text'
       ? t(
         'settings.printer.textScaleTextModeHint',
-        'Classic Text mode ignores exact text sizing on paper. Moving this control switches the draft to Raster Exact.',
+        'Printer text ignores exact sizing. Moving this slider switches the preview to image-like receipt mode.',
       )
       : t('settings.printer.textScaleHint', 'Adjust the overall text size on printed receipts.')
 
@@ -1727,7 +1760,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
           {viewMode === 'edit' ? t('settings.printer.editPrinter') : t('settings.printer.addPrinter')}
         </h3>
 
-        <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs text-blue-100">
+        <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
           <div className="font-medium mb-1">
             {t('settings.printer.quickSetupFirstTitle', 'Quick setup first')}
           </div>
@@ -1749,7 +1782,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
           </button>
         </div>
 
-        <div className={`rounded-lg border p-3 ${verificationTone(selectedVerification)}`}>
+        <div className={`rounded-2xl border p-3 ${verificationTone(selectedVerification)}`}>
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="font-medium">
@@ -1774,7 +1807,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
         </div>
 
         {resetsVerification && (
-          <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
             {t(
               'settings.printer.verificationResetWarning',
               'These manual changes affect transport or protocol settings, so this profile will return to an unverified state after save.',
@@ -1785,7 +1818,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
         {/* Split-pane layout: Form + Live Preview */}
         <div className="flex gap-4" style={{ maxHeight: 'calc(100vh - 200px)' }}>
           {/* Left: Form sections */}
-          <div className="flex-1 min-w-0 overflow-y-auto pr-2 space-y-3">
+          <div className="flex-1 min-w-0 overflow-y-auto scrollbar-hide pr-2 space-y-3">
 
             {/* Section 1: Connection */}
             {renderSectionHeader('connection', 'settings.printer.sectionConnection', 'Connection')}
@@ -1956,15 +1989,15 @@ const PrinterSettingsModal: React.FC<Props> = ({
                 {formData.role === 'receipt' && formData.receiptTemplate === 'classic' && (
                   <div>
                     <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
-                      {t('settings.printer.classicRenderMode', 'Classic Customer Render Mode')}
+                      {t('settings.printer.classicRenderMode', 'Classic print style')}
                     </label>
                     <select
                       value={formData.classicRenderMode}
                       onChange={e => handleClassicRenderModeChange(e.target.value as ClassicRenderMode)}
                       className="liquid-glass-modal-input"
                     >
-                      <option value="text">{t('settings.printer.classicRenderModeText', 'Text (ESC/POS font)')}</option>
-                      <option value="raster_exact">{t('settings.printer.classicRenderModeRasterExact', 'Raster Exact (screenshot-like)')}</option>
+                      <option value="text">{t('settings.printer.classicRenderModeText', 'Printer text')}</option>
+                      <option value="raster_exact">{t('settings.printer.classicRenderModeRasterExact', 'Image-like receipt')}</option>
                     </select>
                   </div>
                 )}
@@ -1973,14 +2006,14 @@ const PrinterSettingsModal: React.FC<Props> = ({
                 {formData.role === 'receipt' && formData.receiptTemplate === 'classic' && (
                   <div>
                     <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
-                      {t('settings.printer.classicEmulationMode', 'Raster Emulation')}
+                      {t('settings.printer.classicEmulationMode', 'Printer language')}
                     </label>
                     <select
                       value={formData.emulationMode}
                       onChange={e => setFormData(prev => ({ ...prev, emulationMode: e.target.value as EmulationMode }))}
                       className="liquid-glass-modal-input"
                     >
-                      <option value="auto">{t('settings.printer.classicEmulationAuto', 'Auto (brand detect)')}</option>
+                      <option value="auto">{t('settings.printer.classicEmulationAuto', 'Auto detect')}</option>
                       <option value="escpos">{t('settings.printer.classicEmulationEscpos', 'ESC/POS')}</option>
                       <option value="star_line">{t('settings.printer.classicEmulationStarLine', 'Star Line')}</option>
                     </select>
@@ -1997,15 +2030,15 @@ const PrinterSettingsModal: React.FC<Props> = ({
                   <>
                     <div>
                       <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
-                        {t('settings.printer.fontType', 'Font Type')}
+                        {t('settings.printer.fontType', 'Font size')}
                       </label>
                       <select
                         value={formData.fontType}
                         onChange={e => setFormData(prev => ({ ...prev, fontType: e.target.value as FontType }))}
                         className="liquid-glass-modal-input"
                       >
-                        <option value="a">{t('settings.printer.fontTypeA', 'A (Larger)')}</option>
-                        <option value="b">{t('settings.printer.fontTypeB', 'B (Compact)')}</option>
+                        <option value="a">{t('settings.printer.fontTypeA', 'Larger')}</option>
+                        <option value="b">{t('settings.printer.fontTypeB', 'Compact')}</option>
                       </select>
                     </div>
 
@@ -2054,7 +2087,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                     </div>
 
                     <p className="text-xs text-gray-400">
-                      {t('settings.printer.safeTypographyHint', 'Star-safe mode avoids risky size commands. Use Font A/B and density/emphasis presets for reliable readability.')}
+                      {t('settings.printer.safeTypographyHint', 'Safe mode avoids risky size commands. Use font, density, and emphasis presets for reliable receipts.')}
                     </p>
                   </>
                 )}
@@ -2073,10 +2106,10 @@ const PrinterSettingsModal: React.FC<Props> = ({
                   disabled={textScaleDisabled}
                 />
                 {textScaleAutoSwitchNotice && formData.role === 'receipt' && formData.receiptTemplate === 'classic' && (
-                  <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs text-blue-100">
+                  <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
                     {t(
                       'settings.printer.textScaleAutoSwitchInline',
-                      'Using the receipt text-size control switches Classic Text to Raster Exact so the preview and printed output can honor the requested size.',
+                      'Text-size changes switch this draft to image-like receipt mode so preview and print can match.',
                     )}
                   </div>
                 )}
@@ -2142,7 +2175,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                   </button>
                   <button
                     onClick={handleSaveLogoSettings}
-                    className={liquidGlassModalButton('primary', 'sm')}
+                    className={SAVE_BTN_SM}
                     disabled={logoSaving}
                     type="button"
                   >
@@ -2184,7 +2217,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
 
                 {/* Logo preview thumbnail */}
                 {logoLoaded && effectiveLogoSource && (
-                  <div className="rounded-md bg-black/20 border border-white/10 p-2">
+                  <div className="rounded-2xl bg-black/20 border border-white/10 p-2">
                     <div className="text-xs liquid-glass-modal-text-muted mb-2">
                       {t('settings.printer.logoPreview', 'Preview')}
                     </div>
@@ -2204,16 +2237,16 @@ const PrinterSettingsModal: React.FC<Props> = ({
               <div className="space-y-3 pl-1">
                 {/* Auto-Detection Info Banner */}
                 {autoConfig && autoConfig.detectedBrand !== 'Unknown' && (
-                  <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-                    <Info className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
+                  <div className="flex items-start gap-2 p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20">
+                    <Info className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
                     <div className="text-xs">
-                      <div className="font-medium text-blue-300 mb-1">
+                      <div className="font-medium text-amber-300 mb-1">
                         {t('settings.printer.autoDetected', 'Auto-Detected Configuration')}
                       </div>
                       <div className="liquid-glass-modal-text-muted space-y-0.5">
-                        <div>{t('settings.printer.detectedBrand', 'Brand')}: <span className="text-blue-300">{autoConfig.detectedBrand}</span></div>
-                        <div>{t('settings.printer.autoCharacterSet', 'Character Set')}: <span className="text-blue-300">{autoConfig.autoCharacterSet}</span></div>
-                        <div>{t('settings.printer.autoCodePage', 'Code Page')}: <span className="text-blue-300">{autoConfig.autoCodePage ?? 'N/A'}</span></div>
+                        <div>{t('settings.printer.detectedBrand', 'Brand')}: <span className="text-amber-300">{autoConfig.detectedBrand}</span></div>
+                        <div>{t('settings.printer.autoCharacterSet', 'Character Set')}: <span className="text-amber-300">{autoConfig.autoCharacterSet}</span></div>
+                        <div>{t('settings.printer.autoCodePage', 'Code Page')}: <span className="text-amber-300">{autoConfig.autoCodePage ?? 'N/A'}</span></div>
                       </div>
                       <p className="mt-1 text-gray-400">
                         {t('settings.printer.autoDetectedHint', 'These values are used automatically when printing. Manual overrides below take priority.')}
@@ -2341,7 +2374,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                 <p className="text-xs text-gray-400">
                   {t(
                     'settings.printer.classicRenderModeHint',
-                    'Use Raster Exact for screenshot-like classic receipts. 80mm defaults to full width (576 dots). MCP31 first-pass: emulation=star_line, optional left margin=0-8, threshold=145-165. Auto defaults are applied when fields are empty.'
+                    'Image-like receipt is best when exact spacing matters. Leave the advanced fields on Auto unless support asks you to change them.'
                   )}
                 </p>
               </div>
@@ -2428,11 +2461,11 @@ const PrinterSettingsModal: React.FC<Props> = ({
               {previewDetails}
             </div>
             {preview?.warnings && preview.warnings.length > 0 && (
-              <div className="mb-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100">
+              <div className="mb-2 rounded-2xl border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100">
                 {preview.warnings.join(' ')}
               </div>
             )}
-            <div className="flex-1 bg-white/5 rounded-lg border border-white/10 overflow-hidden relative">
+            <div className="flex-1 bg-white/5 rounded-2xl border border-white/10 overflow-hidden relative">
               {previewBusy && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/20 z-10">
                   <span className="text-xs text-white/50">{t('settings.printer.previewLoading', 'Loading preview...')}</span>
@@ -2443,16 +2476,32 @@ const PrinterSettingsModal: React.FC<Props> = ({
                   {previewError}
                 </div>
               ) : preview?.kind === 'image' && preview.dataUrl ? (
-                <div className="h-full min-h-[500px] overflow-auto bg-black/15 p-3">
-                  <img
-                    src={preview.dataUrl}
-                    alt={t('settings.printer.livePreview', 'Live Preview') as string}
-                    className="block w-full h-auto rounded-md bg-white"
-                  />
+                <div className="h-full min-h-[500px] overflow-auto scrollbar-hide bg-black/15 p-3">
+                  <div className="relative">
+                    <img
+                      src={preview.dataUrl}
+                      alt={t('settings.printer.livePreview', 'Live Preview') as string}
+                      className="block w-full h-auto rounded-md bg-white"
+                    />
+                    {/* UI-only mask for a scrollbar-like strip baked into the
+                        right edge of the generated preview image. White so it
+                        blends into the receipt paper; aria-hidden +
+                        pointer-events-none so it never changes content meaning,
+                        scrolling, or interaction. Spans full image height, so it
+                        stays aligned while the preview scrolls. */}
+                    <div
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-y-0 right-0 w-4 rounded-r-md bg-white"
+                    />
+                  </div>
                 </div>
               ) : preview?.kind === 'html' && preview.html ? (
                 <iframe
-                  srcDoc={preview.html}
+                  // Prepend scrollbar-hiding CSS so the iframe's own document does not
+                  // show a native vertical rail (the parent `scrollbar-hide` cannot reach
+                  // inside a separate iframe document). Scrolling + receipt rendering are
+                  // unchanged -- this only suppresses the scrollbar chrome.
+                  srcDoc={PREVIEW_HIDE_SCROLLBAR_STYLE + preview.html}
                   className="w-full h-full border-0"
                   sandbox="allow-same-origin"
                   style={{ minHeight: '500px' }}
@@ -2472,14 +2521,14 @@ const PrinterSettingsModal: React.FC<Props> = ({
         <div className="flex gap-2 pt-2">
           <button
             onClick={() => { setViewMode('list'); resetForm() }}
-            className={liquidGlassModalButton('secondary', 'md')}
+            className={CANCEL_BTN_MD}
           >
             {t('common.actions.cancel')}
           </button>
           <button
             onClick={handleSave}
             disabled={loading || !formData.name}
-            className={liquidGlassModalButton('primary', 'md')}
+            className={SAVE_BTN_MD}
           >
             {loading ? t('common.actions.saving') : t('common.actions.save')}
           </button>
@@ -2540,12 +2589,12 @@ const PrinterSettingsModal: React.FC<Props> = ({
           <div className="space-y-3">
             {/* Current Status */}
             {status && (
-              <div className={`p-3 rounded-lg border ${
+              <div className={`p-3 rounded-2xl border ${
                 status.state === 'online' ? 'bg-green-500/10 border-green-500/30' :
                 status.state === 'error' ? 'bg-red-500/10 border-red-500/30' :
                 status.state === 'busy' ? 'bg-yellow-500/10 border-yellow-500/30' :
                 status.state === 'degraded' ? 'bg-amber-500/10 border-amber-500/30' :
-                status.state === 'unverified' || status.state === 'unresolved' ? 'bg-blue-500/10 border-blue-500/30' :
+                status.state === 'unverified' || status.state === 'unresolved' ? 'bg-amber-500/10 border-amber-400/30' :
                 'bg-gray-500/10 border-gray-500/30'
               }`}>
                 <div className="flex items-center gap-2">
@@ -2747,7 +2796,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
       {/* Delete confirmation overlay */}
       {deleteConfirmId && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-2xl">
-          <div className="bg-gray-900/95 border border-white/15 rounded-xl p-6 mx-6 max-w-sm w-full shadow-2xl">
+          <div className="bg-gray-900/95 border border-white/15 rounded-3xl p-6 mx-6 max-w-sm w-full shadow-2xl">
             <div className="flex items-center gap-3 mb-4">
               <Trash2 className="w-5 h-5 text-red-400 flex-shrink-0" />
               <div>
@@ -2769,7 +2818,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
               </button>
               <button
                 onClick={handleDeleteConfirm}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors"
+                className="inline-flex items-center justify-center text-center px-4 py-2 text-sm font-medium rounded-lg bg-red-600 text-white transition-transform active:scale-[0.98]"
               >
                 {t('common.actions.delete') || 'Delete'}
               </button>

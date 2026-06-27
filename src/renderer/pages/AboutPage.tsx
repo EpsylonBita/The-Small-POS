@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { useTheme } from '../contexts/theme-context';
-import { Copy, Check, ExternalLink } from 'lucide-react';
+import { Copy, Check } from 'lucide-react';
 import { getBridge, type DiagnosticsAboutInfo } from '../../lib';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
@@ -49,15 +49,15 @@ const AboutPage: React.FC = () => {
   );
 
   return (
-    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="flex flex-col items-center justify-center h-full p-8">
-      <motion.div variants={pageMotionItem} className={`w-full max-w-lg rounded-2xl border ${isDark ? 'bg-gray-900/80 border-white/10' : 'bg-white border-gray-200'} shadow-xl`}>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="flex h-full flex-col items-center justify-center p-8">
+      <motion.div variants={pageMotionItem} className={`w-full max-w-lg rounded-3xl border shadow-xl ${isDark ? 'bg-gray-900/80 border-white/10' : 'bg-white border-gray-200'}`}>
         {/* Header */}
         <motion.div variants={pageMotionItem} className="p-6 pb-4 text-center border-b border-white/10">
           <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
             The Small POS
           </h1>
           {about && (
-            <p className={`text-lg font-mono mt-1 ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>
+            <p className={`text-lg font-mono mt-1 ${isDark ? 'text-yellow-300' : 'text-yellow-700'}`}>
               v{about.version}
             </p>
           )}
@@ -78,7 +78,7 @@ const AboutPage: React.FC = () => {
             </>
           ) : (
             <div className="py-8 text-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto" />
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-yellow-400 mx-auto" />
             </div>
           )}
         </motion.div>
@@ -88,10 +88,10 @@ const AboutPage: React.FC = () => {
           <button
             onClick={handleCopy}
             disabled={!about}
-            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
+            className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-2xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400
               ${isDark
-                ? 'bg-white/10 hover:bg-white/20 text-white'
-                : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}
+                ? 'bg-yellow-400 text-black'
+                : 'bg-black text-white'}
               disabled:opacity-50`}
           >
             {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { getBridge } from '../../../lib'
+import { renderModalPortal } from '../../utils/render-modal-portal'
 import {
   CreditCard,
   Printer,
@@ -16,7 +17,9 @@ import {
   CheckCircle,
   XCircle,
   Loader2,
+  X,
 } from 'lucide-react'
+import { POSGlassSwitch } from '../ui/pos-glass-components'
 
 // ============================================================
 // TYPES
@@ -26,6 +29,10 @@ type DeviceType = 'cash_register' | 'payment_terminal'
 type ConnectionType = 'serial_usb' | 'network' | 'bluetooth'
 type Protocol = 'generic' | 'zvt' | 'pax'
 type PrintMode = 'register_prints' | 'pos_sends_receipt'
+
+// Round 295: the cash-register switches (Auto Fiscal Print, Set-as-default, Enabled) now use the shared
+// POSGlassSwitch -- one fixed-geometry green-on/neutral-off glass switch -- so they match every other
+// Settings switch exactly. The previous local switch-track class was removed.
 type DeviceStatus = 'connected' | 'disconnected' | 'error'
 type CashRegisterSetupMode = 'rbs_network'
 
@@ -319,7 +326,7 @@ const StatusIndicator: React.FC<{ status?: DeviceStatus; error?: string }> = ({ 
   }
   if (status === 'error') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400" title={error}>
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400" aria-label={error}>
         <AlertCircle className="w-3 h-3" />
         Error
       </span>
@@ -438,6 +445,14 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     setEditingDeviceId(null)
   }
 
+  // Close the Add/Edit device submodal (back to the list) — used by Cancel, the X, the backdrop
+  // and Escape. Does not create or delete anything.
+  const closeForm = useCallback(() => {
+    setViewMode('list')
+    setForm(buildEmptyForm())
+    setEditingDeviceId(null)
+  }, [])
+
   // Open add form
   const handleAdd = () => {
     resetForm()
@@ -450,6 +465,18 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     resetForm(buildRbsNetworkPreset())
     setViewMode('add')
   }, [setupIntent?.token])
+
+  // Escape closes the Add/Edit device submodal (close-only — never saves).
+  useEffect(() => {
+    if (viewMode !== 'add' && viewMode !== 'edit') return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeForm()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [viewMode, closeForm])
 
   // Open edit form
   const handleEdit = (device: ECRCashDevice) => {
@@ -580,7 +607,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     <div className="space-y-3">
       {/* Section Header (collapsible) */}
       <div
-        className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${
+        className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 transition-all ${
           showDevices ? 'bg-white/10 dark:bg-gray-800/20' : ''
         }`}
       >
@@ -613,7 +640,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             <div className="pt-3 flex gap-2">
               <button
                 onClick={handleAdd}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30"
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-transform duration-150 active:scale-95 bg-emerald-600 border border-emerald-500 text-white shadow-sm shadow-emerald-600/30 active:bg-emerald-700"
               >
                 <Plus className="w-4 h-4" />
                 {t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
@@ -621,14 +648,15 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
               <button
                 onClick={loadDevices}
                 disabled={loading}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all bg-white/10 border border-white/20 text-gray-300 hover:bg-white/20"
+                aria-label={t('common.refresh', 'Refresh')}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all bg-white/10 border border-white/20 text-gray-300 active:bg-white/20"
               >
                 <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
               </button>
             </div>
 
             {/* Fiscal Print Toggle */}
-            <div className="flex items-center justify-between rounded-lg bg-white/5 dark:bg-gray-800/10 border liquid-glass-modal-border px-3 py-2.5">
+            <div className="flex items-center justify-between rounded-2xl bg-white/5 dark:bg-gray-800/10 border liquid-glass-modal-border px-3 py-2.5">
               <div className="flex items-center gap-2">
                 <Printer className="w-4 h-4 text-amber-400" />
                 <div>
@@ -640,18 +668,11 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                   </span>
                 </div>
               </div>
-              <button
-                onClick={() => handleFiscalPrintToggle(!fiscalPrintEnabled)}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  fiscalPrintEnabled ? 'bg-amber-500' : 'bg-gray-600'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-                    fiscalPrintEnabled ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
+              <POSGlassSwitch
+                checked={fiscalPrintEnabled}
+                onChange={handleFiscalPrintToggle}
+                aria-label={t('settings.peripherals.cashRegister.fiscalPrintLabel', 'Auto Fiscal Print')}
+              />
             </div>
 
             {/* Device List */}
@@ -671,7 +692,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                 {devices.map((device) => (
                   <div
                     key={device.id}
-                    className="p-3 rounded-lg bg-white/5 border border-white/10 space-y-2"
+                    className="p-3 rounded-2xl bg-white/5 border border-white/10 space-y-2"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3 min-w-0">
@@ -688,7 +709,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                               {device.name}
                             </span>
                             {device.is_default && (
-                              <span className="text-xs bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded flex-shrink-0">
+                              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded flex-shrink-0">
                                 {t('settings.peripherals.cashRegister.default', 'Default')}
                               </span>
                             )}
@@ -711,7 +732,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       <button
                         onClick={() => handleTestConnection(device.id)}
                         disabled={isTesting === device.id}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30 disabled:opacity-50"
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all bg-amber-500/20 border border-amber-500/50 text-amber-900 dark:text-amber-200 active:bg-amber-500/30 disabled:opacity-50"
                       >
                         {isTesting === device.id ? (
                           <Loader2 className="w-3 h-3 animate-spin" />
@@ -722,7 +743,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       </button>
                       <button
                         onClick={() => handleTestPrint(device.id)}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30"
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all bg-amber-500/20 border border-amber-500/50 text-amber-900 dark:text-amber-200 active:bg-amber-500/30"
                       >
                         <Printer className="w-3 h-3" />
                         {t('settings.peripherals.cashRegister.testPrint', 'Test Print')}
@@ -730,15 +751,15 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       <div className="flex-1" />
                       <button
                         onClick={() => handleEdit(device)}
-                        className="p-1.5 rounded-lg text-xs transition-all bg-white/10 border border-white/20 text-gray-300 hover:bg-white/20"
-                        title={t('common.actions.edit', 'Edit')}
+                        aria-label={t('common.actions.edit', 'Edit')}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-xs transition-transform duration-150 active:scale-95 bg-white/10 border border-white/20 text-gray-300 active:bg-white/20"
                       >
                         <Pencil className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => setDeleteConfirmId(device.id)}
-                        className="p-1.5 rounded-lg text-xs transition-all bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20"
-                        title={t('common.actions.delete', 'Delete')}
+                        aria-label={t('common.actions.delete', 'Delete')}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-xs transition-transform duration-150 active:scale-95 bg-red-500/10 border border-red-500/30 text-red-400 active:bg-red-500/20"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -754,7 +775,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       {/* Delete confirmation overlay */}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-gray-900/95 border border-white/15 rounded-xl p-6 mx-6 max-w-sm w-full shadow-2xl">
+          <div className="bg-gray-900/95 border border-white/15 rounded-3xl p-6 mx-6 max-w-sm w-full shadow-2xl">
             <div className="flex items-center gap-3 mb-4">
               <Trash2 className="w-5 h-5 text-red-400 flex-shrink-0" />
               <div>
@@ -772,13 +793,13 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => setDeleteConfirmId(null)}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-white/10 border border-white/20 text-gray-300 hover:bg-white/20 transition-all"
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-white/10 border border-white/20 text-gray-300 active:bg-white/20 transition-all"
               >
                 {t('common.actions.cancel', 'Cancel')}
               </button>
               <button
                 onClick={handleDeleteConfirm}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors"
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-600 active:bg-red-700 text-white transition-colors"
               >
                 {t('common.actions.delete', 'Delete')}
               </button>
@@ -793,18 +814,44 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   // RENDER: ADD / EDIT FORM
   // ============================================================
 
-  const renderFormView = () => (
-    <div className="space-y-3">
-      {/* Header */}
-      <div className="flex items-center gap-3 pb-2 border-b liquid-glass-modal-border">
-        <Settings className="w-5 h-5 text-amber-400" />
-        <h3 className="font-medium liquid-glass-modal-text">
-          {viewMode === 'edit'
-            ? t('settings.peripherals.cashRegister.editDevice', 'Edit Device')
-            : t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
-        </h3>
-      </div>
+  // Add/Edit fiscal device runs in a focused glass submodal (portaled to body) so it never inherits
+  // the settings page scroll offset or appears mid-form. It has its own scroll body + a sticky glass
+  // footer, so fields and actions never overlap at short heights (e.g. 1282x802).
+  const renderFormModal = () => renderModalPortal(
+    // z-[20050] sits ABOVE the Settings LiquidGlassModal viewport (.liquid-glass-modal-viewport,
+    // z-index: 20000) — matching the codebase's nested-above-glass-modal overlays (MenuItemModal,
+    // TableCheckManagerModal). z-[1200] rendered behind Settings (live QA, Round 241).
+    <div className="fixed inset-0 z-[20050] flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-6">
+      {/* Backdrop — click closes (close-only, never saves) */}
+      <div className="absolute inset-0" onClick={closeForm} aria-hidden="true" />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cash-register-device-form-title"
+        className="relative w-full max-w-2xl rounded-3xl border ring-1 shadow-[0_30px_90px_rgba(0,0,0,0.55)] max-h-[calc(100%-1.5rem)] sm:max-h-[calc(100%-3rem)] flex flex-col overflow-hidden bg-white/90 dark:bg-zinc-950/85 backdrop-blur-2xl border-black/10 dark:border-white/10 ring-black/5 dark:ring-white/10"
+      >
+        {/* Header (shrink-0) */}
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b shrink-0 border-black/10 dark:border-white/10">
+          <div className="flex items-center gap-3">
+            <Settings className="w-5 h-5 text-amber-400" />
+            <h3 id="cash-register-device-form-title" className="font-medium liquid-glass-modal-text">
+              {viewMode === 'edit'
+                ? t('settings.peripherals.cashRegister.editDevice', 'Edit Device')
+                : t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={closeForm}
+            aria-label={t('common.actions.close', 'Close')}
+            className="inline-flex h-11 w-11 items-center justify-center rounded-xl border transition-transform duration-150 active:scale-95 bg-white/10 border-white/20 text-gray-300 active:bg-white/20"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
 
+        {/* Body — own scroll + min-h-0 so the sticky footer always keeps its reserved space. */}
+        <div className="px-5 py-4 overflow-y-auto flex-1 min-h-0 scrollbar-hide space-y-3">
       {/* Name */}
       <div>
         <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
@@ -935,7 +982,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             />
           </div>
           {form.brand === 'RBS' && (
-            <div className="col-span-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            <div className="col-span-2 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               {t(
                 'settings.peripherals.cashRegister.rbsNetworkHint',
                 'Use the IP address and TCP port configured on the RBS device or by your installer. POS does not auto-discover RBS fiscal registers yet.'
@@ -965,30 +1012,30 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
         <label className="block text-xs font-medium mb-1.5 liquid-glass-modal-text-muted">
           {t('settings.peripherals.cashRegister.printMode', 'Print Mode')}
         </label>
-        <div className="flex gap-3">
-          <label className="flex items-center gap-2 cursor-pointer">
+        <div className="grid grid-cols-2 gap-2">
+          <label className="cursor-pointer">
             <input
               type="radio"
               name="printMode"
               checked={form.print_mode === 'register_prints'}
               onChange={() => updateForm({ print_mode: 'register_prints' })}
-              className="accent-cyan-500"
+              className="sr-only peer"
             />
-            <span className="text-sm liquid-glass-modal-text">
+            <div className="flex min-h-[44px] items-center justify-center rounded-xl border-2 border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm liquid-glass-modal-text transition-colors peer-checked:border-yellow-500 peer-checked:bg-yellow-400/15 peer-checked:text-yellow-900 dark:peer-checked:text-yellow-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-yellow-500/50">
               {t('settings.peripherals.cashRegister.registerPrints', 'Register prints receipt')}
-            </span>
+            </div>
           </label>
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className="cursor-pointer">
             <input
               type="radio"
               name="printMode"
               checked={form.print_mode === 'pos_sends_receipt'}
               onChange={() => updateForm({ print_mode: 'pos_sends_receipt' })}
-              className="accent-cyan-500"
+              className="sr-only peer"
             />
-            <span className="text-sm liquid-glass-modal-text">
+            <div className="flex min-h-[44px] items-center justify-center rounded-xl border-2 border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm liquid-glass-modal-text transition-colors peer-checked:border-yellow-500 peer-checked:bg-yellow-400/15 peer-checked:text-yellow-900 dark:peer-checked:text-yellow-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-yellow-500/50">
               {t('settings.peripherals.cashRegister.posSendsReceipt', 'POS sends receipt data')}
-            </span>
+            </div>
           </label>
         </div>
       </div>
@@ -998,7 +1045,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
         <label className="block text-xs font-medium mb-1.5 liquid-glass-modal-text-muted">
           {t('settings.peripherals.cashRegister.taxRates', 'Tax Rates')}
         </label>
-        <div className="rounded-lg border liquid-glass-modal-border overflow-hidden">
+        <div className="rounded-2xl border liquid-glass-modal-border overflow-hidden">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-white/5">
@@ -1063,56 +1110,56 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       </div>
 
       {/* Default & Enabled */}
-      <div className="flex items-center gap-6 pt-1">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={form.is_default}
-            onChange={(e) => updateForm({ is_default: e.target.checked })}
-            className="rounded accent-cyan-500"
-          />
+      <div className="flex flex-wrap items-center gap-3 pt-1">
+        <div className="inline-flex items-center gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
           <span className="text-sm liquid-glass-modal-text">
             {t('settings.peripherals.cashRegister.setAsDefault', 'Set as default')}
           </span>
-        </label>
-        <div className="flex items-center gap-2">
+          <POSGlassSwitch
+            checked={form.is_default}
+            onChange={(next) => updateForm({ is_default: next })}
+            aria-label={t('settings.peripherals.cashRegister.setAsDefault', 'Set as default')}
+          />
+        </div>
+        <div className="inline-flex items-center gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
           <span className="text-sm liquid-glass-modal-text">
             {t('settings.peripherals.cashRegister.enabled', 'Enabled')}
           </span>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(e) => updateForm({ enabled: e.target.checked })}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-          </label>
+          <POSGlassSwitch
+            checked={form.enabled}
+            onChange={(next) => updateForm({ enabled: next })}
+            aria-label={t('settings.peripherals.cashRegister.enabled', 'Enabled')}
+          />
         </div>
       </div>
 
-      {/* Form Actions */}
-      <div className="flex gap-2 pt-3 border-t liquid-glass-modal-border">
-        <button
-          onClick={() => {
-            setViewMode('list')
-            resetForm()
-          }}
-          className="px-4 py-2 rounded-lg text-sm font-medium transition-all bg-white/10 border border-white/20 text-gray-300 hover:bg-white/20"
-        >
-          {t('common.actions.cancel', 'Cancel')}
-        </button>
-        <button
-          onClick={handleSave}
-          disabled={isSaving || !form.name.trim()}
-          className="px-4 py-2 rounded-lg text-sm font-medium transition-all bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {isSaving
-            ? t('common.actions.saving', 'Saving...')
-            : viewMode === 'edit'
-            ? t('common.actions.save', 'Save')
-            : t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
-        </button>
+        </div>
+
+        {/* Footer — sticky glass bar (shrink-0); reserved by the flex column so it never overlaps
+            the fields, and the actions are always reachable without scrolling the page. */}
+        <div className="px-5 py-4 border-t shrink-0 backdrop-blur-xl border-black/10 dark:border-white/10 bg-white/70 dark:bg-zinc-950/70">
+          <div className="flex gap-2 justify-end">
+            {/* Cancel = soft destructive red */}
+            <button
+              onClick={closeForm}
+              className="px-4 py-2 rounded-lg text-sm font-medium border transition-transform duration-150 active:scale-95 border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-300 active:bg-red-500/20"
+            >
+              {t('common.actions.cancel', 'Cancel')}
+            </button>
+            {/* Save / Add = green primary with a clear disabled state */}
+            <button
+              onClick={handleSave}
+              disabled={isSaving || !form.name.trim()}
+              className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 text-white border border-emerald-500 shadow-sm shadow-emerald-600/30 transition-transform duration-150 active:scale-95 active:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
+            >
+              {isSaving
+                ? t('common.actions.saving', 'Saving...')
+                : viewMode === 'edit'
+                ? t('common.actions.save', 'Save')
+                : t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -1121,11 +1168,14 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   // RENDER
   // ============================================================
 
-  if (viewMode === 'add' || viewMode === 'edit') {
-    return renderFormView()
-  }
-
-  return renderListView()
+  // The list stays mounted; the Add/Edit form opens as a focused submodal overlay on top of it,
+  // so it no longer renders inline in the scrolled settings page.
+  return (
+    <>
+      {renderListView()}
+      {(viewMode === 'add' || viewMode === 'edit') && renderFormModal()}
+    </>
+  )
 }
 
 export default CashRegisterSection

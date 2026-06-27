@@ -36,8 +36,8 @@ const STEP_TONES: Record<StepStatus, {
     },
     active: {
         shell: 'bg-transparent dark:bg-transparent',
-        border: 'border-cyan-300/80 dark:border-cyan-400/40',
-        icon: 'text-cyan-600 dark:text-cyan-200',
+        border: 'border-amber-300/80 dark:border-amber-400/50',
+        icon: 'text-amber-600 dark:text-amber-300',
         halo: 'bg-transparent dark:bg-transparent',
         label: 'text-slate-900 dark:text-white',
     },
@@ -111,7 +111,7 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
                         {!isLast && orientation === 'horizontal' && (
                             <div className="absolute left-[calc(50%+1.7rem)] right-[calc(-50%+1.7rem)] top-[1.35rem] h-[2px] rounded-full bg-slate-200/90 dark:bg-white/10">
                                 <motion.div
-                                    className="h-full origin-left rounded-full bg-gradient-to-r from-emerald-400 via-emerald-400 to-cyan-400/90"
+                                    className="h-full origin-left rounded-full bg-gradient-to-r from-emerald-400 via-emerald-400 to-amber-400/90"
                                     initial={false}
                                     animate={connectorFilled ? 'visible' : 'hidden'}
                                     variants={connectorFillVariants}
@@ -127,7 +127,7 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
                         {!isLast && orientation === 'vertical' && (
                             <div className="absolute bottom-[-1rem] left-[1.35rem] top-[3rem] w-[2px] rounded-full bg-slate-200/90 dark:bg-white/10">
                                 <motion.div
-                                    className="w-full origin-top rounded-full bg-gradient-to-b from-emerald-400 via-emerald-400 to-cyan-400/90"
+                                    className="w-full origin-top rounded-full bg-gradient-to-b from-emerald-400 via-emerald-400 to-amber-400/90"
                                     initial={false}
                                     animate={connectorFilled ? 'visible' : 'hidden'}
                                     variants={connectorFillVariants}

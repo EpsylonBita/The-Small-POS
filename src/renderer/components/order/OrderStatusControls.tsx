@@ -112,8 +112,8 @@ export function OrderStatusControls({
     const buttonClass = (color: string) =>
       `px-4 py-2 rounded-lg font-semibold transition ${
         theme === 'dark'
-          ? `bg-${color}-900 hover:bg-${color}-800 text-${color}-100`
-          : `bg-${color}-500 hover:bg-${color}-600 text-white`
+          ? `bg-${color}-900 active:bg-${color}-800 text-${color}-100`
+          : `bg-${color}-500 active:bg-${color}-600 text-white`
       } disabled:opacity-50 disabled:cursor-not-allowed`;
 
     const baseButtonClass = `px-4 py-2 rounded-lg font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed`;
@@ -127,8 +127,8 @@ export function OrderStatusControls({
               disabled={disabled || isLoading}
               className={`${baseButtonClass} ${
                 theme === 'dark'
-                  ? 'bg-green-900 hover:bg-green-800 text-green-100'
-                  : 'bg-green-500 hover:bg-green-600 text-white'
+                  ? 'bg-green-900 active:bg-green-800 text-green-100'
+                  : 'bg-green-500 active:bg-green-600 text-white'
               }`}
             >
               {isLoading ? t('orders.actions.processing') : t('orders.actions.approve')}
@@ -138,8 +138,8 @@ export function OrderStatusControls({
               disabled={disabled || isLoading}
               className={`${baseButtonClass} ${
                 theme === 'dark'
-                  ? 'bg-red-900 hover:bg-red-800 text-red-100'
-                  : 'bg-red-500 hover:bg-red-600 text-white'
+                  ? 'bg-red-900 active:bg-red-800 text-red-100'
+                  : 'bg-red-500 active:bg-red-600 text-white'
               }`}
             >
               {t('orders.actions.decline')}
@@ -155,8 +155,8 @@ export function OrderStatusControls({
             disabled={disabled || isLoading}
             className={`${baseButtonClass} ${
               theme === 'dark'
-                ? 'bg-blue-900 hover:bg-blue-800 text-blue-100'
-                : 'bg-blue-500 hover:bg-blue-600 text-white'
+                ? 'bg-blue-900 active:bg-blue-800 text-blue-100'
+                : 'bg-blue-500 active:bg-blue-600 text-white'
             }`}
           >
             {isLoading ? t('orders.actions.processing') : t('orders.actions.startPreparing')}
@@ -183,8 +183,8 @@ export function OrderStatusControls({
               disabled={disabled || isLoading}
               className={`w-full ${baseButtonClass} ${
                 theme === 'dark'
-                  ? 'bg-green-900 hover:bg-green-800 text-green-100'
-                  : 'bg-green-500 hover:bg-green-600 text-white'
+                  ? 'bg-green-900 active:bg-green-800 text-green-100'
+                  : 'bg-green-500 active:bg-green-600 text-white'
               }`}
             >
               {isLoading ? t('orders.actions.processing') : t('orders.actions.markReady')}
@@ -196,8 +196,8 @@ export function OrderStatusControls({
                 disabled={disabled || isNotifyingPlatform}
                 className={`w-full ${baseButtonClass} ${
                   theme === 'dark'
-                    ? 'bg-purple-900 hover:bg-purple-800 text-purple-100'
-                    : 'bg-purple-500 hover:bg-purple-600 text-white'
+                    ? 'bg-purple-900 active:bg-purple-800 text-purple-100'
+                    : 'bg-purple-500 active:bg-purple-600 text-white'
                 }`}
               >
                 {isNotifyingPlatform
@@ -217,8 +217,8 @@ export function OrderStatusControls({
                 disabled={disabled}
                 className={`w-full ${baseButtonClass} ${
                   theme === 'dark'
-                    ? 'bg-blue-900 hover:bg-blue-800 text-blue-100'
-                    : 'bg-blue-500 hover:bg-blue-600 text-white'
+                    ? 'bg-blue-900 active:bg-blue-800 text-blue-100'
+                    : 'bg-blue-500 active:bg-blue-600 text-white'
                 }`}
               >
                 {t('orders.actions.assignDriver')}
@@ -228,8 +228,8 @@ export function OrderStatusControls({
                 disabled={disabled || !onConvertToPickup}
                 className={`w-full ${baseButtonClass} ${
                   theme === 'dark'
-                    ? 'bg-amber-900 hover:bg-amber-800 text-amber-100'
-                    : 'bg-amber-500 hover:bg-amber-600 text-white'
+                    ? 'bg-amber-900 active:bg-amber-800 text-amber-100'
+                    : 'bg-amber-500 active:bg-amber-600 text-white'
                 }`}
               >
                 {t('orders.actions.setAsPickup', 'Set as Pickup')}
@@ -241,8 +241,8 @@ export function OrderStatusControls({
                   disabled={disabled || isNotifyingPlatform}
                   className={`w-full ${baseButtonClass} ${
                     theme === 'dark'
-                      ? 'bg-purple-900 hover:bg-purple-800 text-purple-100'
-                      : 'bg-purple-500 hover:bg-purple-600 text-white'
+                      ? 'bg-purple-900 active:bg-purple-800 text-purple-100'
+                      : 'bg-purple-500 active:bg-purple-600 text-white'
                   }`}
                 >
                   {isNotifyingPlatform
@@ -259,8 +259,8 @@ export function OrderStatusControls({
               disabled={disabled || isLoading}
               className={`w-full ${baseButtonClass} ${
                 theme === 'dark'
-                  ? 'bg-green-900 hover:bg-green-800 text-green-100'
-                  : 'bg-green-500 hover:bg-green-600 text-white'
+                  ? 'bg-green-900 active:bg-green-800 text-green-100'
+                  : 'bg-green-500 active:bg-green-600 text-white'
               }`}
             >
               {isLoading ? t('orders.actions.processing') : t('orders.actions.completeOrder')}
@@ -275,8 +275,8 @@ export function OrderStatusControls({
             disabled={disabled || isLoading}
             className={`w-full ${baseButtonClass} ${
               theme === 'dark'
-                ? 'bg-green-900 hover:bg-green-800 text-green-100'
-                : 'bg-green-500 hover:bg-green-600 text-white'
+                ? 'bg-green-900 active:bg-green-800 text-green-100'
+                : 'bg-green-500 active:bg-green-600 text-white'
             }`}
           >
             {isLoading ? t('orders.actions.processing') : t('orders.actions.markDelivered')}
@@ -292,8 +292,8 @@ export function OrderStatusControls({
               disabled={disabled || isLoading}
               className={`${baseButtonClass} ${
                 theme === 'dark'
-                  ? 'bg-blue-900 hover:bg-blue-800 text-blue-100'
-                  : 'bg-blue-500 hover:bg-blue-600 text-white'
+                  ? 'bg-blue-900 active:bg-blue-800 text-blue-100'
+                  : 'bg-blue-500 active:bg-blue-600 text-white'
               }`}
             >
               {isLoading ? t('orders.actions.processing') : t('orders.actions.reactivate')}

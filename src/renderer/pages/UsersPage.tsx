@@ -1,11 +1,21 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { posApiFetch, posApiGet } from '../utils/api-helpers';
+import { renderModalPortal } from '../utils/render-modal-portal';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import toast from 'react-hot-toast';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
+import {
+  getLoyaltyTierKey,
+  hasActiveUserDirectoryFilters,
+  matchesUserDirectoryFilters,
+  USER_LOYALTY_FILTERS,
+  USER_STATUS_FILTERS,
+  type UserLoyaltyFilter,
+  type UserStatusFilter,
+} from '../utils/userDirectoryFilters';
 import {
   Users,
   Search,
@@ -180,9 +190,13 @@ const UsersPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<UserStatusFilter>('all');
+  const [loyaltyFilter, setLoyaltyFilter] = useState<UserLoyaltyFilter>('all');
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
   const [userAddresses, setUserAddresses] = useState<CustomerAddress[]>([]);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [addressPendingDelete, setAddressPendingDelete] = useState<string | null>(null);
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
   const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
   const [editedAddress, setEditedAddress] = useState<Partial<CustomerAddress>>({});
@@ -190,6 +204,93 @@ const UsersPage: React.FC = () => {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isLoadingAddresses, setIsLoadingAddresses] = useState(false);
   const addressSessionTokenRef = useRef<string | null>(null);
+
+  // Refs + stable title ids so the portaled modals can declare labelled dialog
+  // semantics and join the topmost-[role="dialog"] Escape stack used across the POS.
+  const detailsDialogRef = useRef<HTMLDivElement>(null);
+  const detailsTitleId = useId();
+  const deleteAddressTitleId = useId();
+  const deleteAddressDialogRef = useRef<HTMLDivElement>(null);
+
+  // Close-only path for the customer details modal. Mirrors the footer Close button
+  // (clears the modal/view state only) and never calls ban/delete/address-save, so no
+  // dismissal route can trigger a side effect.
+  const closeDetailsModal = useCallback(() => {
+    setShowDetailsModal(false);
+    setSelectedUser(null);
+    setUserAddresses([]);
+  }, []);
+
+  // Close-only path for the address-delete confirmation. Escape (and the existing
+  // cancel/backdrop) clear the pending target only; it never calls the delete submit,
+  // so dismissing the confirmation can never delete an address.
+  const closeAddressDeleteModal = useCallback(() => {
+    setAddressPendingDelete(null);
+  }, []);
+
+  // Escape closes the filter popover (a role="menu" dropdown, not a dialog) while it
+  // is open, leaving status/loyalty filter state untouched.
+  useEffect(() => {
+    if (!showFilterMenu) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      event.preventDefault();
+      setShowFilterMenu(false);
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [showFilterMenu]);
+
+  // Escape closes the customer details modal, mirroring the app-level POS modals.
+  // Only the frontmost [role="dialog"] reacts, so the nested address-delete
+  // confirmation (also a dialog, mounted above) stays in control while open and this
+  // modal is never dismissed out of order. Routes through the close-only path above.
+  useEffect(() => {
+    if (!showDetailsModal) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== detailsDialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      closeDetailsModal();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [showDetailsModal, closeDetailsModal]);
+
+  // Escape closes ONLY the address-delete confirmation while it is the frontmost
+  // [role="dialog"] (it mounts above the details modal at a higher z-index). The details
+  // modal's own Escape effect self-suppresses because the confirmation is topmost, so the
+  // first Escape closes the confirmation and leaves the parent detail modal open. Routes
+  // through the close-only path, never the delete submit.
+  useEffect(() => {
+    if (!addressPendingDelete) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== deleteAddressDialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      closeAddressDeleteModal();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [addressPendingDelete, closeAddressDeleteModal]);
 
   useEffect(() => {
     loadUsers();
@@ -571,12 +672,16 @@ const UsersPage: React.FC = () => {
     }
   };
 
-  const handleDeleteAddress = async (addressId: string) => {
+  const handleDeleteAddress = (addressId: string) => {
     if (!selectedUser) return;
+    // Open an app-level confirmation modal instead of a native browser dialog.
+    setAddressPendingDelete(addressId);
+  };
 
-    if (!confirm(t('users.confirmDeleteAddress', 'Are you sure you want to delete this address?'))) {
-      return;
-    }
+  const confirmDeleteAddress = async () => {
+    if (!selectedUser || !addressPendingDelete) return;
+    const addressId = addressPendingDelete;
+    setAddressPendingDelete(null);
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       toast.error(
@@ -643,41 +748,44 @@ const UsersPage: React.FC = () => {
   };
 
   const getLoyaltyBadge = (points: number) => {
-    let tier = 'Bronze';
-    let color = 'text-orange-700 dark:text-orange-500';
+    const tierKey = getLoyaltyTierKey(points);
+    const color =
+      tierKey === 'platinum'
+        ? 'text-amber-500 dark:text-amber-300'
+        : tierKey === 'gold'
+          ? 'text-yellow-500 dark:text-yellow-400'
+          : tierKey === 'silver'
+            ? 'text-zinc-500 dark:text-zinc-300'
+            : 'text-orange-700 dark:text-orange-500';
 
-    if (points >= 1000) {
-      tier = 'Platinum';
-      color = 'text-purple-500 dark:text-purple-400';
-    } else if (points >= 500) {
-      tier = 'Gold';
-      color = 'text-yellow-500 dark:text-yellow-400';
-    } else if (points >= 200) {
-      tier = 'Silver';
-      color = 'text-zinc-500 dark:text-zinc-300';
-    }
+    const tierLabel = t(`users.loyaltyTier.${tierKey}`, tierKey.charAt(0).toUpperCase() + tierKey.slice(1));
 
     return (
       <span className={`inline-flex items-center text-xs font-medium ${color}`}>
         <Star className="w-3 h-3 mr-1" />
-        {tier}
+        {tierLabel}
       </span>
     );
   };
 
-  const filteredUsers = useMemo(() => users.filter(user => {
-    if (!searchTerm) return true;
-    const search = searchTerm.toLowerCase();
-    return (
-      user.name?.toLowerCase().includes(search) ||
-      user.email?.toLowerCase().includes(search) ||
-      user.phone?.toLowerCase().includes(search)
-    );
-  }), [searchTerm, users]);
+  const filtersActive = hasActiveUserDirectoryFilters({ status: statusFilter, loyalty: loyaltyFilter });
 
+  const filteredUsers = useMemo(
+    () =>
+      users.filter(user =>
+        matchesUserDirectoryFilters(user, {
+          search: searchTerm,
+          status: statusFilter,
+          loyalty: loyaltyFilter,
+        }),
+      ),
+    [searchTerm, statusFilter, loyaltyFilter, users],
+  );
+
+  // Reset to the first page whenever the visible result set can change.
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm]);
+  }, [searchTerm, statusFilter, loyaltyFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredUsers.length / USERS_PAGE_SIZE));
   const activePage = Math.min(currentPage, totalPages);
@@ -712,13 +820,12 @@ const UsersPage: React.FC = () => {
             type="button"
             onClick={() => void loadUsers()}
             disabled={loading}
-            title={t('common.refresh', 'Refresh')}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
               resolvedTheme === 'dark'
-                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                : 'border border-black bg-black text-white hover:bg-zinc-800'
-            } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
+                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
+            } ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -737,20 +844,108 @@ const UsersPage: React.FC = () => {
               placeholder={t('users.searchPlaceholder') || 'Search by name, email, or phone...'}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className={`w-full pl-10 pr-12 py-2 rounded-lg ${
+              className={`w-full pl-10 pr-12 py-2 rounded-2xl ${
                 resolvedTheme === 'dark'
                   ? 'bg-zinc-800 text-white border-zinc-600 focus:ring-white/40 focus:border-white/70'
                   : 'bg-white text-gray-900 border-gray-300 focus:ring-gray-400 focus:border-gray-500'
               } border focus:ring-2`}
             />
-            <Filter
-              aria-label={t('users.platformFilter', 'Platform filter')}
-              className={`absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 ${
-                resolvedTheme === 'dark'
-                  ? 'text-zinc-400'
-                  : 'text-gray-500'
+            <button
+              type="button"
+              onClick={() => setShowFilterMenu(open => !open)}
+              aria-label={t('users.filters.openLabel', 'Filter users')}
+              aria-haspopup="menu"
+              aria-expanded={showFilterMenu}
+              className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-2xl p-1.5 transition-transform active:scale-95 ${
+                filtersActive
+                  ? 'text-yellow-500'
+                  : resolvedTheme === 'dark'
+                    ? 'text-zinc-400 active:bg-white/10'
+                    : 'text-gray-500 active:bg-gray-200'
               }`}
-            />
+            >
+              <Filter className="h-5 w-5" />
+              {filtersActive && (
+                <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-yellow-500" aria-hidden="true" />
+              )}
+            </button>
+            {showFilterMenu && (
+              <>
+                <div className="fixed inset-0 z-[1190]" onClick={() => setShowFilterMenu(false)} aria-hidden="true" />
+                <div
+                  role="menu"
+                  className={`absolute right-0 top-full z-[1200] mt-2 flex max-h-[calc(100vh-28rem)] min-h-[12rem] w-64 flex-col rounded-2xl border p-3 shadow-2xl ${
+                    resolvedTheme === 'dark'
+                      ? 'bg-zinc-900 border-zinc-700 text-white'
+                      : 'bg-white border-gray-200 text-gray-900'
+                  }`}
+                >
+                  <div className="-mr-1 min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-hide">
+                  <p className={`mb-1.5 text-xs font-semibold uppercase tracking-wider ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-500'}`}>
+                    {t('users.filters.statusLabel', 'Status')}
+                  </p>
+                  <div className="mb-3 flex flex-col gap-1">
+                    {USER_STATUS_FILTERS.map(option => (
+                      <button
+                        key={option}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={statusFilter === option}
+                        onClick={() => setStatusFilter(option)}
+                        className={`rounded-2xl px-3 py-1.5 text-left text-sm transition-transform active:scale-[0.98] ${
+                          statusFilter === option
+                            ? 'bg-yellow-400 text-black'
+                            : resolvedTheme === 'dark'
+                              ? 'text-zinc-200 active:bg-white/10'
+                              : 'text-gray-700 active:bg-gray-100'
+                        }`}
+                      >
+                        {t(`users.filters.status.${option}`, option.charAt(0).toUpperCase() + option.slice(1))}
+                      </button>
+                    ))}
+                  </div>
+                  <p className={`mb-1.5 text-xs font-semibold uppercase tracking-wider ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-500'}`}>
+                    {t('users.filters.loyaltyLabel', 'Loyalty tier')}
+                  </p>
+                  <div className="flex flex-col gap-1">
+                    {USER_LOYALTY_FILTERS.map(option => (
+                      <button
+                        key={option}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={loyaltyFilter === option}
+                        onClick={() => setLoyaltyFilter(option)}
+                        className={`rounded-2xl px-3 py-1.5 text-left text-sm transition-transform active:scale-[0.98] ${
+                          loyaltyFilter === option
+                            ? 'bg-yellow-400 text-black'
+                            : resolvedTheme === 'dark'
+                              ? 'text-zinc-200 active:bg-white/10'
+                              : 'text-gray-700 active:bg-gray-100'
+                        }`}
+                      >
+                        {option === 'all'
+                          ? t('users.filters.loyalty.all', 'All tiers')
+                          : t(`users.loyaltyTier.${option}`, option.charAt(0).toUpperCase() + option.slice(1))}
+                      </button>
+                    ))}
+                  </div>
+                  </div>
+                  {filtersActive && (
+                    <button
+                      type="button"
+                      onClick={() => { setStatusFilter('all'); setLoyaltyFilter('all'); }}
+                      className={`mt-3 shrink-0 w-full rounded-2xl border px-3 py-1.5 text-sm font-medium transition-transform active:scale-[0.98] ${
+                        resolvedTheme === 'dark'
+                          ? 'border-zinc-700 text-zinc-200 active:bg-white/10'
+                          : 'border-gray-200 text-gray-700 active:bg-gray-100'
+                      }`}
+                    >
+                      {t('users.filters.clear', 'Clear filters')}
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </motion.div>
@@ -773,7 +968,9 @@ const UsersPage: React.FC = () => {
               {t('users.noUsers') || 'No users found'}
             </h3>
             <p className={resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}>
-              {searchTerm ? t('users.tryAdjusting') || 'Try adjusting your search' : t('users.noUsersYet') || 'No users yet'}
+              {searchTerm || filtersActive
+                ? t('users.noMatches') || 'No users match your search or filters'
+                : t('users.noUsersYet') || 'No users yet'}
             </p>
           </div>
         ) : (
@@ -808,7 +1005,7 @@ const UsersPage: React.FC = () => {
                     key={user.id}
                     variants={pageMotionItem}
                     className={`transition-colors ${
-                      resolvedTheme === 'dark' ? 'hover:bg-zinc-900' : 'hover:bg-gray-200'
+                      resolvedTheme === 'dark' ? 'active:bg-zinc-900' : 'active:bg-gray-200'
                     } ${updatingUserId === user.id ? 'opacity-50 pointer-events-none' : ''}`}
                   >
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -900,22 +1097,22 @@ const UsersPage: React.FC = () => {
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleViewUser(user)}
-                          className="text-yellow-500 hover:text-yellow-400 transition-colors"
-                          title={t('users.viewDetails') || 'View details'}
+                          className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 transition-transform active:scale-[0.96] active:bg-amber-500/10"
+                          aria-label={t('users.viewDetails') || 'View details'}
                         >
-                          <Eye className="w-4 h-4" />
+                          <Eye className="w-5 h-5" />
                         </button>
                         {user.type !== 'app_user' && (
                           <button
                             onClick={() => handleToggleBan(user.id, user.is_banned || false)}
-                            className={`${
+                            className={`inline-flex h-10 w-10 items-center justify-center rounded-xl transition-transform active:scale-[0.96] ${
                               user.is_banned
-                                ? 'text-green-600 dark:text-green-400 hover:text-green-900 dark:hover:text-green-300'
-                                : 'text-orange-600 dark:text-orange-400 hover:text-orange-900 dark:hover:text-orange-300'
-                            } transition-colors`}
-                            title={user.is_banned ? t('users.unban') || 'Unban' : t('users.ban') || 'Ban'}
+                                ? 'text-green-600 dark:text-green-400 active:bg-green-500/10'
+                                : 'text-red-600 dark:text-red-400 active:bg-red-500/10'
+                            }`}
+                            aria-label={user.is_banned ? t('users.unban') || 'Unban' : t('users.ban') || 'Ban'}
                           >
-                            {user.is_banned ? <CheckCircle className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
+                            {user.is_banned ? <CheckCircle className="w-5 h-5" /> : <Ban className="w-5 h-5" />}
                           </button>
                         )}
                       </div>
@@ -936,28 +1133,28 @@ const UsersPage: React.FC = () => {
                 type="button"
                 onClick={() => setCurrentPage(page => Math.max(1, page - 1))}
                 disabled={activePage === 1}
-                className={`rounded-lg border px-3 py-2 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`rounded-2xl border px-3 py-2 font-medium transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
                   resolvedTheme === 'dark'
-                    ? 'border-yellow-500 text-yellow-400 hover:bg-yellow-400 hover:text-black'
-                    : 'border-yellow-500 text-yellow-700 hover:bg-yellow-400 hover:text-black'
+                    ? 'border-yellow-500 text-yellow-400 active:bg-yellow-400 active:text-black'
+                    : 'border-yellow-500 text-yellow-700 active:bg-yellow-400 active:text-black'
                 }`}
               >
-                Previous
+                {t('users.pagination.previous', 'Previous')}
               </button>
               <span className={resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-600'}>
-                Page {activePage} / {totalPages}
+                {t('users.pagination.pageOf', 'Page {{current}} of {{total}}', { current: activePage, total: totalPages })}
               </span>
               <button
                 type="button"
                 onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))}
                 disabled={activePage === totalPages}
-                className={`rounded-lg border px-3 py-2 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`rounded-2xl border px-3 py-2 font-medium transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
                   resolvedTheme === 'dark'
-                    ? 'border-yellow-500 text-yellow-400 hover:bg-yellow-400 hover:text-black'
-                    : 'border-yellow-500 text-yellow-700 hover:bg-yellow-400 hover:text-black'
+                    ? 'border-yellow-500 text-yellow-400 active:bg-yellow-400 active:text-black'
+                    : 'border-yellow-500 text-yellow-700 active:bg-yellow-400 active:text-black'
                 }`}
               >
-                Next
+                {t('users.pagination.next', 'Next')}
               </button>
             </div>
           </div>
@@ -966,15 +1163,20 @@ const UsersPage: React.FC = () => {
       </motion.div>
 
       {/* User Details Modal */}
-      {showDetailsModal && selectedUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-          <div className={`max-w-2xl w-full rounded-xl shadow-xl ${
-            resolvedTheme === 'dark' ? 'bg-gray-800' : 'bg-white'
+      {showDetailsModal && selectedUser && renderModalPortal(
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div
+            ref={detailsDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={detailsTitleId}
+            className={`max-w-2xl w-full rounded-3xl overflow-hidden border shadow-2xl backdrop-blur-2xl ${
+            resolvedTheme === 'dark' ? 'bg-gray-900/70 border-white/10' : 'bg-white/75 border-white/50'
           }`}>
             <div className={`px-6 py-4 border-b ${
               resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
             }`}>
-              <h3 className={`text-xl font-semibold ${
+              <h3 id={detailsTitleId} className={`text-xl font-semibold ${
                 resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
               }`}>
                 {t('users.customerDetails') || 'Customer Details'}
@@ -1041,7 +1243,7 @@ const UsersPage: React.FC = () => {
                     {userAddresses.map((address) => (
                       <div
                         key={address.id}
-                        className={`p-4 rounded-lg border ${
+                        className={`p-4 rounded-2xl border ${
                           resolvedTheme === 'dark'
                             ? 'bg-gray-700/50 border-gray-600'
                             : 'bg-gray-50 border-gray-200'
@@ -1079,17 +1281,17 @@ const UsersPage: React.FC = () => {
                                       setShowSuggestions(true);
                                     }
                                   }}
-                                  className={`w-full px-3 py-2 rounded-lg text-sm ${
+                                  className={`w-full px-3 py-2 rounded-2xl text-sm ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
                                       : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                                  } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
                                   placeholder={t('modals.addNewAddress.addressPlaceholder')}
                                 />
 
                                 {/* Address Suggestions Dropdown */}
                                 {showSuggestions && addressSuggestions.length > 0 && (
-                                  <div className={`absolute z-50 w-full mt-1 rounded-lg shadow-lg max-h-60 overflow-y-auto ${
+                                  <div className={`absolute z-50 w-full mt-1 rounded-2xl shadow-lg max-h-60 overflow-y-auto scrollbar-hide ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 border-gray-600'
                                       : 'bg-white border-gray-200'
@@ -1099,7 +1301,7 @@ const UsersPage: React.FC = () => {
                                         key={index}
                                         type="button"
                                         onClick={() => handleAddressSuggestionClick(suggestion)}
-                                        className={`w-full px-3 py-2 text-left text-sm hover:bg-blue-500/10 transition-colors border-b last:border-b-0 ${
+                                        className={`w-full px-3 py-2 text-left text-sm active:bg-yellow-500/10 transition-transform active:scale-[0.99] border-b last:border-b-0 ${
                                           resolvedTheme === 'dark'
                                             ? 'border-gray-700 text-white'
                                             : 'border-gray-100 text-gray-900'
@@ -1142,11 +1344,11 @@ const UsersPage: React.FC = () => {
                                     resolved_street_number: undefined,
                                     address_fingerprint: undefined,
                                   }))}
-                                  className={`w-full px-3 py-2 rounded-lg text-sm ${
+                                  className={`w-full px-3 py-2 rounded-2xl text-sm ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
                                       : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                                  } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
                                 />
                               </div>
                               <div>
@@ -1168,11 +1370,11 @@ const UsersPage: React.FC = () => {
                                     resolved_street_number: undefined,
                                     address_fingerprint: undefined,
                                   }))}
-                                  className={`w-full px-3 py-2 rounded-lg text-sm ${
+                                  className={`w-full px-3 py-2 rounded-2xl text-sm ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
                                       : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                                  } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
                                 />
                               </div>
                               <div>
@@ -1185,11 +1387,11 @@ const UsersPage: React.FC = () => {
                                   type="text"
                                   value={editedAddress.floor_number || ''}
                                   onChange={(e) => setEditedAddress({ ...editedAddress, floor_number: e.target.value })}
-                                  className={`w-full px-3 py-2 rounded-lg text-sm ${
+                                  className={`w-full px-3 py-2 rounded-2xl text-sm ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
                                       : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                                  } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
                                 />
                               </div>
                             </div>
@@ -1203,28 +1405,24 @@ const UsersPage: React.FC = () => {
                                 value={editedAddress.delivery_notes || ''}
                                 onChange={(e) => setEditedAddress({ ...editedAddress, delivery_notes: e.target.value })}
                                 rows={2}
-                                className={`w-full px-3 py-2 rounded-lg text-sm ${
+                                className={`w-full px-3 py-2 rounded-2xl text-sm ${
                                   resolvedTheme === 'dark'
                                     ? 'bg-gray-800 text-white border-gray-600'
                                     : 'bg-white text-gray-900 border-gray-300'
-                                } border focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                                } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
                               />
                             </div>
                             <div className="flex items-center gap-2">
                               <button
                                 onClick={() => handleSaveAddress(address.id)}
-                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                                className="liquid-glass-modal-button liquid-glass-modal-success rounded-xl text-sm disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
                               >
                                 <Save className="w-4 h-4" />
                                 {t('common.actions.save', 'Save')}
                               </button>
                               <button
                                 onClick={handleCancelEdit}
-                                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm ${
-                                  resolvedTheme === 'dark'
-                                    ? 'bg-gray-600 text-white hover:bg-gray-500'
-                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                                }`}
+                                className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm border border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300 active:bg-red-500/20 active:scale-[0.98] transition-all"
                               >
                                 <X className="w-4 h-4" />
                                 {t('common.actions.cancel', 'Cancel')}
@@ -1259,17 +1457,17 @@ const UsersPage: React.FC = () => {
                             <div className="flex items-center gap-2 flex-shrink-0">
                               <button
                                 onClick={() => handleEditAddress(address)}
-                                className="p-2 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg transition-colors"
-                                title={t('customer.actions.editAddress')}
+                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 active:bg-amber-500/10 active:scale-[0.96] transition-transform"
+                                aria-label={t('customer.actions.editAddress')}
                               >
-                                <Edit3 className="w-4 h-4" />
+                                <Edit3 className="w-5 h-5" />
                               </button>
                               <button
                                 onClick={() => handleDeleteAddress(address.id)}
-                                className="p-2 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors"
-                                title={t('customer.actions.deleteAddress')}
+                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-red-600 dark:text-red-400 active:bg-red-500/10 active:scale-[0.96] transition-transform"
+                                aria-label={t('customer.actions.deleteAddress')}
                               >
-                                <Trash2 className="w-4 h-4" />
+                                <Trash2 className="w-5 h-5" />
                               </button>
                             </div>
                           </div>
@@ -1307,10 +1505,10 @@ const UsersPage: React.FC = () => {
                     setUserAddresses([]);
                   }}
                   disabled={updatingUserId === selectedUser.id}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                  className={`flex items-center justify-center gap-2 px-4 py-2 rounded-xl transition-all active:scale-[0.98] ${
                     selectedUser.is_banned
-                      ? 'bg-green-600 hover:bg-green-700 text-white'
-                      : 'bg-orange-600 hover:bg-orange-700 text-white'
+                      ? 'bg-green-600 active:bg-green-700 text-white'
+                      : 'bg-red-600 active:bg-red-700 text-white'
                   } disabled:opacity-50 disabled:cursor-not-allowed`}
                 >
                   {selectedUser.is_banned ? (
@@ -1327,18 +1525,55 @@ const UsersPage: React.FC = () => {
                 </button>
               )}
               <button
-                onClick={() => {
-                  setShowDetailsModal(false);
-                  setSelectedUser(null);
-                  setUserAddresses([]);
-                }}
-                className={`px-4 py-2 rounded-lg transition-colors ${
+                onClick={closeDetailsModal}
+                className={`px-4 py-2 rounded-xl transition-all active:scale-[0.98] ${
                   resolvedTheme === 'dark'
-                    ? 'bg-gray-700 hover:bg-gray-600 text-white'
-                    : 'bg-gray-200 hover:bg-gray-300 text-gray-900'
+                    ? 'bg-white/10 active:bg-white/15 text-white'
+                    : 'bg-black/5 active:bg-black/10 text-gray-900'
                 }`}
               >
                 {t('common.actions.close') || 'Close'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {addressPendingDelete && renderModalPortal(
+        <div
+          className="fixed inset-0 z-[1300] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          onClick={() => setAddressPendingDelete(null)}
+        >
+          <div
+            ref={deleteAddressDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={deleteAddressTitleId}
+            className={`w-full max-w-sm rounded-3xl overflow-hidden border shadow-2xl backdrop-blur-2xl ${resolvedTheme === 'dark' ? 'bg-gray-900/70 border-white/10' : 'bg-white/75 border-white/50'}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className={`px-6 py-4 border-b ${resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
+              <h3 id={deleteAddressTitleId} className={`text-lg font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+                {t('users.deleteAddressTitle', 'Delete address')}
+              </h3>
+            </div>
+            <div className={`px-6 py-4 text-sm ${resolvedTheme === 'dark' ? 'text-zinc-300' : 'text-gray-600'}`}>
+              {t('users.confirmDeleteAddress', 'Are you sure you want to delete this address?')}
+            </div>
+            <div className="flex justify-end gap-2 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setAddressPendingDelete(null)}
+                className={`rounded-xl border px-4 py-2 text-sm font-medium transition-all active:scale-[0.98] ${resolvedTheme === 'dark' ? 'border-white/15 bg-white/5 text-zinc-200 active:bg-white/10' : 'border-black/10 bg-black/5 text-gray-700 active:bg-black/10'}`}
+              >
+                {t('common.actions.cancel', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteAddress()}
+                className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white active:bg-red-700 active:scale-[0.98] transition-all"
+              >
+                {t('common.actions.delete', 'Delete')}
               </button>
             </div>
           </div>

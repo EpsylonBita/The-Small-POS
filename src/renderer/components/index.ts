@@ -18,7 +18,6 @@ export { default as BulkActionsBar } from './BulkActionsBar';
 export { default as NavigationSidebar } from './NavigationSidebar';
 export { default as OrderTabsBar } from './OrderTabsBar';
 export { ThemeSwitcher } from './ThemeSwitcher';
-export { default as CustomTitleBar } from './CustomTitleBar';
 export { FloatingActionButton } from './ui/FloatingActionButton';
 
 // Order components
@@ -57,6 +56,12 @@ export { OrderModals } from './OrderModals';
 // Update components
 export { UpdateDialog } from './UpdateDialog';
 export type { UpdateDialogProps, UpdateStatus } from './UpdateDialog';
+export { AppWindowFrame } from './AppWindowFrame';
+export type {
+  AppFrameUpdate,
+  AppFrameUpdateStatus,
+  AppFrameWindowState,
+} from './AppWindowFrame';
 
 // POS Glassmorphism UI Components
 export {

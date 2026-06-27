@@ -33,13 +33,19 @@ import {
 import { screenCaptureHandler } from "./services/ScreenCaptureHandler";
 import AnimatedBackground from "./components/AnimatedBackground";
 import ThemeToggle from "./components/ThemeToggle";
-import CustomTitleBar from "./components/CustomTitleBar";
 import FullscreenAwareLayout from "./components/FullscreenAwareLayout";
+import { UpdateDialog } from "./components/UpdateDialog";
+import type { UpdateStatus } from "./components/UpdateDialog";
+import type {
+  AppFrameUpdate,
+  AppFrameUpdateStatus,
+} from "./components/AppWindowFrame";
 import { useBlockerRegistration } from "./hooks/useBlockerRegistration";
 import { useFreezeWatchdog } from "./hooks/useFreezeWatchdog";
 import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
 import { useCallerIdNotifications } from "./hooks/useCallerIdNotifications";
+import { useAutoUpdater } from "./hooks/useAutoUpdater";
 import { useWindowState } from "./hooks/useWindowState";
 import { environment, updateAdminUrlFromSettings } from "../config/environment";
 import { setSupabaseContext } from "../shared/supabase-config";
@@ -667,7 +673,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-16 h-16 border-4 border-t-transparent border-blue-500 rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-16 h-16 border-4 border-t-transparent border-amber-400 rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-800">{t('app.loading')}</p>
         </div>
       </div>
@@ -679,7 +685,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       <ErrorBoundary>
         <ThemeProvider>
           <FullscreenAwareLayout>
-            <PageLoadMotion animationKey="onboarding" className="min-h-screen">
+            <PageLoadMotion animationKey="onboarding" className="h-full min-h-0">
               <OnboardingPage />
             </PageLoadMotion>
           </FullscreenAwareLayout>
@@ -690,10 +696,6 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 
   return <>{children}</>;
 }
-
-import { useAutoUpdater } from "./hooks/useAutoUpdater";
-import { UpdateDialog } from "./components/UpdateDialog";
-import type { UpdateStatus } from "./components/UpdateDialog";
 
 /**
  * Helper function to convert autoUpdater state to UpdateStatus
@@ -706,6 +708,73 @@ function getUpdateStatus(autoUpdater: ReturnType<typeof useAutoUpdater>): Update
   if (autoUpdater.error) return 'error';
   if (autoUpdater.available) return 'available';
   return 'not-available';
+}
+
+function getFrameUpdateStatus(autoUpdater: ReturnType<typeof useAutoUpdater>): AppFrameUpdateStatus {
+  if (autoUpdater.installingVersion) return 'installing';
+  if (autoUpdater.installPending) return 'install-pending';
+  if (autoUpdater.checking) return 'checking';
+  if (autoUpdater.downloading) return 'downloading';
+  if (autoUpdater.ready && autoUpdater.updateInfo?.version) return 'downloaded';
+  if (autoUpdater.error) return 'error';
+  if (autoUpdater.available) return 'available';
+  return 'not-available';
+}
+
+function getFrameUpdateLabel(
+  status: AppFrameUpdateStatus,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  switch (status) {
+    case 'checking':
+      return t('updates.title.checking', 'Checking for Updates');
+    case 'available':
+      return t('updates.title.available', 'Update Available');
+    case 'downloading':
+      return t('updates.title.downloading', 'Downloading Update');
+    case 'downloaded':
+    case 'install-pending':
+      return t('updates.title.downloaded', 'Update Ready');
+    case 'installing':
+      return t('updates.title.installing', 'Installing Update');
+    case 'error':
+      return t('updates.title.error', 'Update Error');
+    case 'not-available':
+    default:
+      return t('updates.title.upToDate', "You're Up to Date");
+  }
+}
+
+function getFrameUpdateDetail(
+  autoUpdater: ReturnType<typeof useAutoUpdater>,
+  status: AppFrameUpdateStatus,
+  t: ReturnType<typeof useI18n>['t'],
+): string | null {
+  if (status === 'downloading' && typeof autoUpdater.progress?.percent === 'number') {
+    return `${Math.round(autoUpdater.progress.percent)}%`;
+  }
+
+  if (status === 'error') {
+    return t('updates.actions.retry', 'Retry');
+  }
+
+  const version = autoUpdater.updateInfo?.version || autoUpdater.downloadedVersion;
+  if (
+    version &&
+    ['available', 'downloaded', 'install-pending', 'installing'].includes(status)
+  ) {
+    return `v${version}`;
+  }
+
+  if (
+    status === 'not-available' &&
+    autoUpdater.currentVersion &&
+    autoUpdater.currentVersion.toLowerCase() !== 'unknown'
+  ) {
+    return `v${autoUpdater.currentVersion}`;
+  }
+
+  return null;
 }
 
 function AppContent() {
@@ -722,6 +791,47 @@ function AppContent() {
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
   const windowState = useWindowState();
+  const frameUpdate = useMemo<AppFrameUpdate | undefined>(() => {
+    const status = getFrameUpdateStatus(autoUpdater);
+    if (status === 'not-available' || status === 'checking') {
+      return undefined;
+    }
+
+    const hasActionableUpdate =
+      autoUpdater.available ||
+      autoUpdater.ready ||
+      autoUpdater.downloading ||
+      autoUpdater.installPending ||
+      !!autoUpdater.installingVersion ||
+      !!autoUpdater.downloadedVersion ||
+      (status === 'error' && Boolean(autoUpdater.updateInfo?.version));
+
+    if (!hasActionableUpdate) {
+      return undefined;
+    }
+
+    return {
+      status,
+      label: getFrameUpdateLabel(status, t),
+      detail: getFrameUpdateDetail(autoUpdater, status, t),
+      busy: status === 'downloading' || status === 'installing',
+      onOpen: autoUpdater.openUpdateDialog,
+    };
+  }, [
+    autoUpdater.available,
+    autoUpdater.checking,
+    autoUpdater.currentVersion,
+    autoUpdater.downloadedVersion,
+    autoUpdater.downloading,
+    autoUpdater.error,
+    autoUpdater.installPending,
+    autoUpdater.installingVersion,
+    autoUpdater.openUpdateDialog,
+    autoUpdater.progress?.percent,
+    autoUpdater.ready,
+    autoUpdater.updateInfo?.version,
+    t,
+  ]);
   const silentRefreshOrders = useOrderStore((state) => state.silentRefresh);
   const parityQueueStatusRef = useRef<{
     pending: number;
@@ -738,6 +848,12 @@ function AppContent() {
 
   const openConnectionSettings = useCallback(
     (section: ConnectionSettingsSection = null) => {
+      if (!user) {
+        setShowConnectionSettings(false);
+        setConnectionSettingsInitialSection(null);
+        return;
+      }
+
       bridge.terminalConfig.refresh().catch(() => {
         // Ignore refresh errors and still open recovery/settings.
       });
@@ -746,7 +862,7 @@ function AppContent() {
       setConnectionSettingsInitialSection(section);
       setShowConnectionSettings(true);
     },
-    [bridge.terminalConfig],
+    [bridge.terminalConfig, user],
   );
 
   const closeConnectionSettings = useCallback(() => {
@@ -1343,32 +1459,41 @@ function AppContent() {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-16 h-16 border-4 border-t-transparent border-blue-500 rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-16 h-16 border-4 border-t-transparent border-amber-400 rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-800">{t('app.loading')}</p>
         </div>
       </div>
     );
   }
 
+  const updateDialog = (
+    <UpdateDialog
+      isOpen={autoUpdater.updateDialogOpen}
+      onClose={autoUpdater.closeUpdateDialog}
+      status={getUpdateStatus(autoUpdater)}
+      updateInfo={autoUpdater.updateInfo}
+      progress={autoUpdater.progress}
+      error={autoUpdater.error}
+      currentVersion={autoUpdater.currentVersion}
+      onDownload={autoUpdater.downloadUpdate}
+      onCancel={autoUpdater.cancelDownload}
+      onInstall={autoUpdater.installUpdate}
+      onInstallLater={autoUpdater.scheduleInstallOnNextRestart}
+      onRetry={autoUpdater.checkForUpdates}
+    />
+  );
+
   // Show login when no user
   if (!user) {
     return (
       <ErrorBoundary>
         <ThemeProvider>
-          <FullscreenAwareLayout
-            updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
-            onCheckForUpdates={autoUpdater.openUpdateDialog}
-            onOpenSettings={() => openConnectionSettings()}
-          >
-            <PageLoadMotion animationKey="login" className="min-h-screen">
+          <FullscreenAwareLayout update={frameUpdate} windowState={windowState}>
+            <PageLoadMotion animationKey="login" className="h-full min-h-0">
               <LoginPage onLogin={handleLogin} />
             </PageLoadMotion>
           </FullscreenAwareLayout>
-          <ConnectionSettingsModal
-            isOpen={showConnectionSettings}
-            initialSection={connectionSettingsInitialSection}
-            onClose={closeConnectionSettings}
-          />
+          {updateDialog}
           <Toaster
             position="top-center"
             containerStyle={TOAST_CONTAINER_STYLE}
@@ -1389,11 +1514,7 @@ function AppContent() {
     <ErrorBoundary>
       <ThemeProvider>
         <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-          <FullscreenAwareLayout
-            updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
-            onCheckForUpdates={autoUpdater.openUpdateDialog}
-            onOpenSettings={() => openConnectionSettings()}
-          >
+          <FullscreenAwareLayout update={frameUpdate} windowState={windowState}>
             {/* Shutdown/Restart Overlay */}
             {isShuttingDown && (
               <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center">
@@ -1410,7 +1531,7 @@ function AppContent() {
             )}
 
             {/* Sync Status Indicator - Heart Icon in Top-Left (after navbar) */}
-            <div className="fixed top-12 left-20 z-40">
+            <div className="fixed top-12 left-[9.5rem] z-40">
               <SyncStatusIndicator onOpenRecovery={openSyncRecovery} />
             </div>
 
@@ -1438,7 +1559,7 @@ function AppContent() {
               <Route
                 path="/new-order"
                 element={
-                  <PageLoadMotion animationKey="new-order" className="min-h-screen">
+                  <PageLoadMotion animationKey="new-order" className="h-full min-h-0">
                     <NewOrderPage />
                   </PageLoadMotion>
                 }
@@ -1501,20 +1622,7 @@ function AppContent() {
             />
 
             {/* Unified Update Dialog - handles all update states */}
-            <UpdateDialog
-              isOpen={autoUpdater.updateDialogOpen}
-              onClose={autoUpdater.closeUpdateDialog}
-              status={getUpdateStatus(autoUpdater)}
-              updateInfo={autoUpdater.updateInfo}
-              progress={autoUpdater.progress}
-              error={autoUpdater.error}
-              currentVersion={autoUpdater.currentVersion}
-              onDownload={autoUpdater.downloadUpdate}
-              onCancel={autoUpdater.cancelDownload}
-              onInstall={autoUpdater.installUpdate}
-              onInstallLater={autoUpdater.scheduleInstallOnNextRestart}
-              onRetry={autoUpdater.checkForUpdates}
-            />
+            {updateDialog}
           </FullscreenAwareLayout>
         </HashRouter>
       </ThemeProvider>

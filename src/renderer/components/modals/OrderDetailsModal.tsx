@@ -11,6 +11,8 @@ import {
 } from '../../utils/orderNumberUtils';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { normalizeOrderTypeForDisplay } from '../../utils/orderDisplay';
+import { resolveTableServiceCustomerNumber } from '../../utils/tableOrderFlow';
+import { resolveStrikethroughSubtotal } from '../../utils/orderSummary';
 import RefundVoidModal from './RefundVoidModal';
 import { SplitPaymentModal } from './SplitPaymentModal';
 import type { SplitPaymentResult } from './SplitPaymentModal';
@@ -417,6 +419,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       case 'mixed': return t('payment.split.title', { defaultValue: 'Split Payment' });
       case 'digital':
       case 'digital_wallet': return t('modals.orderDetails.digital', { defaultValue: 'Digital' });
+      case 'pending':
+      case 'unpaid':
+      case 'none':
+      case 'not_selected':
+        return t('modals.orderDetails.pending', { defaultValue: 'Pending' });
       default: return method || t('modals.orderDetails.pending', { defaultValue: 'Pending' });
     }
   };
@@ -440,12 +447,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
   const getPaymentMethodIcon = (method: string): React.ReactNode => {
     switch (method?.toLowerCase()) {
-      case 'card': return <CreditCard className="h-5 w-5 text-blue-400" />;
+      case 'card': return <CreditCard className="h-5 w-5 text-slate-400" />;
       case 'cash': return <Banknote className="h-5 w-5 text-green-400" />;
       case 'split':
-      case 'mixed': return <Split className="h-5 w-5 text-purple-400" />;
+      case 'mixed': return <Split className="h-5 w-5 text-slate-400" />;
       case 'digital':
-      case 'digital_wallet': return <Smartphone className="h-5 w-5 text-purple-400" />;
+      case 'digital_wallet': return <Smartphone className="h-5 w-5 text-slate-400" />;
       default: return <Clock className="h-5 w-5 text-gray-400" />;
     }
   };
@@ -489,14 +496,19 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const normalizedCustomerPhone = String(customerPhone || '').replace(/\D+/g, '');
 
   const normalizeText = (value: any): string => typeof value === 'string' ? value.trim() : '';
+  // Table-service orders use the table as the customer; show it through the shared
+  // display convention ("Τραπέζι #TB01"), not the raw "Τραπέζι B01" pseudo-label.
+  const tableCustomerNumber = resolveTableServiceCustomerNumber(displayOrder);
   const hasRealCustomerIdentity = Boolean(
+    tableCustomerNumber ||
     normalizeText(rawCustomerName) ||
     normalizeText(customerPhone) ||
     normalizeText(customerEmail),
   );
-  const customerIdentityName =
-    normalizeText(rawCustomerName) ||
-    t('modals.orderDetails.guestCustomer', { defaultValue: 'Guest' });
+  const customerIdentityName = tableCustomerNumber
+    ? t('orderFlow.tableCustomer', { table: tableCustomerNumber })
+    : normalizeText(rawCustomerName) ||
+      t('modals.orderDetails.guestCustomer', { defaultValue: 'Guest' });
   const rawAddress = displayOrder.delivery_address || displayOrder.deliveryAddress;
   const rawAddressText = normalizeText(
     typeof rawAddress === 'string'
@@ -574,8 +586,16 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const discountAmount = displayOrder.discount_amount || displayOrder.discountAmount || 0;
   const discountPercentage = displayOrder.discount_percentage || displayOrder.discountPercentage || 0;
   const total = displayOrder.total || displayOrder.total_amount || displayOrder.totalAmount || 0;
-  // Calculate original subtotal before discount (for display purposes)
-  const originalSubtotal = discountAmount > 0 ? subtotal + discountAmount : subtotal;
+  // Only strike through a pre-discount subtotal when the order carries a REAL,
+  // distinct one greater than the displayed subtotal. `subtotal` is already the
+  // pre-discount item subtotal, so subtotal + discount would double-count (bogus).
+  const reportedOriginalSubtotal = Number(
+    (displayOrder as any).original_subtotal ?? (displayOrder as any).originalSubtotal ?? 0,
+  ) || 0;
+  const strikethroughSubtotal = resolveStrikethroughSubtotal({
+    subtotal,
+    originalSubtotal: reportedOriginalSubtotal,
+  });
   const normalizedOrderStatus = String(displayOrder.status || 'pending').toLowerCase();
   const isCancelledOrder = normalizedOrderStatus === 'cancelled' || normalizedOrderStatus === 'canceled';
   const displayStatus = isCancelledOrder ? 'cancelled' : normalizedOrderStatus;
@@ -740,7 +760,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const insetPanelClass =
     'rounded-2xl border border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/[0.04]';
   const mutedEyebrowClass =
-    'text-[11px] font-semibold uppercase tracking-[0.32em] liquid-glass-modal-text-muted';
+    'text-[11px] font-semibold liquid-glass-modal-text-muted';
 
   // Parse customizations/ingredients with prices
   // Edge Case Handling (Requirements 5.3, 5.5):
@@ -959,7 +979,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         {onPrintReceipt && (
           <button
             onClick={onPrintReceipt}
-            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200/70 bg-white/90 px-4 text-sm font-semibold text-zinc-900 transition hover:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-100 dark:hover:bg-white/[0.08]"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200/70 bg-white/90 px-4 text-sm font-semibold text-zinc-900 transition active:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-100 dark:active:bg-white/[0.08]"
           >
             <Printer className="h-4 w-4" />
             {t('modals.orderDetails.printReceipt') || 'Print Receipt'}
@@ -968,7 +988,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         {canSplitPayment && (
           <button
             onClick={() => setShowSplitPaymentModal(true)}
-            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-fuchsia-300/60 bg-fuchsia-50 px-4 text-sm font-semibold text-fuchsia-700 transition hover:bg-fuchsia-100 dark:border-fuchsia-500/25 dark:bg-fuchsia-500/10 dark:text-fuchsia-200 dark:hover:bg-fuchsia-500/15"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-amber-300/60 bg-amber-50 px-4 text-sm font-semibold text-amber-700 transition active:bg-amber-100 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200 dark:active:bg-amber-500/15"
           >
             <Split className="h-4 w-4" />
             {t('payment.split.title', { defaultValue: 'Split Payment' })}
@@ -977,7 +997,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         {canRefund && (
           <button
             onClick={() => setShowRefundModal(true)}
-            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-red-300/70 bg-red-50 px-4 text-sm font-semibold text-red-700 transition hover:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 dark:hover:bg-red-500/15"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-red-300/70 bg-red-50 px-4 text-sm font-semibold text-red-700 transition active:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 dark:active:bg-red-500/15"
           >
             <RotateCcw className="h-4 w-4" />
             {t('modals.orderDetails.voidRefund', { defaultValue: 'Void / Refund' })}
@@ -985,7 +1005,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         )}
         <button
           onClick={onClose}
-          className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-zinc-300/80 bg-zinc-100 px-4 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-200 dark:border-white/10 dark:bg-zinc-900/80 dark:text-zinc-100 dark:hover:bg-zinc-800"
+          className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-zinc-300/80 bg-zinc-100 px-4 text-sm font-semibold text-zinc-700 transition active:bg-zinc-200 dark:border-white/10 dark:bg-zinc-900/80 dark:text-zinc-100 dark:active:bg-zinc-800"
         >
           {t('common.actions.close') || 'Close'}
         </button>
@@ -1001,15 +1021,15 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       isOpen={isOpen}
       onClose={onClose}
       size="lg"
-      className="!w-[92vw] !max-w-6xl"
-      contentClassName="p-0 overflow-hidden"
+      className="!w-[92vw] !max-w-6xl !max-h-[96vh]"
+      contentClassName="p-0 !pt-0 overflow-hidden"
       ariaLabel={t('modals.orderDetails.title', { defaultValue: 'Order Details' })}
       footer={modalFooter}
     >
-      <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 pb-6 pt-16 scrollbar-hide">
+      <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 pt-16 pb-24 scroll-pb-24 scrollbar-hide">
         <button
           onClick={onClose}
-          className="absolute right-4 top-3 z-20 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-zinc-200/70 bg-white/80 text-zinc-700 shadow-sm transition-colors hover:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-200 dark:hover:bg-white/[0.08]"
+          className="absolute right-4 top-3 z-20 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-zinc-200/70 bg-white/80 text-zinc-700 shadow-sm transition-colors active:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-200 dark:active:bg-white/[0.08]"
           aria-label={t('common.actions.close')}
         >
           <X className="h-6 w-6" />
@@ -1018,14 +1038,14 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
           <div className="flex items-center justify-center py-12">
             <div className={`h-12 w-12 animate-spin rounded-full border-2 ${
               isDarkTheme
-                ? 'border-white/15 border-t-cyan-300'
-                : 'border-zinc-200 border-t-blue-600'
+                ? 'border-white/15 border-t-yellow-400'
+                : 'border-zinc-200 border-t-amber-500'
             }`}></div>
           </div>
         ) : (
-          <div className="space-y-6">
+          <div className="space-y-4">
 
-            <section className={`${shellPanelClass} overflow-hidden p-6`}>
+            <section className={`${shellPanelClass} overflow-hidden p-5`}>
               <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className={mutedEyebrowClass}>
@@ -1042,7 +1062,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
               {isCancelledOrder ? (
                 <div className="mb-5 rounded-2xl border border-red-500/70 bg-black px-6 py-7 text-center shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
-                  <div className="flex items-center justify-center gap-2 text-sm font-bold uppercase tracking-[0.24em] text-red-400">
+                  <div className="flex items-center justify-center gap-2 text-sm font-bold text-red-400">
                     <RotateCcw className="h-4 w-4" />
                     {t('modals.orderDetails.cancellationReason', { defaultValue: 'Cancellation Reason' })}
                   </div>
@@ -1053,12 +1073,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
               ) : null}
 
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <div className={`${insetPanelClass} px-4 py-4`}>
+                <div className={`${insetPanelClass} px-4 py-3`}>
                   <div className="flex items-center gap-3">
                     <span className={`flex h-5 w-5 shrink-0 items-center justify-center ${
                       isDeliveryOrder
                         ? 'text-orange-500 dark:text-orange-300'
-                        : 'text-blue-600 dark:text-blue-300'
+                        : 'text-slate-600 dark:text-slate-300'
                     }`}>
                       {isDeliveryOrder ? <Truck className="h-5 w-5" /> : <Clock className="h-5 w-5" />}
                     </span>
@@ -1069,9 +1089,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   </div>
                 </div>
 
-                <div className={`${insetPanelClass} px-4 py-4`}>
+                <div className={`${insetPanelClass} px-4 py-3`}>
                   <div className="flex items-center gap-3">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center text-sky-600 dark:text-sky-300">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center text-slate-600 dark:text-slate-300">
                       <Clock className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">
@@ -1081,7 +1101,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   </div>
                 </div>
 
-                <div className={`${insetPanelClass} px-4 py-4`}>
+                <div className={`${insetPanelClass} px-4 py-3`}>
                   <div className="flex items-center gap-3">
                     <span className="flex h-5 w-5 shrink-0 items-center justify-center text-emerald-600 dark:text-emerald-300">
                       {getPaymentMethodIcon(paymentMethodPresentation)}
@@ -1096,9 +1116,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   </div>
                 </div>
 
-                <div className={`${insetPanelClass} px-4 py-4`}>
+                <div className={`${insetPanelClass} px-4 py-3`}>
                   <div className="flex items-center gap-3">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center text-violet-600 dark:text-violet-300">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center text-slate-600 dark:text-slate-300">
                       <Package className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">
@@ -1115,8 +1135,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
               {hasRealCustomerIdentity || (isDeliveryOrder && hasDeliveryAddress) || serviceNotes.length > 0 || (isDeliveryOrder && hasDriverAssignment) ? (
                 <div className="mt-4 grid gap-3 lg:grid-cols-2">
                   {hasRealCustomerIdentity ? (
-                    <div className={`${insetPanelClass} px-4 py-4`}>
-                      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                    <div className={`${insetPanelClass} px-4 py-3`}>
+                      <div className="mb-3 flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
                         <User className="h-4 w-4" />
                         {t('modals.orderDetails.customerInformation', { defaultValue: 'Customer' })}
                       </div>
@@ -1134,8 +1154,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   ) : null}
 
                   {isDeliveryOrder && hasDeliveryAddress ? (
-                    <div className={`${insetPanelClass} px-4 py-4`}>
-                      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                    <div className={`${insetPanelClass} px-4 py-3`}>
+                      <div className="mb-3 flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
                         <MapPin className="h-4 w-4" />
                         {t('modals.orderDetails.deliveryAddress', { defaultValue: 'Delivery Address' })}
                       </div>
@@ -1160,8 +1180,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   ) : null}
 
                   {isDeliveryOrder && hasDriverAssignment ? (
-                    <div className={`${insetPanelClass} px-4 py-4`}>
-                      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                    <div className={`${insetPanelClass} px-4 py-3`}>
+                      <div className="mb-3 flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
                         <Truck className="h-4 w-4" />
                         {t('modals.orderDetails.deliveryFulfillment', { defaultValue: 'Delivery Fulfillment' })}
                       </div>
@@ -1177,8 +1197,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   ) : null}
 
                   {serviceNotes.length > 0 ? (
-                    <div className={`${insetPanelClass} px-4 py-4`}>
-                      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                    <div className={`${insetPanelClass} px-4 py-3`}>
+                      <div className="mb-3 flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
                         <FileText className="h-4 w-4" />
                         {t('modals.orderDetails.serviceNotes', { defaultValue: 'Service Notes' })}
                       </div>
@@ -1195,9 +1215,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
               ) : null}
             </section>
 
-            <section className={`${shellPanelClass} flex flex-col p-6`}>
+            <section className={`${shellPanelClass} flex flex-col p-5`}>
                   <div className="mb-5 flex items-center justify-between gap-3">
-                    <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
+                    <h4 className="flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
                       <Package className="w-4 h-4" />
                       {t('modals.orderDetails.orderItems') || 'Items'}
                     </h4>
@@ -1206,7 +1226,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                     </span>
                   </div>
 
-                  <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
+                  <div className="flex-1 overflow-y-auto space-y-3 scrollbar-hide">
                     {items.length > 0 ? (
                       items.map((item: any, index: number) => {
                         const customizations = parseCustomizations(
@@ -1243,7 +1263,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 <div className="flex-1">
                                   {/* Category name above item */}
                                   {categoryPath && (
-                                    <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 liquid-glass-modal-text-muted">
+                                    <div className="text-[10px] font-medium mb-0.5 liquid-glass-modal-text-muted">
                                       {categoryPath}
                                     </div>
                                   )}
@@ -1256,9 +1276,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                       <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
                                         isItemPaid
                                           ? itemPaymentPresentation === 'card'
-                                            ? 'bg-blue-500/15 text-blue-300 border border-blue-500/30'
+                                            ? 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
                                             : itemPaymentPresentation === 'split'
-                                              ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30'
+                                              ? 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
                                               : 'bg-green-500/15 text-green-300 border border-green-500/30'
                                           : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
                                       }`}>
@@ -1275,14 +1295,14 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                             >
                                               <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${
                                                 entry.method === 'card'
-                                                  ? 'border border-blue-500/30 bg-blue-500/15 text-blue-300'
+                                                  ? 'border border-slate-500/30 bg-slate-500/15 text-slate-300'
                                                   : 'border border-green-500/30 bg-green-500/15 text-green-300'
                                               }`}>
                                                 {getPaymentMethodLabel(entry.method)}
                                               </span>
                                               <span>{formatCurrency(entry.itemAmount)}</span>
                                               {entry.paymentOrigin === 'terminal' && (
-                                                <span className="text-cyan-300">
+                                                <span className="text-amber-300">
                                                   {t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })}
                                                 </span>
                                               )}
@@ -1330,7 +1350,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 {/* Without ingredients */}
                                 {customizations.filter(c => c.isWithout).length > 0 && (
                                   <div className="mt-1 space-y-1 rounded-2xl border border-red-200/70 bg-red-50/70 px-3 py-3 dark:border-red-500/15 dark:bg-red-500/[0.06]">
-                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">{withoutLabel}</div>
+                                    <div className="text-[11px] font-semibold text-red-700 dark:text-red-300">{withoutLabel}</div>
                                     {customizations.filter(c => c.isWithout).map((c, idx) => (
                                       <div key={`without-${idx}`} className="flex justify-between text-xs text-red-600 dark:text-red-300">
                                         <span className="line-through">- {c.name}</span>
@@ -1359,12 +1379,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   </div>
 
                   {/* Totals Section */}
-                  <div className={`${insetPanelClass} mt-6 space-y-2 px-5 py-5`}>
+                  <div className={`${insetPanelClass} mt-4 space-y-2 px-5 py-4`}>
                     <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                       <span>{t('modals.orderDetails.subtotal') || 'Subtotal'}</span>
                       <div className="flex items-center gap-2">
-                        {discountAmount > 0 && (
-                          <span className="line-through text-xs text-zinc-400">{formatCurrency(originalSubtotal)}</span>
+                        {strikethroughSubtotal !== null && (
+                          <span className="line-through text-xs text-zinc-400">{formatCurrency(strikethroughSubtotal)}</span>
                         )}
                         <span>{formatCurrency(subtotal)}</span>
                       </div>
@@ -1402,8 +1422,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
             </section>
 
-            <section className={`${shellPanelClass} p-6`}>
-              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <section className={`${shellPanelClass} p-5`}>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <History className="h-4 w-4 liquid-glass-modal-text-muted" />
                   <div className={mutedEyebrowClass}>
@@ -1424,7 +1444,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
               {normalizedCustomerPhone ? (
                 <div className="space-y-4">
-                  <div className={`${insetPanelClass} px-4 py-4`}>
+                  <div className={`${insetPanelClass} px-4 py-3`}>
                     <div className="text-sm font-semibold liquid-glass-modal-text">
                       {repeatOrderCount > 1
                         ? t('modals.orderDetails.previousOrdersCount', {
@@ -1486,7 +1506,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         {/* Cancellation reason — visible whenever the order is cancelled. */}
         {String(status).toLowerCase() === 'cancelled' ? (
           <div className="mt-4 rounded-2xl border border-rose-300/70 bg-rose-50/80 p-4 dark:border-rose-700/70 dark:bg-rose-950/30">
-            <div className="text-xs font-semibold uppercase tracking-wider text-rose-700 dark:text-rose-300">
+            <div className="text-xs font-semibold text-rose-700 dark:text-rose-300">
               {t('modals.orderDetails.cancellation.title', { defaultValue: 'Cancellation' })}
             </div>
             <div className="mt-1 text-sm text-rose-900 dark:text-rose-100">

@@ -604,6 +604,7 @@ export interface DiagnosticsSystemHealth {
   } | null;
   pendingOrders: number;
   dbSizeBytes: number;
+  panicCount?: number;
   invalidOrders?: {
     count: number;
     details: DiagnosticsInvalidOrder[];
@@ -635,6 +636,28 @@ export interface DiagnosticsExportResponse {
 export interface DiagnosticsOpenExportDirResponse {
   success: boolean;
   path?: string;
+  error?: string;
+}
+
+export type PosIncidentSeverity = 'info' | 'warning' | 'high' | 'critical';
+
+export interface PosIncidentCandidate {
+  issueCode: string;
+  severity: PosIncidentSeverity;
+  fingerprint: string;
+  summary: string;
+  evidence: Record<string, unknown>;
+  shouldReport: boolean;
+}
+
+export interface RemoteIncidentReportResponse {
+  success: boolean;
+  incidentId?: string | null;
+  status?: 'open' | 'resolved' | string;
+  deduped?: boolean;
+  alertSent?: boolean;
+  lastSentAt?: string;
+  candidate?: PosIncidentCandidate;
   error?: string;
 }
 

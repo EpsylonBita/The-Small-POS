@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useId } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MenuCategoryTabs } from '../menu/MenuCategoryTabs';
 import { MenuItemGrid } from '../menu/MenuItemGrid';
@@ -20,6 +20,7 @@ import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useKdsLiveDraftSync } from '../../hooks/useKdsLiveDraftSync';
 import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { renderModalPortal } from '../../utils/render-modal-portal';
 import toast from 'react-hot-toast';
 import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
 import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
@@ -46,6 +47,7 @@ import {
 } from '../../utils/saved-address-geolocation';
 import { isLegacyFallbackAddress } from '../../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
+import { resolveCouponErrorKey, COUPON_ERROR_FALLBACKS } from '../../utils/couponErrors';
 import { shouldBypassPaymentForTableOrder } from '../../utils/tableOrderFlow';
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge, isBrowser } from '../../../lib';
@@ -453,15 +455,87 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // Customer popover state (for pickup orders)
   const [showCustomerPopover, setShowCustomerPopover] = useState(false);
+  // Dirty-cart discard confirmation: closing a NEW order with items in the cart must
+  // confirm before discarding the in-progress draft. Topmost role="dialog" over MenuModal.
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+  const discardDialogRef = useRef<HTMLDivElement>(null);
+  const discardTitleId = useId();
   const [pickupCustomerName, setPickupCustomerName] = useState(selectedCustomer?.name || '');
   const [pickupCustomerPhone, setPickupCustomerPhone] = useState(selectedCustomer?.phone || selectedCustomer?.phone_number || '');
   const [pickupCustomerNotes, setPickupCustomerNotes] = useState(selectedCustomer?.notes || '');
 
+  // Escape closes ONLY the customer details popover. The popover renders with
+  // role="dialog" above the MenuModal, so MenuModal's own Escape handler already
+  // self-suppresses (isTopMostDialog). This just supplies the missing close so the
+  // topmost overlay collapses while the parent order-entry modal stays open.
+  useEffect(() => {
+    if (!showCustomerPopover) {
+      return;
+    }
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowCustomerPopover(false);
+      }
+    };
+    window.addEventListener('keydown', onEscape);
+    return () => {
+      window.removeEventListener('keydown', onEscape);
+    };
+  }, [showCustomerPopover]);
+
+  // Route the user-initiated close (header X / MenuModal Escape) through a discard
+  // confirmation when a NEW order has a populated cart, so the X/Escape can't silently
+  // drop the draft. Edit mode and the post-checkout success paths (which call onClose
+  // directly) bypass this and close immediately.
+  const requestClose = useCallback(() => {
+    if (!editMode && cartItems.length > 0) {
+      setShowDiscardConfirm(true);
+      return;
+    }
+    onClose();
+  }, [editMode, cartItems.length, onClose]);
+
+  const handleDiscardOrder = useCallback(() => {
+    setShowDiscardConfirm(false);
+    setCartItems([]);
+    onClose();
+  }, [onClose]);
+
+  // Escape closes ONLY the discard confirmation. It renders with role="dialog" above the
+  // MenuModal, so MenuModal's own Escape self-suppresses (isTopMostDialog). This supplies
+  // the close so the topmost overlay collapses while the cart/order-entry modal stay intact.
+  useEffect(() => {
+    if (!showDiscardConfirm) {
+      return;
+    }
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowDiscardConfirm(false);
+      }
+    };
+    window.addEventListener('keydown', onEscape);
+    return () => {
+      window.removeEventListener('keydown', onEscape);
+    };
+  }, [showDiscardConfirm]);
+
   const hasCustomerInfo = !!(
     (selectedCustomer?.name && selectedCustomer.name.trim()) ||
     (selectedCustomer?.phone && selectedCustomer.phone.trim()) ||
-    (selectedCustomer?.phone_number && selectedCustomer.phone_number.trim())
+    (selectedCustomer?.phone_number && selectedCustomer.phone_number.trim()) ||
+    (pickupCustomerName && pickupCustomerName.trim()) ||
+    (pickupCustomerPhone && pickupCustomerPhone.trim())
   );
+
+  // Display-only label for the customer/table chip. Prefer locally entered pickup
+  // fields, but fall back to the selectedCustomer the flow supplies (e.g. the
+  // dine-in "Table #TB02" pseudo-customer that arrives after the modal opens).
+  // Without this fallback the chip could pass hasCustomerInfo yet render icon-only
+  // because the local pickup state was initialized empty. Read-only: it never
+  // overwrites user-edited pickup fields.
+  const customerChipName = pickupCustomerName || selectedCustomer?.name || '';
+  const customerChipPhone =
+    pickupCustomerPhone || selectedCustomer?.phone || selectedCustomer?.phone_number || '';
 
   useKdsLiveDraftSync({
     enabled: !editMode,
@@ -1359,7 +1433,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       } | null;
 
       if (!result.success) {
-        setCouponError(result.error || t('menu.cart.couponError', 'Failed to validate coupon'));
+        // Transport/system failure (coupon validation reasons come back as
+        // success:true with valid:false). Keep the generic localized message and
+        // log the raw server detail for diagnostics instead of leaking English.
+        if (result.error) {
+          console.warn('Coupon validation request failed:', result.error);
+        }
+        setCouponError(t('menu.cart.couponError', 'Failed to validate coupon'));
         return;
       }
 
@@ -1368,7 +1448,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         setCouponError(null);
         toast.success(t('menu.cart.couponApplied', 'Coupon applied!'));
       } else {
-        setCouponError(couponPayload?.error || t('menu.cart.couponInvalid', 'Invalid coupon code'));
+        // Localize the validation reason at the source: map the server's machine
+        // code (browser) or English sentence (desktop bridge) to a locale key so
+        // Greek UI shows Greek instead of "Coupon not found" / "COUPON_NOT_FOUND".
+        const reasonKey = resolveCouponErrorKey(couponPayload?.error);
+        setCouponError(t(reasonKey, COUPON_ERROR_FALLBACKS[reasonKey]));
       }
     } catch (error) {
       console.error('Error validating coupon:', error);
@@ -1953,6 +2037,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       orderType,
       editMode,
       ghostMode: shouldBypassPaymentWithGhostMode,
+      // Round 236: a room-charge dine-in order must NOT auto-submit a pending table payment — it has
+      // to reach PaymentModal so the room_charge tender appears and posts to the folio.
+      hasRoomCharge: Boolean(roomChargeContext?.roomId && roomChargeContext?.activeFolioId),
     })) {
       await handlePaymentComplete({ method: 'table', status: 'pending', amount: 0 });
       return;
@@ -2176,7 +2263,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       orderType === 'delivery'
         ? t('modals.menu.delivery')
         : orderType === 'dine-in'
-          ? t('orders.type.dine_in', 'Dine In')
+          ? t('orders.type.dineIn', { defaultValue: 'Dine In' })
           : t('modals.menu.pickup');
     if (editMode && editOrderNumber) {
       return `${t('modals.menu.editOrder') || 'Edit Order'} ${formatCompactOrderNumberForDisplay(editOrderNumber)} - ${typeLabel}`;
@@ -2188,16 +2275,22 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     <>
       <LiquidGlassModal
         isOpen={isOpen}
-        onClose={onClose}
+        onClose={requestClose}
         ariaLabel={getModalTitle()}
         header={
-          <div className="flex flex-col gap-1 px-5 py-2.5 border-b border-white/10 flex-shrink-0">
+          <div className="flex flex-col gap-1 px-5 py-2.5 border-b border-white/10 flex-shrink-0 min-w-0">
             {/* Main row: Title + Customer + Close */}
-            <div className="flex items-center justify-between gap-4 w-full">
-              <h2 className="liquid-glass-modal-title text-xl flex-shrink-0">
-                {getModalTitle()}
+            <div className="flex items-center justify-between gap-4 w-full min-w-0">
+              <h2
+                className="liquid-glass-modal-title text-xl flex items-center gap-2 min-w-0"
+                title={getModalTitle()}
+              >
+                {/* Long edit titles truncate (with a hover tooltip) instead of
+                    forcing the header wider than the viewport, which clipped the
+                    centered modal off the left edge. */}
+                <span className="truncate">{getModalTitle()}</span>
                 {editMode && (
-                  <span className="ml-3 text-xs font-medium text-amber-400 bg-amber-500/20 px-2 py-0.5 rounded-full align-middle">
+                  <span className="flex-shrink-0 whitespace-nowrap text-xs font-medium text-amber-400 bg-amber-500/20 px-2 py-0.5 rounded-full">
                     <Pencil className="w-3 h-3 inline mr-1" />
                     {t('modals.menu.editModeMessage') || 'Editing'}
                   </span>
@@ -2212,13 +2305,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   autoFocus
                   value={menuSearchQuery}
                   onChange={(e) => setMenuSearchQuery(e.target.value)}
-                  placeholder={t('menu.search.placeholder', 'Search menu items...')}
+                  placeholder={t('menu.search', { defaultValue: 'Search menu items...' })}
                   className="h-10 w-full rounded-xl border border-white/15 bg-white/[0.08] pl-9 pr-9 text-sm text-white placeholder-gray-400 backdrop-blur-md focus:border-yellow-400/70 focus:outline-none focus:ring-1 focus:ring-yellow-400"
                 />
                 {menuSearchQuery && (
                   <button
                     onClick={() => setMenuSearchQuery('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-gray-400 transition-colors hover:bg-white/10 hover:text-white"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-gray-400 transition-colors active:bg-white/10 active:text-white"
                     aria-label={t('common.actions.clear', 'Clear')}
                   >
                     <X className="w-4 h-4" />
@@ -2226,27 +2319,29 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 )}
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 min-w-0 flex-shrink-0">
                 {/* Customer info chip or Add Customer button */}
-                <div>
+                <div className="min-w-0">
                   {orderType === 'delivery' && selectedCustomer ? (
-                    <span className="inline-flex items-center gap-2 rounded-full border border-blue-500/40 bg-transparent px-3 py-1.5 text-sm text-white">
-                      <User className="w-3.5 h-3.5 text-blue-400" />
-                      {selectedCustomer.name}{selectedCustomer.phone_number || selectedCustomer.phone ? ` \u00B7 ${selectedCustomer.phone_number || selectedCustomer.phone}` : ''}
+                    <span className="inline-flex items-center gap-2 rounded-full border border-green-500/40 bg-transparent px-3 py-1.5 text-sm text-white max-w-[16rem]">
+                      <User className="w-3.5 h-3.5 text-green-300 flex-shrink-0" />
+                      <span className="truncate">{selectedCustomer.name}{selectedCustomer.phone_number || selectedCustomer.phone ? ` \u00B7 ${selectedCustomer.phone_number || selectedCustomer.phone}` : ''}</span>
                     </span>
                   ) : hasCustomerInfo ? (
                     <button
                       onClick={() => setShowCustomerPopover(true)}
-                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm bg-green-500/20 text-green-300 border border-green-500/30 hover:bg-green-500/30 transition-colors"
+                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm bg-green-500/20 text-green-300 border border-green-500/30 active:bg-green-500/30 transition-colors max-w-[16rem]"
                     >
-                      <User className="w-3.5 h-3.5" />
-                      {pickupCustomerName || pickupCustomerPhone}
-                      {pickupCustomerName && pickupCustomerPhone ? ` \u00B7 ${pickupCustomerPhone}` : ''}
+                      <User className="w-3.5 h-3.5 flex-shrink-0" />
+                      <span className="truncate">
+                        {customerChipName || customerChipPhone}
+                        {customerChipName && customerChipPhone ? ` \u00B7 ${customerChipPhone}` : ''}
+                      </span>
                     </button>
                   ) : (
                     <button
                       onClick={() => setShowCustomerPopover(true)}
-                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm liquid-glass-modal-button hover:bg-white/10 transition-colors"
+                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm liquid-glass-modal-button active:bg-white/10 transition-colors"
                     >
                       <UserPlus className="w-3.5 h-3.5" />
                       {t('modals.menu.addCustomer', { defaultValue: 'Add Customer' })}
@@ -2256,13 +2351,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
                 {/* Close button */}
                 <button
-                  onClick={onClose}
-                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0"
+                  onClick={requestClose}
+                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0 flex-shrink-0"
                   aria-label={t('common.actions.close')}
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
@@ -2273,7 +2366,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 <span>{selectedAddress.street_address || selectedAddress.street}, {selectedAddress.postal_code || selectedAddress.city}</span>
                 {effectiveDeliveryZoneInfo?.zone && (
                   <>
-                    <span className="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium">
+                    <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-medium">
                       {effectiveDeliveryZoneInfo.zone.name}
                     </span>
                     <span>{t('modals.menu.fee')}: {formatCurrency(resolvedDeliveryFee)}</span>
@@ -2445,9 +2538,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
       {/* SplitPaymentModal now rendered in OrderDashboard */}
 
-      {/* Customer Info Modal — compact centered overlay */}
-      {showCustomerPopover && (
-        <div className="fixed inset-0 z-[1200] flex items-center justify-center" onClick={() => setShowCustomerPopover(false)}>
+      {/* Customer Info Modal - compact centered overlay */}
+      {showCustomerPopover && renderModalPortal(
+        <div className="fixed inset-0 z-[20050] flex items-center justify-center" onClick={() => setShowCustomerPopover(false)}>
           {/* Heavy blur backdrop */}
           <div className="absolute inset-0 bg-black/50 backdrop-blur-md" />
 
@@ -2463,7 +2556,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               <h3 className="liquid-glass-modal-title !text-lg">
                 {t('modals.menu.customerInfo', { defaultValue: 'Customer Info (Optional)' })}
               </h3>
-              <button onClick={() => setShowCustomerPopover(false)} className="liquid-glass-modal-close !w-8 !h-8 !text-base">
+              <button
+                onClick={() => setShowCustomerPopover(false)}
+                aria-label={t('common.actions.close', { defaultValue: 'Close' })}
+                title={t('common.actions.close', { defaultValue: 'Close' })}
+                className="liquid-glass-modal-close !w-8 !h-8 !text-base"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -2502,9 +2600,43 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   }
                   setShowCustomerPopover(false);
                 }}
-                className="liquid-glass-modal-button liquid-glass-modal-primary w-full"
+                className="liquid-glass-modal-button liquid-glass-modal-success w-full"
               >
                 {t('common.actions.save', { defaultValue: 'Save' })}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dirty-cart discard confirmation (topmost over MenuModal) */}
+      {showDiscardConfirm && renderModalPortal(
+        <div className="fixed inset-0 z-[20060] flex items-center justify-center bg-black/60 backdrop-blur-md p-4">
+          <div
+            ref={discardDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={discardTitleId}
+            className="w-[340px] max-w-[90vw] rounded-2xl border border-white/15 bg-gray-900/95 p-5 shadow-2xl text-white"
+          >
+            <h3 id={discardTitleId} className="text-base font-semibold mb-2">
+              {t('modals.menu.discardOrder.title', { defaultValue: 'Discard this order?' })}
+            </h3>
+            <p className="text-sm text-gray-300 mb-4">
+              {t('modals.menu.discardOrder.message', { defaultValue: 'This order has items in the cart. Closing now will discard them.' })}
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setShowDiscardConfirm(false)}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-white/10 active:bg-white/20 text-white transition-colors"
+              >
+                {t('modals.menu.discardOrder.keepEditing', { defaultValue: 'Keep editing' })}
+              </button>
+              <button
+                onClick={handleDiscardOrder}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-600 active:bg-red-700 text-white transition-colors"
+              >
+                {t('modals.menu.discardOrder.discard', { defaultValue: 'Discard order' })}
               </button>
             </div>
           </div>
@@ -2516,7 +2648,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[1100]">
           <div className="rounded-2xl p-8 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border backdrop-blur-xl">
             <div className="flex flex-col items-center space-y-4">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-500"></div>
               <p className="text-lg font-medium liquid-glass-modal-text">
                 {t('modals.menu.processingOrder')}
               </p>

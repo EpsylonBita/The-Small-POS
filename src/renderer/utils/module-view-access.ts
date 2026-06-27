@@ -24,6 +24,7 @@ import { isCoreModule } from '../../shared/constants/pos-modules';
 export const VIEW_MODULE_ALIASES: Record<string, string> = {
   customers: 'users',
   integrations: 'plugin_integrations',
+  services: 'service_catalog',
 };
 
 /**
@@ -39,6 +40,10 @@ export interface ViewAccessModuleLike {
 
 export function resolveViewModuleId(view: string): string {
   return VIEW_MODULE_ALIASES[view] ?? view;
+}
+
+function matchesResolvedModuleId(viewModuleId: string, enabledModuleId: string): boolean {
+  return enabledModuleId === viewModuleId || resolveViewModuleId(enabledModuleId) === viewModuleId;
 }
 
 /**
@@ -66,5 +71,5 @@ export function isViewAccessDenied(
   if (enabledModules.length === 0) {
     return false;
   }
-  return !enabledModules.some((entry) => entry.module.id === moduleId);
+  return !enabledModules.some((entry) => matchesResolvedModuleId(moduleId, entry.module.id));
 }

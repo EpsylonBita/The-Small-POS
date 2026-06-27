@@ -76,9 +76,14 @@ test('remaining top-level pages use the shared page header treatment', () => {
     }
 
     if (page.hasRefresh) {
+      // Genuinely-shared invariant: every page's refresh exposes an accessible name (no native title
+      // tooltip on this touch POS). The refresh button CHROME is intentionally NOT asserted here anymore:
+      // pages have diverged in palette across rounds -- amber-glass on IntegrationsPage/LoyaltyPage/
+      // UsersPage/PaymentTerminalsPage/CouponsPage/Kiosk, and a hover-less
+      // inverted variant on Analytics/Delivery/Tables. The old hardcoded `bg-white text-black hover:...`
+      // assertion was stale (failing for the migrated pages). Each page's specific refresh palette is now
+      // guarded by its own focused test (e.g. integrations-page-ui.test.ts, payment-terminals-ui.test.ts).
       assert.match(source, /aria-label=\{t\('common\.refresh'/, `${page.file} refresh should be accessible`);
-      assert.match(source, /border border-white\/80 bg-white text-black hover:bg-zinc-200/, `${page.file} refresh should use dark inverted chrome`);
-      assert.match(source, /border border-black bg-black text-white hover:bg-zinc-800/, `${page.file} refresh should use light inverted chrome`);
     }
   }
 });

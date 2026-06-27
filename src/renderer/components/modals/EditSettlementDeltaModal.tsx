@@ -144,8 +144,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
             disabled={submitting}
             className={`flex flex-col items-center gap-2 rounded-2xl border px-4 py-5 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
               isRefund
-                ? 'border-orange-400/30 bg-orange-500/10 text-orange-200 hover:border-orange-400/50 hover:bg-orange-500/15'
-                : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200 hover:border-emerald-400/50 hover:bg-emerald-500/15'
+                ? 'border-orange-400/30 bg-orange-500/10 text-orange-200 active:border-orange-400/50 active:bg-orange-500/15'
+                : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200 active:border-emerald-400/50 active:bg-emerald-500/15'
             }`}
             data-testid="edit-settlement-delta-cash"
           >
@@ -159,8 +159,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
             disabled={submitting}
             className={`flex flex-col items-center gap-2 rounded-2xl border px-4 py-5 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
               isRefund
-                ? 'border-orange-400/30 bg-orange-500/10 text-orange-200 hover:border-orange-400/50 hover:bg-orange-500/15'
-                : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200 hover:border-emerald-400/50 hover:bg-emerald-500/15'
+                ? 'border-orange-400/30 bg-orange-500/10 text-orange-200 active:border-orange-400/50 active:bg-orange-500/15'
+                : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200 active:border-emerald-400/50 active:bg-emerald-500/15'
             }`}
             data-testid="edit-settlement-delta-card"
           >
@@ -171,7 +171,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
 
         {/* Refund caveat */}
         {isRefund && (
-          <div className="flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+          <div className="flex items-start gap-2 rounded-2xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
               {t('modals.editSettlementDelta.refundNote', {
@@ -191,7 +191,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
               onCancel();
             }}
             disabled={submitting}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white/70 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex items-center gap-1.5 rounded-2xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white/70 transition-colors active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <X className="h-3.5 w-3.5" />
             {t('modals.editSettlementDelta.cancel', { defaultValue: 'Cancel' })}

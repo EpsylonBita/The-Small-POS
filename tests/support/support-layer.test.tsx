@@ -1775,9 +1775,12 @@ test('isViewAccessDenied fails closed for unowned module views (THE-315)', () =>
   // View aliases resolve to their backing module before the check.
   assert.equal(resolveViewModuleId('customers'), 'users');
   assert.equal(resolveViewModuleId('integrations'), 'plugin_integrations');
+  assert.equal(resolveViewModuleId('services'), 'service_catalog');
   assert.equal(isViewAccessDenied(typicalOrg, 'customers'), false);
   assert.equal(isViewAccessDenied(typicalOrg, 'integrations'), true);
   assert.equal(isViewAccessDenied(owned('plugin_integrations'), 'integrations'), false);
+  assert.equal(isViewAccessDenied(owned('service_catalog'), 'services'), false);
+  assert.equal(isViewAccessDenied(owned('services'), 'service_catalog'), false);
 
   // Bootstrap window: module data not hydrated yet -> nothing is denied
   // (a synced terminal always carries its core modules, so an empty list

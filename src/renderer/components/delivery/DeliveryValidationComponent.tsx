@@ -7,6 +7,7 @@ import {
 import { DeliveryValidationService } from '../../../shared/services/DeliveryValidationService';
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
+import { renderModalPortal } from '../../utils/render-modal-portal';
 
 // UI State type for delivery validation
 interface DeliveryValidationUIState {
@@ -144,7 +145,7 @@ export function DeliveryValidationComponent({
   const getValidationIndicator = () => {
     if (uiState.isValidating) {
       return (
-        <div className="flex items-center gap-2 text-blue-600">
+        <div className="flex items-center gap-2 text-amber-600 dark:text-amber-300">
           <Clock className="w-4 h-4 animate-spin" />
           <span className="text-sm">{t('delivery.zone.validating')}</span>
         </div>
@@ -174,7 +175,7 @@ export function DeliveryValidationComponent({
 
       case 'warning':
         return (
-          <div className="flex items-center gap-2 text-orange-600">
+          <div className="flex items-center gap-2 text-amber-600 dark:text-amber-300">
             <Shield className="w-4 h-4" />
             <span className="text-sm">{t('delivery.zone.overrideApplied')}</span>
           </div>
@@ -213,9 +214,7 @@ export function DeliveryValidationComponent({
             value={uiState.addressInput}
             onChange={(e) => handleAddressInput(e.target.value)}
             placeholder={t('forms.placeholders.enterAddress')}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg 
-                     bg-white dark:bg-gray-800 text-gray-900 dark:text-white
-                     focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className="w-full rounded-2xl border border-gray-300 bg-white/80 py-2.5 pl-10 pr-4 text-gray-900 outline-none backdrop-blur-sm transition-shadow focus:border-amber-400 focus:ring-2 focus:ring-amber-400/35 dark:border-white/10 dark:bg-zinc-950/70 dark:text-white"
           />
         </div>
       </div>
@@ -233,7 +232,7 @@ export function DeliveryValidationComponent({
 
       {/* Validation Details */}
       {uiState.validationResult && (
-        <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-4 space-y-3">
+        <div className="space-y-3 rounded-[22px] border border-gray-200/80 bg-white/72 p-4 shadow-[0_14px_34px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/62 dark:shadow-[0_18px_42px_rgba(0,0,0,0.34)]">
           {/* Zone Information */}
           {uiState.validationResult.zone && (
             <div className="grid grid-cols-2 gap-4 text-sm">
@@ -262,7 +261,7 @@ export function DeliveryValidationComponent({
           {uiState.validationResult.validation && (
             <div className="space-y-2">
               {!uiState.validationResult.validation.meetsMinimumOrder && (
-                <div className="text-sm text-orange-600 dark:text-orange-400">
+                <div className="text-sm text-amber-700 dark:text-amber-300">
                   <span className="inline-flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4" aria-hidden="true" />
                     Order amount ({formatCurrency(orderAmount)}) is below minimum ({formatCurrency(uiState.validationResult.zone?.minimumOrderAmount || 0)}).
@@ -275,16 +274,16 @@ export function DeliveryValidationComponent({
 
           {/* Override Information */}
           {uiState.validationResult.override?.applied && (
-            <div className="bg-orange-100 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded p-3">
-              <div className="flex items-center gap-2 text-orange-800 dark:text-orange-400">
+            <div className="rounded-2xl border border-amber-300/70 bg-amber-100/70 p-3 dark:border-amber-400/25 dark:bg-amber-500/12">
+              <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200">
                 <Shield className="w-4 h-4" />
                 <span className="font-medium">Delivery Override Applied</span>
               </div>
-              <div className="mt-1 text-sm text-orange-700 dark:text-orange-300">
+              <div className="mt-1 text-sm text-amber-800 dark:text-amber-200/85">
                 Reason: {uiState.validationResult.override.reason}
               </div>
               {uiState.validationResult.override.customDeliveryFee && (
-                <div className="mt-1 text-sm text-orange-700 dark:text-orange-300">
+                <div className="mt-1 text-sm text-amber-800 dark:text-amber-200/85">
                   Custom delivery fee: {formatCurrency(uiState.validationResult.override.customDeliveryFee)}
                 </div>
               )}
@@ -298,7 +297,7 @@ export function DeliveryValidationComponent({
                 Alternative Options:
               </div>
               {uiState.validationResult.alternatives.pickup && (
-                <div className="text-sm text-blue-600 dark:text-blue-400">
+                <div className="text-sm text-emerald-700 dark:text-emerald-300">
                   <span className="inline-flex items-center gap-2"><CheckCircle className="w-4 h-4" aria-hidden="true" />Pickup available at our location</span>
                 </div>
               )}
@@ -318,7 +317,7 @@ export function DeliveryValidationComponent({
         <div className="flex gap-2">
           <button
             onClick={() => setUIState(prev => ({ ...prev, showOverrideModal: true }))}
-            className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
+            className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl bg-amber-400 px-4 py-2 font-semibold text-black transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 disabled:opacity-50"
           >
             <Settings className="w-4 h-4" />
             Override Delivery Restriction
@@ -327,30 +326,30 @@ export function DeliveryValidationComponent({
       )}
 
       {/* Override Confirmation Modal */}
-      {uiState.showOverrideModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
+      {uiState.showOverrideModal && renderModalPortal(
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/45 backdrop-blur-md">
+          <div className="mx-4 w-full max-w-md rounded-[28px] border border-white/25 bg-white/72 p-6 shadow-[0_24px_80px_rgba(0,0,0,0.28)] backdrop-blur-2xl dark:border-white/12 dark:bg-zinc-950/74">
             <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">
               Override Delivery Restriction
             </h3>
             <p className="text-gray-600 dark:text-gray-400 mb-4">
               This address is outside the normal delivery area. Are you sure you want to proceed with delivery?
             </p>
-            <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded p-3 mb-4">
-              <div className="text-sm text-yellow-800 dark:text-yellow-400">
+            <div className="mb-4 rounded-2xl border border-amber-300/70 bg-amber-100/70 p-3 dark:border-amber-400/25 dark:bg-amber-500/12">
+              <div className="text-sm text-amber-900 dark:text-amber-200">
                 <span className="inline-flex items-center gap-2"><AlertTriangle className="w-4 h-4" aria-hidden="true" />This action will be logged for review.</span>
               </div>
             </div>
             <div className="flex gap-3">
               <button
                 onClick={handleOverride}
-                className="flex-1 bg-orange-600 text-white py-2 px-4 rounded-lg hover:bg-orange-700 transition-colors"
+                className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded-2xl bg-amber-400 px-4 py-2 font-semibold text-black transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
               >
                 Confirm Override
               </button>
               <button
                 onClick={() => setUIState(prev => ({ ...prev, showOverrideModal: false }))}
-                className="flex-1 bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-gray-300 py-2 px-4 rounded-lg hover:bg-gray-400 dark:hover:bg-gray-500 transition-colors"
+                className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded-2xl bg-red-600 px-4 py-2 font-semibold text-white transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/80"
               >
                 Cancel
               </button>

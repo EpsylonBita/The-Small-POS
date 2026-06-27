@@ -174,7 +174,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
                 type="button"
                 onClick={() => void loadRecoveryState()}
                 disabled={loading}
-                className="inline-flex items-center gap-2 rounded-2xl border border-slate-200/90 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-slate-200/90 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-transform active:scale-[0.98] active:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:active:bg-white/[0.08]"
               >
                 <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                 {t('common.actions.refresh', { defaultValue: 'Refresh' })}
@@ -183,7 +183,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
                 <button
                   type="button"
                   onClick={handleOpenSnapshots}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-slate-200/90 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]"
+                  className="inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-slate-200/90 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-transform active:scale-[0.98] active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:active:bg-white/[0.08]"
                 >
                   <FolderOpen className="h-4 w-4" />
                   {t('sync.recoveryCenter.openSnapshots', {
@@ -194,7 +194,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="liquid-glass-modal-button min-h-0 min-w-0 rounded-xl p-2"
+                className="liquid-glass-modal-button min-h-[44px] min-w-[44px] rounded-2xl p-2 transition-transform active:scale-95"
                 aria-label={t('common.actions.close', { defaultValue: 'Close' })}
               >
                 <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -209,8 +209,8 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
-            <div className="mb-5 rounded-[22px] border border-sky-200/90 bg-sky-50/90 px-4 py-4 text-sm text-sky-800 dark:border-sky-400/30 dark:bg-sky-500/10 dark:text-sky-100">
+          <div className="flex-1 overflow-y-auto scrollbar-hide px-5 py-5 sm:px-6">
+            <div className="mb-5 rounded-[22px] border border-amber-200/90 bg-amber-50/90 px-4 py-4 text-sm text-amber-800 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100">
               {t('sync.recoveryCenter.guidedContextNote', {
                 defaultValue:
                   'Start with the first blocker. If a known fix exists, the POS can run it or open the exact screen needed to fix the order.',
@@ -219,7 +219,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
 
             {loading && !systemHealth ? (
               <div className="flex h-56 items-center justify-center">
-                <div className="h-12 w-12 animate-spin rounded-full border-4 border-blue-500/30 border-t-blue-500" />
+                <div className="h-12 w-12 animate-spin rounded-full border-4 border-amber-500/30 border-t-amber-500" />
               </div>
             ) : (
               <RecoveryCenterPanel

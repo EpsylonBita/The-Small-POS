@@ -16,7 +16,7 @@ interface LoadingSpinnerProps {
  */
 export const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
   size = 'medium',
-  color = '#1976d2',
+  color = '#f59e0b',
   text,
   fullScreen = false,
   className = ''
@@ -95,4 +95,3 @@ export const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
 };
 
 export default LoadingSpinner;
-

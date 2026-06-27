@@ -3,29 +3,37 @@
 
 /* CSS Custom Properties for Consistent Theming */
 :root {
-  /* Glass backgrounds - Light theme with blue tones */
-  --glass-bg-primary: rgba(59, 130, 246, 0.15);
-  --glass-bg-secondary: rgba(59, 130, 246, 0.1);
-  --glass-bg-interactive: rgba(59, 130, 246, 0.12);
-  --glass-bg-hover: rgba(59, 130, 246, 0.2);
+  /* Glass backgrounds - Light theme, neutral grey tint */
+  --glass-bg-primary: rgba(24, 24, 27, 0.05);
+  --glass-bg-secondary: rgba(24, 24, 27, 0.035);
+  --glass-bg-interactive: rgba(24, 24, 27, 0.045);
+  --glass-bg-hover: rgba(24, 24, 27, 0.09);
 
-  /* Glass borders - Light theme with blue tones */
-  --glass-border-primary: rgba(59, 130, 246, 0.2);
-  --glass-border-secondary: rgba(59, 130, 246, 0.15);
-  --glass-border-interactive: rgba(59, 130, 246, 0.18);
-  --glass-border-hover: rgba(59, 130, 246, 0.3);
+  /* Glass borders - Light theme, neutral grey tint */
+  --glass-border-primary: rgba(24, 24, 27, 0.12);
+  --glass-border-secondary: rgba(24, 24, 27, 0.1);
+  --glass-border-interactive: rgba(24, 24, 27, 0.11);
+  --glass-border-hover: rgba(24, 24, 27, 0.18);
 
   /* Shadows and blur effects */
-  --glass-shadow-primary: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+  --glass-shadow-primary: 0 8px 32px 0 rgba(0, 0, 0, 0.18);
   --glass-shadow-dark: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
   --glass-blur-primary: blur(10px);
   --glass-blur-secondary: blur(12px);
 
-  /* Border radius and transitions */
-  --glass-radius-small: 8px;
-  --glass-radius-medium: 12px;
-  --glass-radius-large: 16px;
-  --glass-radius-xl: 24px;
+  /* Border radius — smooth, consistent container edges.
+     control/input 14px · card 22px · panel 26px · modal/large 30px */
+  --glass-radius-small: 14px;
+  --glass-radius-medium: 22px;
+  --glass-radius-large: 26px;
+  --glass-radius-xl: 30px;
+  /* Canonical aliases consumed by .pos-glass-* / .glass-* classes. These were
+     referenced but never defined, so those surfaces fell back to sharp 0-radius
+     corners — defining them here fixes the smoothing globally. */
+  --pos-glass-radius-small: var(--glass-radius-small);
+  --pos-glass-radius-medium: var(--glass-radius-medium);
+  --pos-glass-radius-large: var(--glass-radius-large);
+  --pos-glass-radius-xl: var(--glass-radius-xl);
   --glass-transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   --glass-transition-slow: all 1000ms cubic-bezier(0.4, 0, 0.2, 1);
 
@@ -44,17 +52,17 @@
   --pos-status-success: rgba(16, 185, 129, 0.2);
   --pos-status-warning: rgba(245, 158, 11, 0.2);
   --pos-status-error: rgba(239, 68, 68, 0.2);
-  --pos-status-info: rgba(59, 130, 246, 0.2);
-  --pos-status-pending: rgba(249, 115, 22, 0.2);
-  --pos-status-preparing: rgba(59, 130, 246, 0.2);
+  --pos-status-info: rgba(113, 113, 122, 0.2);
+  --pos-status-pending: rgba(245, 158, 11, 0.2);
+  --pos-status-preparing: rgba(113, 113, 122, 0.2);
   --pos-status-ready: rgba(16, 185, 129, 0.2);
 
   /* Liquid Glass Variables - Light Theme */
   --c-glass: #bbbbbc;
   --c-light: #fff;
   --c-dark: #000;
-  --c-content: #224;
-  --c-action: #0052f5;
+  --c-content: #18181b;
+  --c-action: #ca8a04;
   --glass-reflex-dark: 1;
   --glass-reflex-light: 1;
   --saturation: 150%;
@@ -63,8 +71,8 @@
   --modal-c-glass: #bbbbbc;
   --modal-c-light: #fff;
   --modal-c-dark: #000;
-  --modal-c-content: #1a1a2e;  /* Darker, more vivid text */
-  --modal-c-action: #2563eb;   /* Vivid blue like admin dashboard */
+  --modal-c-content: #18181b;  /* Neutral near-black (was blue-tinted) */
+  --modal-c-action: #ca8a04;   /* Yellow accent (was brand blue) */
   --modal-c-bg: #E8E8E9;
   --modal-glass-reflex-dark: 1;
   --modal-glass-reflex-light: 1;
@@ -74,9 +82,9 @@
   --pos-fab-core: rgba(255, 244, 210, 0.98);
   --pos-fab-core-strong: rgba(255, 176, 62, 0.96);
   --pos-fab-cyan: rgba(255, 255, 232, 0.92);
-  --pos-fab-violet: rgba(255, 214, 196, 0.88);
-  --pos-fab-magenta: rgba(255, 128, 150, 0.74);
-  --pos-fab-lilac: rgba(255, 231, 220, 0.9);
+  --pos-fab-violet: rgba(255, 232, 178, 0.88);
+  --pos-fab-magenta: rgba(255, 176, 72, 0.74);
+  --pos-fab-lilac: rgba(255, 240, 214, 0.9);
   --pos-fab-yellow: rgba(255, 236, 128, 0.96);
   --pos-fab-green: rgba(255, 250, 214, 0.88);
   --pos-fab-orange: rgba(255, 164, 86, 0.9);
@@ -121,7 +129,7 @@
   --c-light: #fff;
   --c-dark: #000;
   --c-content: #e1e1e1;
-  --c-action: #03d5ff;
+  --c-action: #facc15;
   --glass-reflex-dark: 2;
   --glass-reflex-light: 0.3;
   --saturation: 150%;
@@ -131,7 +139,7 @@
   --modal-c-light: #fff;
   --modal-c-dark: #000;
   --modal-c-content: #f8fafc;  /* Brighter, crisper white */
-  --modal-c-action: #60a5fa;   /* Vivid blue for dark theme */
+  --modal-c-action: #facc15;   /* Yellow accent (was brand blue) */
   --modal-c-bg: #000000;
   --modal-glass-reflex-dark: 2;
   --modal-glass-reflex-light: 0.3;
@@ -140,9 +148,9 @@
   --pos-fab-core: rgba(255, 242, 204, 0.98);
   --pos-fab-core-strong: rgba(255, 185, 72, 0.98);
   --pos-fab-cyan: rgba(255, 255, 232, 0.94);
-  --pos-fab-violet: rgba(255, 212, 200, 0.92);
-  --pos-fab-magenta: rgba(255, 122, 154, 0.78);
-  --pos-fab-lilac: rgba(255, 230, 220, 0.9);
+  --pos-fab-violet: rgba(255, 230, 176, 0.92);
+  --pos-fab-magenta: rgba(255, 172, 70, 0.78);
+  --pos-fab-lilac: rgba(255, 238, 212, 0.9);
   --pos-fab-yellow: rgba(255, 236, 128, 0.98);
   --pos-fab-green: rgba(255, 250, 214, 0.9);
   --pos-fab-orange: rgba(255, 166, 84, 0.94);
@@ -197,11 +205,14 @@
   color: var(--pos-glass-text-primary);
 }
 
-.glass-button:hover {
-  background: var(--pos-glass-bg-hover);
-  border-color: var(--pos-glass-border-hover);
-  transform: translateY(-2px);
-  box-shadow: var(--pos-glass-shadow-hover);
+/* Mouse-only: never apply sticky hover on a touch terminal. */
+@media (hover: hover) {
+  .glass-button:hover {
+    background: var(--pos-glass-bg-hover);
+    border-color: var(--pos-glass-border-hover);
+    transform: translateY(-2px);
+    box-shadow: var(--pos-glass-shadow-hover);
+  }
 }
 
 .glass-button:active {
@@ -210,8 +221,8 @@
 }
 
 .glass-button-primary {
-  background: rgba(59, 130, 246, 0.3);
-  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(113, 113, 122, 0.3);
+  border-color: rgba(113, 113, 122, 0.4);
   color: rgba(255, 255, 255, 0.95);
 }
 
@@ -245,20 +256,22 @@
 }
 
 .glass-fab {
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.8), rgba(147, 51, 234, 0.8));
+  background: linear-gradient(135deg, rgba(113, 113, 122, 0.8), rgba(82, 82, 91, 0.8));
   backdrop-filter: var(--pos-glass-blur-primary);
   -webkit-backdrop-filter: var(--pos-glass-blur-primary);
   border: 1px solid rgba(255, 255, 255, 0.3);
   border-radius: 50%;
-  box-shadow: 0 8px 32px rgba(59, 130, 246, 0.4);
+  box-shadow: 0 8px 32px rgba(113, 113, 122, 0.4);
   transition: var(--pos-glass-transition);
   cursor: pointer;
   animation: float 3s ease-in-out infinite;
 }
 
-.glass-fab:hover {
-  transform: translateY(-4px) scale(1.05);
-  box-shadow: 0 12px 40px rgba(59, 130, 246, 0.6);
+@media (hover: hover) {
+  .glass-fab:hover {
+    transform: translateY(-4px) scale(1.05);
+    box-shadow: 0 12px 40px rgba(113, 113, 122, 0.6);
+  }
 }
 
 .glass-fab:active {
@@ -819,15 +832,15 @@
 }
 
 .pos-glass-primary {
-  background: rgba(59, 130, 246, 0.15);
-  border: 1px solid rgba(59, 130, 246, 0.2);
-  box-shadow: 0 8px 32px 0 rgba(59, 130, 246, 0.2);
+  background: rgba(113, 113, 122, 0.15);
+  border: 1px solid rgba(113, 113, 122, 0.2);
+  box-shadow: 0 8px 32px 0 rgba(113, 113, 122, 0.2);
 }
 
 .pos-glass-secondary {
-  background: rgba(59, 130, 246, 0.1);
-  border: 1px solid rgba(59, 130, 246, 0.15);
-  box-shadow: 0 8px 32px 0 rgba(59, 130, 246, 0.15);
+  background: rgba(113, 113, 122, 0.1);
+  border: 1px solid rgba(113, 113, 122, 0.15);
+  box-shadow: 0 8px 32px 0 rgba(113, 113, 122, 0.15);
   backdrop-filter: var(--pos-glass-blur-secondary);
   -webkit-backdrop-filter: var(--pos-glass-blur-secondary);
   border-radius: var(--pos-glass-radius-medium);
@@ -848,11 +861,11 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-.pos-glass-interactive:hover {
-  background: var(--pos-glass-bg-hover);
-  border: 1px solid var(--pos-glass-border-hover);
-  box-shadow: var(--pos-glass-shadow-hover);
-  transform: translateY(-3px) scale(1.02);
+@media (hover: hover) {
+  .pos-glass-interactive:hover {
+    background: var(--pos-glass-bg-hover);
+    border: 1px solid var(--pos-glass-border-hover);
+  }
 }
 
 .pos-glass-interactive:active {
@@ -1019,7 +1032,7 @@
   max-height: 92vh;
   width: 100%;
   padding: 0;
-  border-radius: 20px;
+  border-radius: 28px;
   /* True Liquid Glass Effect - restored */
   background: rgba(255, 255, 255, 0.15);
   backdrop-filter: blur(40px) saturate(200%);
@@ -1054,6 +1067,134 @@
     0 20px 60px rgba(0, 0, 0, 0.4),
     0 8px 24px rgba(0, 0, 0, 0.3),
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* Trial: New Order chooser as a transparent command palette. */
+.liquid-glass-modal-viewport:has(.order-type-transparent-modal) .liquid-glass-modal-backdrop {
+  background: rgba(0, 0, 0, 0.2) !important;
+  backdrop-filter: blur(22px) saturate(0.96) brightness(0.82) !important;
+  -webkit-backdrop-filter: blur(22px) saturate(0.96) brightness(0.82) !important;
+}
+
+.dark .liquid-glass-modal-viewport:has(.order-type-transparent-modal) .liquid-glass-modal-backdrop {
+  background: rgba(0, 0, 0, 0.08) !important;
+  backdrop-filter: blur(18px) saturate(1.08) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(1.08) !important;
+}
+
+.order-type-transparent-modal.liquid-glass-modal-shell,
+.dark .order-type-transparent-modal.liquid-glass-modal-shell {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  overflow: visible !important;
+}
+
+.order-type-transparent-modal .liquid-glass-modal-header {
+  position: absolute;
+  inset: -52px 0 auto 0;
+  z-index: 2;
+  padding: 0;
+  border: 0 !important;
+  background: transparent !important;
+  pointer-events: none;
+}
+
+.order-type-transparent-modal .liquid-glass-modal-title {
+  display: none;
+}
+
+.order-type-transparent-modal .liquid-glass-modal-close {
+  display: none !important;
+}
+
+.order-type-transparent-modal .liquid-glass-modal-content {
+  padding: 0 !important;
+  overflow: visible !important;
+  transform: none;
+  isolation: auto;
+}
+
+.order-type-transparent-modal [data-order-type-card] {
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.order-type-transparent-modal [data-order-type-card] svg,
+.order-type-transparent-modal [data-order-type-card] [aria-hidden="true"] {
+  color: rgba(24, 24, 27, 0.9) !important;
+}
+
+.order-type-transparent-modal [data-order-type-card] p {
+  color: rgba(24, 24, 27, 0.72) !important;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.order-type-transparent-modal [data-order-type-card="delivery"] {
+  background: linear-gradient(135deg, rgba(74, 57, 0, 0.76), rgba(32, 28, 14, 0.64)) !important;
+  border-color: rgba(250, 204, 21, 0.72) !important;
+}
+
+.order-type-transparent-modal [data-order-type-card="pickup"] {
+  background: linear-gradient(135deg, rgba(3, 70, 45, 0.76), rgba(8, 37, 30, 0.64)) !important;
+  border-color: rgba(52, 211, 153, 0.72) !important;
+}
+
+.order-type-transparent-modal [data-order-type-card="table"] {
+  background: linear-gradient(135deg, rgba(20, 58, 103, 0.76), rgba(13, 30, 55, 0.64)) !important;
+  border-color: rgba(96, 165, 250, 0.76) !important;
+}
+
+.order-type-transparent-modal [data-order-type-card="room"] {
+  background: linear-gradient(135deg, rgba(70, 28, 104, 0.76), rgba(37, 18, 56, 0.64)) !important;
+  border-color: rgba(168, 85, 247, 0.74) !important;
+}
+
+.order-type-transparent-modal [data-order-type-card="service"] {
+  background: linear-gradient(135deg, rgba(7, 73, 83, 0.76), rgba(8, 38, 44, 0.64)) !important;
+  border-color: rgba(34, 211, 238, 0.74) !important;
+}
+
+.dark .order-type-transparent-modal [data-order-type-card] {
+  box-shadow: none;
+}
+
+.dark .order-type-transparent-modal [data-order-type-card] svg,
+.dark .order-type-transparent-modal [data-order-type-card] [aria-hidden="true"] {
+  color: #fff !important;
+}
+
+.dark .order-type-transparent-modal [data-order-type-card] p {
+  color: rgba(255, 255, 255, 0.6) !important;
+  text-shadow: none;
+}
+
+.dark .order-type-transparent-modal [data-order-type-card="delivery"] {
+  background: linear-gradient(135deg, rgba(250, 204, 21, 0.16), rgba(234, 179, 8, 0.06)) !important;
+  border-color: rgba(250, 204, 21, 0.45) !important;
+}
+
+.dark .order-type-transparent-modal [data-order-type-card="pickup"] {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.16), rgba(22, 163, 74, 0.06)) !important;
+  border-color: rgba(52, 211, 153, 0.45) !important;
+}
+
+.dark .order-type-transparent-modal [data-order-type-card="table"] {
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.16), rgba(37, 99, 235, 0.06)) !important;
+  border-color: rgba(96, 165, 250, 0.45) !important;
+}
+
+.dark .order-type-transparent-modal [data-order-type-card="room"] {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.16), rgba(126, 34, 206, 0.06)) !important;
+  border-color: rgba(168, 85, 247, 0.45) !important;
+}
+
+.dark .order-type-transparent-modal [data-order-type-card="service"] {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.16), rgba(8, 145, 178, 0.06)) !important;
+  border-color: rgba(34, 211, 238, 0.45) !important;
 }
 
 @keyframes modalEnter {
@@ -1139,7 +1280,7 @@
   -webkit-backdrop-filter: blur(10px) saturate(var(--modal-saturation));
   /* Crisp Rim Light Border */
   border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 0.75rem;
+  border-radius: var(--pos-glass-radius-small);
   padding: 0.75rem 1.5rem;
   color: var(--modal-c-content);
   font-weight: 500;
@@ -1149,6 +1290,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* Consistent icon↔label spacing for every modal button (matches the gap-2 that
+     16 call-sites already set explicitly; harmless for text-only buttons). */
+  gap: 0.5rem;
   /* Inner glow for depth */
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.2),
@@ -1157,17 +1301,15 @@
   will-change: transform;
 }
 
-.liquid-glass-modal-button:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.4);
-  transform: translateY(-2px);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.3),
-    0 8px 20px rgba(0, 0, 0, 0.15);
+@media (hover: hover) {
+  .liquid-glass-modal-button:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.4);
+  }
 }
 
 .liquid-glass-modal-button:active {
-  transform: translateY(0);
+  transform: scale(0.98);
   background: rgba(255, 255, 255, 0.02);
 }
 
@@ -1178,9 +1320,11 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
-.dark .liquid-glass-modal-button:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.3);
+@media (hover: hover) {
+  .dark .liquid-glass-modal-button:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.3);
+  }
 }
 
 /* .liquid-glass-modal-input rules moved to globals.css @layer components
@@ -1191,7 +1335,7 @@
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
   border: 1px solid rgba(203, 213, 225, 0.5);
-  border-radius: 1rem;
+  border-radius: var(--pos-glass-radius-medium);
   padding: 1.5rem;
   box-shadow:
     0 4px 16px rgba(0, 0, 0, 0.08),
@@ -1208,15 +1352,15 @@
 
 /* Liquid glass variant tints */
 .liquid-glass-modal-primary {
-  background: rgba(59, 130, 246, 0.16);
-  border-color: rgba(59, 130, 246, 0.35);
-  color: #1d4ed8;
+  background: rgba(234, 179, 8, 0.16);
+  border-color: rgba(234, 179, 8, 0.4);
+  color: #a16207;
 }
 
 .dark .liquid-glass-modal-primary {
-  background: rgba(59, 130, 246, 0.2);
-  border-color: rgba(59, 130, 246, 0.45);
-  color: #93c5fd;
+  background: rgba(234, 179, 8, 0.18);
+  border-color: rgba(234, 179, 8, 0.45);
+  color: #fde047;
 }
 
 .liquid-glass-modal-secondary {
@@ -1268,39 +1412,39 @@
 }
 
 .liquid-glass-modal-info {
-  background: rgba(56, 189, 248, 0.16);
-  border-color: rgba(56, 189, 248, 0.35);
-  color: #0369a1;
+  background: rgba(113, 113, 122, 0.16);
+  border-color: rgba(113, 113, 122, 0.35);
+  color: #3f3f46;
 }
 
 .dark .liquid-glass-modal-info {
-  background: rgba(56, 189, 248, 0.22);
-  border-color: rgba(56, 189, 248, 0.45);
-  color: #7dd3fc;
+  background: rgba(161, 161, 170, 0.18);
+  border-color: rgba(161, 161, 170, 0.4);
+  color: #e4e4e7;
 }
 
 .liquid-glass-modal-pending {
-  background: rgba(59, 130, 246, 0.14);
-  border-color: rgba(59, 130, 246, 0.35);
-  color: #1d4ed8;
+  background: rgba(234, 179, 8, 0.14);
+  border-color: rgba(234, 179, 8, 0.35);
+  color: #a16207;
 }
 
 .dark .liquid-glass-modal-pending {
-  background: rgba(59, 130, 246, 0.2);
-  border-color: rgba(59, 130, 246, 0.45);
-  color: #93c5fd;
+  background: rgba(234, 179, 8, 0.18);
+  border-color: rgba(234, 179, 8, 0.45);
+  color: #fde047;
 }
 
 .liquid-glass-modal-preparing {
-  background: rgba(168, 85, 247, 0.16);
-  border-color: rgba(168, 85, 247, 0.35);
-  color: #6d28d9;
+  background: rgba(113, 113, 122, 0.16);
+  border-color: rgba(113, 113, 122, 0.35);
+  color: #3f3f46;
 }
 
 .dark .liquid-glass-modal-preparing {
-  background: rgba(168, 85, 247, 0.22);
-  border-color: rgba(168, 85, 247, 0.45);
-  color: #d8b4fe;
+  background: rgba(161, 161, 170, 0.18);
+  border-color: rgba(161, 161, 170, 0.4);
+  color: #e4e4e7;
 }
 
 .liquid-glass-modal-ready {
@@ -1347,11 +1491,11 @@
 }
 
 .liquid-glass-modal-action {
-  color: #3b82f6;
+  color: #ca8a04;
 }
 
 .dark .liquid-glass-modal-action {
-  color: #60a5fa;
+  color: #facc15;
 }
 
 /* Modal header and content layout */
@@ -1374,7 +1518,7 @@
   font-size: 1.625rem;
   font-weight: 700;
   color: #0f172a !important;  /* Slate-900 - vivid dark */
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   text-rendering: geometricPrecision;
   -webkit-font-smoothing: subpixel-antialiased;
 }
@@ -1406,15 +1550,16 @@
   color: rgba(255, 255, 255, 0.7);
 }
 
-.liquid-glass-modal-close:hover {
-  background: rgba(0, 0, 0, 0.08);
-  transform: scale(1.05);
-  color: rgba(0, 0, 0, 0.8);
-}
+@media (hover: hover) {
+  .liquid-glass-modal-close:hover {
+    background: rgba(0, 0, 0, 0.08);
+    color: rgba(0, 0, 0, 0.8);
+  }
 
-.dark .liquid-glass-modal-close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.9);
+  .dark .liquid-glass-modal-close:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.9);
+  }
 }
 
 .liquid-glass-modal-close:active {
@@ -1462,7 +1607,7 @@
 
 .pos-glass-info {
   background: var(--pos-status-info);
-  border-color: rgba(59, 130, 246, 0.3);
+  border-color: rgba(113, 113, 122, 0.3);
 }
 
 .pos-glass-pending {
@@ -1472,7 +1617,7 @@
 
 .pos-glass-preparing {
   background: var(--pos-status-preparing);
-  border-color: rgba(59, 130, 246, 0.3);
+  border-color: rgba(113, 113, 122, 0.3);
 }
 
 .pos-glass-ready {
@@ -1536,13 +1681,10 @@
 }
 
 .pos-scrollbar-glass::-webkit-scrollbar-thumb {
+  /* Touch-first: no hover brighten state; neutral interactive glass at rest. */
   background: var(--pos-glass-bg-interactive);
   border-radius: var(--pos-glass-radius-small);
   border: 1px solid var(--pos-glass-border-interactive);
-}
-
-.pos-scrollbar-glass::-webkit-scrollbar-thumb:hover {
-  background: var(--pos-glass-bg-hover);
 }
 
 /* Responsive adjustments for different POS screen sizes */
@@ -1681,14 +1823,15 @@
   transition: var(--glass-transition);
 }
 
-.glass-interactive:hover {
-  background: var(--glass-bg-hover);
-  border-color: var(--glass-border-hover);
-  transform: translateY(-2px);
+@media (hover: hover) {
+  .glass-interactive:hover {
+    background: var(--glass-bg-hover);
+    border-color: var(--glass-border-hover);
+  }
 }
 
 .glass-interactive:active {
-  transform: translateY(0);
+  transform: scale(0.98);
 }
 
 /* Status variants */
@@ -1711,9 +1854,9 @@
 }
 
 .glass-info {
-  background: rgba(59, 130, 246, 0.15);
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  box-shadow: 0 8px 32px 0 rgba(59, 130, 246, 0.2);
+  background: rgba(113, 113, 122, 0.15);
+  border: 1px solid rgba(113, 113, 122, 0.3);
+  box-shadow: 0 8px 32px 0 rgba(113, 113, 122, 0.2);
 }
 
 /* POS specific classes */
@@ -1820,7 +1963,7 @@
 
 /* Focus styles */
 .glass-interactive:focus-visible {
-  outline: 2px solid rgba(59, 130, 246, 0.8);
+  outline: 2px solid rgba(234, 179, 8, 0.85);
   outline-offset: 2px;
 }
 
@@ -1832,336 +1975,6 @@
 
   .glass-interactive:hover {
     border-width: 3px;
-  }
-}
-
-/* Neon Colors for Navigation Icons - Enhanced with !important */
-.pos-neon-dashboard {
-  color: #00ffff !important;
-  text-shadow: 0 0 5px #00ffff, 0 0 10px #00ffff, 0 0 15px #00ffff, 0 0 20px #00ffff !important;
-  filter: drop-shadow(0 0 8px rgba(0, 255, 255, 0.8)) !important;
-}
-
-.pos-neon-menu {
-  color: #ff00ff !important;
-  text-shadow: 0 0 5px #ff00ff, 0 0 10px #ff00ff, 0 0 15px #ff00ff, 0 0 20px #ff00ff !important;
-  filter: drop-shadow(0 0 8px rgba(255, 0, 255, 0.8)) !important;
-}
-
-
-
-.pos-neon-inventory {
-  color: #00ff00 !important;
-  text-shadow: 0 0 5px #00ff00, 0 0 10px #00ff00, 0 0 15px #00ff00, 0 0 20px #00ff00 !important;
-  filter: drop-shadow(0 0 8px rgba(0, 255, 0, 0.8)) !important;
-}
-
-.pos-neon-reports {
-  color: #ff6600 !important;
-  text-shadow: 0 0 5px #ff6600, 0 0 10px #ff6600, 0 0 15px #ff6600, 0 0 20px #ff6600 !important;
-  filter: drop-shadow(0 0 8px rgba(255, 102, 0, 0.8)) !important;
-}
-
-.pos-neon-customers {
-  color: #ff0080 !important;
-  text-shadow: 0 0 5px #ff0080, 0 0 10px #ff0080, 0 0 15px #ff0080, 0 0 20px #ff0080 !important;
-  filter: drop-shadow(0 0 8px rgba(255, 0, 128, 0.8)) !important;
-}
-
-.pos-neon-user {
-  color: #8000ff !important;
-  text-shadow: 0 0 5px #8000ff, 0 0 10px #8000ff, 0 0 15px #8000ff, 0 0 20px #8000ff !important;
-  filter: drop-shadow(0 0 8px rgba(128, 0, 255, 0.8)) !important;
-}
-
-.pos-neon-logo {
-  color: #ffffff !important;
-  text-shadow: 0 0 5px #ffffff, 0 0 10px #ffffff, 0 0 15px #ffffff, 0 0 20px #ffffff !important;
-  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.9)) !important;
-}
-
-/* Enhanced Neon Button Hover Effects */
-.pos-glass-button:hover .pos-neon-dashboard {
-  color: #66ffff !important;
-  text-shadow: 0 0 8px #00ffff, 0 0 16px #00ffff, 0 0 24px #00ffff, 0 0 32px #00ffff !important;
-  animation: neon-pulse-cyan 1.5s ease-in-out infinite alternate !important;
-}
-
-.pos-glass-button:hover .pos-neon-menu {
-  color: #ff66ff !important;
-  text-shadow: 0 0 8px #ff00ff, 0 0 16px #ff00ff, 0 0 24px #ff00ff, 0 0 32px #ff00ff !important;
-  animation: neon-pulse-magenta 1.5s ease-in-out infinite alternate !important;
-}
-
-
-
-.pos-glass-button:hover .pos-neon-inventory {
-  color: #66ff66 !important;
-  text-shadow: 0 0 8px #00ff00, 0 0 16px #00ff00, 0 0 24px #00ff00, 0 0 32px #00ff00 !important;
-  animation: neon-pulse-green 1.5s ease-in-out infinite alternate !important;
-}
-
-.pos-glass-button:hover .pos-neon-reports {
-  color: #ff9966 !important;
-  text-shadow: 0 0 8px #ff6600, 0 0 16px #ff6600, 0 0 24px #ff6600, 0 0 32px #ff6600 !important;
-  animation: neon-pulse-orange 1.5s ease-in-out infinite alternate !important;
-}
-
-.pos-glass-button:hover .pos-neon-customers {
-  color: #ff66b3 !important;
-  text-shadow: 0 0 8px #ff0080, 0 0 16px #ff0080, 0 0 24px #ff0080, 0 0 32px #ff0080 !important;
-  animation: neon-pulse-pink 1.5s ease-in-out infinite alternate !important;
-}
-
-.pos-glass-button:hover .pos-neon-user {
-  color: #b366ff !important;
-  text-shadow: 0 0 8px #8000ff, 0 0 16px #8000ff, 0 0 24px #8000ff, 0 0 32px #8000ff !important;
-  animation: neon-pulse-purple 1.5s ease-in-out infinite alternate !important;
-}
-
-/* Neon Pulse Animations */
-@keyframes neon-pulse-cyan {
-  from {
-    text-shadow: 0 0 8px #00ffff, 0 0 16px #00ffff, 0 0 24px #00ffff, 0 0 32px #00ffff;
-  }
-
-  to {
-    text-shadow: 0 0 12px #00ffff, 0 0 24px #00ffff, 0 0 36px #00ffff, 0 0 48px #00ffff;
-  }
-}
-
-@keyframes neon-pulse-magenta {
-  from {
-    text-shadow: 0 0 8px #ff00ff, 0 0 16px #ff00ff, 0 0 24px #ff00ff, 0 0 32px #ff00ff;
-  }
-
-  to {
-    text-shadow: 0 0 12px #ff00ff, 0 0 24px #ff00ff, 0 0 36px #ff00ff, 0 0 48px #ff00ff;
-  }
-}
-
-@keyframes neon-pulse-yellow {
-  from {
-    text-shadow: 0 0 8px #ffff00, 0 0 16px #ffff00, 0 0 24px #ffff00, 0 0 32px #ffff00;
-  }
-
-  to {
-    text-shadow: 0 0 12px #ffff00, 0 0 24px #ffff00, 0 0 36px #ffff00, 0 0 48px #ffff00;
-  }
-}
-
-@keyframes neon-pulse-green {
-  from {
-    text-shadow: 0 0 8px #00ff00, 0 0 16px #00ff00, 0 0 24px #00ff00, 0 0 32px #00ff00;
-  }
-
-  to {
-    text-shadow: 0 0 12px #00ff00, 0 0 24px #00ff00, 0 0 36px #00ff00, 0 0 48px #00ff00;
-  }
-}
-
-@keyframes neon-pulse-orange {
-  from {
-    text-shadow: 0 0 8px #ff6600, 0 0 16px #ff6600, 0 0 24px #ff6600, 0 0 32px #ff6600;
-  }
-
-  to {
-    text-shadow: 0 0 12px #ff6600, 0 0 24px #ff6600, 0 0 36px #ff6600, 0 0 48px #ff6600;
-  }
-}
-
-@keyframes neon-pulse-pink {
-  from {
-    text-shadow: 0 0 8px #ff0080, 0 0 16px #ff0080, 0 0 24px #ff0080, 0 0 32px #ff0080;
-  }
-
-  to {
-    text-shadow: 0 0 12px #ff0080, 0 0 24px #ff0080, 0 0 36px #ff0080, 0 0 48px #ff0080;
-  }
-}
-
-@keyframes neon-pulse-purple {
-  from {
-    text-shadow: 0 0 8px #8000ff, 0 0 16px #8000ff, 0 0 24px #8000ff, 0 0 32px #8000ff;
-  }
-
-  to {
-    text-shadow: 0 0 12px #8000ff, 0 0 24px #8000ff, 0 0 36px #8000ff, 0 0 48px #8000ff;
-  }
-}
-
-/* SVG-Specific Neon Styling for Navigation Icons */
-svg.pos-neon-dashboard {
-  stroke: #00ffff !important;
-  fill: #00ffff !important;
-  stroke-width: 3 !important;
-  opacity: 1 !important;
-  filter: drop-shadow(0 0 15px rgba(0, 255, 255, 1)) drop-shadow(0 0 25px rgba(0, 255, 255, 0.8)) !important;
-}
-
-svg.pos-neon-menu {
-  stroke: #ff00ff !important;
-  fill: #ff00ff !important;
-  stroke-width: 3 !important;
-  opacity: 1 !important;
-  filter: drop-shadow(0 0 15px rgba(255, 0, 255, 1)) drop-shadow(0 0 25px rgba(255, 0, 255, 0.8)) !important;
-}
-
-
-
-svg.pos-neon-inventory {
-  stroke: #00ff00 !important;
-  fill: #00ff00 !important;
-  stroke-width: 3 !important;
-  opacity: 1 !important;
-  filter: drop-shadow(0 0 15px rgba(0, 255, 0, 1)) drop-shadow(0 0 25px rgba(0, 255, 0, 0.8)) !important;
-}
-
-svg.pos-neon-reports {
-  stroke: #ff6600 !important;
-  fill: #ff6600 !important;
-  stroke-width: 3 !important;
-  opacity: 1 !important;
-  filter: drop-shadow(0 0 15px rgba(255, 102, 0, 1)) drop-shadow(0 0 25px rgba(255, 102, 0, 0.8)) !important;
-}
-
-svg.pos-neon-customers {
-  stroke: #ff0080 !important;
-  fill: #ff0080 !important;
-  stroke-width: 3 !important;
-  opacity: 1 !important;
-  filter: drop-shadow(0 0 15px rgba(255, 0, 128, 1)) drop-shadow(0 0 25px rgba(255, 0, 128, 0.8)) !important;
-}
-
-svg.pos-neon-user {
-  stroke: #8000ff !important;
-  fill: #8000ff !important;
-  stroke-width: 3 !important;
-  opacity: 1 !important;
-  filter: drop-shadow(0 0 15px rgba(128, 0, 255, 1)) drop-shadow(0 0 25px rgba(128, 0, 255, 0.8)) !important;
-}
-
-svg.pos-neon-logo {
-  stroke: #ffffff !important;
-  fill: #ffffff !important;
-  stroke-width: 3 !important;
-  opacity: 1 !important;
-  filter: drop-shadow(0 0 15px rgba(255, 255, 255, 1)) drop-shadow(0 0 25px rgba(255, 255, 255, 0.8)) !important;
-}
-
-/* Enhanced SVG Hover Effects */
-.pos-glass-button:hover svg.pos-neon-dashboard {
-  stroke: #66ffff !important;
-  stroke-width: 3 !important;
-  filter: drop-shadow(0 0 20px rgba(0, 255, 255, 1)) drop-shadow(0 0 35px rgba(0, 255, 255, 0.9)) !important;
-  animation: neon-glow-cyan 1.5s ease-in-out infinite alternate !important;
-}
-
-.pos-glass-button:hover svg.pos-neon-menu {
-  stroke: #ff66ff !important;
-  stroke-width: 3 !important;
-  filter: drop-shadow(0 0 20px rgba(255, 0, 255, 1)) drop-shadow(0 0 35px rgba(255, 0, 255, 0.9)) !important;
-  animation: neon-glow-magenta 1.5s ease-in-out infinite alternate !important;
-}
-
-
-
-.pos-glass-button:hover svg.pos-neon-inventory {
-  stroke: #66ff66 !important;
-  stroke-width: 3 !important;
-  filter: drop-shadow(0 0 20px rgba(0, 255, 0, 1)) drop-shadow(0 0 35px rgba(0, 255, 0, 0.9)) !important;
-  animation: neon-glow-green 1.5s ease-in-out infinite alternate !important;
-}
-
-.pos-glass-button:hover svg.pos-neon-reports {
-  stroke: #ff9966 !important;
-  stroke-width: 3 !important;
-  filter: drop-shadow(0 0 20px rgba(255, 102, 0, 1)) drop-shadow(0 0 35px rgba(255, 102, 0, 0.9)) !important;
-  animation: neon-glow-orange 1.5s ease-in-out infinite alternate !important;
-}
-
-.pos-glass-button:hover svg.pos-neon-customers {
-  stroke: #ff66b3 !important;
-  stroke-width: 3 !important;
-  filter: drop-shadow(0 0 20px rgba(255, 0, 128, 1)) drop-shadow(0 0 35px rgba(255, 0, 128, 0.9)) !important;
-  animation: neon-glow-pink 1.5s ease-in-out infinite alternate !important;
-}
-
-.pos-glass-button:hover svg.pos-neon-user {
-  stroke: #b366ff !important;
-  stroke-width: 3 !important;
-  filter: drop-shadow(0 0 20px rgba(128, 0, 255, 1)) drop-shadow(0 0 35px rgba(128, 0, 255, 0.9)) !important;
-  animation: neon-glow-purple 1.5s ease-in-out infinite alternate !important;
-}
-
-/* SVG Neon Glow Animations */
-@keyframes neon-glow-cyan {
-  from {
-    filter: drop-shadow(0 0 20px rgba(0, 255, 255, 1)) drop-shadow(0 0 35px rgba(0, 255, 255, 0.9));
-  }
-
-  to {
-    filter: drop-shadow(0 0 30px rgba(0, 255, 255, 1)) drop-shadow(0 0 50px rgba(0, 255, 255, 1));
-  }
-}
-
-@keyframes neon-glow-magenta {
-  from {
-    filter: drop-shadow(0 0 20px rgba(255, 0, 255, 1)) drop-shadow(0 0 35px rgba(255, 0, 255, 0.9));
-  }
-
-  to {
-    filter: drop-shadow(0 0 30px rgba(255, 0, 255, 1)) drop-shadow(0 0 50px rgba(255, 0, 255, 1));
-  }
-}
-
-@keyframes neon-glow-yellow {
-  from {
-    filter: drop-shadow(0 0 20px rgba(255, 255, 0, 1)) drop-shadow(0 0 35px rgba(255, 255, 0, 0.9));
-  }
-
-  to {
-    filter: drop-shadow(0 0 30px rgba(255, 255, 0, 1)) drop-shadow(0 0 50px rgba(255, 255, 0, 1));
-  }
-}
-
-@keyframes neon-glow-green {
-  from {
-    filter: drop-shadow(0 0 20px rgba(0, 255, 0, 1)) drop-shadow(0 0 35px rgba(0, 255, 0, 0.9));
-  }
-
-  to {
-    filter: drop-shadow(0 0 30px rgba(0, 255, 0, 1)) drop-shadow(0 0 50px rgba(0, 255, 0, 1));
-  }
-}
-
-@keyframes neon-glow-orange {
-  from {
-    filter: drop-shadow(0 0 20px rgba(255, 102, 0, 1)) drop-shadow(0 0 35px rgba(255, 102, 0, 0.9));
-  }
-
-  to {
-    filter: drop-shadow(0 0 30px rgba(255, 102, 0, 1)) drop-shadow(0 0 50px rgba(255, 102, 0, 1));
-  }
-}
-
-@keyframes neon-glow-pink {
-  from {
-    filter: drop-shadow(0 0 20px rgba(255, 0, 128, 1)) drop-shadow(0 0 35px rgba(255, 0, 128, 0.9));
-  }
-
-  to {
-    filter: drop-shadow(0 0 30px rgba(255, 0, 128, 1)) drop-shadow(0 0 50px rgba(255, 0, 128, 1));
-  }
-}
-
-@keyframes neon-glow-purple {
-  from {
-    filter: drop-shadow(0 0 20px rgba(128, 0, 255, 1)) drop-shadow(0 0 35px rgba(128, 0, 255, 0.9));
-  }
-
-  to {
-    filter: drop-shadow(0 0 30px rgba(128, 0, 255, 1)) drop-shadow(0 0 50px rgba(128, 0, 255, 1));
   }
 }
 
@@ -2237,14 +2050,14 @@ svg.pos-neon-logo {
   0%,
   100% {
     box-shadow:
-      0 8px 32px 0 rgba(31, 38, 135, 0.37),
+      0 8px 32px 0 rgba(0, 0, 0, 0.18),
       0 0 0 1px rgba(255, 255, 255, 0.1);
   }
 
   50% {
     box-shadow:
-      0 12px 40px 0 rgba(59, 130, 246, 0.4),
-      0 0 0 2px rgba(59, 130, 246, 0.3),
+      0 12px 40px 0 rgba(113, 113, 122, 0.4),
+      0 0 0 2px rgba(113, 113, 122, 0.3),
       inset 0 1px 0 rgba(255, 255, 255, 0.2);
   }
 }
@@ -2253,35 +2066,35 @@ svg.pos-neon-logo {
 @keyframes selection-wave {
   0% {
     background: linear-gradient(90deg,
-        rgba(59, 130, 246, 0.1) 0%,
-        rgba(147, 51, 234, 0.1) 100%);
+        rgba(113, 113, 122, 0.1) 0%,
+        rgba(82, 82, 91, 0.1) 100%);
   }
 
   25% {
     background: linear-gradient(90deg,
-        rgba(59, 130, 246, 0.2) 0%,
-        rgba(147, 51, 234, 0.2) 50%,
-        rgba(236, 72, 153, 0.2) 100%);
+        rgba(113, 113, 122, 0.2) 0%,
+        rgba(82, 82, 91, 0.2) 50%,
+        rgba(82, 82, 91, 0.2) 100%);
   }
 
   50% {
     background: linear-gradient(90deg,
-        rgba(147, 51, 234, 0.2) 0%,
-        rgba(236, 72, 153, 0.2) 50%,
-        rgba(59, 130, 246, 0.2) 100%);
+        rgba(82, 82, 91, 0.2) 0%,
+        rgba(82, 82, 91, 0.2) 50%,
+        rgba(113, 113, 122, 0.2) 100%);
   }
 
   75% {
     background: linear-gradient(90deg,
-        rgba(236, 72, 153, 0.2) 0%,
-        rgba(59, 130, 246, 0.2) 50%,
-        rgba(147, 51, 234, 0.2) 100%);
+        rgba(82, 82, 91, 0.2) 0%,
+        rgba(113, 113, 122, 0.2) 50%,
+        rgba(82, 82, 91, 0.2) 100%);
   }
 
   100% {
     background: linear-gradient(90deg,
-        rgba(59, 130, 246, 0.1) 0%,
-        rgba(147, 51, 234, 0.1) 100%);
+        rgba(113, 113, 122, 0.1) 0%,
+        rgba(82, 82, 91, 0.1) 100%);
   }
 }
 
@@ -2321,7 +2134,7 @@ svg.pos-neon-logo {
 
 .order-card-selected {
   animation: selection-wave 2s ease-in-out infinite;
-  border: 2px solid rgba(59, 130, 246, 0.4);
+  border: 2px solid rgba(113, 113, 122, 0.4);
 }
 
 .order-card-expanding {
@@ -2346,12 +2159,12 @@ svg.pos-neon-logo {
 
 .bulk-selection-indicator {
   background: linear-gradient(135deg,
-      rgba(59, 130, 246, 0.8),
-      rgba(147, 51, 234, 0.8));
+      rgba(113, 113, 122, 0.8),
+      rgba(82, 82, 91, 0.8));
   border-radius: 50%;
   box-shadow:
     0 0 0 4px rgba(255, 255, 255, 0.1),
-    0 0 20px rgba(59, 130, 246, 0.6);
+    0 0 20px rgba(113, 113, 122, 0.6);
   animation: priority-pulse 2s ease-in-out infinite;
 }
 
@@ -2416,11 +2229,11 @@ svg.pos-neon-logo {
 /* Enhanced glassmorphism variants for different order types */
 .pos-glass-primary {
   background: linear-gradient(135deg,
-      rgba(59, 130, 246, 0.4) 0%,
-      rgba(29, 78, 216, 0.3) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.3);
+      rgba(113, 113, 122, 0.4) 0%,
+      rgba(63, 63, 70, 0.3) 100%);
+  border: 1px solid rgba(113, 113, 122, 0.3);
   box-shadow:
-    0 8px 32px rgba(59, 130, 246, 0.2),
+    0 8px 32px rgba(113, 113, 122, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
@@ -2436,27 +2249,18 @@ svg.pos-neon-logo {
 
 .pos-glass-info {
   background: linear-gradient(135deg,
-      rgba(14, 165, 233, 0.4) 0%,
-      rgba(2, 132, 199, 0.3) 100%);
-  border: 1px solid rgba(14, 165, 233, 0.3);
+      rgba(113, 113, 122, 0.4) 0%,
+      rgba(63, 63, 70, 0.3) 100%);
+  border: 1px solid rgba(113, 113, 122, 0.3);
   box-shadow:
-    0 8px 32px rgba(14, 165, 233, 0.2),
+    0 8px 32px rgba(113, 113, 122, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
-/* Enhanced interactive effects for order type cards */
-.pos-glass-interactive:hover {
-  transform: translateY(-5px) scale(1.02);
-  box-shadow:
-    0 20px 40px rgba(0, 0, 0, 0.3),
-    0 8px 16px rgba(255, 255, 255, 0.1) inset,
-    0 0 0 1px rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(20px);
-}
-
+/* Interactive effects for order type cards (touch: press feedback only) */
 .pos-glass-interactive:active {
-  transform: translateY(-2px) scale(1.01);
-  transition: all 0.1s ease-out;
+  transform: scale(0.98);
+  transition: transform 0.1s ease-out;
 }
 
 /* Liquid glass transition effects */
@@ -2474,121 +2278,6 @@ svg.pos-neon-logo {
       rgba(0, 0, 0, 0.7) 0%,
       rgba(0, 0, 0, 0.9) 100%);
   backdrop-filter: blur(12px) saturate(1.5);
-}
-
-/* ===== ANIMATED THEME SWITCHER ===== */
-.theme-switch {
-  font-size: 17px;
-  position: relative;
-  display: inline-block;
-  width: 3.5em;
-  height: 2em;
-}
-
-.theme-switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.theme-slider {
-  background-color: #2185d6;
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  cursor: pointer;
-  transition: 0.4s;
-  border-radius: 30px;
-  box-shadow: 0 0 0 rgba(33, 133, 214, 0);
-  transition: all 0.4s ease;
-}
-
-.theme-slider:hover {
-  box-shadow: 0 0 15px rgba(33, 133, 214, 0.5);
-}
-
-.theme-slider::before {
-  position: absolute;
-  content: "";
-  height: 1.4em;
-  width: 1.4em;
-  border-radius: 50%;
-  left: 10%;
-  bottom: 15%;
-  box-shadow: inset 15px -4px 0px 15px #fdf906;
-  background-color: #28096b;
-  transition: all 0.4s ease;
-  transform-origin: center;
-}
-
-.theme-slider:hover::before {
-  transform: rotate(45deg);
-}
-
-.clouds_stars {
-  position: absolute;
-  content: "";
-  border-radius: 50%;
-  height: 10px;
-  width: 10px;
-  left: 70%;
-  bottom: 50%;
-  background-color: #fff;
-  transition: all 0.3s;
-  box-shadow:
-    -12px 0 0 0 white,
-    -6px 0 0 1.6px white,
-    0.3px 16px 0 white,
-    -6.5px 16px 0 white;
-  filter: blur(0.55px);
-}
-
-.theme-switch input:checked~.clouds_stars {
-  transform: translateX(-20px);
-  height: 2px;
-  width: 2px;
-  border-radius: 50%;
-  left: 80%;
-  top: 15%;
-  background-color: #fff;
-  backdrop-filter: blur(10px);
-  transition: all 0.3s;
-  box-shadow:
-    -7px 10px 0 #fff,
-    8px 15px 0 #fff,
-    -17px 1px 0 #fff,
-    -20px 10px 0 #fff,
-    -7px 23px 0 #fff,
-    -15px 25px 0 #fff;
-  filter: none;
-  animation: twinkle 2s infinite;
-}
-
-.theme-switch input:checked+.theme-slider {
-  background-color: #28096b !important;
-}
-
-.theme-switch input:checked+.theme-slider::before {
-  transform: translateX(100%);
-  box-shadow: inset 8px -4px 0 0 #fff;
-}
-
-.theme-switch input:checked+.theme-slider:hover::before {
-  transform: translateX(100%) rotate(-45deg);
-}
-
-@keyframes twinkle {
-
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.5;
-  }
 }
 
 /* Custom Glassmorphic Scrollbar */
@@ -2628,230 +2317,6 @@ svg.pos-neon-logo {
   background: transparent;
 }
 
-/* ===== Admin-style animated background for login ===== */
-.pos-animated-bg {
-  position: fixed;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-  z-index: 0;
-  background: radial-gradient(circle at 20% 20%, rgba(59, 130, 246, 0.10), transparent 60%),
-    radial-gradient(circle at 80% 80%, rgba(99, 102, 241, 0.10), transparent 60%),
-    linear-gradient(120deg, #f8fafc 0%, #e2e8f0 50%, #f8fafc 100%);
-}
-
-/* Dark theme background override */
-.dark .pos-animated-bg {
-  background: radial-gradient(circle at 20% 20%, rgba(0, 0, 0, 0.9), transparent 60%),
-    radial-gradient(circle at 80% 80%, rgba(0, 0, 0, 0.9), transparent 60%),
-    linear-gradient(120deg, #000000 0%, #000000 50%, #000000 100%);
-}
-
-
-.pos-blob {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  opacity: 0.55;
-  mix-blend-mode: screen;
-  background: radial-gradient(circle, rgba(59, 130, 246, 0.9) 0%, rgba(59, 130, 246, 0.6) 35%, rgba(99, 102, 241, 0.5) 60%, rgba(147, 51, 234, 0.4) 75%, transparent 100%);
-}
-
-/* Light theme tweaks */
-:root .pos-blob {
-  mix-blend-mode: overlay;
-  opacity: 0.6;
-}
-
-.dark .pos-blob {
-  mix-blend-mode: screen;
-}
-
-.pos-blob-1 {
-  width: 700px;
-  height: 700px;
-  left: -10%;
-  top: -10%;
-  animation: blob-move-1 26s ease-in-out infinite;
-}
-
-.pos-blob-2 {
-  width: 560px;
-  height: 560px;
-  left: 60%;
-  top: -15%;
-  animation: blob-move-2 24s ease-in-out infinite;
-}
-
-.pos-blob-3 {
-  width: 640px;
-  height: 640px;
-  left: -15%;
-  top: 55%;
-  animation: blob-move-3 28s ease-in-out infinite;
-}
-
-.pos-blob-4 {
-  width: 500px;
-  height: 500px;
-  left: 70%;
-  top: 65%;
-  animation: blob-move-4 30s ease-in-out infinite;
-}
-
-.pos-blob-5 {
-  width: 420px;
-  height: 420px;
-  left: 35%;
-  top: 15%;
-  animation: blob-move-5 32s ease-in-out infinite;
-  opacity: 0.45;
-}
-
-.pos-blob-6 {
-  width: 380px;
-  height: 380px;
-  left: 5%;
-  top: 30%;
-  animation: blob-move-6 34s ease-in-out infinite;
-  opacity: 0.4;
-}
-
-@keyframes blob-move-1 {
-
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-
-  25% {
-    transform: translate(65vw, 20vh) scale(1.2);
-  }
-
-  50% {
-    transform: translate(20vw, 60vh) scale(0.9);
-  }
-
-  75% {
-    transform: translate(50vw, 30vh) scale(1.1);
-  }
-}
-
-@keyframes blob-move-2 {
-
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-
-  20% {
-    transform: translate(-40vw, 30vh) scale(1.1);
-  }
-
-  55% {
-    transform: translate(-20vw, 70vh) scale(0.95);
-  }
-
-  80% {
-    transform: translate(-45vw, 10vh) scale(1.05);
-  }
-}
-
-@keyframes blob-move-3 {
-
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-
-  30% {
-    transform: translate(40vw, -30vh) scale(1.15);
-  }
-
-  60% {
-    transform: translate(60vw, -10vh) scale(0.9);
-  }
-
-  85% {
-    transform: translate(20vw, -40vh) scale(1.05);
-  }
-}
-
-@keyframes blob-move-4 {
-
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-
-  35% {
-    transform: translate(-30vw, -25vh) scale(1.1);
-  }
-
-  65% {
-    transform: translate(-50vw, -5vh) scale(0.95);
-  }
-}
-
-@keyframes blob-move-5 {
-
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-
-  40% {
-    transform: translate(10vw, 40vh) scale(1.08);
-  }
-
-  70% {
-    transform: translate(-10vw, 50vh) scale(0.92);
-  }
-}
-
-@keyframes blob-move-6 {
-
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-
-  50% {
-    transform: translate(25vw, -20vh) scale(1.12);
-  }
-}
-
-/* Force background animation to run even if OS prefers reduced motion (login only) */
-.pos-animated-bg .pos-blob {
-  animation-play-state: running !important;
-  animation-iteration-count: infinite !important;
-}
-
-.pos-animated-bg .pos-blob-1 {
-  animation-duration: 26s !important;
-}
-
-.pos-animated-bg .pos-blob-2 {
-  animation-duration: 24s !important;
-}
-
-.pos-animated-bg .pos-blob-3 {
-  animation-duration: 28s !important;
-}
-
-.pos-animated-bg .pos-blob-4 {
-  animation-duration: 30s !important;
-}
-
-.pos-animated-bg .pos-blob-5 {
-  animation-duration: 32s !important;
-}
-
-.pos-animated-bg .pos-blob-6 {
-  animation-duration: 34s !important;
-}
-
-
 .pos-grain-overlay {
   position: absolute;
   inset: 0;
@@ -2864,7 +2329,7 @@ svg.pos-neon-logo {
 /* Glass card to mirror Admin login */
 .pos-login-card {
   position: relative;
-  border-radius: 20px;
+  border-radius: 28px;
   background: rgba(255, 255, 255, 0.12);
   backdrop-filter: blur(48px) saturate(170%);
   -webkit-backdrop-filter: blur(48px) saturate(170%);
@@ -2927,6 +2392,22 @@ svg.pos-neon-logo {
   text-shadow: 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
+/* Round 316 (live QA, Greek/dark): Split Payment selected segmented controls must stay BLACK on yellow.
+   The split-mode (By Amount / By Items) and footer receipt-mode (All Together / Separate) selected
+   buttons are yellow slabs that also carry `font-medium`, so the broad `.font-medium` override above
+   (slate-800 light / slate-100 dark, both !important) was stomping their `text-black` utility and
+   rendering pale text/icons on yellow. This scoped rule wins by HIGHER specificity (`button.<class>`
+   beats `.liquid-glass-modal-shell .font-medium` in both themes) AND comes later in source order, and it
+   also forces the lucide icon black via the child <svg> (currentColor). Scoped to the split-payment
+   segments only, so no other modal text changes. */
+.liquid-glass-modal-shell button.split-payment-segment-selected,
+.liquid-glass-modal-shell button.split-payment-segment-selected svg,
+.dark .liquid-glass-modal-shell button.split-payment-segment-selected,
+.dark .liquid-glass-modal-shell button.split-payment-segment-selected svg {
+  color: #000 !important;
+  text-shadow: none !important;
+}
+
 /* Ingredient price text - more vivid green */
 .liquid-glass-modal-shell .text-green-500 {
   color: #22c55e !important;  /* Vivid green-500 */
@@ -2958,7 +2439,7 @@ svg.pos-neon-logo {
 }
 
 /* Quantity display in ingredient cards */
-.liquid-glass-modal-shell .min-w-\\[24px\\] {
+.liquid-glass-modal-shell .min-w-\[24px\] {
   color: #ffffff !important;
   font-weight: 700;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
@@ -2969,7 +2450,7 @@ svg.pos-neon-logo {
   font-size: 1.625rem;
   font-weight: 700;
   color: #0f172a !important;  /* Slate-900 */
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   text-rendering: geometricPrecision;
   -webkit-font-smoothing: subpixel-antialiased;
 }
@@ -2979,20 +2460,20 @@ svg.pos-neon-logo {
   text-shadow: 0 0 1px rgba(255, 255, 255, 0.2);
 }
 
-/* Flavor type tabs - vivid active state */
+/* Flavor type tabs - vivid active state (on-palette: yellow / amber / grey) */
 .liquid-glass-modal-shell .bg-blue-500 {
-  background-color: #3b82f6 !important;
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);
+  background-color: #eab308 !important;
+  box-shadow: 0 4px 14px rgba(234, 179, 8, 0.4);
 }
 
 .liquid-glass-modal-shell .bg-orange-500 {
-  background-color: #f97316 !important;
-  box-shadow: 0 4px 14px rgba(249, 115, 22, 0.4);
+  background-color: #d97706 !important;
+  box-shadow: 0 4px 14px rgba(217, 119, 6, 0.4);
 }
 
 .liquid-glass-modal-shell .bg-pink-500 {
-  background-color: #ec4899 !important;
-  box-shadow: 0 4px 14px rgba(236, 72, 153, 0.4);
+  background-color: #52525b !important;
+  box-shadow: 0 4px 14px rgba(82, 82, 91, 0.4);
 }
 
 /* Red text for "without" items - more vivid */
@@ -3005,9 +2486,9 @@ svg.pos-neon-logo {
   color: #fb7185 !important;  /* Rose-400 */
 }
 
-/* Blue text for "little" indicator */
+/* Neutral text for "little" indicator */
 .liquid-glass-modal-shell .text-blue-400 {
-  color: #60a5fa !important;
+  color: #a1a1aa !important;
   font-weight: 500;
 }
 
@@ -3112,7 +2593,7 @@ svg.pos-neon-logo {
 .z-report-content {
   /* Keep it transparent/glass */
   background: transparent;
-  border-radius: 16px;
+  border-radius: var(--pos-glass-radius-medium);
   padding: 1rem;
   /* GPU acceleration for sharper rendering */
   transform: translateZ(0);
@@ -3129,5 +2610,28 @@ svg.pos-neon-logo {
   -webkit-font-smoothing: antialiased !important;
   -moz-osx-font-smoothing: grayscale !important;
   text-rendering: geometricPrecision !important;
+  text-shadow: none !important;
+}
+
+/* Late fallback: transparent New Order chooser must stay readable even if the
+   running desktop window has refreshed CSS before it has refreshed the JSX
+   data-order-type-card hooks. Keep titles accented; change only icons/subtitles. */
+html:not(.dark) .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] svg,
+html:not(.dark) .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] span[aria-hidden="true"] {
+  color: rgba(24, 24, 27, 0.92) !important;
+}
+
+html:not(.dark) .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] p {
+  color: rgba(24, 24, 27, 0.78) !important;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28) !important;
+}
+
+.dark .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] svg,
+.dark .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] span[aria-hidden="true"] {
+  color: #fff !important;
+}
+
+.dark .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] p {
+  color: rgba(255, 255, 255, 0.6) !important;
   text-shadow: none !important;
 }

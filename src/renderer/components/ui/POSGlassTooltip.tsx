@@ -48,7 +48,7 @@ export const POSGlassTooltip: React.FC<POSGlassTooltipProps> = ({
             {children}
             {isVisible && (
                 <div className={cn(
-                    "absolute z-50 px-3 py-2 text-sm text-white bg-gray-900/90 rounded-lg shadow-lg backdrop-blur-sm whitespace-nowrap transition-opacity duration-200 border border-white/10",
+                    "absolute z-50 px-3 py-2 text-sm text-white bg-gray-900/90 rounded-2xl shadow-lg backdrop-blur-sm whitespace-nowrap transition-opacity duration-200 border border-white/10",
                     positionClasses[position],
                     className
                 )}>

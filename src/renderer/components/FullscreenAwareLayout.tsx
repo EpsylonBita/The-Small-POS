@@ -1,41 +1,36 @@
 import React from 'react';
-import { useWindowState } from '../hooks/useWindowState';
-import CustomTitleBar from './CustomTitleBar';
+import AppWindowFrame, {
+  type AppFrameUpdate,
+  type AppFrameWindowState,
+} from './AppWindowFrame';
 
 interface FullscreenAwareLayoutProps {
   children: React.ReactNode;
-  updateAvailable?: boolean;
-  onCheckForUpdates?: () => void;
-  onOpenSettings?: () => void;
   className?: string;
+  update?: AppFrameUpdate;
+  windowState?: AppFrameWindowState;
 }
 
 /**
- * Layout component that handles fullscreen mode properly.
- * When in fullscreen, the title bar is hidden and no top padding is applied.
- * When not in fullscreen, the title bar is shown with appropriate padding.
+ * Top-level layout wrapper for the touchscreen-first POS shell.
+ *
+ * The Tauri window is borderless (`decorations: false`), so the app owns a slim
+ * touch-first frame for update status and window controls. This intentionally is
+ * not the old desktop-style File/Edit/View/Window/Help menu row.
  */
 export const FullscreenAwareLayout: React.FC<FullscreenAwareLayoutProps> = ({
   children,
-  updateAvailable = false,
-  onCheckForUpdates,
-  onOpenSettings,
   className = '',
+  update,
+  windowState,
 }) => {
-  const { isFullScreen } = useWindowState();
-
   return (
-    <div className={`flex flex-col min-h-screen ${className}`}>
-      {/* Custom Title Bar - Hidden in fullscreen mode */}
-      <CustomTitleBar
-        updateAvailable={updateAvailable}
-        onCheckForUpdates={onCheckForUpdates}
-        onOpenSettings={onOpenSettings}
+    <div className={`relative flex h-screen min-h-0 flex-col overflow-hidden ${className}`}>
+      <AppWindowFrame
+        update={update}
+        windowState={windowState}
       />
-      {/* Content area - No padding in fullscreen mode */}
-      <div className={`flex-1 flex flex-col ${isFullScreen ? '' : 'pt-8'}`}>
-        {children}
-      </div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
     </div>
   );
 };

@@ -26,6 +26,7 @@ import type {
   DiagnosticsExportResponse,
   DiagnosticsOpenExportDirResponse,
   DiagnosticsSystemHealth,
+  RemoteIncidentReportResponse,
   EndOfDayStatusResponse,
   UnsettledPaymentBlocker,
   RecoveryActionRequest,
@@ -1152,6 +1153,11 @@ export interface WindowState {
   isFullScreen: boolean;
 }
 
+export interface WindowPosition {
+  x: number;
+  y: number;
+}
+
 export interface UpdateState {
   checking: boolean;
   available: boolean;
@@ -1933,6 +1939,9 @@ export interface PlatformBridge {
 
   // -- Window ----------------------------------------------------------------
   window: {
+    startDrag(): Promise<void>;
+    getPosition(): Promise<WindowPosition>;
+    setPosition(position: WindowPosition): Promise<void>;
     minimize(): Promise<void>;
     maximize(): Promise<void>;
     close(): Promise<void>;
@@ -2054,6 +2063,7 @@ export interface PlatformBridge {
       options?: DiagnosticsExportOptions,
     ): Promise<DiagnosticsExportResponse>;
     openExportDir(path: string): Promise<DiagnosticsOpenExportDirResponse>;
+    sendRemoteIncident(): Promise<RemoteIncidentReportResponse>;
     checkDeliveredOrders(): Promise<any>;
     fixMissingDriverIds(driverId: string): Promise<any>;
   };
@@ -2453,6 +2463,9 @@ export const CHANNEL_MAP: Record<string, string> = {
   "update:set-channel": "updates.setChannel",
 
   // Window
+  "window-start-drag": "window.startDrag",
+  "window-get-position": "window.getPosition",
+  "window-set-position": "window.setPosition",
   "window-minimize": "window.minimize",
   "window-maximize": "window.maximize",
   "window-close": "window.close",
@@ -2502,6 +2515,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "diagnostics:get-system-health": "diagnostics.getSystemHealth",
   "diagnostics:export": "diagnostics.export",
   "diagnostics:open-export-dir": "diagnostics.openExportDir",
+  "diagnostics:send-remote-incident": "diagnostics.sendRemoteIncident",
   "diagnostic:check-delivered-orders": "diagnostics.checkDeliveredOrders",
   "diagnostic:fix-missing-driver-ids": "diagnostics.fixMissingDriverIds",
   "recovery:list-points": "recovery.listPoints",
@@ -3369,6 +3383,10 @@ export class TauriBridge implements PlatformBridge {
   };
 
   window = {
+    startDrag: () => this.inv("window-start-drag"),
+    getPosition: () => this.inv("window-get-position"),
+    setPosition: (position: WindowPosition) =>
+      this.inv("window-set-position", position),
     minimize: () => this.inv("window-minimize"),
     maximize: () => this.inv("window-maximize"),
     close: () => this.inv("window-close"),
@@ -3468,6 +3486,7 @@ export class TauriBridge implements PlatformBridge {
       this.inv("diagnostics:export", ...buildDiagnosticsExportArgs(options)),
     openExportDir: (path: string) =>
       this.inv("diagnostics:open-export-dir", { path }),
+    sendRemoteIncident: () => this.inv("diagnostics:send-remote-incident"),
     checkDeliveredOrders: () => this.inv("diagnostic:check-delivered-orders"),
     fixMissingDriverIds: (driverId: string) =>
       this.inv("diagnostic:fix-missing-driver-ids", driverId),

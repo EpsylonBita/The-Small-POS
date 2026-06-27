@@ -75,19 +75,55 @@ export function resolveTableFloorPlanNode(
   };
 }
 
-export function getTableFloorPlanBounds(tables: FloorPlanTableLike[]) {
-  const nodes = tables.map((table, index) => resolveTableFloorPlanNode(table, index));
-  if (nodes.length === 0) {
-    return { width: 720, height: 480 };
+export interface TableFloorPlanLayout {
+  nodes: ResolvedTableFloorPlanNode[];
+  bounds: { width: number; height: number };
+  offsetX: number;
+  offsetY: number;
+}
+
+/**
+ * Resolve every table to a floor-plan node, then translate the whole cluster so
+ * its top-left corner sits at FLOOR_PLAN_PADDING.
+ *
+ * Tables saved with large admin coordinates - or a narrow filtered set
+ * positioned far from the origin (e.g. only a reserved table) - would otherwise
+ * leave huge empty leading space, so the 2D viewport opened blank until the user
+ * scrolled the inner area. Normalizing keeps the first matching extents inside
+ * the initial viewport while preserving every table's relative position (a pure
+ * translation, so the layout/shape never changes).
+ */
+export function getTableFloorPlanLayout(tables: FloorPlanTableLike[]): TableFloorPlanLayout {
+  const rawNodes = tables.map((table, index) => resolveTableFloorPlanNode(table, index));
+  if (rawNodes.length === 0) {
+    return { nodes: [], bounds: { width: 720, height: 480 }, offsetX: 0, offsetY: 0 };
   }
+
+  const offsetX = Math.min(...rawNodes.map(node => node.x)) - FLOOR_PLAN_PADDING;
+  const offsetY = Math.min(...rawNodes.map(node => node.y)) - FLOOR_PLAN_PADDING;
+
+  const nodes = rawNodes.map(node => ({
+    ...node,
+    x: node.x - offsetX,
+    y: node.y - offsetY,
+  }));
 
   const maxX = Math.max(...nodes.map(node => node.x + node.width));
   const maxY = Math.max(...nodes.map(node => node.y + node.height));
 
   return {
-    width: Math.max(720, Math.ceil(maxX + FLOOR_PLAN_PADDING)),
-    height: Math.max(480, Math.ceil(maxY + FLOOR_PLAN_PADDING)),
+    nodes,
+    bounds: {
+      width: Math.max(720, Math.ceil(maxX + FLOOR_PLAN_PADDING)),
+      height: Math.max(480, Math.ceil(maxY + FLOOR_PLAN_PADDING)),
+    },
+    offsetX,
+    offsetY,
   };
+}
+
+export function getTableFloorPlanBounds(tables: FloorPlanTableLike[]) {
+  return getTableFloorPlanLayout(tables).bounds;
 }
 
 export function getTableShapePathForFloorPlan(

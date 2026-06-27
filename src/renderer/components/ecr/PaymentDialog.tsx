@@ -9,6 +9,7 @@ import {
   X,
 } from 'lucide-react'
 import { formatCurrency } from '../../utils/format'
+import { renderModalPortal } from '../../utils/render-modal-portal'
 
 type TransactionStatus =
   | 'pending'
@@ -114,7 +115,7 @@ export const PaymentDialog: React.FC<Props> = ({
 
   const statusIcons: Record<TransactionStatus, React.ReactNode> = {
     pending: <CreditCard className="w-16 h-16 text-gray-400" />,
-    processing: <Loader2 className="w-16 h-16 text-blue-400 animate-spin" />,
+    processing: <Loader2 className="w-16 h-16 text-amber-400 animate-spin" />,
     approved: <CheckCircle className="w-16 h-16 text-green-400" />,
     declined: <XCircle className="w-16 h-16 text-red-400" />,
     error: <AlertTriangle className="w-16 h-16 text-red-400" />,
@@ -124,7 +125,7 @@ export const PaymentDialog: React.FC<Props> = ({
 
   const statusColors: Record<TransactionStatus, string> = {
     pending: 'text-gray-300',
-    processing: 'text-blue-400',
+    processing: 'text-amber-400',
     approved: 'text-green-400',
     declined: 'text-red-400',
     error: 'text-red-400',
@@ -132,8 +133,8 @@ export const PaymentDialog: React.FC<Props> = ({
     cancelled: 'text-gray-400',
   }
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+  return renderModalPortal(
+    <div className="fixed inset-0 z-[1200] flex items-center justify-center">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
@@ -146,7 +147,7 @@ export const PaymentDialog: React.FC<Props> = ({
         {status !== 'processing' && (
           <button
             onClick={handleCancel}
-            className="absolute top-4 right-4 p-2 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700/50 transition-colors"
+            className="absolute top-4 right-4 p-2 rounded-lg text-gray-400 active:text-white active:bg-gray-700/50 transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -167,7 +168,7 @@ export const PaymentDialog: React.FC<Props> = ({
 
           {/* Card info (if approved) */}
           {status === 'approved' && response && (
-            <div className="w-full p-4 rounded-lg bg-gray-700/50 mb-6">
+            <div className="w-full p-4 rounded-2xl bg-gray-700/50 mb-6">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-gray-400">
                   {t('ecr.payment.card', 'Card')}
@@ -193,14 +194,14 @@ export const PaymentDialog: React.FC<Props> = ({
           {status === 'processing' ? (
             <button
               onClick={handleCancel}
-              className="w-full py-3 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors font-medium"
+              className="w-full py-3 rounded-lg bg-red-500/20 text-red-400 active:bg-red-500/30 transition-colors font-medium"
             >
               {t('ecr.payment.cancel', 'Cancel')}
             </button>
           ) : status === 'approved' ? (
             <button
               onClick={() => onComplete(response!)}
-              className="w-full py-3 rounded-lg bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-colors font-medium"
+              className="w-full py-3 rounded-lg bg-green-500/20 text-green-400 active:bg-green-500/30 transition-colors font-medium"
             >
               {t('common.done', 'Done')}
             </button>
@@ -208,13 +209,13 @@ export const PaymentDialog: React.FC<Props> = ({
             <div className="flex gap-3 w-full">
               <button
                 onClick={handleProcess}
-                className="flex-1 py-3 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors font-medium"
+                className="flex-1 py-3 rounded-lg bg-slate-500/20 text-slate-200 active:bg-slate-500/30 transition-colors font-medium"
               >
                 {t('ecr.payment.retry', 'Retry')}
               </button>
               <button
                 onClick={handleCancel}
-                className="flex-1 py-3 rounded-lg bg-gray-700/50 text-gray-300 hover:bg-gray-700 transition-colors font-medium"
+                className="flex-1 py-3 rounded-lg bg-gray-700/50 text-gray-300 active:bg-gray-700 transition-colors font-medium"
               >
                 {t('common.close', 'Close')}
               </button>

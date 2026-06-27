@@ -29,16 +29,17 @@ export const UpdateToast: React.FC<UpdateToastProps> = ({ t, version, onOpenDial
   return (
     <div
       onClick={handleClick}
-      className="cursor-pointer flex items-start gap-3 p-1"
+      className="flex cursor-pointer items-start gap-3 rounded-2xl p-3 transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
           handleClick();
         }
       }}
     >
-      <RefreshCw className="w-6 h-6 text-white" />
+      <RefreshCw className="w-6 h-6 text-amber-200" />
       <div>
         <div className="font-semibold text-white">{translate('updates.title.available')}</div>
         <div className="text-sm text-white/80">
@@ -63,7 +64,7 @@ export function showUpdateToast(version: string, onOpenDialog: () => void): stri
       <div
         className={`${
           t.visible ? 'animate-enter' : 'animate-leave'
-        } max-w-md w-full bg-cyan-600/90 backdrop-blur-sm shadow-lg rounded-xl pointer-events-auto border border-white/20`}
+        } pointer-events-auto w-full max-w-md rounded-2xl border border-amber-300/35 bg-zinc-950/90 shadow-[0_18px_48px_rgba(0,0,0,0.32)] backdrop-blur-xl`}
       >
         <UpdateToast t={t} version={version} onOpenDialog={onOpenDialog} />
       </div>

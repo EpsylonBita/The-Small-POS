@@ -37,6 +37,8 @@
       "paidAmount": "Payé {{amount}}",
       "total": "Total",
       "totalAmount": "Total {{amount}}",
+      "discount": "Remise",
+      "discountAmount": "Remise {{amount}}",
       "totalAndQty": "Total {{amount}} · Qté {{quantity}}",
       "tips": "Pourboires",
       "tip": "Pourboire",
@@ -143,6 +145,10 @@
     }
   },
   "tablesDashboard": {
+    "viewMode": {
+      "list": "Liste",
+      "floorPlan": "2D"
+    },
     "allFloors": "Tous les étages",
     "floorNumber": "Étage {{floor}}",
     "floor": "Étage",
@@ -169,6 +175,10 @@
     "newOrder": "Nouvelle commande",
     "pay": "Payer",
     "assign": "Assigner",
+    "needsCleaning": "Nettoyage requis",
+    "outOfService": "Hors service",
+    "markCleaned": "Marquer nettoyée",
+    "backInService": "Remettre en service",
     "balance": "Solde",
     "noMatchingTables": "Aucune table ne correspond à ces filtres",
     "time": {

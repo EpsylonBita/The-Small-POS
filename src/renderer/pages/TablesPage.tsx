@@ -13,6 +13,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
@@ -20,7 +21,9 @@ import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
 import { useTables } from '../hooks/useTables';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
+import { useFeatures } from '../hooks/useFeatures';
 import { TableActionModal } from '../components/tables/TableActionModal';
+import { TableCheckManagerModal } from '../components/tables/TableCheckManagerModal';
 import type { RestaurantTable, TableStatus, TableFilters, TableStats } from '../types/tables';
 import { getStatusClasses } from '../types/tables';
 import {
@@ -48,6 +51,7 @@ import {
 } from 'lucide-react';
 import { getBridge } from '../../lib';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
+import { formatTableSeats } from '../utils/i18nLabels';
 
 // ============================================================
 // CONSTANTS
@@ -57,11 +61,11 @@ const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
 
 const STATUS_COLORS: Record<TableStatus, string> = {
   available: '#22c55e',
-  occupied: '#3b82f6',
+  occupied: '#27272a', // near-black: table in use (was brand blue)
   reserved: '#f59e0b',
-  cleaning: '#6b7280',
-  maintenance: '#f97316',
-  unavailable: '#64748b',
+  cleaning: '#a1a1aa',
+  maintenance: '#d97706',
+  unavailable: '#71717a',
 };
 
 const STATUS_LABELS: Record<TableStatus, string> = {
@@ -103,6 +107,13 @@ const getElapsedTime = (since?: string): string => {
   return `${hours}h ${remainingMins}m`;
 };
 
+// Resolve a table's floor as a stable string key, mirroring the TableSelector / TablesDashboard
+// convention (table.floorLevel ?? floor_level ?? 1) so floor filtering stays consistent across surfaces.
+const getTableFloorValue = (table: RestaurantTable): string => {
+  const raw = table.floorLevel ?? (table as { floor_level?: number | null }).floor_level ?? 1;
+  return raw === null || raw === undefined ? '1' : String(raw);
+};
+
 const calculateTableStats = (tables: RestaurantTable[]): TableStats => {
   const total = tables.length;
   const available = tables.filter(t => t.status === 'available').length;
@@ -140,13 +151,13 @@ const TableCard = memo<TableCardProps>(({ table, isSelected, onPress, isDark }) 
     <motion.button
       variants={pageMotionItem}
       onClick={onPress}
-      className={`relative p-0 overflow-hidden rounded-xl border-2 transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] ${
+      className={`relative p-0 overflow-hidden rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${
         isSelected
-          ? 'border-blue-500 ring-2 ring-blue-500/30'
+          ? 'border-yellow-400 ring-2 ring-yellow-400/40'
           : isDark
-          ? 'border-white/10 hover:border-white/20'
-          : 'border-gray-200 hover:border-gray-300'
-      } ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}
+          ? 'border-white/10'
+          : 'border-gray-200'
+      } ${isDark ? 'bg-white/[0.05]' : 'bg-white'}`}
     >
       {/* Status Bar */}
       <div className="h-1" style={{ backgroundColor: statusColor }} />
@@ -155,13 +166,13 @@ const TableCard = memo<TableCardProps>(({ table, isSelected, onPress, isDark }) 
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
           <div
-            className="w-10 h-10 rounded-lg flex items-center justify-center text-lg font-bold"
+            className="w-10 h-10 rounded-2xl flex items-center justify-center text-lg font-bold"
             style={{ backgroundColor: `${statusColor}20`, color: statusColor }}
           >
             {table.tableNumber}
           </div>
           <div
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-2xl text-xs font-medium"
             style={{ backgroundColor: `${statusColor}20`, color: statusColor }}
           >
             <StatusIcon className="w-3 h-3" />
@@ -169,16 +180,17 @@ const TableCard = memo<TableCardProps>(({ table, isSelected, onPress, isDark }) 
           </div>
         </div>
 
-        {/* Info */}
-        <div className="flex items-center justify-between">
+        {/* Info — calm two-line metadata stack (Round 208): seats on the first line, the structured
+            section on the second so it reads cleanly and wraps gracefully (no 60px truncation). */}
+        <div className="space-y-1.5">
           <div className={`flex items-center gap-1.5 text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-            <Users className="w-3.5 h-3.5" />
-            <span>{table.capacity} {t('tables.seats', 'seats')}</span>
+            <Users className="w-3.5 h-3.5 shrink-0" />
+            <span>{formatTableSeats(t, table.capacity)}</span>
           </div>
-          {table.notes && (
-            <div className={`flex items-center gap-1 text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-              <MapPin className="w-3 h-3" />
-              <span className="truncate max-w-[60px]">{table.notes}</span>
+          {table.section && (
+            <div className={`flex items-start gap-1 text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+              <MapPin className="w-3 h-3 shrink-0 mt-0.5" />
+              <span className="min-w-0 break-words leading-snug">{table.section}</span>
             </div>
           )}
         </div>
@@ -232,7 +244,7 @@ const FloorPlanTable = memo<FloorPlanTableProps>(({ table, scale, isSelected, on
   return (
     <motion.button
       variants={pageMotionItem}
-      className={`absolute flex flex-col items-center justify-center shadow-lg transition-all duration-200 hover:scale-105 ${
+      className={`absolute flex flex-col items-center justify-center shadow-lg transition-all duration-200 active:scale-95 ${
         isSelected ? 'ring-4 ring-white/50' : ''
       }`}
       style={{
@@ -282,36 +294,40 @@ const FilterDropdown = memo<FilterDropdownProps>(({ filter, onFilterChange, isDa
   return (
     <div
       className={`absolute top-full right-0 mt-2 w-64 rounded-xl shadow-2xl border z-50 ${
-        isDark ? 'bg-gray-800 border-white/10' : 'bg-white border-gray-200'
+        isDark ? 'bg-black/80 backdrop-blur-xl border-white/10' : 'bg-white border-gray-200'
       }`}
     >
       <div className="p-4">
         <div className="flex items-center justify-between mb-4">
           <h3 className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-            {t('tables.filterTables', 'Filter Tables')}
+            {t('tables.filters.title', 'Filter Tables')}
           </h3>
-          <button onClick={onClose} className={`p-1 rounded-lg ${isDark ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
+          <button
+            onClick={onClose}
+            className={`p-1 rounded-2xl ${isDark ? 'active:bg-white/10' : 'active:bg-gray-100'}`}
+            aria-label={t('common.actions.close', 'Close')}
+          >
             <X className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
           </button>
         </div>
 
         <div className="space-y-2">
           <p className={`text-xs font-medium ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-            {t('tables.status', 'Status')}
+            {t('tables.filters.status', 'Filter by Status')}
           </p>
           <div className="flex flex-wrap gap-2">
             {(['all', 'available', 'occupied', 'reserved', 'cleaning'] as const).map(status => (
               <button
                 key={status}
                 onClick={() => handleStatusChange(status)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-2xl text-xs font-medium transition-colors ${
                   filter.statusFilter === status
                     ? status === 'all'
-                      ? 'bg-blue-500 text-white'
+                      ? 'bg-yellow-400 text-black'
                       : `text-white`
                     : isDark
-                    ? 'bg-white/10 text-gray-300 hover:bg-white/20'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    ? 'bg-white/10 text-gray-300 active:bg-white/20'
+                    : 'bg-gray-100 text-gray-600 active:bg-gray-200'
                 }`}
                 style={
                   filter.statusFilter === status && status !== 'all'
@@ -328,8 +344,8 @@ const FilterDropdown = memo<FilterDropdownProps>(({ filter, onFilterChange, isDa
         <div className="mt-4 pt-4 border-t border-white/10 flex justify-end">
           <button
             onClick={handleReset}
-            className={`px-4 py-2 rounded-lg text-sm font-medium ${
-              isDark ? 'bg-white/10 text-gray-300 hover:bg-white/20' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            className={`px-4 py-2 rounded-2xl text-sm font-medium ${
+              isDark ? 'bg-white/10 text-gray-300 active:bg-white/20' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
             }`}
           >
             {t('common.reset', 'Reset')}
@@ -354,6 +370,9 @@ interface StatusChangeModalProps {
   onNewOrder: (table: RestaurantTable) => void;
   onNewReservation: (table: RestaurantTable) => void;
   isDark: boolean;
+  canCreateOrders: boolean;
+  featuresLoading: boolean;
+  orderCreationDisabledMessage: string;
 }
 
 const StatusChangeModal = memo<StatusChangeModalProps>(({
@@ -364,6 +383,9 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
   onNewOrder,
   onNewReservation,
   isDark,
+  canCreateOrders,
+  featuresLoading,
+  orderCreationDisabledMessage,
 }) => {
   const { t } = useTranslation();
 
@@ -373,17 +395,17 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
     {
       status: 'available',
       label: table.status === 'cleaning'
-        ? t('tables.setCleaned', 'Cleaned')
+        ? t('tables.actions.markCleaned', 'Cleaned')
         : table.status === 'maintenance'
-          ? t('tables.markBackInService', 'Back in service')
-          : t('tables.setAvailable', 'Set Available'),
+          ? t('tables.actions.markBackInService', 'Back in service')
+          : t('tables.actions.markAvailable', 'Set Available'),
       icon: CheckCircle,
       color: STATUS_COLORS.available,
     },
-    { status: 'occupied', label: t('tables.setOccupied', 'Set Occupied'), icon: Users, color: STATUS_COLORS.occupied },
-    { status: 'reserved', label: t('tables.setReserved', 'Set Reserved'), icon: Clock, color: STATUS_COLORS.reserved },
-    { status: 'cleaning', label: t('tables.setCleaning', 'Set Cleaning'), icon: Sparkles, color: STATUS_COLORS.cleaning },
-    { status: 'maintenance', label: t('tables.setMaintenance', 'Set Maintenance'), icon: AlertTriangle, color: STATUS_COLORS.maintenance },
+    { status: 'occupied', label: t('tables.actions.markOccupied', 'Set Occupied'), icon: Users, color: STATUS_COLORS.occupied },
+    { status: 'reserved', label: t('tables.actions.markReserved', 'Set Reserved'), icon: Clock, color: STATUS_COLORS.reserved },
+    { status: 'cleaning', label: t('tables.actions.markCleaning', 'Set Cleaning'), icon: Sparkles, color: STATUS_COLORS.cleaning },
+    { status: 'maintenance', label: t('tables.actions.markMaintenance', 'Set Maintenance'), icon: AlertTriangle, color: STATUS_COLORS.maintenance },
   ];
 
   const handleStatusClick = (status: TableStatus) => {
@@ -392,16 +414,22 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
     }
     onClose();
   };
+  const isNewOrderActionDisabled = !table.currentOrderId && !featuresLoading && !canCreateOrders;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+  const modalContent = (
+    // z-[1200] = POS app-modal layer: above the sidebar (z-50), FAB (z-[900]) and
+    // content, below the custom titlebar. Combined with the portal below so the
+    // backdrop/blur covers the full app shell, not just the table page/grid container.
+    <div className="fixed inset-0 z-[1200] flex items-center justify-center">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
 
       {/* Modal */}
       <div
-        className={`relative w-full max-w-md mx-4 rounded-2xl shadow-2xl ${
-          isDark ? 'bg-gray-900 border border-white/10' : 'bg-white'
+        className={`relative w-full max-w-md mx-4 rounded-2xl border backdrop-blur-2xl ring-1 ${
+          isDark
+            ? 'bg-black/60 border-white/10 ring-white/15 shadow-2xl shadow-black/50'
+            : 'bg-white/50 border-white/70 ring-white/60 shadow-2xl shadow-black/30'
         }`}
       >
         {/* Header */}
@@ -411,7 +439,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
               {t('tables.tableNumber', 'Table {{number}}', { number: table.tableNumber })}
             </h2>
             <div
-              className="inline-flex items-center gap-1.5 mt-1 px-2 py-1 rounded-lg text-xs font-medium"
+              className="inline-flex items-center gap-1.5 mt-1 px-2 py-1 rounded-2xl text-xs font-medium"
               style={{ backgroundColor: `${STATUS_COLORS[table.status]}20`, color: STATUS_COLORS[table.status] }}
             >
               {React.createElement(getStatusIcon(table.status), { className: 'w-3 h-3' })}
@@ -420,7 +448,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
           </div>
           <button
             onClick={onClose}
-            className={`p-2 rounded-lg ${isDark ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
+            className={`p-2 rounded-2xl ${isDark ? 'active:bg-white/10 text-gray-400' : 'active:bg-gray-100 text-gray-500'}`}
           >
             <X className="w-5 h-5" />
           </button>
@@ -430,7 +458,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
         <div className={`px-4 py-3 flex items-center gap-4 border-b ${isDark ? 'border-white/10' : 'border-gray-100'}`}>
           <div className={`flex items-center gap-2 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
             <Users className="w-4 h-4" />
-            <span className="text-sm">{table.capacity} {t('tables.seats', 'seats')}</span>
+            <span className="text-sm">{formatTableSeats(t, table.capacity)}</span>
           </div>
           {table.occupiedSince && table.status === 'occupied' && (
             <div className={`flex items-center gap-2 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
@@ -444,37 +472,52 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
         {(table.status === 'available' || table.status === 'occupied') && (
           <div className="p-4 space-y-2">
             <p className={`text-xs font-medium mb-3 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {t('tables.quickActions', 'Quick Actions')}
+              {t('tables.actions.quickActions', 'Quick Actions')}
             </p>
             <div className="flex gap-2">
               <button
                 onClick={() => onNewOrder(table)}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 transition-colors"
+                disabled={isNewOrderActionDisabled}
+                aria-disabled={isNewOrderActionDisabled}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium border transition-colors ${
+                  isNewOrderActionDisabled
+                    ? isDark
+                      ? 'cursor-not-allowed bg-white/5 border-white/10 text-white/40'
+                      : 'cursor-not-allowed bg-gray-100 border-gray-200 text-gray-400'
+                    : isDark
+                      ? 'bg-yellow-400/15 border-yellow-400/40 text-yellow-300 active:bg-yellow-400/25'
+                      : '!bg-yellow-400 border-yellow-500 text-black active:!bg-yellow-500 shadow-lg shadow-yellow-500/30'
+                }`}
               >
                 <Receipt className="w-4 h-4" />
-                <span>{table.currentOrderId ? t('tables.viewOrder', 'View Order') : t('tables.newOrder', 'New Order')}</span>
+                <span>{table.currentOrderId ? t('tables.actions.viewOrder', 'View Order') : t('tables.actions.newOrder', 'New Order')}</span>
               </button>
               {table.status === 'available' && (
                 <button
                   onClick={() => onNewReservation(table)}
                   className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-colors ${
                     isDark
-                      ? 'bg-white/10 text-white hover:bg-white/20'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      ? 'bg-white/10 text-white active:bg-white/20'
+                      : 'bg-gray-100 text-gray-700 active:bg-gray-200'
                   }`}
                 >
                   <Clock className="w-4 h-4" />
-                  <span>{t('tables.newReservation', 'Reserve')}</span>
+                  <span>{t('tables.actions.newReservation', 'Reserve')}</span>
                 </button>
               )}
             </div>
+            {isNewOrderActionDisabled && (
+              <p className={`text-xs ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>
+                {orderCreationDisabledMessage}
+              </p>
+            )}
           </div>
         )}
 
         {/* Status Actions */}
         <div className={`p-4 ${table.status === 'available' || table.status === 'occupied' ? 'border-t ' + (isDark ? 'border-white/10' : 'border-gray-100') : ''}`}>
           <p className={`text-xs font-medium mb-3 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-            {t('tables.changeStatus', 'Change Status')}
+            {t('tables.actions.changeStatus', 'Change Status')}
           </p>
           <div className="space-y-2">
             {statusActions.map(action => {
@@ -487,7 +530,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors ${
                     isCurrentStatus
                       ? 'opacity-50 cursor-not-allowed'
-                      : 'hover:scale-[1.01] active:scale-[0.99]'
+                      : 'active:scale-[0.99]'
                   } ${isDark ? 'border-white/10' : 'border-gray-200'}`}
                   style={{ borderColor: isCurrentStatus ? undefined : action.color }}
                 >
@@ -506,6 +549,14 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
       </div>
     </div>
   );
+
+  // Render at the app-shell level so the backdrop/blur covers the full POS viewport
+  // (sidebar + outer shell) instead of being clipped by the table page/grid container.
+  if (typeof document === 'undefined' || !document.body) {
+    return modalContent;
+  }
+
+  return createPortal(modalContent, document.body);
 });
 
 StatusChangeModal.displayName = 'StatusChangeModal';
@@ -520,7 +571,13 @@ const TablesPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { getSetting } = useTerminalSettings();
+  const { isFeatureEnabled, loading: featuresLoading } = useFeatures();
+  const canCreateOrders = isFeatureEnabled('orderCreation');
   const isDark = resolvedTheme === 'dark';
+  const orderCreationDisabledMessage = t(
+    'settings.terminal.messages.orderCreationDisabled',
+    'Order creation is disabled for this terminal',
+  );
 
   // Get terminal context
   const [branchId, setBranchId] = useState<string | null>(null);
@@ -551,9 +608,12 @@ const TablesPage: React.FC = () => {
   const [filter, setFilter] = useState<TableFilters>({ statusFilter: 'all' });
   const [showFilterDropdown, setShowFilterDropdown] = useState(false);
   const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(null);
+  const [showCheckManager, setShowCheckManager] = useState(false);
+  const [checkManagerTable, setCheckManagerTable] = useState<RestaurantTable | null>(null);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [floorFilter, setFloorFilter] = useState<string>('all');
 
   // Derived data
   const filteredTables = useMemo(() => {
@@ -568,25 +628,41 @@ const TablesPage: React.FC = () => {
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       result = result.filter(t =>
-        t.tableNumber.toString().includes(term) ||
-        t.notes?.toLowerCase().includes(term)
+        t.tableNumber.toString().toLowerCase().includes(term) ||
+        t.section?.toLowerCase().includes(term)
       );
     }
 
+    // Filter by floor (composes with status + search)
+    if (floorFilter !== 'all') {
+      result = result.filter(t => getTableFloorValue(t) === floorFilter);
+    }
+
     return result;
-  }, [tables, filter, searchTerm]);
+  }, [tables, filter, searchTerm, floorFilter]);
+
+  // Unique floors derived from real table metadata; numeric floors sort numerically, strings lexically.
+  const floorOptions = useMemo(() => {
+    const values = Array.from(new Set(tables.map(getTableFloorValue)));
+    return values.sort((a, b) => {
+      const na = Number(a);
+      const nb = Number(b);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return a.localeCompare(b);
+    });
+  }, [tables]);
 
   const stats = useMemo(() => calculateTableStats(tables), [tables]);
 
   // Check for active filters
-  const hasActiveFilters = filter.statusFilter !== 'all' || searchTerm !== '';
+  const hasActiveFilters = filter.statusFilter !== 'all' || searchTerm !== '' || floorFilter !== 'all';
 
   // Handlers
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
     await refetch();
     setIsRefreshing(false);
-    toast.success(t('tables.refreshed', 'Tables refreshed'));
+    toast.success(t('tables.messages.refreshed', 'Tables refreshed'));
   }, [refetch, t]);
 
   const handleTablePress = useCallback((table: RestaurantTable) => {
@@ -597,17 +673,59 @@ const TablesPage: React.FC = () => {
   const handleStatusChange = useCallback(async (tableId: string, status: TableStatus) => {
     const success = await updateTableStatus(tableId, status);
     if (success) {
-      toast.success(t('tables.statusUpdated', 'Table status updated'));
+      toast.success(t('tables.messages.statusUpdated', 'Table status updated to {{status}}', {
+        status: t(`tables.status.${status}`, STATUS_LABELS[status]),
+      }));
     } else {
-      toast.error(t('tables.statusUpdateFailed', 'Failed to update table status'));
+      toast.error(t('tables.messages.statusUpdateFailed', 'Failed to update table status'));
     }
   }, [updateTableStatus, t]);
 
   const handleNewOrder = useCallback((table: RestaurantTable) => {
+    // Occupied table with an existing order ("View Order"): open the existing
+    // table check/order flow (current items + total) instead of the blank
+    // new-order screen. NewOrderPage only ever creates a fresh order.
+    if (table.currentOrderId) {
+      setShowStatusModal(false);
+      setCheckManagerTable(table);
+      setShowCheckManager(true);
+      return;
+    }
+    if (!featuresLoading && !canCreateOrders) {
+      // Terminal gate: once features have loaded, don't navigate to the (guarded)
+      // NewOrderPage when creation is disabled; keep the user on the table grid/modal
+      // and explain in the active language.
+      toast.error(orderCreationDisabledMessage);
+      return;
+    }
     setShowStatusModal(false);
-    // Navigate to menu with table context
-    navigate(`/menu?orderType=dine-in&tableNumber=${table.tableNumber}&tableId=${table.id}`);
+    const params = new URLSearchParams({
+      orderType: 'dine-in',
+      tableNumber: String(table.tableNumber),
+      tableId: table.id,
+    });
+    navigate(`/new-order?${params.toString()}`);
+  }, [canCreateOrders, featuresLoading, navigate, orderCreationDisabledMessage]);
+
+  const handleCheckAddItems = useCallback((table: RestaurantTable) => {
+    // Adding items continues into the dine-in order menu for this table.
+    setShowCheckManager(false);
+    setCheckManagerTable(null);
+    const params = new URLSearchParams({
+      orderType: 'dine-in',
+      tableNumber: String(table.tableNumber),
+      tableId: table.id,
+    });
+    navigate(`/new-order?${params.toString()}`);
   }, [navigate]);
+
+  const handleCheckManagerClose = useCallback(() => {
+    // Closing the check leaves the user on the table grid (not an empty embedded
+    // orders view); refresh so any settlement/status change is reflected.
+    setShowCheckManager(false);
+    setCheckManagerTable(null);
+    void refetch();
+  }, [refetch]);
 
   const handleNewReservation = useCallback((table: RestaurantTable) => {
     setShowStatusModal(false);
@@ -618,6 +736,7 @@ const TablesPage: React.FC = () => {
   const handleClearFilters = useCallback(() => {
     setFilter({ statusFilter: 'all' });
     setSearchTerm('');
+    setFloorFilter('all');
   }, []);
 
   // Floor plan scale calculation
@@ -635,11 +754,11 @@ const TablesPage: React.FC = () => {
   // Loading state
   if (isLoading && tables.length === 0) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-gray-900' : 'bg-[#fdfaf5]'}`}>
+      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black' : 'bg-[#fdfaf5]'}`}>
         <div className="text-center">
-          <div className="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4" />
+          <div className="animate-spin w-12 h-12 border-4 border-yellow-400 border-t-transparent rounded-full mx-auto mb-4" />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-            {t('tables.loading', 'Loading tables...')}
+            {t('tables.messages.loading', 'Loading tables...')}
           </p>
         </div>
       </div>
@@ -651,7 +770,7 @@ const TablesPage: React.FC = () => {
       initial="hidden"
       animate="show"
       variants={pageMotionContainer}
-      className={`h-full flex flex-col ${isDark ? 'bg-gray-900' : 'bg-[#fdfaf5]'}`}
+      className={`h-full flex flex-col ${isDark ? 'bg-black' : 'bg-[#fdfaf5]'}`}
     >
       {/* Header */}
       <motion.div variants={pageMotionItem} className="px-6 py-4 flex items-center justify-between">
@@ -661,7 +780,10 @@ const TablesPage: React.FC = () => {
           </h1>
           <div className="mt-1 flex items-center gap-2">
             <p className={`truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {stats.availableTables} {t('tables.available', 'available')} / {stats.totalTables} {t('tables.total', 'total')}
+              {t('tables.stats.availableTotal', '{{available}} available / {{total}} total', {
+                available: stats.availableTables,
+                total: stats.totalTables,
+              })}
             </p>
             {/* Real-time indicator */}
             <Wifi className="h-3 w-3 shrink-0 text-green-500" />
@@ -677,7 +799,7 @@ const TablesPage: React.FC = () => {
               type="text"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              placeholder={t('tables.search', 'Search tables...')}
+              placeholder={t('tables.filters.search', 'Search tables...')}
               className={`w-48 pl-9 pr-4 py-2 rounded-xl text-sm bg-transparent outline-none ${
                 isDark ? 'text-white placeholder:text-gray-500' : 'text-gray-900 placeholder:text-gray-400'
               }`}
@@ -687,7 +809,12 @@ const TablesPage: React.FC = () => {
           {/* View Mode Toggle */}
           <button
             onClick={() => setViewMode(viewMode === 'grid' ? 'floorplan' : 'grid')}
-            className={`p-2.5 rounded-xl ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-white hover:bg-gray-50'} border ${
+            aria-label={
+              viewMode === 'grid'
+                ? t('tables.layout.switchToFloorPlan', 'Switch to floor plan view')
+                : t('tables.layout.switchToGrid', 'Switch to grid view')
+            }
+            className={`p-2.5 rounded-xl ${isDark ? 'bg-white/10 active:bg-white/20' : 'bg-white active:bg-gray-50'} border ${
               isDark ? 'border-white/10' : 'border-gray-200'
             } transition-colors`}
           >
@@ -702,11 +829,12 @@ const TablesPage: React.FC = () => {
           <div className="relative">
             <button
               onClick={() => setShowFilterDropdown(!showFilterDropdown)}
+              aria-label={t('tables.filters.title', 'Filter Tables')}
               className={`p-2.5 rounded-xl ${
-                hasActiveFilters ? 'bg-blue-500 text-white' : isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-white hover:bg-gray-50'
-              } border ${hasActiveFilters ? 'border-blue-500' : isDark ? 'border-white/10' : 'border-gray-200'} transition-colors`}
+                hasActiveFilters ? 'bg-yellow-400 text-black' : isDark ? 'bg-white/10 active:bg-white/20' : 'bg-white active:bg-gray-50'
+              } border ${hasActiveFilters ? 'border-yellow-500' : isDark ? 'border-white/10' : 'border-gray-200'} transition-colors`}
             >
-              <Filter className={`w-5 h-5 ${hasActiveFilters ? 'text-white' : isDark ? 'text-gray-300' : 'text-gray-600'}`} />
+              <Filter className={`w-5 h-5 ${hasActiveFilters ? 'text-black' : isDark ? 'text-gray-300' : 'text-gray-600'}`} />
             </button>
             {showFilterDropdown && (
               <FilterDropdown
@@ -723,13 +851,12 @@ const TablesPage: React.FC = () => {
             type="button"
             onClick={handleRefresh}
             disabled={isRefreshing}
-            title={t('common.refresh', 'Refresh')}
             aria-label={t('common.refresh', 'Refresh')}
             className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
               isDark
-                ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                : 'border border-black bg-black text-white hover:bg-zinc-800'
-            } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                ? 'border border-white/80 bg-white text-black active:bg-zinc-200'
+                : 'border border-black bg-black text-white active:bg-zinc-800'
+            } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
@@ -753,12 +880,12 @@ const TablesPage: React.FC = () => {
                 filter.statusFilter === key
                   ? 'border-current'
                   : isDark
-                  ? 'border-white/10 bg-white/5 hover:bg-white/10'
-                  : 'border-gray-200 bg-white hover:bg-gray-50'
+                  ? 'border-white/10 bg-white/5 active:bg-white/10'
+                  : 'border-gray-200 bg-white active:bg-gray-50'
               }`}
               style={filter.statusFilter === key ? { borderColor: color } : undefined}
             >
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${color}20` }}>
+              <div className="w-8 h-8 rounded-2xl flex items-center justify-center" style={{ backgroundColor: `${color}20` }}>
                 <Icon className="w-4 h-4" style={{ color }} />
               </div>
               <div className="text-left">
@@ -774,6 +901,49 @@ const TablesPage: React.FC = () => {
         </motion.div>
       </motion.div>
 
+      {/* Floor selector strip - direct, touch-first floor filtering under the stats row and above the
+          grid (not hidden in the filter popover). Yellow = selected, neutral glass = rest; no hover. */}
+      {floorOptions.length > 0 && (
+        <motion.div variants={pageMotionItem} data-tables-floor-selector className="px-6 pb-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`text-sm font-medium ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+              {t('tableSelector.floor', { defaultValue: 'Floor' })}
+            </span>
+            <button
+              type="button"
+              onClick={() => setFloorFilter('all')}
+              aria-pressed={floorFilter === 'all'}
+              className={`inline-flex min-h-[44px] items-center justify-center rounded-xl border px-4 text-sm font-medium transition active:scale-95 ${
+                floorFilter === 'all'
+                  ? 'border-yellow-500 bg-yellow-400 text-black'
+                  : isDark
+                    ? 'border-white/10 bg-white/5 text-gray-200 active:bg-white/10'
+                    : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
+              }`}
+            >
+              {t('tableSelector.allFloors', { defaultValue: 'All floors' })}
+            </button>
+            {floorOptions.map((floor) => (
+              <button
+                key={floor}
+                type="button"
+                onClick={() => setFloorFilter(floor)}
+                aria-pressed={floorFilter === floor}
+                className={`inline-flex min-h-[44px] items-center justify-center rounded-xl border px-4 text-sm font-medium transition active:scale-95 ${
+                  floorFilter === floor
+                    ? 'border-yellow-500 bg-yellow-400 text-black'
+                    : isDark
+                      ? 'border-white/10 bg-white/5 text-gray-200 active:bg-white/10'
+                      : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
+                }`}
+              >
+                {t('tableSelector.floorNumber', { defaultValue: 'Floor {{floor}}', floor })}
+              </button>
+            ))}
+          </div>
+        </motion.div>
+      )}
+
       {/* Error Banner */}
       {error && (
         <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
@@ -783,7 +953,7 @@ const TablesPage: React.FC = () => {
       )}
 
       {/* Content */}
-      <motion.div variants={pageMotionItem} className="flex-1 overflow-auto px-6 pb-6">
+      <motion.div variants={pageMotionItem} className="flex-1 min-h-0 overflow-auto px-6 pb-6 scrollbar-hide">
         {viewMode === 'grid' ? (
           <motion.div variants={pageMotionContainer} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
             {filteredTables.map(table => (
@@ -797,8 +967,8 @@ const TablesPage: React.FC = () => {
             ))}
           </motion.div>
         ) : (
-          <motion.div variants={pageMotionItem} className={`rounded-2xl border ${isDark ? 'bg-gray-800/50 border-white/10' : 'bg-white border-gray-200'}`}>
-            <div className="relative w-full h-[500px] overflow-hidden rounded-2xl">
+          <motion.div variants={pageMotionItem} className={`h-full min-h-[360px] rounded-2xl border ${isDark ? 'bg-white/[0.05] backdrop-blur-xl border-white/10' : 'bg-white border-gray-200'}`}>
+            <div className={`floor-plan-scrollbar ${isDark ? 'floor-plan-scrollbar-dark' : 'floor-plan-scrollbar-light'} relative h-full min-h-[360px] w-full overflow-auto rounded-2xl`}>
               {filteredTables.map(table => (
                 <FloorPlanTable
                   key={table.id}
@@ -812,7 +982,7 @@ const TablesPage: React.FC = () => {
               {filteredTables.length === 0 && (
                 <div className="absolute inset-0 flex items-center justify-center">
                   <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                    {t('tables.noTablesOnFloorPlan', 'No tables to display')}
+                    {t('tables.messages.noTablesOnFloorPlan', 'No tables to display')}
                   </p>
                 </div>
               )}
@@ -838,15 +1008,15 @@ const TablesPage: React.FC = () => {
             <Utensils className={`w-16 h-16 mb-4 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
             <p className={`text-lg font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {hasActiveFilters
-                ? t('tables.noMatchingTables', 'No tables match your filters')
-                : t('tables.noTables', 'No tables found')}
+                ? t('tables.messages.noMatchingTables', 'No tables match your filters')
+                : t('tables.messages.noTables', 'No tables found')}
             </p>
             {hasActiveFilters && (
               <button
                 onClick={handleClearFilters}
-                className="mt-4 px-4 py-2 rounded-xl border border-blue-500 text-blue-500 font-medium hover:bg-blue-500/10 transition-colors"
+                className="mt-4 px-4 py-2 rounded-xl border border-yellow-500 text-yellow-600 font-medium active:bg-yellow-500/10 transition-colors"
               >
-                {t('tables.clearFilters', 'Clear Filters')}
+                {t('tables.filters.clear', 'Clear Filters')}
               </button>
             )}
           </motion.div>
@@ -865,6 +1035,21 @@ const TablesPage: React.FC = () => {
         onNewOrder={handleNewOrder}
         onNewReservation={handleNewReservation}
         isDark={isDark}
+        canCreateOrders={canCreateOrders}
+        featuresLoading={featuresLoading}
+        orderCreationDisabledMessage={orderCreationDisabledMessage}
+      />
+
+      {/* Existing table order / check flow (View Order on an occupied table).
+          Renders through LiquidGlassModal: app-level portal + blurred backdrop. */}
+      <TableCheckManagerModal
+        isOpen={showCheckManager}
+        table={checkManagerTable}
+        tables={tables}
+        onAddItems={handleCheckAddItems}
+        onRefreshTables={refetch}
+        onRefreshOrders={refetch}
+        onClose={handleCheckManagerClose}
       />
     </motion.div>
   );

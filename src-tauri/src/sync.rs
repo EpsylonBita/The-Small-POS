@@ -89,6 +89,9 @@ use crate::terminal_helpers::{
 };
 use crate::APP_START_EPOCH;
 
+const ADMIN_API_CACHE_PREFIX: &str = "admin_api_get::";
+const POS_INTEGRATIONS_PATH: &str = "/api/pos/integrations";
+
 // ---------------------------------------------------------------------------
 // Typed sync response schemas
 // ---------------------------------------------------------------------------
@@ -1031,6 +1034,134 @@ fn validate_string_length(field: &str, value: &str, max: usize) -> Result<(), St
 // Order creation
 // ---------------------------------------------------------------------------
 
+fn normalize_fiscal_plugin_id(value: Option<&Value>) -> String {
+    let Some(raw) = value.and_then(Value::as_str) else {
+        return String::new();
+    };
+
+    let mut normalized = String::new();
+    let mut last_was_separator = false;
+    for ch in raw.trim().to_ascii_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            normalized.push('_');
+            last_was_separator = true;
+        }
+    }
+    normalized.trim_matches('_').to_string()
+}
+
+fn is_fiscal_order_reporting_integration(row: &Map<String, Value>) -> bool {
+    let plugin_id = normalize_fiscal_plugin_id(
+        row.get("plugin_id")
+            .or_else(|| row.get("provider"))
+            .or_else(|| row.get("id")),
+    );
+
+    plugin_id == "mydata" || plugin_id.starts_with("fiscalization_")
+}
+
+fn has_acquired_fiscal_order_reporting_integration(value: &Value) -> bool {
+    let integrations = value
+        .as_array()
+        .or_else(|| value.get("integrations").and_then(Value::as_array));
+
+    integrations
+        .map(|items| {
+            items.iter().any(|integration| {
+                let Some(row) = integration.as_object() else {
+                    return false;
+                };
+                is_fiscal_order_reporting_integration(row)
+                    && row.get("is_purchased").and_then(Value::as_bool) == Some(true)
+                    && row.get("is_enabled").and_then(Value::as_bool) != Some(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn cached_fiscal_order_reporting_entitlement(conn: &Connection) -> Option<bool> {
+    let cache_key = format!("{ADMIN_API_CACHE_PREFIX}{POS_INTEGRATIONS_PATH}");
+    let raw = db::get_setting(conn, "local", &cache_key)?;
+    let envelope = serde_json::from_str::<Value>(&raw).ok()?;
+    let data = envelope.get("data").unwrap_or(&envelope);
+    if data.is_null() {
+        return None;
+    }
+    Some(has_acquired_fiscal_order_reporting_integration(data))
+}
+
+fn order_column_exists(conn: &Connection, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(orders)")
+        .map_err(|e| format!("orders table_info: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("orders table_info query: {e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("orders table_info next: {e}"))?
+    {
+        let name: String = row
+            .get(1)
+            .map_err(|e| format!("orders table_info name: {e}"))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn clear_non_fiscal_order_receipt_numbers(conn: &Connection) -> Result<usize, String> {
+    if cached_fiscal_order_reporting_entitlement(conn) != Some(false) {
+        return Ok(0);
+    }
+    if !order_column_exists(conn, "receipt_number")? {
+        return Ok(0);
+    }
+
+    let mut receipt_candidates = Vec::new();
+    if order_column_exists(conn, "display_order_number")? {
+        receipt_candidates.push("NULLIF(TRIM(display_order_number), '')");
+    }
+    if order_column_exists(conn, "order_number")? {
+        receipt_candidates.push("NULLIF(TRIM(order_number), '')");
+    }
+    let fallback_expr = if receipt_candidates.is_empty() {
+        "id".to_string()
+    } else {
+        format!("COALESCE({}, id)", receipt_candidates.join(", "))
+    };
+
+    conn.execute(
+        &format!(
+            "
+        UPDATE orders
+           SET receipt_number = NULL
+         WHERE receipt_number IS NOT NULL
+           AND (
+             TRIM(receipt_number) = ''
+             OR receipt_number = {fallback_expr}
+           )
+        "
+        ),
+        [],
+    )
+    .map_err(|e| format!("clear non-fiscal order receipt_number: {e}"))
+}
+
+fn should_persist_receipt_number_for_branch(conn: &Connection, branch_id: &str) -> bool {
+    match crate::fiscal::active_cache::verdict(branch_id) {
+        crate::fiscal::active_cache::CacheVerdict::Inactive => false,
+        crate::fiscal::active_cache::CacheVerdict::Active => true,
+        crate::fiscal::active_cache::CacheVerdict::Unknown => {
+            cached_fiscal_order_reporting_entitlement(conn).unwrap_or(false)
+        }
+    }
+}
+
 /// Create an order locally: insert into `orders` table and enqueue for sync.
 pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     // Validate menu items BEFORE acquiring the connection lock to avoid
@@ -1140,6 +1271,16 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     // Extract fields from payload with defaults
     let order_number = Some(next_order_number(&conn));
     let display_order_number = order_number.clone();
+    let receipt_number = if should_persist_receipt_number_for_branch(&conn, &branch_id) {
+        Some(
+            display_order_number
+                .clone()
+                .or_else(|| order_number.clone())
+                .unwrap_or_else(|| order_id.clone()),
+        )
+    } else {
+        None
+    };
     let customer_name =
         str_field(payload, "customerName").or_else(|| str_field(payload, "customer_name"));
     let customer_phone =
@@ -1388,10 +1529,10 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             created_at, updated_at, estimated_time, sync_status, payment_status,
             staff_shift_id, staff_id, driver_id, driver_name, discount_percentage,
             discount_amount, tip_amount, version, terminal_id, owner_terminal_id,
-            source_terminal_id, branch_id, plugin, tax_rate,
+            source_terminal_id, branch_id, organization_id, plugin, tax_rate,
             delivery_fee, client_request_id, is_ghost, ghost_source, ghost_metadata,
             delivery_address_id, delivery_latitude, delivery_longitude,
-            delivery_address_fingerprint, delivery_zone_id
+            delivery_address_fingerprint, delivery_zone_id, receipt_number
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
             ?8, ?9, ?10, ?11, ?12,
@@ -1401,9 +1542,9 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             ?25, ?26, ?27, 'pending', ?28,
             ?29, ?30, ?31, ?32, ?33,
             ?34, ?35, 1, ?36, ?37,
-            ?38, ?39, ?40, ?41,
-            ?42, ?43, ?44, ?45, ?46,
-            ?47, ?48, ?49, ?50, ?51
+            ?38, ?39, ?40, ?41, ?42,
+            ?43, ?44, ?45, ?46, ?47,
+            ?48, ?49, ?50, ?51, ?52, ?53
         )",
         params![
             &order_id,
@@ -1445,6 +1586,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &owner_terminal_id,
             &source_terminal_id,
             &branch_id,
+            &organization_id,
             &plugin,
             &tax_rate,
             &delivery_fee,
@@ -1457,6 +1599,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &delivery_longitude,
             &delivery_address_fingerprint,
             &delivery_zone_id,
+            &receipt_number,
         ],
     )
     .map_err(|e| {
@@ -4275,9 +4418,11 @@ pub(crate) struct OrderUpdateReplayRepairStats {
     pub repaired_parent_orders: usize,
     pub requeued_parent_wait_orders: usize,
     pub quarantined_stale_parent_wait_orders: usize,
+    pub forced_table_session_closes: usize,
     pub first_pass: sync_queue::SyncResult,
     pub promoted_payments: usize,
     pub second_pass: Option<sync_queue::SyncResult>,
+    pub table_session_pass: Option<sync_queue::SyncResult>,
     pub remaining_parent_order_inserts: usize,
     pub remaining_order_blockers: usize,
     pub remaining_parent_wait_blockers: usize,
@@ -4347,10 +4492,10 @@ pub(crate) fn requeue_order_update_replay_blockers(db: &DbState) -> Result<usize
         .map_err(|e| format!("requeue order update replay blockers: {e}"))
 }
 
-fn minimize_manual_order_update_replay_blockers(conn: &Connection) -> Result<usize, String> {
+fn minimize_item_order_update_replay_blockers(conn: &Connection) -> Result<usize, String> {
     conn.execute(
         "UPDATE parity_sync_queue
-         SET data = json_object(
+         SET data = json_patch(json_object(
                  'orderId', record_id,
                  'status', COALESCE(
                    NULLIF(TRIM(COALESCE(json_extract(data, '$.status'), '')), ''),
@@ -4361,35 +4506,73 @@ fn minimize_manual_order_update_replay_blockers(conn: &Connection) -> Result<usi
                    'pending'
                  ),
                  'totalAmount', COALESCE(
-                   json_extract(data, '$.totalAmount'),
-                   json_extract(data, '$.total_amount'),
                    (SELECT orders.total_amount
                     FROM orders
                     WHERE orders.id = parity_sync_queue.record_id
-                    LIMIT 1)
+                    LIMIT 1),
+                   json_extract(data, '$.totalAmount'),
+                   json_extract(data, '$.total_amount')
                  ),
                  'totalAmountCents', COALESCE(
-                   json_extract(data, '$.totalAmountCents'),
-                   json_extract(data, '$.total_amount_cents'),
-                   (SELECT orders.total_amount_cents
+                   (SELECT COALESCE(
+                         NULLIF(orders.total_amount_cents, 0),
+                         CAST(ROUND(COALESCE(orders.total_amount, 0.0) * 100) AS INTEGER)
+                       )
                     FROM orders
                     WHERE orders.id = parity_sync_queue.record_id
-                    LIMIT 1)
+                    LIMIT 1),
+                   json_extract(data, '$.totalAmountCents'),
+                   json_extract(data, '$.total_amount_cents')
                  ),
                  'subtotal', COALESCE(
-                   json_extract(data, '$.subtotal'),
-                   (SELECT COALESCE(orders.subtotal, orders.total_amount)
+                   (SELECT COALESCE(NULLIF(orders.subtotal, 0.0), orders.total_amount)
                     FROM orders
                     WHERE orders.id = parity_sync_queue.record_id
-                    LIMIT 1)
+                    LIMIT 1),
+                   json_extract(data, '$.subtotal')
                  ),
                  'subtotalCents', COALESCE(
-                   json_extract(data, '$.subtotalCents'),
-                   json_extract(data, '$.subtotal_cents'),
-                   (SELECT COALESCE(orders.subtotal_cents, orders.total_amount_cents)
+                   (SELECT COALESCE(
+                         NULLIF(orders.subtotal_cents, 0),
+                         CAST(ROUND(COALESCE(NULLIF(orders.subtotal, 0.0), orders.total_amount, 0.0) * 100) AS INTEGER)
+                       )
                     FROM orders
                     WHERE orders.id = parity_sync_queue.record_id
-                    LIMIT 1)
+                    LIMIT 1),
+                   json_extract(data, '$.subtotalCents'),
+                   json_extract(data, '$.subtotal_cents')
+                 ),
+                 'discountAmount', COALESCE(
+                   (SELECT COALESCE(
+                         NULLIF(orders.discount_amount, 0.0),
+                         CASE
+                           WHEN COALESCE(NULLIF(orders.subtotal, 0.0), orders.total_amount, 0.0) > COALESCE(orders.total_amount, 0.0)
+                           THEN ROUND((COALESCE(NULLIF(orders.subtotal, 0.0), orders.total_amount, 0.0) - COALESCE(orders.total_amount, 0.0)) * 100.0) / 100.0
+                           ELSE NULL
+                         END
+                       )
+                    FROM orders
+                    WHERE orders.id = parity_sync_queue.record_id
+                    LIMIT 1),
+                   json_extract(data, '$.discountAmount'),
+                   json_extract(data, '$.discount_amount'),
+                   0.0
+                 ),
+                 'discountAmountCents', COALESCE(
+                   (SELECT COALESCE(
+                         NULLIF(orders.discount_amount_cents, 0),
+                         CASE
+                           WHEN COALESCE(NULLIF(orders.subtotal, 0.0), orders.total_amount, 0.0) > COALESCE(orders.total_amount, 0.0)
+                           THEN CAST(ROUND((COALESCE(NULLIF(orders.subtotal, 0.0), orders.total_amount, 0.0) - COALESCE(orders.total_amount, 0.0)) * 100.0) AS INTEGER)
+                           ELSE NULL
+                         END
+                       )
+                    FROM orders
+                    WHERE orders.id = parity_sync_queue.record_id
+                    LIMIT 1),
+                   json_extract(data, '$.discountAmountCents'),
+                   json_extract(data, '$.discount_amount_cents'),
+                   0
                  ),
                  'paymentStatus', COALESCE(
                    NULLIF(TRIM(COALESCE(json_extract(data, '$.paymentStatus'), '')), ''),
@@ -4400,6 +4583,51 @@ fn minimize_manual_order_update_replay_blockers(conn: &Connection) -> Result<usi
                     LIMIT 1)
                  )
              ),
+             COALESCE(
+               (SELECT CASE
+                  WHEN json_valid(orders.items)
+                   AND json_array_length(json(orders.items)) > 0
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM json_each(orders.items) AS item
+                     WHERE COALESCE(
+                       NULLIF(TRIM(COALESCE(json_extract(item.value, '$.menu_item_id'), '')), ''),
+                       NULLIF(TRIM(COALESCE(json_extract(item.value, '$.menuItemId'), '')), '')
+                     ) IS NULL
+                   )
+                   AND (
+                     COALESCE(
+                       NULLIF(orders.discount_amount, 0.0),
+                       CASE
+                         WHEN COALESCE(NULLIF(orders.subtotal, 0.0), orders.total_amount, 0.0) > COALESCE(orders.total_amount, 0.0)
+                         THEN ROUND((COALESCE(NULLIF(orders.subtotal, 0.0), orders.total_amount, 0.0) - COALESCE(orders.total_amount, 0.0)) * 100.0) / 100.0
+                         ELSE 0.0
+                       END,
+                       0.0
+                     ) <= 0.0
+                     OR EXISTS (
+                       SELECT 1
+                       FROM json_each(orders.items) AS item
+                       WHERE CAST(COALESCE(
+                         json_extract(item.value, '$.original_unit_price'),
+                         json_extract(item.value, '$.originalUnitPrice'),
+                         0
+                       ) AS REAL) > CAST(COALESCE(
+                         json_extract(item.value, '$.unit_price'),
+                         json_extract(item.value, '$.unitPrice'),
+                         json_extract(item.value, '$.price'),
+                         0
+                       ) AS REAL)
+                     )
+                   )
+                  THEN json_object('items', json(orders.items))
+                  ELSE NULL
+               END
+                FROM orders
+                WHERE orders.id = parity_sync_queue.record_id
+                LIMIT 1),
+               '{}'
+             )),
              status = 'pending',
              attempts = 0,
              last_attempt = NULL,
@@ -4412,22 +4640,23 @@ fn minimize_manual_order_update_replay_blockers(conn: &Connection) -> Result<usi
            AND status IN ('pending', 'processing', 'failed', 'conflict')
            AND error_message IS NOT NULL
            AND lower(error_message) LIKE '%failed to update order%'
+           AND json_valid(data)
+           AND (
+             json_type(data, '$.items') = 'array'
+             OR NULLIF(TRIM(COALESCE(
+                  json_extract(data, '$.paymentStatus'),
+                  json_extract(data, '$.payment_status'),
+                  ''
+                )), '') IS NOT NULL
+           )
            AND EXISTS (
              SELECT 1
              FROM orders
              WHERE orders.id = parity_sync_queue.record_id
-               AND EXISTS (
-                 SELECT 1
-                 FROM json_each(orders.items) AS item
-                 WHERE COALESCE(
-                   NULLIF(TRIM(COALESCE(json_extract(item.value, '$.menu_item_id'), '')), ''),
-                   NULLIF(TRIM(COALESCE(json_extract(item.value, '$.menuItemId'), '')), '')
-                 ) IS NULL
-               )
            )",
         [],
     )
-    .map_err(|e| format!("minimize manual order update replay blockers: {e}"))
+    .map_err(|e| format!("minimize item order update replay blockers: {e}"))
 }
 
 fn requeue_failed_order_insert_parent_blockers(conn: &Connection) -> Result<usize, String> {
@@ -4765,6 +4994,40 @@ fn requeue_resolved_table_session_parent_wait_rows(conn: &Connection) -> Result<
     .map_err(|e| format!("requeue resolved table session parent wait rows: {e}"))
 }
 
+fn force_requeue_settled_table_session_close_rows(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET data = json_set(data, '$.force', json('true')),
+             status = 'pending',
+             attempts = 0,
+             last_attempt = NULL,
+             error_message = NULL,
+             next_retry_at = NULL,
+             retry_delay_ms = 1000,
+             claim_generation = claim_generation + 1
+         WHERE table_name = 'restaurant_table_sessions'
+           AND upper(operation) = 'UPDATE'
+           AND status IN ('pending', 'processing', 'failed', 'conflict')
+           AND error_message IS NOT NULL
+           AND json_valid(data)
+           AND lower(COALESCE(CAST(json_extract(data, '$.force') AS TEXT), 'false')) NOT IN ('1', 'true')
+           AND lower(COALESCE(json_extract(data, '$.action'), '')) = 'close'
+           AND lower(COALESCE(json_extract(data, '$.status'), '')) = 'closed'
+           AND lower(COALESCE(
+                 json_extract(data, '$.release_status'),
+                 json_extract(data, '$.releaseStatus'),
+                 'cleaning'
+               )) = 'cleaning'
+           AND (
+             lower(error_message) LIKE '%waiting for table payment sync%'
+             OR lower(error_message) LIKE '%outstanding balance%'
+             OR lower(error_message) LIKE '%outstanding_balance%'
+           )",
+        [],
+    )
+    .map_err(|e| format!("force requeue settled table session close rows: {e}"))
+}
+
 fn infer_repaired_order_update_status(payload: &Value, remote_order: &Value) -> String {
     str_any(payload, &["status"])
         .or_else(|| str_any(remote_order, &["status"]))
@@ -5087,20 +5350,29 @@ pub(crate) async fn repair_order_update_replay_blockers(
     };
     let (repaired_parent_orders, requeued_parent_wait_orders, quarantined_stale_parent_wait_orders) =
         repair_order_update_parent_wait_blockers(db, admin_url, api_key).await?;
-    let minimized_manual_update_replays = {
+    let minimized_item_update_replays = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        minimize_manual_order_update_replay_blockers(&conn)?
+        minimize_item_order_update_replay_blockers(&conn)?
     };
-    if minimized_manual_update_replays > 0 {
+    if minimized_item_update_replays > 0 {
         info!(
-            count = minimized_manual_update_replays,
-            "Minimized manual-item order update replay blockers for legacy admin compatibility"
+            count = minimized_item_update_replays,
+            "Minimized item order update replay blockers for admin compatibility"
         );
     }
-    let requeued_orders = requeue_order_update_replay_blockers(db)?;
+    let requeued_orders = minimized_item_update_replays + requeue_order_update_replay_blockers(db)?;
     let first_pass = sync_queue::process_queue(&db.conn, admin_url, api_key).await?;
     let promoted_payments = reconcile_deferred_payments(db)?;
     let second_pass = if promoted_payments > 0 {
+        Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
+    } else {
+        None
+    };
+    let forced_table_session_closes = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        force_requeue_settled_table_session_close_rows(&conn)?
+    };
+    let table_session_pass = if forced_table_session_closes > 0 {
         Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
     } else {
         None
@@ -5125,9 +5397,11 @@ pub(crate) async fn repair_order_update_replay_blockers(
         repaired_parent_orders,
         requeued_parent_wait_orders,
         quarantined_stale_parent_wait_orders,
+        forced_table_session_closes,
         first_pass,
         promoted_payments,
         second_pass,
+        table_session_pass,
         remaining_parent_order_inserts,
         remaining_order_blockers,
         remaining_parent_wait_blockers,
@@ -18865,6 +19139,333 @@ mod tests {
     }
 
     #[test]
+    fn test_create_order_persists_organization_id_for_fiscal_enqueue() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "organizationId": "org-create-fiscal",
+            "branchId": "branch-create-fiscal",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "dine-in"
+        });
+
+        let created = create_order(&db, &payload).expect("create order");
+        let order_id = created
+            .get("orderId")
+            .and_then(Value::as_str)
+            .expect("order id");
+
+        let conn = db.conn.lock().unwrap();
+        let organization_id: Option<String> = conn
+            .query_row(
+                "SELECT organization_id FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .expect("query order organization_id");
+
+        assert_eq!(organization_id.as_deref(), Some("org-create-fiscal"));
+    }
+
+    #[test]
+    fn test_create_order_persists_receipt_number_for_fiscal_enqueue() {
+        let db = test_db();
+        crate::fiscal::active_cache::reset_for_tests();
+        crate::fiscal::active_cache::update("branch-create-receipt", true);
+        let payload = serde_json::json!({
+            "organizationId": "org-create-receipt",
+            "branchId": "branch-create-receipt",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "dine-in"
+        });
+
+        let created = create_order(&db, &payload).expect("create order");
+        let order_id = created
+            .get("orderId")
+            .and_then(Value::as_str)
+            .expect("order id");
+
+        let conn = db.conn.lock().unwrap();
+        let order_number: Option<String> = conn
+            .query_row(
+                "SELECT order_number FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .expect("query order_number");
+        let receipt_number: Option<String> = conn
+            .query_row(
+                "SELECT receipt_number FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .expect("query order receipt_number");
+
+        assert_eq!(receipt_number.as_deref(), order_number.as_deref());
+    }
+
+    #[test]
+    fn test_create_order_omits_receipt_number_when_fiscal_inactive() {
+        let db = test_db();
+        crate::fiscal::active_cache::reset_for_tests();
+        crate::fiscal::active_cache::update("branch-create-no-fiscal-receipt", false);
+        let payload = serde_json::json!({
+            "organizationId": "org-create-no-fiscal-receipt",
+            "branchId": "branch-create-no-fiscal-receipt",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "dine-in"
+        });
+
+        let created = create_order(&db, &payload).expect("create order");
+        let order_id = created
+            .get("orderId")
+            .and_then(Value::as_str)
+            .expect("order id");
+
+        let conn = db.conn.lock().unwrap();
+        let (order_number, receipt_number): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT order_number, receipt_number FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query order receipt fields");
+
+        assert!(order_number.is_some());
+        assert!(receipt_number.is_none());
+    }
+
+    #[test]
+    fn test_create_order_omits_receipt_number_when_cached_integrations_have_no_fiscal_plugin() {
+        let db = test_db();
+        crate::fiscal::active_cache::reset_for_tests();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "local",
+                "admin_api_get::/api/pos/integrations",
+                &serde_json::json!({
+                    "path": "/api/pos/integrations",
+                    "cachedAt": "2026-06-21T00:00:00Z",
+                    "data": {
+                        "success": true,
+                        "integrations": [
+                            {
+                                "plugin_id": "wolt",
+                                "provider": "wolt",
+                                "is_purchased": true,
+                                "is_enabled": true
+                            },
+                            {
+                                "plugin_id": "mydata",
+                                "provider": "mydata",
+                                "is_purchased": false,
+                                "is_enabled": true
+                            }
+                        ]
+                    }
+                })
+                .to_string(),
+            )
+            .expect("seed integrations cache");
+        }
+
+        let payload = serde_json::json!({
+            "organizationId": "org-create-cached-no-fiscal-receipt",
+            "branchId": "branch-create-cached-no-fiscal-receipt",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "dine-in"
+        });
+
+        let created = create_order(&db, &payload).expect("create order");
+        let order_id = created
+            .get("orderId")
+            .and_then(Value::as_str)
+            .expect("order id");
+
+        let conn = db.conn.lock().unwrap();
+        let (order_number, receipt_number): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT order_number, receipt_number FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query order receipt fields");
+
+        assert!(order_number.is_some());
+        assert!(receipt_number.is_none());
+    }
+
+    #[test]
+    fn test_create_order_persists_receipt_number_when_cached_mydata_is_acquired() {
+        let db = test_db();
+        crate::fiscal::active_cache::reset_for_tests();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "local",
+                "admin_api_get::/api/pos/integrations",
+                &serde_json::json!({
+                    "path": "/api/pos/integrations",
+                    "cachedAt": "2026-06-21T00:00:00Z",
+                    "data": {
+                        "success": true,
+                        "integrations": [
+                            {
+                                "plugin_id": "mydata",
+                                "provider": "mydata",
+                                "is_purchased": true,
+                                "is_enabled": true
+                            }
+                        ]
+                    }
+                })
+                .to_string(),
+            )
+            .expect("seed integrations cache");
+        }
+
+        let payload = serde_json::json!({
+            "organizationId": "org-create-cached-mydata-receipt",
+            "branchId": "branch-create-cached-mydata-receipt",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "dine-in"
+        });
+
+        let created = create_order(&db, &payload).expect("create order");
+        let order_id = created
+            .get("orderId")
+            .and_then(Value::as_str)
+            .expect("order id");
+
+        let conn = db.conn.lock().unwrap();
+        let (order_number, receipt_number): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT order_number, receipt_number FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query order receipt fields");
+
+        assert_eq!(receipt_number.as_deref(), order_number.as_deref());
+    }
+
+    #[test]
+    fn test_create_order_omits_receipt_number_when_fiscal_entitlement_unknown() {
+        let db = test_db();
+        crate::fiscal::active_cache::reset_for_tests();
+        let payload = serde_json::json!({
+            "organizationId": "org-create-unknown-fiscal-receipt",
+            "branchId": "branch-create-unknown-fiscal-receipt",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "dine-in"
+        });
+
+        let created = create_order(&db, &payload).expect("create order");
+        let order_id = created
+            .get("orderId")
+            .and_then(Value::as_str)
+            .expect("order id");
+
+        let conn = db.conn.lock().unwrap();
+        let (order_number, receipt_number): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT order_number, receipt_number FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query order receipt fields");
+
+        assert!(order_number.is_some());
+        assert!(receipt_number.is_none());
+    }
+
+    #[test]
+    fn test_clear_non_fiscal_order_receipt_numbers_after_late_integrations_cache() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, order_number, display_order_number, receipt_number)
+             VALUES ('order-late-non-fiscal', '00014', '00014', '00014')",
+            [],
+        )
+        .expect("seed stale receipt_number");
+        db::set_setting(
+            &conn,
+            "local",
+            "admin_api_get::/api/pos/integrations",
+            r#"{"data":{"success":true,"integrations":[]}}"#,
+        )
+        .expect("seed non-fiscal integrations cache");
+
+        let cleared =
+            clear_non_fiscal_order_receipt_numbers(&conn).expect("clear non-fiscal receipts");
+
+        let (order_number, receipt_number): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT order_number, receipt_number FROM orders WHERE id = 'order-late-non-fiscal'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query receipt cleanup result");
+
+        assert_eq!(cleared, 1);
+        assert_eq!(order_number.as_deref(), Some("00014"));
+        assert!(receipt_number.is_none());
+    }
+
+    #[test]
+    fn test_clear_non_fiscal_order_receipt_numbers_preserves_fiscal_cache() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, order_number, display_order_number, receipt_number)
+             VALUES ('order-fiscal-cache', '00015', '00015', '00015')",
+            [],
+        )
+        .expect("seed fiscal receipt_number");
+        db::set_setting(
+            &conn,
+            "local",
+            "admin_api_get::/api/pos/integrations",
+            r#"{"data":{"success":true,"integrations":[{"plugin_id":"mydata","is_purchased":true,"is_enabled":true}]}}"#,
+        )
+        .expect("seed fiscal integrations cache");
+
+        let cleared =
+            clear_non_fiscal_order_receipt_numbers(&conn).expect("preserve fiscal receipts");
+        let receipt_number: Option<String> = conn
+            .query_row(
+                "SELECT receipt_number FROM orders WHERE id = 'order-fiscal-cache'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query fiscal receipt_number");
+
+        assert_eq!(cleared, 0);
+        assert_eq!(receipt_number.as_deref(), Some("00015"));
+    }
+
+    #[test]
     fn test_create_delivery_order_keeps_neutral_ownership_without_driver_assignment() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -25355,7 +25956,7 @@ mod tests {
         )
         .unwrap();
 
-        let minimized = minimize_manual_order_update_replay_blockers(&conn).unwrap();
+        let minimized = minimize_item_order_update_replay_blockers(&conn).unwrap();
         assert_eq!(minimized, 1);
 
         let (status, attempts, error, data): (String, i64, Option<String>, String) = conn
@@ -25375,13 +25976,283 @@ mod tests {
         assert_eq!(
             payload,
             serde_json::json!({
+                "discountAmount": 0.0,
+                "discountAmountCents": 0,
                 "orderId": "ord-manual-replay",
                 "paymentStatus": "pending",
                 "status": "pending",
-                "subtotal": 22,
+                "subtotal": 22.0,
                 "subtotalCents": 2200,
-                "totalAmount": 22,
+                "totalAmount": 22.0,
                 "totalAmountCents": 2200
+            })
+        );
+    }
+
+    #[test]
+    fn generic_item_order_update_replay_blockers_are_minimized_before_retry() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents,
+                 subtotal, subtotal_cents, status, payment_status, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'ord-discounted-replay', 'ORD-DISCOUNTED-REPLAY',
+                 '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"name\":\"Prosciutto Pizza\",\"quantity\":1,\"unit_price\":18.9,\"total_price\":18.9,\"original_unit_price\":21.0,\"is_price_overridden\":true},{\"menu_item_id\":\"00000000-0000-0000-0000-000000000002\",\"name\":\"Chocolate Fondant\",\"quantity\":1,\"unit_price\":10.5,\"total_price\":10.5}]',
+                 29.4, 2940, 31.5, 3150, 'pending', 'paid', 'synced',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-discounted-order-replay', 'orders', 'ord-discounted-replay', 'UPDATE',
+                 '{\"orderId\":\"ord-discounted-replay\",\"status\":\"pending\",\"totalAmount\":29.4,\"totalAmountCents\":2940,\"subtotal\":31.5,\"subtotalCents\":3150,\"paymentStatus\":\"paid\"}',
+                 'org-test', datetime('now'), 4, 60000, 1, 'orders', 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to update order\"}'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let minimized = minimize_item_order_update_replay_blockers(&conn).unwrap();
+        assert_eq!(minimized, 1);
+
+        let data: String = conn
+            .query_row(
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-discounted-order-replay'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&data).unwrap();
+
+        let items = payload
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("repair should rehydrate syncable local items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].get("original_unit_price").and_then(Value::as_f64),
+            Some(21.0)
+        );
+        assert_eq!(
+            items[0].get("is_price_overridden").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "discountAmount": 2.1,
+                "discountAmountCents": 210,
+                "items": [
+                    {
+                        "is_price_overridden": true,
+                        "menu_item_id": "00000000-0000-0000-0000-000000000001",
+                        "name": "Prosciutto Pizza",
+                        "original_unit_price": 21.0,
+                        "quantity": 1,
+                        "total_price": 18.9,
+                        "unit_price": 18.9
+                    },
+                    {
+                        "menu_item_id": "00000000-0000-0000-0000-000000000002",
+                        "name": "Chocolate Fondant",
+                        "quantity": 1,
+                        "total_price": 10.5,
+                        "unit_price": 10.5
+                    }
+                ],
+                "orderId": "ord-discounted-replay",
+                "paymentStatus": "paid",
+                "status": "pending",
+                "subtotal": 31.5,
+                "subtotalCents": 3150,
+                "totalAmount": 29.4,
+                "totalAmountCents": 2940
+            })
+        );
+    }
+
+    #[test]
+    fn settled_table_session_close_blockers_are_force_requeued_for_repair() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, claim_generation, status, error_message
+             ) VALUES (
+                 'queue-table-close-blocked', 'restaurant_table_sessions', 'session-paid-local', 'UPDATE',
+                 '{\"action\":\"close\",\"status\":\"closed\",\"release_status\":\"cleaning\",\"client_event_id\":\"table-close-session-paid-local\"}',
+                 'org-test', datetime('now'), 50, 60000, 1, 'orders',
+                 'server-wins', 1, 4, 'conflict',
+                 'Deferred too many times (50x \"Waiting for table payment sync\"); escalated to conflict'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let requeued = force_requeue_settled_table_session_close_rows(&conn).unwrap();
+        assert_eq!(requeued, 1);
+
+        let (status, attempts, error, next_retry_at, retry_delay_ms, generation, data): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, next_retry_at, retry_delay_ms, claim_generation, data
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-table-close-blocked'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&data).unwrap();
+
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert!(error.is_none());
+        assert!(next_retry_at.is_none());
+        assert_eq!(retry_delay_ms, 1000);
+        assert_eq!(generation, 5);
+        assert_eq!(payload.get("force").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn malformed_order_update_replay_payload_does_not_break_minimization() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents,
+                 status, payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-valid-replay', 'ORD-VALID-REPLAY',
+                 '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"name\":\"Coffee\",\"quantity\":1,\"unit_price\":3,\"total_price\":3}]',
+                 3.0, 300, 'pending', 'pending', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-malformed-order-replay', 'orders', 'ord-malformed-replay', 'UPDATE',
+                 '{bad-json', 'org-test', datetime('now'), 2, 60000, 1,
+                 'orders', 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to update order\"}'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-valid-order-replay', 'orders', 'ord-valid-replay', 'UPDATE',
+                 '{\"orderId\":\"ord-valid-replay\",\"items\":[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"quantity\":1,\"unit_price\":3}]}',
+                 'org-test', datetime('now'), 2, 60000, 1,
+                 'orders', 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to update order\"}'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let minimized = minimize_item_order_update_replay_blockers(&conn).unwrap();
+        assert_eq!(minimized, 1);
+    }
+
+    #[test]
+    fn minimized_payment_status_order_update_replay_rows_are_renormalized() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents,
+                 subtotal, subtotal_cents, status, payment_status, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'ord-minimized-payment-replay', 'ORD-MINIMIZED-PAYMENT-REPLAY',
+                 '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"name\":\"Pizza\",\"quantity\":1,\"unit_price\":29.4,\"total_price\":29.4}]',
+                 29.4, 2940, 31.5, NULL, 'pending', 'paid', 'synced',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-minimized-payment-replay', 'orders', 'ord-minimized-payment-replay', 'UPDATE',
+                 '{\"orderId\":\"ord-minimized-payment-replay\",\"status\":\"pending\",\"totalAmount\":29.4,\"totalAmountCents\":2940,\"subtotal\":31.5,\"subtotalCents\":2940,\"paymentStatus\":\"paid\"}',
+                 'org-test', datetime('now'), 7, 60000, 1, 'orders', 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to update order\"}'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let minimized = minimize_item_order_update_replay_blockers(&conn).unwrap();
+        assert_eq!(minimized, 1);
+
+        let data: String = conn
+            .query_row(
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-minimized-payment-replay'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&data).unwrap();
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "discountAmount": 2.1,
+                "discountAmountCents": 210,
+                "orderId": "ord-minimized-payment-replay",
+                "paymentStatus": "paid",
+                "status": "pending",
+                "subtotal": 31.5,
+                "subtotalCents": 3150,
+                "totalAmount": 29.4,
+                "totalAmountCents": 2940
             })
         );
     }

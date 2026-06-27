@@ -79,8 +79,8 @@ export const SalesTrendChart = memo<SalesTrendChartProps>(({ data, isDark, curre
           <AreaChartC data={data}>
             <defs>
               <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.8} />
-                <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                <stop offset="5%" stopColor="#eab308" stopOpacity={0.8} />
+                <stop offset="95%" stopColor="#eab308" stopOpacity={0} />
               </linearGradient>
             </defs>
             <CartesianGridC strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
@@ -108,7 +108,7 @@ export const SalesTrendChart = memo<SalesTrendChartProps>(({ data, isDark, curre
             <AreaC
               type="monotone"
               dataKey="revenue"
-              stroke="#3b82f6"
+              stroke="#eab308"
               strokeWidth={2}
               fillOpacity={1}
               fill="url(#colorRevenue)"
@@ -131,7 +131,7 @@ interface TopItemsChartProps {
 
 export const TopItemsChart = memo<TopItemsChartProps>(({ data, isDark, currency }) => {
   const { t } = useTranslation();
-  const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
+  const COLORS = ['#eab308', '#10b981', '#f59e0b', '#ef4444', '#71717a'];
 
   return (
     <ChartContainer title={t('reports.sales.topItems')} isDark={isDark} delay={0.2}>
@@ -161,7 +161,7 @@ export const TopItemsChart = memo<TopItemsChartProps>(({ data, isDark, currency 
               }}
               formatter={(value: number) => [currency.format(value), 'Revenue']}
             />
-            <BarC dataKey="revenue" fill="#3b82f6" radius={[0, 8, 8, 0]} animationDuration={1000}>
+            <BarC dataKey="revenue" fill="#eab308" radius={[0, 8, 8, 0]} animationDuration={1000}>
               {data.map((entry, index) => (
                 <CellC key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
               ))}
@@ -216,7 +216,7 @@ export const HourlySalesChart = memo<HourlySalesChartProps>(({ data, isDark, cur
               ]}
               labelFormatter={(value: number) => `${value}:00`}
             />
-            <BarC dataKey="revenue" fill="#3b82f6" radius={[8, 8, 0, 0]} animationDuration={1000} />
+            <BarC dataKey="revenue" fill="#eab308" radius={[8, 8, 0, 0]} animationDuration={1000} />
           </BarChartC>
         </ResponsiveContainerC>
       </div>
@@ -240,7 +240,7 @@ export const PaymentMethodChart = memo<PaymentMethodChartProps>(({ cashTotal, ca
     { name: 'Card', value: cardTotal },
   ];
 
-  const COLORS = ['#10b981', '#3b82f6'];
+  const COLORS = ['#10b981', '#eab308'];
 
   const total = cashTotal + cardTotal;
 
@@ -299,7 +299,7 @@ export const OrderTypeChart = memo<OrderTypeChartProps>(({ deliveryTotal, instor
     { name: 'In-Store', value: instoreTotal },
   ];
 
-  const COLORS = ['#f59e0b', '#8b5cf6'];
+  const COLORS = ['#f59e0b', '#71717a'];
 
   const total = deliveryTotal + instoreTotal;
 

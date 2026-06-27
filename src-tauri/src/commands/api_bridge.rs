@@ -108,7 +108,20 @@ pub(crate) fn cache_admin_get_response(
         "cachedAt": Utc::now().to_rfc3339(),
         "data": response,
     });
-    write_local_json(db, &admin_api_cache_key(path), &envelope)
+    write_local_json(db, &admin_api_cache_key(path), &envelope)?;
+
+    if path.split('?').next() == Some("/api/pos/integrations") {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let cleared = crate::sync::clear_non_fiscal_order_receipt_numbers(&conn)?;
+        if cleared > 0 {
+            tracing::info!(
+                cleared,
+                "Cleared stale non-fiscal order receipt numbers after integrations cache refresh"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn read_cached_admin_get_response(

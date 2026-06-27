@@ -219,7 +219,7 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
           {dismissible && (
             <button
               onClick={handleDismiss}
-              className="p-1 hover:bg-white/10 rounded-lg transition-colors"
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-2xl text-gray-400 transition-transform active:scale-95 active:bg-white/10"
               aria-label="Dismiss"
             >
               <X className="h-4 w-4 text-gray-400" />
@@ -259,4 +259,3 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
 }
 
 export default TrialModulePrompt
-

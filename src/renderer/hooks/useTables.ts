@@ -69,6 +69,32 @@ export function useTables({
         return table;
       }
 
+      // Release override: the table was cleared after a final payment. Apply the
+      // released projection wholesale so a stale read-after-write refetch can't
+      // resurrect the occupied/unpaid state before the server reflects the close.
+      if ((override as Record<string, unknown>).__released === true) {
+        return buildReleasedTableAfterSettlement(
+          table,
+          override.status === 'cleaning' ? 'cleaning' : 'available',
+        );
+      }
+
+      const tableOrderTotal = Number(table.balance?.order_total || 0);
+      const overrideOrderTotal = Number(override.balance?.order_total || 0);
+      const forceBalanceOverride = (override as Record<string, unknown>).__forceBalanceOverride === true;
+      const balance =
+        forceBalanceOverride
+          ? override.balance || table.balance || null
+          : tableOrderTotal > 0 || overrideOrderTotal <= 0
+          ? table.balance || override.balance || null
+          : override.balance || table.balance || null;
+      const unpaidBalance =
+        forceBalanceOverride
+          ? override.unpaidBalance ?? table.unpaidBalance ?? 0
+          : tableOrderTotal > 0 || overrideOrderTotal <= 0
+          ? table.unpaidBalance ?? override.unpaidBalance ?? 0
+          : override.unpaidBalance ?? table.unpaidBalance ?? 0;
+
       return {
         ...table,
         ...override,
@@ -80,8 +106,8 @@ export function useTables({
         occupiedSince: table.occupiedSince || override.occupiedSince,
         floorLevel: table.floorLevel ?? override.floorLevel ?? null,
         section: table.section ?? override.section ?? null,
-        balance: table.balance || override.balance || null,
-        unpaidBalance: table.unpaidBalance || override.unpaidBalance || 0,
+        balance,
+        unpaidBalance,
       };
     });
   }, []);
@@ -133,22 +159,34 @@ export function useTables({
       workflow: Record<string, unknown> = {},
     ): Promise<boolean> => {
       const nextUpdatedAt = new Date().toISOString();
+      // Release request: an explicit, durable "release this table" (e.g. recovering
+      // a stale reserved table, or releasing after no-show/cancel). It stores a
+      // __released override so the optimistic clear survives an immediate stale
+      // refetch that still reports the prior status, instead of being deleted.
+      const releaseRequested =
+        workflow.__release === true && (status === 'available' || status === 'cleaning');
+      const workflowForServer: Record<string, unknown> = { ...workflow };
+      delete workflowForServer.__release;
+
       if (status === 'occupied') {
-        optimisticTableOverridesRef.current[tableId] = {
-          status,
-          updatedAt: nextUpdatedAt,
-          currentOrderId: typeof workflow.current_order_id === 'string'
+        const occupiedProjection = buildOptimisticOccupiedTable({}, {
+          orderId: typeof workflow.current_order_id === 'string'
             ? workflow.current_order_id
             : optimisticTableOverridesRef.current[tableId]?.currentOrderId,
           tableSessionId: typeof workflow.table_session_id === 'string'
             ? workflow.table_session_id
             : optimisticTableOverridesRef.current[tableId]?.tableSessionId || null,
-          guestCount: typeof workflow.guest_count === 'number'
-            ? workflow.guest_count
-            : optimisticTableOverridesRef.current[tableId]?.guestCount ?? null,
+          guestCount: workflow.guest_count ?? optimisticTableOverridesRef.current[tableId]?.guestCount ?? null,
           occupiedSince: typeof workflow.occupied_since === 'string'
             ? workflow.occupied_since
             : optimisticTableOverridesRef.current[tableId]?.occupiedSince || nextUpdatedAt,
+          orderTotal: workflow.order_total ?? workflow.orderTotal,
+          paidTotal: workflow.paid_total ?? workflow.paidTotal,
+          tipTotal: workflow.tip_total ?? workflow.tipTotal,
+        });
+        optimisticTableOverridesRef.current[tableId] = {
+          ...occupiedProjection,
+          updatedAt: nextUpdatedAt,
           currentWaiterId: typeof workflow.current_waiter_id === 'string'
             ? workflow.current_waiter_id
             : optimisticTableOverridesRef.current[tableId]?.currentWaiterId || null,
@@ -156,6 +194,20 @@ export function useTables({
             ? workflow.current_waiter_name
             : optimisticTableOverridesRef.current[tableId]?.currentWaiterName || null,
         };
+      } else if (releaseRequested) {
+        // Durable release override: survives the immediate (possibly stale) refetch
+        // that still reports the prior reserved/occupied status, until the server
+        // reflects the released status. mergeOptimisticTableOverrides drops it then.
+        optimisticTableOverridesRef.current[tableId] = {
+          status,
+          currentOrderId: undefined,
+          tableSessionId: null,
+          guestCount: null,
+          occupiedSince: undefined,
+          unpaidBalance: 0,
+          balance: null,
+          __released: true,
+        } as Partial<RestaurantTable> & { __released: true };
       } else {
         delete optimisticTableOverridesRef.current[tableId];
       }
@@ -177,6 +229,9 @@ export function useTables({
                       occupiedSince: typeof workflow.occupied_since === 'string'
                         ? workflow.occupied_since
                         : table.occupiedSince ?? new Date().toISOString(),
+                      orderTotal: workflow.order_total ?? workflow.orderTotal,
+                      paidTotal: workflow.paid_total ?? workflow.paidTotal,
+                      tipTotal: workflow.tip_total ?? workflow.tipTotal,
                     }),
                     updatedAt: nextUpdatedAt,
                     currentWaiterId: typeof workflow.current_waiter_id === 'string'
@@ -186,6 +241,11 @@ export function useTables({
                       ? workflow.current_waiter_name
                       : table.currentWaiterName,
                   }
+                : releaseRequested
+                ? buildReleasedTableAfterSettlement(
+                    table,
+                    status === 'cleaning' ? 'cleaning' : 'available',
+                  )
                 : {
                     ...table,
                     status,
@@ -213,9 +273,9 @@ export function useTables({
         const result = isBrowser()
           ? await posApiPatch<{ success?: boolean; error?: string }>(
               `/api/pos/tables/${tableId}`,
-              { status, ...workflow },
+              { status, ...workflowForServer },
             )
-          : await bridge.tables.updateStatus(tableId, status, workflow);
+          : await bridge.tables.updateStatus(tableId, status, workflowForServer);
 
         if (!result.success) {
           throw new Error(result.error || 'Failed to update table status');
@@ -232,6 +292,12 @@ export function useTables({
         if (status === 'occupied') {
           setError(err instanceof Error ? err : new Error('Failed to update table status'));
           return false;
+        }
+        // The release failed: drop the optimistic release override so the next
+        // fetch reflects the true (still reserved/occupied) server state instead
+        // of a phantom "released" projection.
+        if (releaseRequested) {
+          delete optimisticTableOverridesRef.current[tableId];
         }
         await fetchTables();
         return false;
@@ -282,16 +348,83 @@ export function useTables({
       scheduleRefresh(150);
     };
 
-    const handleTableSessionSettled = (payload: { tableId?: string | null }) => {
+    const handleTableSessionSettled = (payload: {
+      tableId?: string | null;
+      releaseStatus?: string | null;
+    }) => {
+      const tableId = typeof payload?.tableId === 'string' ? payload.tableId.trim() : '';
+      const releaseStatus = payload?.releaseStatus === 'cleaning' ? 'cleaning' : 'available';
+      if (!tableId) {
+        scheduleRefresh(150);
+        return;
+      }
+      // Store a release override so the optimistic clear survives the immediate
+      // (possibly stale) refetch the close flow fires, until the server reflects
+      // the released table. mergeOptimisticTableOverrides drops it once that lands.
+      optimisticTableOverridesRef.current[tableId] = {
+        status: releaseStatus,
+        currentOrderId: undefined,
+        tableSessionId: null,
+        guestCount: null,
+        occupiedSince: undefined,
+        unpaidBalance: 0,
+        balance: null,
+        __released: true,
+      } as Partial<RestaurantTable> & { __released: true };
+      setTables((prevTables) =>
+        prevTables.map((table) =>
+          table.id === tableId ? buildReleasedTableAfterSettlement(table, releaseStatus) : table,
+        ),
+      );
+      scheduleRefresh(150);
+    };
+
+    const handleTableSessionBalanceUpdated = (payload: {
+      tableId?: string | null;
+      orderId?: string | null;
+      tableSessionId?: string | null;
+      guestCount?: unknown;
+      occupiedSince?: string | null;
+      orderTotal?: unknown;
+      paidTotal?: unknown;
+      tipTotal?: unknown;
+    }) => {
       const tableId = typeof payload?.tableId === 'string' ? payload.tableId.trim() : '';
       if (!tableId) {
         scheduleRefresh(150);
         return;
       }
-      delete optimisticTableOverridesRef.current[tableId];
+
+      const projection = {
+        ...buildOptimisticOccupiedTable({}, {
+          orderId: payload.orderId,
+          tableSessionId: payload.tableSessionId,
+          guestCount: payload.guestCount,
+          occupiedSince: payload.occupiedSince || new Date().toISOString(),
+          orderTotal: payload.orderTotal,
+          paidTotal: payload.paidTotal,
+          tipTotal: payload.tipTotal,
+        }),
+        __forceBalanceOverride: true,
+        updatedAt: new Date().toISOString(),
+      } as Partial<RestaurantTable> & { __forceBalanceOverride: true; updatedAt: string };
+
+      optimisticTableOverridesRef.current[tableId] = {
+        ...optimisticTableOverridesRef.current[tableId],
+        ...projection,
+      };
       setTables((prevTables) =>
         prevTables.map((table) =>
-          table.id === tableId ? buildReleasedTableAfterSettlement(table) : table,
+          table.id === tableId
+            ? {
+                ...table,
+                ...projection,
+                currentOrderId: projection.currentOrderId || table.currentOrderId,
+                tableSessionId: projection.tableSessionId || table.tableSessionId || null,
+                guestCount: projection.guestCount ?? table.guestCount ?? null,
+                occupiedSince: projection.occupiedSince || table.occupiedSince,
+              }
+            : table,
         ),
       );
       scheduleRefresh(150);
@@ -303,6 +436,7 @@ export function useTables({
     onEvent('order-status-updated', handleOrderMutation);
     onEvent('order-deleted', handleOrderMutation);
     onEvent('table-session-settled', handleTableSessionSettled);
+    onEvent('table-session-balance-updated', handleTableSessionBalanceUpdated);
 
     return () => {
       disposed = true;
@@ -313,6 +447,7 @@ export function useTables({
       offEvent('order-status-updated', handleOrderMutation);
       offEvent('order-deleted', handleOrderMutation);
       offEvent('table-session-settled', handleTableSessionSettled);
+      offEvent('table-session-balance-updated', handleTableSessionBalanceUpdated);
     };
   }, [fetchTables, enabled]);
 

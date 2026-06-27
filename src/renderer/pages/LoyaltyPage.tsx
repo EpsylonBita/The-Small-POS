@@ -40,6 +40,27 @@ interface CustomerLoyalty {
   loyalty_card_uid?: string | null;
 }
 
+// Tier tokens that mean "no tier assigned" (backend emits these inconsistently). Separators are
+// collapsed before matching so none / no_tier / no-tier / "no tier" all resolve to the same state.
+const NO_TIER_TOKENS = new Set(['', 'none', 'notier', 'unassigned']);
+
+const normalizeTier = (tier?: string | null): string => (tier ?? '').trim().toLowerCase();
+
+const isNoTier = (normalizedTier: string): boolean =>
+  NO_TIER_TOKENS.has(normalizedTier.replace(/[\s_-]+/g, ''));
+
+// Humanize an unknown non-empty tier token (e.g. "vip_gold" -> "Vip Gold") so the UI never shows a
+// raw lowercase database token.
+const humanizeTier = (rawTier: string): string =>
+  rawTier
+    .trim()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .map(word => (word ? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase() : ''))
+    .join(' ');
+
 const LoyaltyPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -91,8 +112,12 @@ const LoyaltyPage: React.FC = () => {
   }, [fetchData]);
 
   const getTierColor = (tier: string) => {
-    switch (tier?.toLowerCase()) {
-      case 'platinum': return 'text-purple-400 border-purple-500/40';
+    const normalized = normalizeTier(tier);
+    if (isNoTier(normalized)) {
+      return isDark ? 'text-zinc-400 border-zinc-700' : 'text-gray-500 border-gray-300';
+    }
+    switch (normalized) {
+      case 'platinum': return 'text-amber-300 border-amber-400/50';
       case 'gold': return 'text-yellow-400 border-yellow-500/40';
       case 'silver': return 'text-zinc-300 border-zinc-400/40';
       default: return 'text-amber-500 border-amber-500/40';
@@ -100,8 +125,24 @@ const LoyaltyPage: React.FC = () => {
   };
 
   const getTierIcon = (tier: string) => {
-    const stars = tier?.toLowerCase() === 'platinum' ? 4 : tier?.toLowerCase() === 'gold' ? 3 : tier?.toLowerCase() === 'silver' ? 2 : 1;
+    const normalized = normalizeTier(tier);
+    if (isNoTier(normalized)) return null;
+    const stars = normalized === 'platinum' ? 4 : normalized === 'gold' ? 3 : normalized === 'silver' ? 2 : 1;
     return Array(stars).fill(0).map((_, i) => <Star key={i} className="w-3 h-3 fill-current" />);
+  };
+
+  // Resolve a backend tier value to a localized, display-safe label. Never renders the raw token:
+  // no-tier -> neutral localized label, known tiers -> localized names, unknown -> humanized.
+  const getTierLabel = (tier: string) => {
+    const normalized = normalizeTier(tier);
+    if (isNoTier(normalized)) return t('loyalty.tier.none', 'No tier');
+    switch (normalized) {
+      case 'bronze': return t('loyalty.tier.bronze', 'Bronze');
+      case 'silver': return t('loyalty.tier.silver', 'Silver');
+      case 'gold': return t('loyalty.tier.gold', 'Gold');
+      case 'platinum': return t('loyalty.tier.platinum', 'Platinum');
+      default: return humanizeTier(tier);
+    }
   };
 
   const findCustomerByCode = useCallback((code: string) => {
@@ -221,7 +262,7 @@ const LoyaltyPage: React.FC = () => {
           <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               onClick={() => setShowScanPanel(true)}
-              className="h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 bg-transparent text-white border border-cyan-500/40"
+              className={`h-10 px-4 rounded-xl text-sm font-semibold transition-all duration-200 inline-flex items-center justify-center gap-2 bg-transparent active:scale-95 ${isDark ? 'border border-yellow-400/70 text-white active:bg-yellow-400/10' : 'border border-yellow-400 text-gray-950 active:bg-yellow-50'}`}
             >
               <ScanLine className="w-4 h-4" />
               {t('loyalty.scan.button', 'Scan')}
@@ -230,13 +271,12 @@ const LoyaltyPage: React.FC = () => {
               type="button"
               onClick={() => void fetchData()}
               disabled={loading}
-              title={t('common.refresh', 'Refresh')}
               aria-label={t('common.refresh', 'Refresh')}
-              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
                 isDark
-                  ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                  : 'border border-black bg-black text-white hover:bg-zinc-800'
-              } ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                  ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
+                  : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
+              } ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
             >
               <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
             </button>
@@ -251,7 +291,7 @@ const LoyaltyPage: React.FC = () => {
             className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
                 <Users className="w-5 h-5 text-green-500" />
               </div>
               <div>
@@ -267,7 +307,7 @@ const LoyaltyPage: React.FC = () => {
             className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
                 <Award className="w-5 h-5 text-yellow-500" />
               </div>
               <div>
@@ -283,8 +323,8 @@ const LoyaltyPage: React.FC = () => {
             className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <TrendingUp className="w-5 h-5 text-blue-500" />
+              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+                <TrendingUp className="w-5 h-5 text-amber-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('loyalty.avgPoints', 'Avg Points')}</p>
@@ -326,8 +366,8 @@ const LoyaltyPage: React.FC = () => {
               transition={{ delay: idx * 0.05 }}
               onClick={() => setSelectedCustomer(selectedCustomer?.id === customer.id ? null : customer)}
               className={`p-4 rounded-xl cursor-pointer transition-all border ${
-                isDark ? 'bg-zinc-950 hover:bg-zinc-900 border-zinc-800' : 'bg-white hover:bg-gray-50 border-gray-200'
-              } ${selectedCustomer?.id === customer.id ? 'ring-2 ring-purple-500' : ''}`}
+                isDark ? 'bg-zinc-950 active:bg-zinc-900 border-zinc-800' : 'bg-white active:bg-gray-50 border-gray-200'
+              } ${selectedCustomer?.id === customer.id ? 'ring-2 ring-yellow-400' : ''}`}
             >
               <div className="flex items-start justify-between mb-3">
                 <div>
@@ -341,13 +381,13 @@ const LoyaltyPage: React.FC = () => {
                 </div>
                 <span className={`px-2 py-1 text-xs font-medium rounded border bg-transparent flex items-center gap-1 ${getTierColor(customer.tier)}`}>
                   {getTierIcon(customer.tier)}
-                  {customer.tier || 'Bronze'}
+                  {getTierLabel(customer.tier)}
                 </span>
               </div>
 
               <div className="grid grid-cols-3 gap-2 text-center">
                 <div>
-                  <p className="text-lg font-bold text-purple-400">{customer.points_balance}</p>
+                  <p className="text-lg font-bold text-yellow-400">{customer.points_balance}</p>
                   <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{t('loyalty.balance', 'Balance')}</p>
                 </div>
                 <div>

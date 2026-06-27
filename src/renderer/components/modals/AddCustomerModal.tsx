@@ -333,7 +333,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   return (
     <div className="relative">
       <div className="relative">
-        <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+        <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
         <input
           type="text"
           value={value}
@@ -364,10 +364,10 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
               type="button"
               key={suggestion.place_id || index}
               onClick={() => handleSuggestionClick(suggestion)}
-              className="w-full text-left p-3 hover:bg-white/10 dark:hover:bg-white/5 transition-colors border-b border-gray-200/20 dark:border-gray-600/20 last:border-b-0"
+              className="w-full text-left p-3 active:bg-white/10 dark:active:bg-white/5 transition-colors border-b border-gray-200/20 dark:border-gray-600/20 last:border-b-0"
             >
               <div className="flex items-start gap-2">
-                <MapPin className="w-4 h-4 text-blue-500 dark:text-blue-400 mt-1 flex-shrink-0" />
+                <MapPin className="w-4 h-4 text-amber-500 dark:text-amber-300 mt-1 flex-shrink-0" />
                 <div>
                   <p className="text-sm font-medium text-gray-900 dark:text-white">
                     {getSuggestionStreetLabel(suggestion)}
@@ -828,14 +828,6 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.overrideReason = t('modals.addCustomer.overrideReasonRequired', 'Override reason must be at least 6 characters.');
     }
 
-    if (!isSpecialAddressMode && !formData.nameOnRinger.trim()) {
-      newErrors.nameOnRinger = t('modals.addCustomer.nameOnRingerRequired', 'Name on ringer is required');
-    }
-
-    if (!isSpecialAddressMode && !formData.floorNumber.trim()) {
-      newErrors.floorNumber = t('modals.addCustomer.floorRequired', 'Floor number is required');
-    }
-
     if (formData.email && !/\S+@\S+\.\S+/.test(formData.email)) {
       newErrors.email = t('modals.addCustomer.emailInvalid');
     }
@@ -1270,7 +1262,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.phoneLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
-            <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
             <input
               type="tel"
               value={formData.phone}
@@ -1298,7 +1290,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               placeholder={
                 hasDeliveryPro
                   ? t('modals.addCustomer.streetPlaceholder')
-                  : t('modals.addCustomer.manualAddressPlaceholder', 'Enter address manually')
+                  : t('modals.addCustomer.manualAddressPlaceholder')
               }
               className="pr-3"
               searchEnabled={hasDeliveryPro}
@@ -1309,10 +1301,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           )}
           {!hasDeliveryPro && (
             <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-              {t(
-                'modals.addCustomer.manualAddressEntryHint',
-                'Delivery Pro is not enabled for this terminal. Address search and zone validation are off, so the address will be saved manually.',
-              )}
+              {t('modals.addCustomer.manualAddressEntryHint')}
             </p>
           )}
         </div>
@@ -1352,7 +1341,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               {/* Validation Status */}
               <div className="min-h-[24px]">
                 {isValidatingDelivery && (
-                  <div className="flex items-center gap-2 text-blue-600">
+                  <div className="flex items-center gap-2 text-yellow-600 dark:text-yellow-300">
                     <Clock className="w-4 h-4 animate-spin" />
                     <span className="text-sm">{t('modals.addCustomer.validatingAddress')}</span>
                   </div>
@@ -1387,7 +1376,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
               {/* Validation Details */}
               {deliveryValidationResult && deliveryValidationResult.selectedZone && (
-                <div className="bg-black/20 rounded-lg p-3 space-y-2 border border-white/5">
+                <div className="bg-black/20 rounded-2xl p-3 space-y-2 border border-white/5">
                   <div className="grid grid-cols-2 gap-4 text-xs">
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.zone')}:</span>
@@ -1412,7 +1401,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               )}
 
               {(deliveryValidationStatus === 'out_of_zone' || deliveryValidationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-lg border border-orange-500/30 bg-orange-500/10 p-3">
+                <div className="space-y-2 rounded-2xl border border-orange-500/30 bg-orange-500/10 p-3">
                   <label className="flex items-center gap-2 text-sm text-orange-200">
                     <input
                       type="checkbox"
@@ -1450,7 +1439,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.cityLabel')}
           </label>
           <div className="relative">
-            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
             <input
               type="text"
               value={formData.city}
@@ -1467,7 +1456,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.postcodeLabel')}
           </label>
           <div className="relative">
-            <Hash className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <Hash className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
             <input
               type="text"
               value={formData.postalCode}
@@ -1484,7 +1473,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.nameLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
-            <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
             <input
               type="text"
               value={formData.name}
@@ -1506,7 +1495,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.emailLabel')}
           </label>
           <div className="relative">
-            <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
             <input
               type="email"
               value={formData.email}
@@ -1525,10 +1514,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         {/* Name on Ringer */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.nameOnRingerLabel')} {!isSpecialAddressMode && <span className="text-red-500">*</span>}
+            {t('modals.addCustomer.nameOnRingerLabel')}
           </label>
           <div className="relative">
-            <Users className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <Users className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
             <input
               type="text"
               value={formData.nameOnRinger}
@@ -1545,10 +1534,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         {/* Floor Number */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.floorLabel')} {!isSpecialAddressMode && <span className="text-red-500">*</span>}
+            {t('modals.addCustomer.floorLabel')}
           </label>
           <div className="relative">
-            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
             <input
               type="text"
               value={formData.floorNumber}
@@ -1574,7 +1563,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.notesLabel')}
           </label>
           <div className="relative">
-            <FileText className="absolute left-3 top-3 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <FileText className="absolute left-3 top-3 w-5 h-5 text-gray-500 dark:text-gray-400" />
             <textarea
               value={formData.notes}
               onChange={(e) => handleInputChange('notes', e.target.value)}
@@ -1587,7 +1576,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         {/* Submit Error */}
         {errors.submit && (
-          <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-sm">
+          <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-600 dark:text-red-400 text-sm">
             {errors.submit}
           </div>
         )}
@@ -1597,18 +1586,18 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="liquid-glass-modal-button flex-1 text-gray-300 bg-white/5 border-white/10 hover:border-white/20"
+            className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-2xl"
           >
             {t('modals.addCustomer.cancel')}
           </button>
           <button
             type="submit"
             disabled={isSubmitting}
-            className="flex-1 py-3 px-4 rounded-2xl font-bold text-white bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+            className="liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-2xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
           >
             {isSubmitting
               ? t('modals.addCustomer.saving')
-              : mode === 'addAddress'
+              : (mode === 'addAddress' || mode === 'editAddress')
                 ? t('modals.addCustomer.saveAddress', 'Save Address')
                 : mode === 'edit'
                   ? t('modals.addCustomer.saveChanges', 'Save Changes')

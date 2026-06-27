@@ -14,10 +14,10 @@ export const ThemeSwitcher: React.FC = () => {
   return (
     <button
       onClick={handleToggle}
-      className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300 ${
+      className={`w-10 h-10 rounded-xl flex items-center justify-center transition-transform duration-150 active:scale-95 ${
         resolvedTheme === 'light'
-          ? 'text-slate-900 hover:text-yellow-500 hover:drop-shadow-[0_0_8px_rgba(234,179,8,0.8)]'
-          : 'text-gray-500 hover:text-blue-400 hover:drop-shadow-[0_0_8px_rgba(59,130,246,0.8)]'
+          ? 'text-slate-900 hover:text-yellow-500'
+          : 'text-gray-300 hover:text-yellow-400'
       }`}
       title={resolvedTheme === 'light' ? t('theme.switchToDark') : t('theme.switchToLight')}
     >

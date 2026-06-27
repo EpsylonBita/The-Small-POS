@@ -8,7 +8,7 @@ import {
   settleDraftPortions,
   settleTerminalPortion,
   type SplitOrderFinancials,
-} from '../../src/renderer/utils/splitPaymentSettlement';
+} from '../../src/renderer/utils/splitPaymentSettlement.ts';
 
 const baseFinancials = (totalAmount: number): SplitOrderFinancials => ({
   totalAmount,
@@ -250,4 +250,77 @@ test('SplitPaymentModal routes discount persistence through the settlement helpe
     /persistAdditionalDiscount/,
     'the pre-payment absolute discount write must not come back to the modal',
   );
+});
+
+// Regression contract for the by-item tab reset (2026-06-21 review): the load-state
+// effect depended on applySplitStateSnapshot, which depended on the live activeTab,
+// so every tab click recreated the callback, re-ran the load effect, and reset the
+// tab back to initialMode — making the "By Item" tab unreachable from the repair modal.
+test('SplitPaymentModal tab switching is stable: load-state does not reset to initialMode on tab change', () => {
+  const source = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'modals', 'SplitPaymentModal.tsx'),
+    'utf8',
+  );
+
+  // applySplitStateSnapshot must not depend on the live activeTab (which would make
+  // it — and the load-state effect that depends on it — re-run on every tab click).
+  const snapshotCb = source.match(
+    /const applySplitStateSnapshot = useCallback\([\s\S]*?\}, \[([^\]]*)\]\);/,
+  );
+  assert.ok(snapshotCb, 'applySplitStateSnapshot callback not found');
+  assert.doesNotMatch(snapshotCb[1], /\bactiveTab\b/);
+  assert.match(snapshotCb[1], /initialMode/);
+  // The reset path defaults to initialMode, never the live activeTab.
+  assert.match(snapshotCb[0], /initializePortions\(options\.mode \?\? initialMode,/);
+  assert.doesNotMatch(snapshotCb[0], /options\.mode \?\? activeTab/);
+
+  // The load-state effect (keyed on isOpen/initialMode) still applies initialMode on
+  // open, but its deps no longer include the live activeTab.
+  const loadEffect = source.match(
+    /const snapshot = await fetchLatestSplitState\(\);[\s\S]*?\}, \[([^\]]*)\]\);/,
+  );
+  assert.ok(loadEffect, 'load-state effect not found');
+  assert.doesNotMatch(loadEffect[1], /\bactiveTab\b/);
+  assert.match(loadEffect[0], /applySplitStateSnapshot\(snapshot, \{ resetDraft: true, mode: initialMode \}\)/);
+
+  // Both tabs remain wired (reachable) and the drift refresh still passes the live tab.
+  assert.match(source, /onClick=\{\(\) => setActiveTab\('by-amount'\)\}/);
+  assert.match(source, /onClick=\{\(\) => setActiveTab\('by-items'\)\}/);
+  assert.match(source, /ensureLatestOutstanding\([^)]*activeTab\)/);
+});
+
+test('SplitPaymentModal unassigned-item warning uses real i18next plurals, no parenthetical grammar', () => {
+  const source = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'modals', 'SplitPaymentModal.tsx'),
+    'utf8',
+  );
+  // Component calls the key with count and no parenthetical defaultValue.
+  assert.match(source, /t\('splitPayment\.unassignedWarning', \{ count: unassignedCount \}\)/);
+  assert.doesNotMatch(source, /item\(s\) not assigned/);
+
+  const loadLocale = (lng: string) =>
+    JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${lng}.json`), 'utf8'));
+
+  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+    const sp = loadLocale(lng).splitPayment;
+    // Plural keys exist; the flat parenthetical key is gone.
+    assert.equal(typeof sp.unassignedWarning_one, 'string', `${lng} missing unassignedWarning_one`);
+    assert.equal(typeof sp.unassignedWarning_other, 'string', `${lng} missing unassignedWarning_other`);
+    assert.ok(!('unassignedWarning' in sp), `${lng} still has the flat unassignedWarning`);
+    // No parenthetical plural grammar in any locale.
+    assert.doesNotMatch(sp.unassignedWarning_one, /\(s\)|\(τα\)|\(en\)|\(i\)/);
+    assert.doesNotMatch(sp.unassignedWarning_other, /\(s\)|\(τα\)|\(en\)|\(i\)/);
+    // Tokens preserved.
+    assert.match(sp.unassignedWarning_other, /\{\{count\}\}/);
+  }
+
+  // Greek must not contain the old parenthetical "προϊόν(τα)", and de/fr/it must not
+  // leak the English "item(s) not assigned".
+  const el = loadLocale('el').splitPayment;
+  assert.doesNotMatch(el.unassignedWarning_one, /προϊόν\(τα\)/);
+  assert.doesNotMatch(el.unassignedWarning_other, /προϊόν\(τα\)/);
+  for (const lng of ['de', 'fr', 'it']) {
+    const sp = loadLocale(lng).splitPayment;
+    assert.doesNotMatch(sp.unassignedWarning_other, /item.*not assigned/i, `${lng} leaks English`);
+  }
 });

@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useId } from 'react';
 import { useTranslation } from 'react-i18next';
+import { renderModalPortal } from '../utils/render-modal-portal';
 import { motion } from 'framer-motion';
 import {
   Package,
@@ -176,6 +177,13 @@ const InventoryPage: React.FC = () => {
   const [adjustmentReason, setAdjustmentReason] = useState<'count' | 'received' | 'damaged' | 'expired' | 'theft' | 'other'>('count');
   const [adjustmentNotes, setAdjustmentNotes] = useState('');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  // Refs + stable title ids so each portaled modal can declare dialog semantics and
+  // join the topmost-[role="dialog"] Escape stack used across the POS modals.
+  const historyDialogRef = useRef<HTMLDivElement>(null);
+  const adjustDialogRef = useRef<HTMLDivElement>(null);
+  const historyTitleId = useId();
+  const adjustTitleId = useId();
 
   const isDark = resolvedTheme === 'dark';
   const isGreek = i18n.language === 'el';
@@ -368,6 +376,62 @@ const InventoryPage: React.FC = () => {
     }
   }, [t]);
 
+  // Close-only callbacks. closeAdjustModal mirrors the existing Cancel button
+  // (resets reason/notes) and never calls handleAdjustStock, so dismissing the
+  // modal can never save an adjustment.
+  const closeHistoryModal = useCallback(() => {
+    setHistoryItem(null);
+  }, []);
+
+  const closeAdjustModal = useCallback(() => {
+    setShowAdjustModal(false);
+    setAdjustmentReason('count');
+    setAdjustmentNotes('');
+  }, []);
+
+  // Escape closes the topmost open Inventory modal, mirroring the app-level POS
+  // modals (TableActionModal / RoomsView). Each handler is gated on its own
+  // open-state and only reacts when its panel is the frontmost [role="dialog"],
+  // so a nested dialog opened above it would close first. Both route through the
+  // close-only callbacks above, never the save/adjust submit path.
+  useEffect(() => {
+    if (!historyItem) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== historyDialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      closeHistoryModal();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [historyItem, closeHistoryModal]);
+
+  useEffect(() => {
+    if (!showAdjustModal) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== adjustDialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      closeAdjustModal();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [showAdjustModal, closeAdjustModal]);
+
   return (
     <div className={`min-h-screen p-6 ${isDark ? 'text-white' : 'text-gray-900'}`}>
       {/* Header */}
@@ -381,9 +445,8 @@ const InventoryPage: React.FC = () => {
         <button
           type="button"
           onClick={fetchInventory}
-          title={t('common.refresh', 'Refresh')}
           aria-label={t('common.refresh', 'Refresh')}
-          className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${loading ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+          className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -401,7 +464,7 @@ const InventoryPage: React.FC = () => {
             </div>
             <button
               onClick={fetchInventory}
-              className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium border ${isDark ? 'border-red-700 hover:bg-red-900/40' : 'border-red-300 hover:bg-red-100'}`}
+              className={`shrink-0 rounded-2xl px-3 py-2 text-sm font-medium border transition-transform active:scale-[0.98] ${isDark ? 'border-red-700 active:bg-red-900/40' : 'border-red-300 active:bg-red-100'}`}
             >
               {t('common.retry', 'Retry')}
             </button>
@@ -413,9 +476,9 @@ const InventoryPage: React.FC = () => {
         <>
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-blue-400' : 'bg-white border-gray-200 border-t-blue-500'}`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-zinc-400' : 'bg-white border-gray-200 border-t-zinc-500'}`}>
           <div className="flex items-center gap-3">
-            <Boxes className={`w-5 h-5 shrink-0 ${isDark ? 'text-blue-300' : 'text-blue-600'}`} />
+            <Boxes className={`w-5 h-5 shrink-0 ${isDark ? 'text-zinc-300' : 'text-zinc-600'}`} />
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.totalItems', 'Total Items')}</p>
               <p className="text-xl font-bold">{stats.total}</p>
@@ -449,9 +512,9 @@ const InventoryPage: React.FC = () => {
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-cyan-400' : 'bg-white border-gray-200 border-t-cyan-500'}`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500'}`}>
           <div className="flex items-center gap-3">
-            <BarChart3 className={`w-5 h-5 shrink-0 ${isDark ? 'text-cyan-300' : 'text-cyan-600'}`} />
+            <BarChart3 className={`w-5 h-5 shrink-0 ${isDark ? 'text-amber-300' : 'text-amber-600'}`} />
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.totalValue', 'Total Value')}</p>
               <p className="text-lg font-bold">{formatMoney(stats.totalValue)}</p>
@@ -477,7 +540,7 @@ const InventoryPage: React.FC = () => {
             <button
               key={status}
               onClick={() => setStatusFilter(status)}
-              className={`px-4 py-2 rounded-lg font-medium transition-all border ${
+              className={`px-4 py-2 rounded-2xl font-medium transition-transform active:scale-[0.98] border ${
                 status === 'all'
                   ? statusFilter === status
                     ? isDark
@@ -490,19 +553,19 @@ const InventoryPage: React.FC = () => {
                   ? statusFilter === status
                     ? 'bg-red-500 text-white border-red-500'
                     : isDark
-                    ? 'bg-zinc-900 text-red-300 border-red-500/40 hover:bg-red-500/10'
-                    : 'bg-white text-red-600 border-red-300 hover:bg-red-50'
+                    ? 'bg-zinc-900 text-red-300 border-red-500/40 active:bg-red-500/10'
+                    : 'bg-white text-red-600 border-red-300 active:bg-red-50'
                   : status === 'low'
                   ? statusFilter === status
                     ? 'bg-amber-500 text-black border-amber-500'
                     : isDark
-                    ? 'bg-zinc-900 text-amber-300 border-amber-500/40 hover:bg-amber-500/10'
-                    : 'bg-white text-amber-600 border-amber-300 hover:bg-amber-50'
+                    ? 'bg-zinc-900 text-amber-300 border-amber-500/40 active:bg-amber-500/10'
+                    : 'bg-white text-amber-600 border-amber-300 active:bg-amber-50'
                   : statusFilter === status
                   ? 'bg-emerald-500 text-black border-emerald-500'
                   : isDark
-                  ? 'bg-zinc-900 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/10'
-                  : 'bg-white text-emerald-600 border-emerald-300 hover:bg-emerald-50'
+                  ? 'bg-zinc-900 text-emerald-300 border-emerald-500/40 active:bg-emerald-500/10'
+                  : 'bg-white text-emerald-600 border-emerald-300 active:bg-emerald-50'
               }`}
             >
               {t(`inventory.filter.${status}`, status.charAt(0).toUpperCase() + status.slice(1))}
@@ -545,8 +608,8 @@ const InventoryPage: React.FC = () => {
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: index * 0.03 }}
                     onClick={() => void openHistoryModal(item)}
-                    className={`${isDark ? 'hover:bg-zinc-900' : 'hover:bg-gray-50'} cursor-pointer transition-colors`}
-                    title={t('inventory.history.open', 'View price and movement history')}
+                    className={`${isDark ? 'active:bg-zinc-900' : 'active:bg-gray-50'} cursor-pointer transition-colors`}
+                    aria-label={t('inventory.history.open', 'View price and movement history')}
                   >
                     <td className="px-4 py-3"><StatusIcon status={status} /></td>
                     <td className="px-4 py-3 font-medium">{name}</td>
@@ -565,8 +628,8 @@ const InventoryPage: React.FC = () => {
                           openAdjustModal(item);
                         }}
                         disabled={adjustAction.disabled}
-                        className={`p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-200'}`}
-                        title={adjustAction.message || t('inventory.adjustStock', 'Adjust Stock')}
+                        className={`p-2 rounded-2xl transition-transform active:scale-[0.96] disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'active:bg-zinc-800' : 'active:bg-gray-200'}`}
+                        aria-label={adjustAction.message || t('inventory.adjustStock', 'Adjust Stock')}
                       >
                         <Edit3 className="w-4 h-4" />
                       </button>
@@ -588,9 +651,13 @@ const InventoryPage: React.FC = () => {
       )}
 
       {/* Item History Modal */}
-      {historyItem && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setHistoryItem(null)}>
+      {historyItem && renderModalPortal(
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[1200] p-4" onClick={closeHistoryModal}>
           <motion.div
+            ref={historyDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={historyTitleId}
             initial={{ opacity: 0, scale: 0.96 }}
             animate={{ opacity: 1, scale: 1 }}
             className={`flex max-h-[90vh] w-full max-w-5xl flex-col rounded-2xl border shadow-2xl ${isDark ? 'bg-zinc-950 border-zinc-800 text-white' : 'bg-white border-gray-200 text-gray-950'}`}
@@ -598,18 +665,18 @@ const InventoryPage: React.FC = () => {
           >
             <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-5">
               <div className="min-w-0">
-                <div className={`mb-2 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDark ? 'bg-blue-500/15 text-blue-200' : 'bg-blue-50 text-blue-700'}`}>
+                <div className={`mb-2 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDark ? 'bg-amber-500/15 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
                   <History className="h-3.5 w-3.5" />
                   {t('inventory.history.title', 'Price and movement history')}
                 </div>
-                <h3 className="truncate text-2xl font-bold">{isGreek ? historyItem.name_el : historyItem.name_en}</h3>
+                <h3 id={historyTitleId} className="truncate text-2xl font-bold">{isGreek ? historyItem.name_el : historyItem.name_en}</h3>
                 <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
                   {historyItem.category_name || t('inventory.noCategory', 'No category')}
                 </p>
               </div>
               <button
-                onClick={() => setHistoryItem(null)}
-                className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${isDark ? 'border-zinc-700 bg-zinc-900 hover:bg-zinc-800' : 'border-gray-200 bg-white hover:bg-gray-100'}`}
+                onClick={closeHistoryModal}
+                className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-zinc-700 bg-zinc-900 active:bg-zinc-800' : 'border-gray-200 bg-white active:bg-gray-100'}`}
                 aria-label={t('common.close', 'Close')}
               >
                 <X className="h-5 w-5" />
@@ -742,15 +809,19 @@ const InventoryPage: React.FC = () => {
       )}
 
       {/* Adjust Stock Modal */}
-      {showAdjustModal && selectedItem && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAdjustModal(false)}>
+      {showAdjustModal && selectedItem && renderModalPortal(
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[1200]" onClick={closeAdjustModal}>
           <motion.div
+            ref={adjustDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={adjustTitleId}
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
-            className={`p-6 rounded-2xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} shadow-2xl w-full max-w-md`}
+            className={`p-6 rounded-2xl border backdrop-blur-2xl ring-1 ${isDark ? 'bg-black/60 border-white/10 ring-white/15 text-white shadow-2xl shadow-black/50' : 'bg-white/60 border-white/70 ring-white/60 text-gray-950 shadow-2xl shadow-black/30'} w-full max-w-md`}
             onClick={(e: React.MouseEvent) => e.stopPropagation()}
           >
-            <h3 className="text-xl font-bold mb-4">{t('inventory.adjustStock', 'Adjust Stock')}</h3>
+            <h3 id={adjustTitleId} className="text-xl font-bold mb-4">{t('inventory.adjustStock', 'Adjust Stock')}</h3>
             <p className="mb-2">{isGreek ? selectedItem.name_el : selectedItem.name_en}</p>
             <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'} mb-4`}>
               {t('inventory.currentStock', 'Current')}: {selectedItem.stock_quantity} {selectedItem.unit_of_measurement}
@@ -763,7 +834,7 @@ const InventoryPage: React.FC = () => {
                 value={adjustmentReason}
                 onChange={(e) => setAdjustmentReason(e.target.value as typeof adjustmentReason)}
                 disabled={adjustAction.disabled}
-                className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100' : 'bg-gray-100 border-gray-300 text-gray-900'}`}
+                className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100' : 'bg-gray-100 border-gray-300 text-gray-900'}`}
               >
                 <option value="count">{t('inventory.reasons.count', 'Stock Count')}</option>
                 <option value="received">{t('inventory.reasons.received', 'Received Delivery')}</option>
@@ -774,17 +845,18 @@ const InventoryPage: React.FC = () => {
               </select>
             </div>
             <div className="flex items-center gap-4 mb-4">
-              <button disabled={adjustAction.disabled} onClick={() => setAdjustmentQty(q => q - 1)} className={`p-3 rounded-xl border disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 hover:bg-gray-300'}`}>
+              <button disabled={adjustAction.disabled} aria-label={t('common.actions.decrease', { defaultValue: 'Decrease' })} onClick={() => setAdjustmentQty(q => q - 1)} className={`inline-flex items-center justify-center p-3 rounded-xl border disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 active:bg-gray-300'}`}>
                 <Minus className="w-5 h-5" />
               </button>
               <input
                 type="number"
+                aria-label={t('inventory.adjustmentQuantity', { defaultValue: 'Adjustment quantity' })}
                 value={adjustmentQty}
                 onChange={(e) => setAdjustmentQty(Number(e.target.value))}
                 disabled={adjustAction.disabled}
                 className={`flex-1 text-center text-2xl font-bold py-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-gray-100 border-gray-300'}`}
               />
-              <button disabled={adjustAction.disabled} onClick={() => setAdjustmentQty(q => q + 1)} className={`p-3 rounded-xl border disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 hover:bg-gray-300'}`}>
+              <button disabled={adjustAction.disabled} aria-label={t('common.actions.increase', { defaultValue: 'Increase' })} onClick={() => setAdjustmentQty(q => q + 1)} className={`inline-flex items-center justify-center p-3 rounded-xl border disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 active:bg-gray-300'}`}>
                 <Plus className="w-5 h-5" />
               </button>
             </div>
@@ -798,15 +870,15 @@ const InventoryPage: React.FC = () => {
                 placeholder={t('inventory.notesPlaceholder', 'Add notes about this adjustment...')}
                 rows={2}
                 disabled={adjustAction.disabled}
-                className={`w-full px-3 py-2 rounded-lg resize-none border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100 placeholder-zinc-500' : 'bg-gray-100 border-gray-300 text-gray-900 placeholder-gray-400'}`}
+                className={`w-full px-3 py-2 rounded-2xl resize-none border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100 placeholder-zinc-500' : 'bg-gray-100 border-gray-300 text-gray-900 placeholder-gray-400'}`}
               />
             </div>
             <div className="flex gap-3">
-              <button onClick={() => { setShowAdjustModal(false); setAdjustmentReason('count'); setAdjustmentNotes(''); }} className={`flex-1 py-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-gray-200 border-gray-300'}`}>
+              <button onClick={closeAdjustModal} className={`flex-1 py-3 rounded-xl border inline-flex items-center justify-center active:scale-95 ${isDark ? 'border-red-500/40 bg-red-500/10 text-red-300 active:bg-red-500/20' : 'border-red-300 bg-red-50 text-red-600 active:bg-red-100'}`}>
                 {t('common.cancel', 'Cancel')}
               </button>
-              <button onClick={() => void handleAdjustStock()} disabled={adjustmentQty === 0 || adjustAction.disabled} title={adjustAction.message || undefined} className={`flex-1 py-3 rounded-xl font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
-                isDark ? 'bg-zinc-100 text-black hover:bg-white' : 'bg-black text-white hover:bg-zinc-800'
+              <button onClick={() => void handleAdjustStock()} disabled={adjustmentQty === 0 || adjustAction.disabled} aria-label={adjustAction.message ? `${t('common.save', 'Save')}: ${adjustAction.message}` : t('common.save', 'Save')} className={`flex-1 py-3 rounded-xl border font-medium inline-flex items-center justify-center active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed ${
+                isDark ? 'border-emerald-500/40 bg-emerald-500/20 text-emerald-200 active:bg-emerald-500/30' : 'border-emerald-600 bg-emerald-600 text-white active:bg-emerald-700'
               }`}>
                 {t('common.save', 'Save')}
               </button>

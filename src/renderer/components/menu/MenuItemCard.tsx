@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { Plus, Minus, Settings2 } from 'lucide-react';
+import { formatCurrency } from '../../utils/format';
 
 interface CustomizationOption {
   id: string;
@@ -121,7 +122,7 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
       className={`p-3 rounded-xl border cursor-pointer transition-colors duration-150 active:scale-[0.98] flex flex-col touch-feedback min-h-[132px] sm:min-h-[144px] relative ${
         item.is_customizable
           ? resolvedTheme === 'dark'
-            ? 'bg-orange-500/15 border-orange-500/30 active:bg-orange-500/25'
+            ? 'bg-amber-400/15 border-amber-400/30 active:bg-amber-400/25'
             : 'bg-amber-100/95 border-amber-400/90 shadow-[0_10px_24px_rgba(15,23,42,0.08)] active:bg-amber-200/80'
           : resolvedTheme === 'dark'
             ? 'bg-gray-700/30 border-gray-600/30 active:bg-gray-600/50'
@@ -155,8 +156,8 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
               onClick={handleDecrement}
               className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
                 resolvedTheme === 'dark'
-                  ? 'bg-gray-600 hover:bg-gray-500 text-white'
-                  : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
+                  ? 'bg-gray-600 active:bg-gray-500 text-white'
+                  : 'bg-gray-200 active:bg-gray-300 text-gray-700'
               }`}
             >
               <Minus size={16} />
@@ -170,8 +171,8 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
               onClick={handleIncrement}
               className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
                 resolvedTheme === 'dark'
-                  ? 'bg-gray-600 hover:bg-gray-500 text-white'
-                  : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
+                  ? 'bg-gray-600 active:bg-gray-500 text-white'
+                  : 'bg-gray-200 active:bg-gray-300 text-gray-700'
               }`}
             >
               <Plus size={16} />
@@ -180,17 +181,13 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
           <div className="flex gap-2">
             <button
               onClick={handleCancelQuickAdd}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                resolvedTheme === 'dark'
-                  ? 'bg-gray-600 hover:bg-gray-500 text-white'
-                  : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
-              }`}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all bg-red-500 active:bg-red-600 text-white"
             >
               {t('common.actions.cancel')}
             </button>
             <button
               onClick={handleQuickAdd}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-500 hover:bg-emerald-600 text-white transition-all"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-500 active:bg-emerald-600 text-white transition-all"
             >
               {t('common.actions.add')} ({quickQuantity})
             </button>
@@ -201,11 +198,18 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
       {/* Customizable indicator */}
       {item.is_customizable && (
         <div className="mb-1.5">
-          <Settings2
-            className={`h-5 w-5 ${resolvedTheme === 'dark' ? 'text-orange-300' : 'text-amber-800'}`}
-            aria-label={t('menu.item.customizable')}
+          <span
+            className={`inline-flex h-6 w-6 items-center justify-center rounded-lg border shadow-sm ${
+              resolvedTheme === 'dark'
+                ? 'border-yellow-400/30 bg-yellow-400/15 text-yellow-300'
+                : 'border-amber-500/40 bg-amber-200/70 text-amber-900'
+            }`}
             role="img"
-          />
+            aria-label={t('menu.item.customizable')}
+            title={t('menu.item.customizable')}
+          >
+            <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
+          </span>
         </div>
       )}
 
@@ -233,7 +237,7 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
         <span className={`text-lg font-extrabold tracking-tight antialiased text-right ${
           resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-800'
         }`}>
-          {item.is_customizable ? t('menu.item.from') : ''}€{item.price.toFixed(2)}
+          {item.is_customizable ? t('menu.item.from') : ''}{formatCurrency(item.price)}
         </span>
       </div>
     </div>

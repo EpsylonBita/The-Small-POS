@@ -468,11 +468,12 @@ pub struct ConflictAuditEntry {
 #[derive(Debug)]
 enum RequestPreparation {
     Ready(RequestSpec),
+    Consumed { reason: String },
     Deferred { reason: String },
     Failed { reason: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RequestSpec {
     endpoint: String,
     method: Method,
@@ -1377,7 +1378,11 @@ fn normalize_customizations_for_insert(value: Option<&Value>) -> Value {
     }
 }
 
-fn normalize_order_update_items_for_request(items: &Value) -> Option<Value> {
+fn normalize_order_update_items_for_request(
+    items: &Value,
+    order_discount_amount: Option<f64>,
+    order_subtotal: Option<f64>,
+) -> Option<Value> {
     let normalized = normalize_order_insert_items(items);
     if normalized.is_empty() {
         return None;
@@ -1398,7 +1403,77 @@ fn normalize_order_update_items_for_request(items: &Value) -> Option<Value> {
         return None;
     }
 
-    Some(Value::Array(normalized))
+    let discount_amount = order_discount_amount.unwrap_or_default().max(0.0);
+    if discount_amount <= 0.0 {
+        return Some(Value::Array(normalized));
+    }
+
+    let mut pre_discount_subtotal = 0.0;
+    let mut has_original_override = false;
+    for item in &normalized {
+        let quantity = number_field_from_sources(&[item], &["quantity"])
+            .unwrap_or(1.0)
+            .max(1.0);
+        let unit_price = number_field_from_sources(&[item], &["unit_price", "unitPrice", "price"])
+            .unwrap_or_default()
+            .max(0.0);
+        let original_unit_price =
+            number_field_from_sources(&[item], &["original_unit_price", "originalUnitPrice"])
+                .unwrap_or_default()
+                .max(0.0);
+        let uses_original = original_unit_price > 0.0 && original_unit_price > unit_price;
+        if uses_original {
+            has_original_override = true;
+        }
+        pre_discount_subtotal += if uses_original {
+            original_unit_price
+        } else {
+            unit_price
+        } * quantity;
+    }
+
+    if let Some(expected_subtotal) = order_subtotal.filter(|value| *value > 0.0) {
+        let tolerance = (normalized.len() as f64 * 0.01).max(0.02);
+        if (pre_discount_subtotal - expected_subtotal).abs() > tolerance {
+            return None;
+        }
+    } else if !has_original_override {
+        return None;
+    }
+
+    let mut adjusted = normalized;
+    for item in &mut adjusted {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        let quantity = object
+            .get("quantity")
+            .and_then(number_from_value)
+            .unwrap_or(1.0)
+            .max(1.0);
+        let unit_price = object
+            .get("unit_price")
+            .and_then(number_from_value)
+            .unwrap_or_default()
+            .max(0.0);
+        let original_unit_price = object
+            .get("original_unit_price")
+            .and_then(number_from_value)
+            .unwrap_or_default()
+            .max(0.0);
+        if original_unit_price > 0.0 && original_unit_price > unit_price {
+            object.insert(
+                "unit_price".to_string(),
+                serde_json::json!(original_unit_price),
+            );
+            object.insert(
+                "total_price".to_string(),
+                serde_json::json!((original_unit_price * quantity * 100.0).round() / 100.0),
+            );
+        }
+    }
+
+    Some(Value::Array(adjusted))
 }
 
 fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
@@ -1431,7 +1506,16 @@ fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
             (unit_price * quantity as f64).max(0.0)
         };
 
-        normalized.push(serde_json::json!({
+        let original_unit_price =
+            number_field_from_sources(&[&item], &["original_unit_price", "originalUnitPrice"])
+                .filter(|value| *value > 0.0);
+        let explicit_price_override =
+            bool_field_from_sources(&[&item], &["is_price_overridden", "isPriceOverridden"]);
+        let derived_price_override = original_unit_price
+            .map(|original| (original - unit_price).abs() > 0.005)
+            .unwrap_or(false);
+
+        let mut normalized_item = serde_json::json!({
             "menu_item_id": menu_item_id,
             "quantity": quantity,
             "unit_price": unit_price,
@@ -1439,7 +1523,25 @@ fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
             "name": name,
             "notes": string_field(&item, &["notes", "specialInstructions", "special_instructions"]),
             "customizations": normalize_customizations_for_insert(item.get("customizations")),
-        }));
+        });
+        if let Some(object) = normalized_item.as_object_mut() {
+            if let Some(original_unit_price) = original_unit_price {
+                object.insert(
+                    "original_unit_price".to_string(),
+                    serde_json::json!(original_unit_price),
+                );
+            }
+            if let Some(is_price_overridden) = explicit_price_override {
+                object.insert(
+                    "is_price_overridden".to_string(),
+                    serde_json::json!(is_price_overridden),
+                );
+            } else if derived_price_override {
+                object.insert("is_price_overridden".to_string(), serde_json::json!(true));
+            }
+        }
+
+        normalized.push(normalized_item);
     }
 
     normalized
@@ -2592,6 +2694,175 @@ fn retry_failed_customer_address_not_found_items_limited(
     )
 }
 
+/// True when an admin replay failed because a `restaurant_table_sessions`
+/// UPDATE/DELETE was routed through an obsolete local-placeholder path.
+///
+/// These rows predate `prepare_table_session_request` learning to either defer
+/// until the remote session UUID is known or consume paid/completed orphan
+/// closes locally. Requeuing them lets the new path take over instead of
+/// leaving a permanently `failed` row that keeps tripping queue-age warnings.
+fn is_table_session_local_placeholder_uuid_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    (normalized.contains("invalid input syntax for type uuid")
+        && normalized.contains(LOCAL_TABLE_SESSION_PREFIX))
+        || normalized.contains("http 405")
+        || normalized.contains("method not allowed")
+}
+
+fn retry_failed_table_session_local_placeholder_items_limited(
+    conn: &Connection,
+    limit: usize,
+) -> Result<RetryItemsResult, String> {
+    if limit == 0 {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    if resolve_request_terminal_id(conn, &Value::Object(Map::new())).is_none() {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, record_id, operation, error_message
+             FROM parity_sync_queue
+             WHERE table_name = 'restaurant_table_sessions'
+               AND status = 'failed'
+               AND error_message IS NOT NULL
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| {
+            format!("sync_queue retry_failed_table_session_local_placeholder_items prepare: {e}")
+        })?;
+
+    let candidates: Vec<(String, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(|e| {
+            format!("sync_queue retry_failed_table_session_local_placeholder_items query: {e}")
+        })?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    let mut queue_ids = Vec::new();
+    for (queue_id, record_id, operation, error_message) in candidates {
+        if queue_ids.len() >= limit {
+            break;
+        }
+        // Only UPDATE/DELETE rows can carry the renderer's session-id key; INSERT
+        // rows post to the collection endpoint and never hit the uuid path.
+        if !(operation.eq_ignore_ascii_case("UPDATE") || operation.eq_ignore_ascii_case("DELETE")) {
+            continue;
+        }
+        if local_table_session_order_id(record_id.as_str()).is_none() {
+            continue;
+        }
+        if !is_table_session_local_placeholder_uuid_error(error_message.as_str()) {
+            continue;
+        }
+        queue_ids.push(queue_id);
+    }
+
+    requeue_failed_items(
+        conn,
+        &queue_ids,
+        "Requeued table session rows after local placeholder id routing fix",
+    )
+}
+
+fn is_invalid_fiscal_issued_at_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    let compact: String = normalized
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect();
+    compact.contains("invalidfiscalreceiptinput")
+        && normalized.contains("issuedat")
+        && normalized.contains("datetime")
+}
+
+fn normalize_fiscal_request_payload(payload: &Value) -> Value {
+    let mut normalized = payload.clone();
+    let Some(object) = normalized.as_object_mut() else {
+        return normalized;
+    };
+
+    let issued_at = object
+        .get("issuedAt")
+        .or_else(|| object.get("issued_at"))
+        .and_then(Value::as_str)
+        .map(crate::fiscal::payload_builder::normalize_issued_at);
+
+    if let Some(issued_at) = issued_at {
+        object.insert("issuedAt".to_string(), Value::String(issued_at));
+    }
+
+    normalized
+}
+
+fn retry_failed_invalid_fiscal_issued_at_items_limited(
+    conn: &Connection,
+    limit: usize,
+) -> Result<RetryItemsResult, String> {
+    if limit == 0 {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    if resolve_request_terminal_id(conn, &Value::Object(Map::new())).is_none() {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, data, error_message
+             FROM parity_sync_queue
+             WHERE module_type = 'fiscal'
+               AND status = 'failed'
+               AND error_message IS NOT NULL
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| {
+            format!("sync_queue retry_failed_invalid_fiscal_issued_at_items prepare: {e}")
+        })?;
+
+    let candidates: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(|e| format!("sync_queue retry_failed_invalid_fiscal_issued_at_items query: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    let mut queue_ids = Vec::new();
+    for (queue_id, payload_raw, error_message) in candidates {
+        if queue_ids.len() >= limit {
+            break;
+        }
+        if !is_invalid_fiscal_issued_at_error(&error_message) {
+            continue;
+        }
+
+        let Ok(payload) = serde_json::from_str::<Value>(&payload_raw) else {
+            continue;
+        };
+        let normalized_payload = normalize_fiscal_request_payload(&payload);
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET data = ?1
+             WHERE id = ?2",
+            params![normalized_payload.to_string(), queue_id.as_str()],
+        )
+        .map_err(|e| {
+            format!("sync_queue retry_failed_invalid_fiscal_issued_at_items normalize: {e}")
+        })?;
+        queue_ids.push(queue_id);
+    }
+
+    requeue_failed_items(
+        conn,
+        &queue_ids,
+        "Requeued fiscal parity rows after issuedAt datetime normalization",
+    )
+}
+
 pub fn enqueue_payload_item(
     conn: &Connection,
     table_name: &str,
@@ -3597,6 +3868,15 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         }
     };
 
+    if item.module_type == "fiscal" {
+        return Ok(RequestPreparation::Ready(RequestSpec {
+            endpoint: resolve_endpoint(item),
+            method: Method::POST,
+            body: Some(normalize_fiscal_request_payload(&payload).to_string()),
+            terminal_id,
+        }));
+    }
+
     match item.table_name.as_str() {
         "orders" => prepare_order_request(conn, item, &payload, terminal_id.as_str()),
         "payments" => prepare_payment_request(conn, item, &payload, terminal_id.as_str()),
@@ -3611,6 +3891,9 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             prepare_loyalty_request(conn, item, &payload, terminal_id.as_str())
         }
         "housekeeping_tasks" => prepare_housekeeping_request(item, &payload, terminal_id.as_str()),
+        "restaurant_table_sessions" => {
+            prepare_table_session_request(conn, item, &payload, terminal_id.as_str())
+        }
         "room_checkins" => prepare_room_checkin_request(item, &payload, terminal_id.as_str()),
         "customer_addresses" => {
             prepare_customer_address_request(conn, item, &payload, terminal_id.as_str())
@@ -4118,6 +4401,35 @@ fn prepare_order_request(
         }
     }
 
+    fn copy_financial_source_field(
+        body: &mut Map<String, Value>,
+        sources: &[&Value],
+        source_keys: &[&str],
+        target: &str,
+    ) {
+        let mut zero_value: Option<Value> = None;
+        for source in sources {
+            for source_key in source_keys {
+                let Some(value) = source.get(*source_key) else {
+                    continue;
+                };
+                if value.is_null() {
+                    continue;
+                }
+                let is_zero = value.as_f64().map(|number| number == 0.0).unwrap_or(false);
+                if is_zero {
+                    zero_value.get_or_insert_with(|| value.clone());
+                    continue;
+                }
+                body.insert(target.to_string(), value.clone());
+                return;
+            }
+        }
+        if let Some(value) = zero_value {
+            body.insert(target.to_string(), value);
+        }
+    }
+
     copy_source_field(
         &mut body,
         &sources,
@@ -4305,16 +4617,24 @@ fn prepare_order_request(
         ("taxAmount", "tax_amount"),
         ("deliveryFee", "delivery_fee"),
         ("tipAmount", "tip_amount"),
-        ("paymentStatus", "payment_status"),
     ] {
-        for source in &sources {
-            if let Some(value) = source.get(camel).or_else(|| source.get(snake)) {
-                if !value.is_null() {
-                    body.insert(snake.to_string(), value.clone());
-                }
-                break;
-            }
-        }
+        copy_financial_source_field(&mut body, &sources, &[camel, snake], snake);
+    }
+    copy_payload_field(
+        &mut body,
+        payload,
+        &["paymentStatus", "payment_status"],
+        "payment_status",
+        false,
+    );
+    if !body.contains_key("payment_status") {
+        copy_source_field(
+            &mut body,
+            &sources,
+            &["paymentStatus", "payment_status"],
+            "payment_status",
+            false,
+        );
     }
     for source in &sources {
         if let Some(value) = source
@@ -4339,18 +4659,31 @@ fn prepare_order_request(
         ("couponDiscountAmountCents", "coupon_discount_amount_cents"),
         ("manualDiscountValueCents", "manual_discount_value_cents"),
     ] {
-        for source in &sources {
-            if let Some(value) = source.get(camel).or_else(|| source.get(snake)) {
-                if !value.is_null() {
-                    body.insert(snake.to_string(), value.clone());
-                }
-                break;
-            }
-        }
+        copy_financial_source_field(&mut body, &sources, &[camel, snake], snake);
     }
     if let Some(items) = payload.get("items") {
         if !items.is_null() {
-            if let Some(normalized_items) = normalize_order_update_items_for_request(items) {
+            let order_discount_amount = body
+                .get("discount_amount")
+                .and_then(number_from_value)
+                .or_else(|| {
+                    body.get("discount_amount_cents")
+                        .and_then(number_from_value)
+                        .map(|cents| cents / 100.0)
+                });
+            let order_subtotal = body
+                .get("subtotal")
+                .and_then(number_from_value)
+                .or_else(|| {
+                    body.get("subtotal_cents")
+                        .and_then(number_from_value)
+                        .map(|cents| cents / 100.0)
+                });
+            if let Some(normalized_items) = normalize_order_update_items_for_request(
+                items,
+                order_discount_amount,
+                order_subtotal,
+            ) {
                 body.insert("items".to_string(), normalized_items);
             }
         }
@@ -4805,6 +5138,267 @@ fn prepare_room_checkin_request(
     }))
 }
 
+/// Renderer-side prefix for table-session ids that have not been assigned a
+/// remote Supabase UUID yet. The renderer builds these as
+/// `local-table-session:{localOrderId}` (see
+/// `TableCheckManagerModal.buildLocalSessionFromOrder`) so the cart can show a
+/// table check before the open INSERT has round-tripped.
+const LOCAL_TABLE_SESSION_PREFIX: &str = "local-table-session:";
+
+/// Deferral reason used when a table-session UPDATE/DELETE still only carries a
+/// local placeholder id and the remote UUID is not yet known locally.
+const TABLE_SESSION_REMOTE_ID_WAIT_REASON: &str = "Waiting for remote table session id";
+
+fn is_uuid(value: &str) -> bool {
+    Uuid::parse_str(value.trim()).is_ok()
+}
+
+/// If `record_id` is a `local-table-session:{localOrderId}` placeholder, return
+/// the embedded local order id. Returns `None` for real remote UUIDs (and any
+/// other id shape), which are passed through unchanged.
+fn local_table_session_order_id(record_id: &str) -> Option<&str> {
+    record_id
+        .strip_prefix(LOCAL_TABLE_SESSION_PREFIX)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// Read the remote table-session UUID that a prior INSERT-success persisted onto
+/// the local order row (see `apply_success` for `restaurant_table_sessions`).
+fn lookup_order_table_session_uuid(conn: &Connection, local_order_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT NULLIF(TRIM(COALESCE(table_session_id, '')), '')
+         FROM orders
+         WHERE id = ?1",
+        params![local_order_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|candidate| is_uuid(candidate))
+}
+
+/// Resolve the remote Supabase UUID for a local table-session placeholder.
+///
+/// Preference order (mirrors the suggested fix): the durable
+/// `orders.table_session_id` mapping captured at INSERT-success time, then a
+/// UUID carried directly in the replay payload as a fallback. Returns `None`
+/// when no remote id is known yet so the caller can defer instead of sending an
+/// invalid `/api/pos/table-sessions/local-table-session:...` path that admin
+/// rejects with HTTP 500 (`invalid input syntax for type uuid`).
+fn resolve_remote_table_session_id(
+    conn: &Connection,
+    local_order_id: &str,
+    payload: &Value,
+) -> Option<String> {
+    if let Some(remote) = lookup_order_table_session_uuid(conn, local_order_id) {
+        return Some(remote);
+    }
+
+    string_field(
+        payload,
+        &[
+            "remote_session_id",
+            "remoteSessionId",
+            "table_session_id",
+            "tableSessionId",
+            "session_id",
+            "sessionId",
+        ],
+    )
+    .map(|value| value.trim().to_string())
+    .filter(|candidate| is_uuid(candidate))
+}
+
+struct ObsoleteTableSessionClose {
+    reason: String,
+}
+
+fn is_table_session_close_payload(payload: &Value) -> bool {
+    string_field(payload, &["action"])
+        .map(|action| action.eq_ignore_ascii_case("close"))
+        .unwrap_or(false)
+}
+
+fn local_order_payment_is_settled(payment_status: &str) -> bool {
+    matches!(
+        payment_status.trim().to_ascii_lowercase().as_str(),
+        "paid" | "completed"
+    )
+}
+
+fn local_order_lifecycle_is_complete(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("completed")
+}
+
+fn completed_local_payments_cover_order(
+    conn: &Connection,
+    local_order_id: &str,
+) -> Result<bool, String> {
+    let order_total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(total_amount, 0)
+             FROM orders
+             WHERE id = ?1",
+            params![local_order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("sync_queue completed_local_payments_cover_order total: {e}"))?
+        .unwrap_or(0.0);
+
+    if order_total <= 0.0 {
+        return Ok(true);
+    }
+
+    let paid_total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0)
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'
+               AND (voided_at IS NULL OR TRIM(COALESCE(voided_at, '')) = '')",
+            params![local_order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("sync_queue completed_local_payments_cover_order paid: {e}"))?
+        .unwrap_or(0.0);
+
+    Ok(paid_total + 0.005 >= order_total)
+}
+
+fn classify_obsolete_table_session_close(
+    conn: &Connection,
+    local_order_id: &str,
+    payload: &Value,
+) -> Result<Option<ObsoleteTableSessionClose>, String> {
+    if !is_table_session_close_payload(payload) {
+        return Ok(None);
+    }
+
+    let order = conn
+        .query_row(
+            "SELECT
+                 NULLIF(TRIM(COALESCE(supabase_id, '')), ''),
+                 COALESCE(status, ''),
+                 COALESCE(payment_status, ''),
+                 NULLIF(TRIM(COALESCE(table_id, '')), ''),
+                 NULLIF(TRIM(COALESCE(table_number, '')), ''),
+                 guest_count,
+                 NULLIF(TRIM(COALESCE(branch_id, '')), ''),
+                 NULLIF(TRIM(COALESCE(client_request_id, '')), '')
+             FROM orders
+             WHERE id = ?1",
+            params![local_order_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("sync_queue table-session close reconciliation order: {e}"))?;
+
+    let Some((
+        Some(remote_order_id),
+        status,
+        payment_status,
+        _table_id,
+        _table_number,
+        _guest_count,
+        _branch_id,
+        _client_request_id,
+    )) = order
+    else {
+        return Ok(None);
+    };
+
+    if !is_uuid(&remote_order_id)
+        || !local_order_lifecycle_is_complete(&status)
+        || !local_order_payment_is_settled(&payment_status)
+        || !completed_local_payments_cover_order(conn, local_order_id)?
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(ObsoleteTableSessionClose {
+        reason: format!(
+            "Obsolete local table-session close consumed; order {local_order_id} is completed, paid, and synced as {remote_order_id}"
+        ),
+    }))
+}
+
+/// Build the request for a `restaurant_table_sessions` row.
+///
+/// INSERT rows POST to the collection endpoint unchanged. UPDATE/DELETE rows are
+/// keyed by the renderer's session id, which is the remote UUID once the open
+/// INSERT has synced but a `local-table-session:{localOrderId}` placeholder
+/// while it is still pending. For the placeholder we resolve the remote UUID
+/// from the INSERT-success mapping; if it is not available yet we defer rather
+/// than send the invalid local path to admin. Real UUID (and any non-local)
+/// ids pass through with the existing behavior.
+fn prepare_table_session_request(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    if item.operation == "INSERT" {
+        return Ok(RequestPreparation::Ready(RequestSpec {
+            endpoint: "/api/pos/table-sessions".to_string(),
+            method: Method::POST,
+            body: Some(item.data.clone()),
+            terminal_id: terminal_id.to_string(),
+        }));
+    }
+
+    let session_id = match local_table_session_order_id(&item.record_id) {
+        Some(local_order_id) => {
+            match resolve_remote_table_session_id(conn, local_order_id, payload) {
+                Some(remote_id) => remote_id,
+                None => {
+                    if item.operation == "UPDATE" {
+                        if let Some(obsolete_close) =
+                            classify_obsolete_table_session_close(conn, local_order_id, payload)?
+                        {
+                            return Ok(RequestPreparation::Consumed {
+                                reason: obsolete_close.reason,
+                            });
+                        }
+                    }
+                    return Ok(RequestPreparation::Deferred {
+                        reason: TABLE_SESSION_REMOTE_ID_WAIT_REASON.to_string(),
+                    });
+                }
+            }
+        }
+        None => item.record_id.clone(),
+    };
+
+    let method = resolve_http_method(item);
+    let body = if method == Method::DELETE {
+        None
+    } else {
+        Some(item.data.clone())
+    };
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: format!("/api/pos/table-sessions/{session_id}"),
+        method,
+        body,
+        terminal_id: terminal_id.to_string(),
+    }))
+}
+
 fn extract_response_string(response: Option<&Value>, paths: &[&str]) -> Option<String> {
     for path in paths {
         let mut current = response?;
@@ -5063,6 +5657,66 @@ fn apply_success(
                 );
             }
         }
+        "restaurant_table_sessions" => {
+            // Capture the remote (Supabase) session UUID minted by the open
+            // INSERT and persist it onto the related local order so a later
+            // close/update row keyed by `local-table-session:{localOrderId}`
+            // can resolve the real UUID instead of replaying the local
+            // placeholder (which admin rejects with HTTP 500). Only the INSERT
+            // mints a new id; UPDATE/DELETE responses carry no new mapping.
+            if item.operation == "INSERT" {
+                let remote_session_id = extract_response_string(
+                    response,
+                    &[
+                        "session.id",
+                        "data.session.id",
+                        "data.id",
+                        "session_id",
+                        "sessionId",
+                        "id",
+                    ],
+                )
+                .filter(|candidate| is_uuid(candidate));
+
+                if let Some(remote_session_id) = remote_session_id {
+                    let payload = serde_json::from_str::<Value>(&item.data)
+                        .unwrap_or_else(|_| Value::Object(Map::new()));
+                    let local_order_id = string_field(
+                        &payload,
+                        &[
+                            "active_order_client_id",
+                            "activeOrderClientId",
+                            "client_order_id",
+                            "clientOrderId",
+                            "order_id",
+                            "orderId",
+                            "active_order_id",
+                            "activeOrderId",
+                        ],
+                    );
+
+                    if let Some(local_order_id) = local_order_id {
+                        // Conservative: only fill an empty mapping or replace a
+                        // local placeholder; never clobber an existing UUID.
+                        conn.execute(
+                            "UPDATE orders
+                             SET table_session_id = ?1,
+                                 updated_at = ?2
+                             WHERE id = ?3
+                               AND (
+                                 table_session_id IS NULL
+                                 OR TRIM(table_session_id) = ''
+                                 OR table_session_id LIKE 'local-table-session:%'
+                               )",
+                            params![remote_session_id, now, local_order_id],
+                        )
+                        .map_err(|e| {
+                            format!("sync_queue apply_success table_session insert: {e}")
+                        })?;
+                    }
+                }
+            }
+        }
         "loyalty_transactions" => {
             // Wave 5 Session 6: mirror legacy `sync_loyalty_items`
             // (sync.rs:12875) which flipped `sync_state='applied'` on
@@ -5139,6 +5793,27 @@ fn is_parent_order_wait_response(status: u16, response_body: &str) -> bool {
         || lower.contains("parent_order_sync")
 }
 
+fn is_table_session_close_waiting_payment_response(
+    status: u16,
+    response_body: &str,
+    item: &SyncQueueItem,
+) -> bool {
+    if status != 409 || item.table_name != "restaurant_table_sessions" || item.operation != "UPDATE"
+    {
+        return false;
+    }
+
+    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+    let action = string_field(&payload, &["action"]).unwrap_or_default();
+    if !action.eq_ignore_ascii_case("close") {
+        return false;
+    }
+
+    let lower = response_body.to_ascii_lowercase();
+    lower.contains("cannot close a table session with an outstanding balance")
+        || (lower.contains("outstanding_balance") && lower.contains("paid_total"))
+}
+
 /// Returns the missing-module list when the response is the admin API's
 /// uniform module-acquisition denial (THE-306 gating sweep):
 /// `403 {"success":false,"error":"MODULE_REQUIRED","missingModules":[...]}`.
@@ -5196,6 +5871,11 @@ pub async fn process_queue(
         remaining_requeue_budget =
             remaining_requeue_budget.saturating_sub(rate_limited_retries.retried as usize);
 
+        let fiscal_issued_at_retries =
+            retry_failed_invalid_fiscal_issued_at_items_limited(&db, remaining_requeue_budget)?;
+        remaining_requeue_budget =
+            remaining_requeue_budget.saturating_sub(fiscal_issued_at_retries.retried as usize);
+
         let legacy_order_retries =
             retry_failed_legacy_order_insert_items_limited(&db, remaining_requeue_budget)?;
         remaining_requeue_budget =
@@ -5206,8 +5886,15 @@ pub async fn process_queue(
         remaining_requeue_budget =
             remaining_requeue_budget.saturating_sub(payment_conflict_resolutions.retried as usize);
 
-        let _ =
+        let customer_address_retries =
             retry_failed_customer_address_not_found_items_limited(&db, remaining_requeue_budget)?;
+        remaining_requeue_budget =
+            remaining_requeue_budget.saturating_sub(customer_address_retries.retried as usize);
+
+        let _ = retry_failed_table_session_local_placeholder_items_limited(
+            &db,
+            remaining_requeue_budget,
+        )?;
 
         queue_depth_before = get_length(&db)?;
     }
@@ -5245,6 +5932,20 @@ pub async fn process_queue(
 
         let request_spec = match request_spec {
             RequestPreparation::Ready(spec) => spec,
+            RequestPreparation::Consumed { reason } => {
+                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                mark_success(&db, &item.id, item.claim_generation)?;
+                processed += 1;
+                telemetry.record_success(&item);
+                info!(
+                    item_id = %item.id,
+                    table_name = %item.table_name,
+                    record_id = %item.record_id,
+                    reason = %reason,
+                    "Parity item consumed locally"
+                );
+                continue;
+            }
             RequestPreparation::Deferred { reason } => {
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                 mark_deferred(&db, &item.id, &reason, item.claim_generation)?;
@@ -5334,6 +6035,15 @@ pub async fn process_queue(
                 } else if is_parent_order_wait_response(status, &response_body) {
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                     let reason = "Waiting for parent order sync";
+                    mark_deferred(&db, &item.id, reason, item.claim_generation)?;
+                    telemetry.record_deferred(&item, reason);
+                } else if is_table_session_close_waiting_payment_response(
+                    status,
+                    &response_body,
+                    &item,
+                ) {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let reason = "Waiting for table payment sync";
                     mark_deferred(&db, &item.id, reason, item.claim_generation)?;
                     telemetry.record_deferred(&item, reason);
                 } else if let Some(missing_modules) =
@@ -5487,6 +6197,95 @@ pub async fn process_queue(
                     });
                 } else {
                     // Server error (retriable)
+                    let fallback_specs = legacy_order_update_retry_specs(
+                        &item,
+                        &request_spec,
+                        status,
+                        &response_body,
+                    );
+                    let mut fallback_processed = false;
+                    for (fallback_outcome, fallback_spec) in fallback_specs {
+                        let fallback_url = format!(
+                            "{}{}",
+                            api_base_url.trim_end_matches('/'),
+                            fallback_spec.endpoint
+                        );
+                        let mut fallback_request = client
+                            .request(fallback_spec.method.clone(), &fallback_url)
+                            .header("x-pos-api-key", api_key)
+                            .header("x-terminal-id", fallback_spec.terminal_id.as_str())
+                            .header("Content-Type", "application/json");
+
+                        if let Some(body) = fallback_spec.body.as_ref() {
+                            fallback_request = fallback_request.body(body.clone());
+                        }
+
+                        match fallback_request.send().await {
+                            Ok(fallback_resp) => {
+                                let fallback_status = fallback_resp.status().as_u16();
+                                let fallback_is_success = fallback_resp.status().is_success();
+                                let fallback_body = fallback_resp.text().await.unwrap_or_default();
+                                let fallback_json =
+                                    serde_json::from_str::<Value>(&fallback_body).ok();
+
+                                if fallback_is_success {
+                                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                                    let generation_matches = db
+                                        .query_row(
+                                            "SELECT claim_generation = ?2
+                                             FROM parity_sync_queue
+                                             WHERE id = ?1",
+                                            params![item.id.as_str(), item.claim_generation],
+                                            |row| row.get::<_, bool>(0),
+                                        )
+                                        .unwrap_or(false);
+                                    if generation_matches {
+                                        apply_success(&db, &item, fallback_json.as_ref())?;
+                                        mark_success(&db, &item.id, item.claim_generation)?;
+                                        processed += 1;
+                                        telemetry.record_outcome(
+                                            &item,
+                                            "processed",
+                                            fallback_outcome,
+                                        );
+                                    } else {
+                                        debug!(
+                                            item_id = %item.id,
+                                            expected_generation = item.claim_generation,
+                                            "Skipping stale parity fallback success ack before local apply"
+                                        );
+                                    }
+                                    fallback_processed = true;
+                                    break;
+                                }
+
+                                warn!(
+                                    item_id = %item.id,
+                                    table_name = %item.table_name,
+                                    record_id = %item.record_id,
+                                    first_status = status,
+                                    fallback_status = fallback_status,
+                                    fallback_body = %fallback_body,
+                                    fallback_outcome = fallback_outcome,
+                                    "Legacy order update fallback did not succeed"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    item_id = %item.id,
+                                    table_name = %item.table_name,
+                                    record_id = %item.record_id,
+                                    error = %e,
+                                    fallback_outcome = fallback_outcome,
+                                    "Legacy order update fallback hit a network error"
+                                );
+                            }
+                        }
+                    }
+                    if fallback_processed {
+                        continue;
+                    }
+
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                     if let Some(dl) = mark_failure(
                         &db,
@@ -5638,6 +6437,87 @@ fn resolve_http_method(item: &SyncQueueItem) -> Method {
         "DELETE" => Method::DELETE,
         _ => Method::POST,
     }
+}
+
+fn is_legacy_order_update_generic_failure(
+    item: &SyncQueueItem,
+    request_spec: &RequestSpec,
+    status: u16,
+    response_body: &str,
+) -> bool {
+    if status != 500
+        || item.table_name != "orders"
+        || item.operation != "UPDATE"
+        || request_spec.method != Method::PATCH
+        || request_spec.endpoint != "/api/pos/orders"
+    {
+        return false;
+    }
+
+    let lower_body = response_body.to_lowercase();
+    lower_body.contains("failed to update order") && !lower_body.contains("\"details\"")
+}
+
+fn legacy_order_update_without_items_retry_spec(request_spec: &RequestSpec) -> Option<RequestSpec> {
+    let body_raw = request_spec.body.as_ref()?;
+    let mut body = serde_json::from_str::<Value>(body_raw).ok()?;
+    let body_obj = body.as_object_mut()?;
+    body_obj.remove("items")?;
+
+    Some(RequestSpec {
+        body: Some(Value::Object(body_obj.clone()).to_string()),
+        ..request_spec.clone()
+    })
+}
+
+fn legacy_order_update_minimal_retry_spec(
+    request_spec: &RequestSpec,
+    include_payment_status: bool,
+) -> Option<RequestSpec> {
+    let body_raw = request_spec.body.as_ref()?;
+    let body = serde_json::from_str::<Value>(body_raw).ok()?;
+    let body_obj = body.as_object()?;
+    let id = body_obj.get("id")?.clone();
+    let status = body_obj.get("status")?.clone();
+
+    let mut minimal = Map::new();
+    minimal.insert("id".to_string(), id);
+    minimal.insert("status".to_string(), status);
+    if include_payment_status {
+        let payment_status = body_obj.get("payment_status")?.clone();
+        if !payment_status.is_null() {
+            minimal.insert("payment_status".to_string(), payment_status);
+        }
+    }
+
+    Some(RequestSpec {
+        body: Some(Value::Object(minimal).to_string()),
+        ..request_spec.clone()
+    })
+}
+
+fn legacy_order_update_retry_specs(
+    item: &SyncQueueItem,
+    request_spec: &RequestSpec,
+    status: u16,
+    response_body: &str,
+) -> Vec<(&'static str, RequestSpec)> {
+    if !is_legacy_order_update_generic_failure(item, request_spec, status, response_body) {
+        return Vec::new();
+    }
+
+    let mut specs = Vec::new();
+    if let Some(spec) = legacy_order_update_without_items_retry_spec(request_spec) {
+        specs.push(("legacy_order_update_without_items_retry", spec));
+    }
+    if let Some(spec) = legacy_order_update_minimal_retry_spec(request_spec, true) {
+        specs.push(("legacy_order_update_minimal_retry", spec));
+    }
+    if let Some(spec) = legacy_order_update_minimal_retry_spec(request_spec, false) {
+        specs.push(("legacy_order_update_status_only_retry", spec));
+    }
+
+    specs
 }
 
 fn resolve_orders_endpoint(item: &SyncQueueItem) -> String {
@@ -7192,6 +8072,167 @@ mod tests {
     }
 
     #[test]
+    fn prepare_order_update_sends_discounted_menu_items_as_pre_discount_lines() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents,
+                 subtotal, subtotal_cents, status, payment_status, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-discounted-menu-update', 'remote-order-discounted-menu-update',
+                 '[]', 29.4, 2940, 31.5, 3150, 'pending', 'paid', 'synced',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced discounted menu order");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-discounted-menu-update",
+            json!({
+                "orderId": "order-discounted-menu-update",
+                "status": "pending",
+                "paymentStatus": "paid",
+                "discountAmount": 2.1,
+                "discountAmountCents": 210,
+                "subtotal": 31.5,
+                "subtotalCents": 3150,
+                "totalAmount": 29.4,
+                "totalAmountCents": 2940,
+                "items": [
+                    {
+                        "menu_item_id": TEST_MENU_ITEM_ID,
+                        "quantity": 1,
+                        "unit_price": 18.9,
+                        "total_price": 18.9,
+                        "original_unit_price": 21.0,
+                        "is_price_overridden": true,
+                        "name": "Prosciutto Pizza"
+                    },
+                    {
+                        "menu_item_id": "33333333-3333-3333-3333-333333333333",
+                        "quantity": 1,
+                        "unit_price": 10.5,
+                        "total_price": 10.5,
+                        "name": "Chocolate Fondant"
+                    }
+                ]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(body.get("subtotal").and_then(Value::as_f64), Some(31.5));
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(29.4));
+        assert_eq!(
+            body.get("discount_amount").and_then(Value::as_f64),
+            Some(2.1)
+        );
+
+        let items = body
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("items should be forwarded");
+        assert_eq!(
+            items[0].get("unit_price").and_then(Value::as_f64),
+            Some(21.0)
+        );
+        assert_eq!(
+            items[0].get("total_price").and_then(Value::as_f64),
+            Some(21.0)
+        );
+        assert_eq!(
+            items[0].get("original_unit_price").and_then(Value::as_f64),
+            Some(21.0)
+        );
+        assert_eq!(
+            items[0].get("is_price_overridden").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            items[1].get("unit_price").and_then(Value::as_f64),
+            Some(10.5)
+        );
+    }
+
+    #[test]
+    fn prepare_order_update_uses_repaired_payload_when_local_subtotal_defaults_to_zero() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents,
+                 subtotal, subtotal_cents, status, payment_status, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-repaired-payment-update', 'remote-order-repaired-payment-update',
+                 '[]', 29.4, 2940, 0.0, 0, 'pending', 'paid', 'synced',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced table order with legacy zero subtotal");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-repaired-payment-update",
+            json!({
+                "orderId": "order-repaired-payment-update",
+                "status": "pending",
+                "paymentStatus": "paid",
+                "discountAmount": 2.1,
+                "discountAmountCents": 210,
+                "subtotal": 31.5,
+                "subtotalCents": 3150,
+                "totalAmount": 29.4,
+                "totalAmountCents": 2940
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(body.get("subtotal").and_then(Value::as_f64), Some(31.5));
+        assert_eq!(
+            body.get("subtotal_cents").and_then(Value::as_i64),
+            Some(3150)
+        );
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(29.4));
+        assert_eq!(
+            body.get("total_amount_cents").and_then(Value::as_i64),
+            Some(2940)
+        );
+        assert_eq!(
+            body.get("discount_amount").and_then(Value::as_f64),
+            Some(2.1)
+        );
+        assert_eq!(
+            body.get("discount_amount_cents").and_then(Value::as_i64),
+            Some(210)
+        );
+        assert_eq!(
+            body.get("payment_status").and_then(Value::as_str),
+            Some("paid")
+        );
+    }
+
+    #[test]
     fn prepare_order_request_defaults_payment_method_and_recomputes_total_amount() {
         let conn = test_connection();
         let item = queue_item(
@@ -8149,6 +9190,446 @@ mod tests {
     }
 
     #[test]
+    fn prepare_table_session_update_defers_local_placeholder_without_remote_mapping() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        // A close UPDATE keyed by the renderer's local placeholder, with no
+        // prior INSERT-success mapping on the (also-missing) local order.
+        let item = queue_item(
+            "restaurant_table_sessions",
+            "UPDATE",
+            "local-table-session:34ccc66a-ab4d-4b1d-bef2-0869f42088c7",
+            json!({
+                "action": "close",
+                "status": "closed",
+                "release_status": "cleaning",
+                "force": true,
+                "branch_id": TEST_BRANCH_ID
+            }),
+        );
+
+        match prepare_request(&conn, &item).expect("prepare table-session update") {
+            RequestPreparation::Deferred { reason } => {
+                assert_eq!(reason, "Waiting for remote table session id");
+            }
+            other => panic!(
+                "expected local placeholder close to defer, not send the invalid \
+                 /api/pos/table-sessions/local-table-session:... path; got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn classifies_table_session_local_placeholder_uuid_error() {
+        // The exact admin HTTP 500 observed in production for a close UPDATE that
+        // was routed to /api/pos/table-sessions/local-table-session:... before the
+        // deferral fix landed.
+        let observed = r#"HTTP 500: {"success":false,"error":"invalid input syntax for type uuid: \"local-table-session:34ccc66a-ab4d-4b1d-bef2-0869f42088c7\""}"#;
+        assert!(is_table_session_local_placeholder_uuid_error(observed));
+        assert!(is_table_session_local_placeholder_uuid_error(
+            "HTTP 405: Method Not Allowed"
+        ));
+
+        // A real-uuid syntax error that is NOT the local-placeholder path must not
+        // be swept by this recovery.
+        assert!(!is_table_session_local_placeholder_uuid_error(
+            r#"HTTP 500: {"error":"invalid input syntax for type uuid: \"not-a-uuid\""}"#
+        ));
+
+        // Outstanding-balance / waiting-payment close failures belong to a
+        // different recovery path and must stay out of scope here.
+        assert!(!is_table_session_local_placeholder_uuid_error(
+            r#"HTTP 409: {"error":"Table session has an outstanding balance"}"#
+        ));
+    }
+
+    fn seed_failed_table_session_row(
+        conn: &Connection,
+        table_name: &str,
+        operation: &str,
+        record_id: &str,
+        error_message: &str,
+    ) -> String {
+        let id = enqueue_test_item(
+            conn,
+            table_name,
+            operation,
+            record_id,
+            json!({ "action": "close", "status": "closed" }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed', attempts = 10, error_message = ?2
+             WHERE id = ?1",
+            params![id, error_message],
+        )
+        .expect("seed failed parity row");
+        id
+    }
+
+    #[test]
+    fn requeues_failed_local_placeholder_table_session_rows() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        // Matching row: close UPDATE keyed by the local placeholder, failed after
+        // 10 attempts with the admin invalid-uuid error.
+        let matching = seed_failed_table_session_row(
+            &conn,
+            "restaurant_table_sessions",
+            "UPDATE",
+            "local-table-session:34ccc66a-ab4d-4b1d-bef2-0869f42088c7",
+            r#"HTTP 500: {"success":false,"error":"invalid input syntax for type uuid: \"local-table-session:34ccc66a-ab4d-4b1d-bef2-0869f42088c7\""}"#,
+        );
+
+        // A real-uuid session id failing for an unrelated reason: out of scope.
+        let unrelated = seed_failed_table_session_row(
+            &conn,
+            "restaurant_table_sessions",
+            "UPDATE",
+            "11111111-1111-4111-8111-111111111111",
+            r#"HTTP 409: {"error":"Table session has an outstanding balance"}"#,
+        );
+
+        // A payments row carrying a look-alike error must never be touched.
+        let payment = seed_failed_table_session_row(
+            &conn,
+            "payments",
+            "INSERT",
+            "local-table-session:34ccc66a-ab4d-4b1d-bef2-0869f42088c7",
+            r#"HTTP 500: {"error":"invalid input syntax for type uuid: \"local-table-session:34ccc66a-ab4d-4b1d-bef2-0869f42088c7\""}"#,
+        );
+
+        let result = retry_failed_table_session_local_placeholder_items_limited(
+            &conn,
+            MAX_AUTO_REQUEUE_ITEMS_PER_CYCLE,
+        )
+        .expect("requeue local placeholder table session rows");
+        assert_eq!(result.retried, 1);
+
+        let (status, attempts, error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message FROM parity_sync_queue WHERE id = ?1",
+                params![matching],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read requeued row");
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert!(
+            error.is_none(),
+            "requeue must clear the stale error message"
+        );
+
+        // The unrelated table-session row and the payment row stay failed.
+        for id in [unrelated, payment] {
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("read untouched row");
+            assert_eq!(status, "failed", "row {id} must not be requeued");
+        }
+    }
+
+    #[test]
+    fn requeue_local_placeholder_table_session_rows_respects_budget() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        for n in 0..3 {
+            seed_failed_table_session_row(
+                &conn,
+                "restaurant_table_sessions",
+                "UPDATE",
+                &format!("local-table-session:order-{n}"),
+                r#"HTTP 500: {"error":"invalid input syntax for type uuid: \"local-table-session:order\""}"#,
+            );
+        }
+
+        // Zero budget is a no-op.
+        let none = retry_failed_table_session_local_placeholder_items_limited(&conn, 0)
+            .expect("zero-budget requeue");
+        assert_eq!(none.retried, 0);
+
+        // A budget below the candidate count caps how many rows are requeued.
+        let capped = retry_failed_table_session_local_placeholder_items_limited(&conn, 2)
+            .expect("capped requeue");
+        assert_eq!(capped.retried, 2);
+
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count pending rows");
+        assert_eq!(
+            pending, 2,
+            "budget must cap requeues to the remaining cycle budget"
+        );
+    }
+
+    #[test]
+    fn table_session_insert_success_maps_remote_id_and_close_update_uses_it() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        // Local order created before the open INSERT round-tripped; its
+        // table_session_id is still the local placeholder.
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, status, sync_status,
+                 table_session_id, created_at, updated_at
+             ) VALUES (
+                 'local-table-order-9', '[]', 24.5, 'completed', 'synced',
+                 'local-table-session:local-table-order-9', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed local table order");
+
+        // Open INSERT succeeds and returns the remote session UUID.
+        let remote_session_id = "11111111-1111-4111-8111-111111111111";
+        let insert_item = queue_item(
+            "restaurant_table_sessions",
+            "INSERT",
+            "table-session-open-event-9",
+            json!({
+                "client_event_id": "table-session-open-event-9",
+                "branch_id": TEST_BRANCH_ID,
+                "primary_table_id": "table-9",
+                "active_order_client_id": "local-table-order-9"
+            }),
+        );
+        let response = json!({
+            "success": true,
+            "session": { "id": remote_session_id }
+        });
+        apply_success(&conn, &insert_item, Some(&response)).expect("apply table-session insert");
+
+        let mapped: String = conn
+            .query_row(
+                "SELECT table_session_id FROM orders WHERE id = 'local-table-order-9'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read mapped table_session_id");
+        assert_eq!(mapped, remote_session_id);
+
+        // A later close UPDATE keyed by the local placeholder now resolves to
+        // the remote UUID path.
+        let close_item = queue_item(
+            "restaurant_table_sessions",
+            "UPDATE",
+            "local-table-session:local-table-order-9",
+            json!({
+                "action": "close",
+                "status": "closed",
+                "release_status": "cleaning",
+                "force": true,
+                "branch_id": TEST_BRANCH_ID
+            }),
+        );
+        match prepare_request(&conn, &close_item).expect("prepare table-session close") {
+            RequestPreparation::Ready(spec) => {
+                assert_eq!(
+                    spec.endpoint,
+                    format!("/api/pos/table-sessions/{remote_session_id}")
+                );
+                assert_eq!(spec.method, Method::PATCH);
+            }
+            other => panic!("expected resolved close request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unresolved_paid_table_session_close_is_consumed_locally() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let local_order_id = "34ccc66a-ab4d-4b1d-bef2-0869f42088c7";
+        let remote_order_id = "19b13a49-dc22-4dcf-b9c8-054afdf2a0e9";
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, status, sync_status,
+                 payment_status, table_id, table_number, guest_count,
+                 branch_id, client_request_id, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, '[]', 10.5, 'completed', 'synced',
+                 'paid', '81193c14-1334-4fc6-b474-db14b7a0a53f', 'B01', 1,
+                 ?3, '44a7bacf-d9e7-4e53-b3a2-e08928f964c4',
+                 datetime('now'), datetime('now')
+             )",
+            params![local_order_id, remote_order_id, TEST_BRANCH_ID],
+        )
+        .expect("seed paid local table order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 '846dca19-bcda-4937-9eac-0d3d5201506a', ?1, 'cash',
+                 10.5, 1050, 'completed', 'synced', 'applied',
+                 datetime('now'), datetime('now')
+             )",
+            params![local_order_id],
+        )
+        .expect("seed completed local payment");
+
+        let close_item = queue_item(
+            "restaurant_table_sessions",
+            "UPDATE",
+            &format!("local-table-session:{local_order_id}"),
+            json!({
+                "action": "close",
+                "status": "closed",
+                "release_status": "cleaning",
+                "force": true,
+                "client_event_id": "pos-tauri-table-close-local-table-session",
+                "branch_id": TEST_BRANCH_ID
+            }),
+        );
+
+        match prepare_request(&conn, &close_item).expect("prepare orphan close") {
+            RequestPreparation::Consumed { reason } => {
+                assert!(reason.contains(local_order_id));
+                assert!(reason.contains(remote_order_id));
+            }
+            other => panic!("expected local consume outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_drains_obsolete_paid_table_session_close_without_http() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let local_order_id = "34ccc66a-ab4d-4b1d-bef2-0869f42088c7";
+        let remote_order_id = "19b13a49-dc22-4dcf-b9c8-054afdf2a0e9";
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, status, sync_status,
+                 payment_status, table_id, table_number, guest_count,
+                 branch_id, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, '[]', 10.5, 'completed', 'synced',
+                 'paid', '81193c14-1334-4fc6-b474-db14b7a0a53f', 'B01', 1,
+                 ?3, datetime('now'), datetime('now')
+             )",
+            params![local_order_id, remote_order_id, TEST_BRANCH_ID],
+        )
+        .expect("seed paid local table order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'pay-reconciled-close', ?1, 'cash', 10.5, 1050,
+                 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            params![local_order_id],
+        )
+        .expect("seed completed local payment");
+
+        let queue_id = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "restaurant_table_sessions".to_string(),
+                record_id: format!("local-table-session:{local_order_id}"),
+                operation: "UPDATE".to_string(),
+                data: json!({
+                    "action": "close",
+                    "status": "closed",
+                    "release_status": "cleaning",
+                    "force": true,
+                    "branch_id": TEST_BRANCH_ID
+                })
+                .to_string(),
+                organization_id: "org-1".to_string(),
+                priority: Some(0),
+                module_type: Some("table_service".to_string()),
+                conflict_strategy: Some("server-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue orphan close");
+
+        let conn = std::sync::Mutex::new(conn);
+        let result = process_queue(&conn, "http://127.0.0.1:9", "api-key")
+            .await
+            .expect("process queue");
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(remaining, 0);
+
+        clear_terminal_identity();
+    }
+
+    #[test]
+    fn prepare_request_keeps_non_uuid_table_session_in_payment_metadata() {
+        // Guard: the new table-session resolution path must not alter how the
+        // payments path stows a non-UUID table session id into metadata.
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-metadata-guard', 'remote-order-metadata-guard',
+                 '[]', 18.0, 1800, 'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed payment order");
+
+        let item = queue_item(
+            "payments",
+            "INSERT",
+            "pay-metadata-guard",
+            json!({
+                "paymentId": "pay-metadata-guard",
+                "orderId": "order-metadata-guard",
+                "amount": 18.0,
+                "method": "cash",
+                "tableSessionId": "local-table-session:order-metadata-guard"
+            }),
+        );
+
+        let spec = match prepare_request(&conn, &item).expect("prepare payment via dispatcher") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready payment request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(spec.body.as_deref().expect("payment body"))
+            .expect("parse payment body");
+
+        assert_eq!(body.get("table_session_id"), None);
+        assert_eq!(
+            body.pointer("/metadata/local_table_session_id")
+                .and_then(Value::as_str),
+            Some("local-table-session:order-metadata-guard")
+        );
+    }
+
+    #[test]
     fn prepare_payment_request_includes_settlement_adjustments() {
         let conn = test_connection();
         seed_terminal_context(&conn);
@@ -8661,6 +10142,97 @@ mod tests {
 
         assert_eq!(pending_count, 2);
         assert_eq!(failed_count, 2);
+    }
+
+    #[test]
+    fn invalid_fiscal_issued_at_error_accepts_server_error_name_variants() {
+        for error_name in [
+            "InvalidFiscalReceiptInput",
+            "Invalid FiscalReceiptInput",
+            "Invalid Fiscal Receipt Input",
+            "invalid_fiscal_receipt_input",
+        ] {
+            let error = format!(
+                r#"HTTP 400: {{"error":"{error_name}","issues":[{{"validation":"datetime","message":"Invalid datetime","path":["issuedAt"]}}]}}"#
+            );
+            assert!(
+                is_invalid_fiscal_issued_at_error(&error),
+                "should match fiscal issuedAt datetime error variant: {error_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_failed_invalid_fiscal_issued_at_items_rewrites_payload_and_requeues() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "fiscal_submission".to_string(),
+                record_id: "ord-fiscal-retry-date".to_string(),
+                operation: "INSERT".to_string(),
+                data: json!({
+                    "organizationId": "org-1",
+                    "branchId": TEST_BRANCH_ID,
+                    "orderId": "ord-fiscal-retry-date",
+                    "receiptNumber": "R-FISCAL-RETRY-DATE",
+                    "issuedAt": "2026-06-19 11:35:00",
+                    "totals": {
+                        "netCents": 2540,
+                        "vatCents": 610,
+                        "grossCents": 3150,
+                        "currency": "EUR"
+                    },
+                    "vatBreakdown": [],
+                    "lines": [],
+                    "payments": [],
+                    "metadata": {}
+                })
+                .to_string(),
+                organization_id: "org-1".to_string(),
+                priority: Some(100),
+                module_type: Some("fiscal".to_string()),
+                conflict_strategy: Some("last-write-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue fiscal row");
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 attempts = 10,
+                 error_message = ?2
+             WHERE id = ?1",
+            params![
+                queue_id.as_str(),
+                r#"HTTP 400: {"error":"InvalidFiscalReceiptInput","issues":[{"code":"invalid_string","validation":"datetime","message":"Invalid datetime","path":["issuedAt"]}]}"#
+            ],
+        )
+        .expect("seed invalid fiscal failure");
+
+        let result = retry_failed_invalid_fiscal_issued_at_items_limited(&conn, 1)
+            .expect("retry failed fiscal issuedAt rows");
+        assert_eq!(result.retried, 1);
+
+        let (status, attempts, error_message, data): (String, i64, Option<String>, String) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, data
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read fiscal row");
+        let payload = serde_json::from_str::<Value>(&data).expect("parse fiscal data");
+
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert_eq!(error_message, None);
+        assert_eq!(
+            payload.get("issuedAt").and_then(Value::as_str),
+            Some("2026-06-19T11:35:00.000Z")
+        );
     }
 
     #[test]
@@ -9296,6 +10868,81 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn process_queue_normalizes_fiscal_issued_at_before_submit() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "fiscal_submission".to_string(),
+                record_id: "ord-fiscal-date".to_string(),
+                operation: "INSERT".to_string(),
+                data: json!({
+                    "organizationId": "org-1",
+                    "branchId": TEST_BRANCH_ID,
+                    "orderId": "ord-fiscal-date",
+                    "receiptNumber": "R-FISCAL-DATE",
+                    "issuedAt": "2026-06-19 11:35:00",
+                    "totals": {
+                        "netCents": 2540,
+                        "vatCents": 610,
+                        "grossCents": 3150,
+                        "currency": "EUR"
+                    },
+                    "vatBreakdown": [],
+                    "lines": [],
+                    "payments": [],
+                    "metadata": {}
+                })
+                .to_string(),
+                organization_id: "org-1".to_string(),
+                priority: Some(100),
+                module_type: Some("fiscal".to_string()),
+                conflict_strategy: Some("last-write-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue fiscal row");
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) =
+            spawn_mock_http_server(vec![MockResponse::json(200, r#"{"success":true}"#)]).await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+
+        let request = requests.recv().await.expect("captured fiscal request");
+        assert_eq!(
+            request.request_line,
+            "POST /api/plugins/fiscal/submit HTTP/1.1"
+        );
+        let body = serde_json::from_str::<Value>(&request.body).expect("parse fiscal body");
+        assert_eq!(
+            body.get("issuedAt").and_then(Value::as_str),
+            Some("2026-06-19T11:35:00.000Z")
+        );
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(remaining, 0);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn process_queue_keeps_429_rows_pending_and_stops_the_batch() {
         clear_terminal_identity();
         let conn = test_connection();
@@ -9462,6 +11109,307 @@ mod tests {
         assert_eq!(row.0, "pending");
         assert_eq!(row.1, 1);
         assert_eq!(row.2.as_deref(), Some("Waiting for parent order sync"));
+        assert!(row.3.is_some(), "deferred row should have a retry time");
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_retries_legacy_order_update_without_items_after_generic_admin_500() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status,
+                 created_at, updated_at
+             )
+             VALUES (
+                 'local-discounted-order', 'remote-discounted-order',
+                 '[]', 29.4, 2940, 'pending', 'pending',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed discounted order");
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "UPDATE",
+            "local-discounted-order",
+            json!({
+                "orderId": "local-discounted-order",
+                "status": "pending",
+                "totalAmount": 29.4,
+                "subtotal": 31.5,
+                "discountAmount": 2.1,
+                "paymentStatus": "paid",
+                "items": [
+                    {
+                        "menu_item_id": TEST_MENU_ITEM_ID,
+                        "name": "Prosciutto Pizza",
+                        "quantity": 1,
+                        "unit_price": 18.9,
+                        "original_unit_price": 21,
+                        "is_price_overridden": true
+                    },
+                    {
+                        "menu_item_id": "33333333-3333-4333-9333-333333333333",
+                        "name": "Chocolate Fondant",
+                        "quantity": 1,
+                        "unit_price": 10.5,
+                        "total_price": 10.5
+                    }
+                ]
+            }),
+        );
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(500, r#"{"success":false,"error":"Failed to update order"}"#),
+            MockResponse::json(
+                200,
+                r#"{"success":true,"data":{"id":"remote-discounted-order"}}"#,
+            ),
+        ])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let first_request = requests.recv().await.expect("captured first request");
+        assert_eq!(first_request.request_line, "PATCH /api/pos/orders HTTP/1.1");
+        let first_body: Value =
+            serde_json::from_str(&first_request.body).expect("parse first body");
+        assert!(
+            first_body.get("items").is_some(),
+            "first request should preserve item replacement payload"
+        );
+
+        let second_request = requests.recv().await.expect("captured fallback request");
+        assert_eq!(
+            second_request.request_line,
+            "PATCH /api/pos/orders HTTP/1.1"
+        );
+        let second_body: Value =
+            serde_json::from_str(&second_request.body).expect("parse fallback body");
+        assert_eq!(second_body["id"], json!("remote-discounted-order"));
+        assert_eq!(second_body["total_amount"], json!(29.4));
+        assert_eq!(second_body["discount_amount"], json!(2.1));
+        assert!(
+            second_body.get("items").is_none(),
+            "fallback request must omit item replacement for legacy admin"
+        );
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read fallback row count");
+        assert_eq!(remaining, 0);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_retries_legacy_order_update_with_minimal_body_after_itemless_retry_fails(
+    ) {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status,
+                 created_at, updated_at
+             )
+             VALUES (
+                 'local-discounted-order-minimal', 'remote-discounted-order-minimal',
+                 '[]', 29.4, 2940, 'pending', 'pending',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed discounted order");
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "UPDATE",
+            "local-discounted-order-minimal",
+            json!({
+                "orderId": "local-discounted-order-minimal",
+                "status": "pending",
+                "totalAmount": 29.4,
+                "subtotal": 31.5,
+                "discountAmount": 2.1,
+                "paymentStatus": "paid",
+                "items": [
+                    {
+                        "menu_item_id": TEST_MENU_ITEM_ID,
+                        "name": "Prosciutto Pizza",
+                        "quantity": 1,
+                        "unit_price": 18.9,
+                        "original_unit_price": 21,
+                        "is_price_overridden": true
+                    },
+                    {
+                        "menu_item_id": "33333333-3333-4333-9333-333333333333",
+                        "name": "Chocolate Fondant",
+                        "quantity": 1,
+                        "unit_price": 10.5,
+                        "total_price": 10.5
+                    }
+                ]
+            }),
+        );
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(500, r#"{"success":false,"error":"Failed to update order"}"#),
+            MockResponse::json(500, r#"{"success":false,"error":"Failed to update order"}"#),
+            MockResponse::json(
+                200,
+                r#"{"success":true,"data":{"id":"remote-discounted-order-minimal"}}"#,
+            ),
+        ])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let first_request = requests.recv().await.expect("captured first request");
+        let first_body: Value =
+            serde_json::from_str(&first_request.body).expect("parse first body");
+        assert!(
+            first_body.get("items").is_some(),
+            "first request should preserve item replacement payload"
+        );
+
+        let second_request = requests.recv().await.expect("captured itemless request");
+        let second_body: Value =
+            serde_json::from_str(&second_request.body).expect("parse itemless body");
+        assert!(second_body.get("items").is_none());
+        assert_eq!(second_body["discount_amount"], json!(2.1));
+
+        let third_request = requests.recv().await.expect("captured minimal request");
+        assert_eq!(third_request.request_line, "PATCH /api/pos/orders HTTP/1.1");
+        let third_body: Value =
+            serde_json::from_str(&third_request.body).expect("parse minimal body");
+        assert_eq!(third_body["id"], json!("remote-discounted-order-minimal"));
+        assert_eq!(third_body["status"], json!("pending"));
+        assert_eq!(third_body["payment_status"], json!("paid"));
+        assert!(
+            third_body.get("items").is_none(),
+            "minimal fallback must omit item replacement"
+        );
+        assert!(
+            third_body.get("total_amount").is_none(),
+            "minimal fallback must omit financial fields rejected by legacy admin"
+        );
+        assert!(
+            third_body.get("discount_amount").is_none(),
+            "minimal fallback must omit discount fields rejected by legacy admin"
+        );
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read minimal fallback row count");
+        assert_eq!(remaining, 0);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_defers_table_session_close_when_payment_totals_are_stale() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "restaurant_table_sessions",
+            "UPDATE",
+            "session-paid-local",
+            json!({
+                "action": "close",
+                "status": "closed",
+                "release_status": "cleaning",
+                "client_event_id": "table-close-session-paid-local",
+                "branch_id": TEST_BRANCH_ID
+            }),
+        );
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            409,
+            r#"{"order_total":24.5,"outstanding_balance":24.5,"paid_total":0,"payment_status":"pending","tip_total":0}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let request = requests
+            .recv()
+            .await
+            .expect("captured table-session close request");
+        assert_eq!(
+            request.request_line,
+            "PATCH /api/pos/table-sessions/session-paid-local HTTP/1.1"
+        );
+
+        let row: (String, i64, Option<String>, Option<String>) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts, error_message, next_retry_at
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read deferred table-session close row");
+        assert_eq!(row.0, "pending");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2.as_deref(), Some("Waiting for table payment sync"));
         assert!(row.3.is_some(), "deferred row should have a retry time");
 
         clear_terminal_identity();

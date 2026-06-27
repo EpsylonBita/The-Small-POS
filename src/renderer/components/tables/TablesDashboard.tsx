@@ -10,6 +10,7 @@ import { FloatingActionButton } from '../ui/FloatingActionButton';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
 import {
+  AlertTriangle,
   ArrowRightLeft,
   Banknote,
   CheckCircle,
@@ -181,18 +182,18 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
   // Get color classes for tab
   const getTabColorClasses = (tab: TabConfig, isActive: boolean) => {
     if (!isActive) {
-      return isDark ? 'text-white/70 hover:text-white' : 'text-gray-600 hover:text-gray-800';
+      return isDark ? 'text-white/70' : 'text-gray-600';
     }
 
     switch (tab.color) {
       case 'green':
-        return 'text-green-500 drop-shadow-[0_0_8px_rgba(34,197,94,0.8)]';
+        return 'text-green-500';
       case 'orange':
-        return 'text-orange-500 drop-shadow-[0_0_8px_rgba(249,115,22,0.8)]';
+        return 'text-amber-500';
       case 'red':
-        return 'text-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]';
+        return 'text-red-500';
       case 'blue':
-        return 'text-blue-500 drop-shadow-[0_0_8px_rgba(59,130,246,0.8)]';
+        return 'text-yellow-500';
       default:
         return isDark ? 'text-white' : 'text-gray-900';
     }
@@ -213,12 +214,12 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
         <button
           onClick={handleRefresh}
           disabled={isRefreshing || ordersLoading || tablesLoading}
-          className={`mr-2 p-2 rounded-lg transition-all duration-200 ${
+          className={`mr-2 p-2 rounded-xl transition-all duration-200 ${
             isDark
-              ? 'hover:bg-white/10 text-white/70 hover:text-white disabled:text-white/30'
-              : 'hover:bg-gray-200 text-gray-600 hover:text-gray-800 disabled:text-gray-300'
+              ? 'active:bg-white/10 text-white/70 disabled:text-white/30'
+              : 'active:bg-gray-200 text-gray-600 disabled:text-gray-300'
           }`}
-          title={t('tablesDashboard.refresh', { defaultValue: 'Refresh' })}
+          aria-label={t('tablesDashboard.refresh', { defaultValue: 'Refresh' })}
         >
           <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
         </button>
@@ -226,14 +227,14 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
           <button
             key={tab.id}
             onClick={() => handleTabChange(tab.id)}
-            className={`flex-1 min-w-[90px] px-3 sm:px-4 py-2.5 sm:py-3 rounded-lg font-medium transition-all duration-200 relative touch-feedback active:scale-95 ${
+            className={`flex-1 min-w-[90px] px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl font-medium transition-all duration-200 relative touch-feedback active:scale-95 ${
               activeTab === tab.id
                 ? isDark
                   ? 'bg-white/20 shadow-lg'
                   : 'bg-white backdrop-blur-sm shadow-sm border border-gray-200/30'
                 : isDark
-                  ? 'hover:bg-white/10 active:bg-white/20'
-                  : 'hover:bg-white/60 active:bg-white/80'
+                  ? 'active:bg-white/20'
+                  : 'active:bg-white/80'
             }`}
           >
             <div className="flex items-center justify-center gap-1.5 sm:gap-2">
@@ -250,10 +251,10 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
                   ? tab.color === 'green'
                     ? 'bg-green-500/20 text-green-500'
                     : tab.color === 'orange'
-                      ? 'bg-orange-500/20 text-orange-500'
+                      ? 'bg-amber-500/20 text-amber-500'
                       : tab.color === 'red'
                         ? 'bg-red-500/20 text-red-500'
-                        : 'bg-blue-500/20 text-blue-500'
+                        : 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-300'
                   : isDark
                     ? 'bg-white/10 text-white/70'
                     : 'bg-gray-200 text-gray-600'
@@ -303,7 +304,7 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
       <FloatingActionButton
         onClick={onAddOrder}
         className="!bottom-6 !right-6"
-        title={t('tablesDashboard.addOrder', { defaultValue: 'Add Order' })}
+        aria-label={t('tablesDashboard.addOrder', { defaultValue: 'Add Order' })}
       />
     </div>
   );
@@ -342,8 +343,8 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
           : 'bg-yellow-100 text-yellow-700 border-yellow-300';
       case 'preparing':
         return isDark
-          ? 'bg-purple-500/20 text-purple-400 border-purple-500/30'
-          : 'bg-purple-100 text-purple-700 border-purple-300';
+          ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+          : 'bg-amber-100 text-amber-800 border-amber-300';
       case 'ready':
       case 'completed':
       case 'delivered':
@@ -411,10 +412,10 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
         return (
           <div
             key={order.id}
-            className={`rounded-xl p-4 border transition-all duration-200 hover:scale-[1.01] cursor-pointer ${
+            className={`rounded-xl p-4 border transition-all duration-200 active:scale-[0.99] cursor-pointer ${
               isDark
-                ? 'bg-white/5 border-white/10 hover:bg-white/10 hover:border-white/20'
-                : 'bg-white border-gray-200 hover:bg-gray-50 hover:border-gray-300 shadow-sm'
+                ? 'bg-white/5 border-white/10 active:bg-white/10'
+                : 'bg-white border-gray-200 active:bg-gray-50 shadow-sm'
             }`}
           >
             <div className="flex items-center justify-between">
@@ -557,8 +558,8 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
             key={order.id}
             className={`rounded-xl p-4 border transition-all duration-200 ${
               isDark
-                ? 'bg-green-500/5 border-green-500/20 hover:bg-green-500/10'
-                : 'bg-green-50 border-green-200 hover:bg-green-100 shadow-sm'
+                ? 'bg-green-500/5 border-green-500/20 active:bg-green-500/10'
+                : 'bg-green-50 border-green-200 active:bg-green-100 shadow-sm'
             }`}
           >
             <div className="flex items-center justify-between">
@@ -706,8 +707,8 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
             key={order.id}
             className={`rounded-xl p-4 border transition-all duration-200 ${
               isDark
-                ? 'bg-red-500/5 border-red-500/20 hover:bg-red-500/10'
-                : 'bg-red-50 border-red-200 hover:bg-red-100 shadow-sm'
+                ? 'bg-red-500/5 border-red-500/20 active:bg-red-500/10'
+                : 'bg-red-50 border-red-200 active:bg-red-100 shadow-sm'
             }`}
           >
             <div className="flex items-center justify-between">
@@ -889,8 +890,8 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     available: {
       label: t('tablesDashboard.tableStatus.available', { defaultValue: 'Available' }),
       cardClass: isDark
-        ? 'border-emerald-400/35 bg-emerald-500/10 hover:border-emerald-300/65'
-        : 'border-emerald-300 bg-emerald-50/90 hover:border-emerald-500',
+        ? 'border-emerald-400/35 bg-emerald-500/10'
+        : 'border-emerald-300 bg-emerald-50/90',
       badgeClass: isDark
         ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
         : 'border-emerald-200 bg-emerald-100 text-emerald-700',
@@ -900,19 +901,19 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     occupied: {
       label: t('tablesDashboard.tableStatus.occupied', { defaultValue: 'Occupied' }),
       cardClass: isDark
-        ? 'border-blue-400/45 bg-blue-500/10 hover:border-blue-300/75'
-        : 'border-blue-300 bg-blue-50/95 hover:border-blue-500',
+        ? 'border-yellow-400/45 bg-yellow-500/10'
+        : 'border-yellow-300 bg-yellow-50/95',
       badgeClass: isDark
-        ? 'border-blue-400/30 bg-blue-400/10 text-blue-200'
-        : 'border-blue-200 bg-blue-100 text-blue-700',
-      iconClass: 'text-blue-500',
-      progressClass: 'bg-blue-500',
+        ? 'border-yellow-400/30 bg-yellow-400/10 text-yellow-200'
+        : 'border-yellow-200 bg-yellow-100 text-yellow-800',
+      iconClass: 'text-yellow-500',
+      progressClass: 'bg-yellow-500',
     },
     reserved: {
       label: t('tablesDashboard.tableStatus.reserved', { defaultValue: 'Reserved' }),
       cardClass: isDark
-        ? 'border-amber-400/40 bg-amber-500/10 hover:border-amber-300/70'
-        : 'border-amber-300 bg-amber-50 hover:border-amber-500',
+        ? 'border-amber-400/40 bg-amber-500/10'
+        : 'border-amber-300 bg-amber-50',
       badgeClass: isDark
         ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
         : 'border-amber-200 bg-amber-100 text-amber-700',
@@ -922,8 +923,8 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     cleaning: {
       label: t('tablesDashboard.tableStatus.cleaning', { defaultValue: 'Cleaning' }),
       cardClass: isDark
-        ? 'border-slate-400/25 bg-white/[0.045] hover:border-slate-300/50'
-        : 'border-slate-300 bg-slate-50 hover:border-slate-400',
+        ? 'border-slate-400/25 bg-white/[0.045]'
+        : 'border-slate-300 bg-slate-50',
       badgeClass: isDark
         ? 'border-slate-400/25 bg-slate-400/10 text-slate-200'
         : 'border-slate-200 bg-slate-100 text-slate-700',
@@ -933,19 +934,19 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     maintenance: {
       label: t('tablesDashboard.tableStatus.maintenance', { defaultValue: 'Maintenance' }),
       cardClass: isDark
-        ? 'border-orange-400/35 bg-orange-500/10 hover:border-orange-300/65'
-        : 'border-orange-300 bg-orange-50 hover:border-orange-500',
+        ? 'border-red-400/35 bg-red-500/10'
+        : 'border-red-300 bg-red-50',
       badgeClass: isDark
-        ? 'border-orange-400/25 bg-orange-400/10 text-orange-200'
-        : 'border-orange-200 bg-orange-100 text-orange-700',
-      iconClass: 'text-orange-500',
-      progressClass: 'bg-orange-500',
+        ? 'border-red-400/25 bg-red-400/10 text-red-200'
+        : 'border-red-200 bg-red-100 text-red-700',
+      iconClass: 'text-red-500',
+      progressClass: 'bg-red-500',
     },
     unavailable: {
       label: t('tablesDashboard.tableStatus.unavailable', { defaultValue: 'Unavailable' }),
       cardClass: isDark
-        ? 'border-slate-500/25 bg-slate-800/35 hover:border-slate-400/45'
-        : 'border-slate-300 bg-slate-100 hover:border-slate-400',
+        ? 'border-slate-500/25 bg-slate-800/35'
+        : 'border-slate-300 bg-slate-100',
       badgeClass: isDark
         ? 'border-slate-500/25 bg-slate-500/10 text-slate-300'
         : 'border-slate-300 bg-slate-200 text-slate-700',
@@ -1026,6 +1027,18 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     scrollTarget.scrollTop = nextScrollTop;
   }, []);
 
+  // Reset the table-card scroll region to the top whenever the active status
+  // filter, floor filter, or view mode changes, so a narrow filtered result set
+  // starts fully visible below the fixed controls instead of inheriting the
+  // previous scrollTop. Keyed on the filter/view inputs, not the table data, so
+  // live updates don't reset the scroll position while staff are scrolling.
+  useEffect(() => {
+    const scrollTarget = tableGridScrollRef.current;
+    if (scrollTarget) {
+      scrollTarget.scrollTop = 0;
+    }
+  }, [filter, floorFilter, tableViewMode]);
+
   if (tables.length === 0) {
     return (
       <div className={`h-full flex items-center justify-center ${isDark ? 'text-white/50' : 'text-gray-500'}`}>
@@ -1044,23 +1057,23 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
 
   return (
     <div className="flex h-full min-h-0 gap-4">
-      <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden" onWheel={handleTableGridWheel}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" onWheel={handleTableGridWheel}>
         <div className="mb-4 shrink-0 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="grid min-w-[360px] grid-cols-3 gap-2">
-              <div className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
+              <div className={`rounded-2xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
                 <div className={`text-[11px] font-semibold uppercase tracking-wide ${textMuted}`}>
                   {t('tablesDashboard.occupied', { defaultValue: 'Occupied' })}
                 </div>
                 <div className={`mt-1 text-xl font-bold ${textStrong}`}>{stats.occupied}/{stats.total}</div>
               </div>
-              <div className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
+              <div className={`rounded-2xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
                 <div className={`text-[11px] font-semibold uppercase tracking-wide ${textMuted}`}>
                   {t('tablesDashboard.openDue', { defaultValue: 'Open due' })}
                 </div>
                 <div className="mt-1 text-xl font-bold text-amber-600 dark:text-amber-300">{formatCurrency(stats.due)}</div>
               </div>
-              <div className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
+              <div className={`rounded-2xl border px-4 py-3 backdrop-blur-xl ${subtleClass}`}>
                 <div className={`text-[11px] font-semibold uppercase tracking-wide ${textMuted}`}>
                   {t('tablesDashboard.rate', { defaultValue: 'Rate' })}
                 </div>
@@ -1081,12 +1094,12 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                 <button
                   type="button"
                   onClick={() => setTableViewMode('list')}
-                  className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
                     tableViewMode === 'list'
-                      ? 'bg-blue-600 text-white'
+                      ? 'bg-yellow-400 text-black'
                       : isDark
-                        ? 'text-slate-200 hover:bg-white/[0.08]'
-                        : 'text-slate-700 hover:bg-white'
+                        ? 'text-slate-200 active:bg-white/[0.08]'
+                        : 'text-slate-700 active:bg-white'
                   }`}
                 >
                   <LayoutGrid className="h-4 w-4" />
@@ -1095,12 +1108,12 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                 <button
                   type="button"
                   onClick={() => setTableViewMode('floorplan')}
-                  className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
                     tableViewMode === 'floorplan'
-                      ? 'bg-blue-600 text-white'
+                      ? 'bg-yellow-400 text-black'
                       : isDark
-                        ? 'text-slate-200 hover:bg-white/[0.08]'
-                        : 'text-slate-700 hover:bg-white'
+                        ? 'text-slate-200 active:bg-white/[0.08]'
+                        : 'text-slate-700 active:bg-white'
                   }`}
                 >
                   <MapIcon className="h-4 w-4" />
@@ -1114,10 +1127,10 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                   onClick={() => setFilter(status)}
                   className={`rounded-xl px-3 py-2 text-sm font-semibold transition-all ${
                     filter === status
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20'
+                      ? 'bg-yellow-400 text-black shadow-lg shadow-yellow-500/20'
                       : isDark
-                        ? 'bg-white/[0.06] text-slate-200 hover:bg-white/[0.1]'
-                        : 'bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50'
+                        ? 'bg-white/[0.06] text-slate-200 active:bg-white/[0.1]'
+                        : 'bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 active:bg-slate-50'
                   }`}
                 >
                   {status === 'all' ? t('tablesDashboard.all', { defaultValue: 'All' }) : statusConfig[status].label}
@@ -1138,19 +1151,19 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
           </div>
 
           <div className={`flex items-center gap-2 overflow-x-auto rounded-xl border p-1 backdrop-blur-xl scrollbar-hide ${subtleClass}`}>
-            <span className={`ml-2 mr-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+            <span className={`ml-2 mr-1 flex items-center gap-1.5 text-xs font-semibold tracking-wide ${textMuted}`}>
               <LayoutGrid className="h-3.5 w-3.5" />
               {t('tablesDashboard.floor', { defaultValue: 'Floor' })}
             </span>
             <button
               type="button"
               onClick={() => setFloorFilter('all')}
-              className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+              className={`rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
                 floorFilter === 'all'
-                  ? 'bg-blue-600 text-white'
+                  ? 'bg-yellow-400 text-black'
                   : isDark
-                    ? 'text-slate-200 hover:bg-white/[0.08]'
-                    : 'text-slate-700 hover:bg-white'
+                    ? 'text-slate-200 active:bg-white/[0.08]'
+                    : 'text-slate-700 active:bg-white'
               }`}
             >
               {floorLabel('all')}
@@ -1160,12 +1173,12 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                 key={floor}
                 type="button"
                 onClick={() => setFloorFilter(floor)}
-                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                className={`rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
                   floorFilter === floor
-                    ? 'bg-blue-600 text-white'
+                    ? 'bg-yellow-400 text-black'
                     : isDark
-                      ? 'text-slate-200 hover:bg-white/[0.08]'
-                      : 'text-slate-700 hover:bg-white'
+                      ? 'text-slate-200 active:bg-white/[0.08]'
+                      : 'text-slate-700 active:bg-white'
                 }`}
               >
                 {floorLabel(floor)}
@@ -1176,12 +1189,12 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
 
         <div
           data-testid="tables-dashboard-table-grid-container"
-          className="h-[calc(100dvh-30rem)] min-h-56 overflow-hidden"
+          className="min-h-0 flex-1 overflow-hidden"
         >
           <div
             ref={tableGridScrollRef}
             data-testid="tables-dashboard-table-scroll-region"
-            className="h-full min-h-0 overflow-y-auto overflow-x-hidden pr-1 scrollbar-hide touch-scroll"
+            className="h-full min-h-0 overflow-y-auto overflow-x-hidden pb-28 pr-24 scrollbar-hide touch-scroll"
           >
           {tableViewMode === 'floorplan' ? (
             <TableFloorPlanView
@@ -1203,6 +1216,17 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
               const isSelected = selectedTable?.id === table.id;
               const hasOpenCheck = tableHasOpenCheckReference(table);
               const occupiedInfo = hasOpenCheck ? formatOccupiedDuration(table.occupiedSince) : null;
+              // Cleaning/maintenance/unavailable tables are not ready for guests and must not
+              // offer guest order actions, even when no open check remains after payment.
+              const needsAttention =
+                !hasOpenCheck &&
+                (displayStatus === 'cleaning' ||
+                  displayStatus === 'maintenance' ||
+                  displayStatus === 'unavailable');
+              const attentionActionLabel =
+                displayStatus === 'cleaning'
+                  ? t('tablesDashboard.markCleaned', { defaultValue: 'Mark cleaned' })
+                  : t('tablesDashboard.backInService', { defaultValue: 'Back in service' });
 
               return (
                 <div
@@ -1211,32 +1235,32 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                   tabIndex={0}
                   onClick={() => handleTableClick(table)}
                   onKeyDown={(event) => handleTableKeyDown(event, table)}
-                  className={`group min-h-[205px] cursor-pointer rounded-xl border p-4 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-blue-400/45 ${
+                  className={`group min-h-[205px] cursor-pointer rounded-2xl border p-4 backdrop-blur-xl transition-all duration-200 active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-yellow-400/45 ${
                     visual.cardClass
-                  } ${isSelected ? 'ring-2 ring-blue-500/70' : ''}`}
+                  } ${isSelected ? 'ring-2 ring-yellow-500/70' : ''}`}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className={`flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+                      <div className={`flex items-center gap-1.5 text-xs font-semibold tracking-wide ${textMuted}`}>
                         <LayoutGrid className="h-3.5 w-3.5" />
                         {floorLabel(getFloorValue(table))}
                       </div>
                       <div className={`mt-1 truncate text-3xl font-black ${textStrong}`}>#{table.tableNumber}</div>
                     </div>
-                    <span className={`shrink-0 rounded-lg border px-2.5 py-1 text-xs font-bold ${visual.badgeClass}`}>
+                    <span className={`shrink-0 rounded-xl border px-2.5 py-1 text-xs font-bold ${visual.badgeClass}`}>
                       {visual.label}
                     </span>
                   </div>
 
                   <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
-                    <div className={`rounded-lg border px-3 py-2 ${isDark ? 'border-white/10 bg-black/20' : 'border-white/70 bg-white/65'}`}>
+                    <div className={`rounded-2xl border px-3 py-2 ${isDark ? 'border-white/10 bg-black/20' : 'border-white/70 bg-white/65'}`}>
                       <div className={`flex items-center gap-1 text-xs font-medium ${textMuted}`}>
                         <Users className="h-3.5 w-3.5" />
                         {t('tablesDashboard.covers', { defaultValue: 'Covers' })}
                       </div>
                       <div className={`mt-1 font-bold ${textStrong}`}>{guestCount}/{table.capacity}</div>
                     </div>
-                    <div className={`rounded-lg border px-3 py-2 ${isDark ? 'border-white/10 bg-black/20' : 'border-white/70 bg-white/65'}`}>
+                    <div className={`rounded-2xl border px-3 py-2 ${isDark ? 'border-white/10 bg-black/20' : 'border-white/70 bg-white/65'}`}>
                       <div className={`flex items-center gap-1 text-xs font-medium ${textMuted}`}>
                         <UserCheck className="h-3.5 w-3.5" />
                         {t('tablesDashboard.waiter', { defaultValue: 'Waiter' })}
@@ -1270,8 +1294,17 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                         />
                       </div>
                     </div>
+                  ) : needsAttention ? (
+                    <div className={`mt-4 rounded-2xl border px-3 py-3 ${isDark ? 'border-amber-400/25 bg-amber-400/10' : 'border-amber-200 bg-amber-50/80'}`}>
+                      <div className="flex items-center gap-2 text-sm font-semibold text-amber-700 dark:text-amber-300">
+                        <AlertTriangle className="h-4 w-4" />
+                        {displayStatus === 'cleaning'
+                          ? t('tablesDashboard.needsCleaning', { defaultValue: 'Needs cleaning' })
+                          : t('tablesDashboard.outOfService', { defaultValue: 'Out of service' })}
+                      </div>
+                    </div>
                   ) : (
-                    <div className={`mt-4 rounded-lg border px-3 py-3 ${isDark ? 'border-emerald-400/20 bg-emerald-400/10' : 'border-emerald-200 bg-white/70'}`}>
+                    <div className={`mt-4 rounded-2xl border px-3 py-3 ${isDark ? 'border-emerald-400/20 bg-emerald-400/10' : 'border-emerald-200 bg-white/70'}`}>
                       <div className="flex items-center gap-2 text-sm font-semibold text-emerald-700 dark:text-emerald-300">
                         <CheckCircle className="h-4 w-4" />
                         {t('tablesDashboard.readyForGuests', { defaultValue: 'Ready for guests' })}
@@ -1281,31 +1314,39 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
 
                   <div className={`mt-4 flex flex-wrap items-center gap-2 text-xs ${textMuted}`}>
                     {occupiedInfo ? (
-                      <span className="inline-flex items-center gap-1 rounded-lg border border-blue-400/20 bg-blue-500/10 px-2 py-1 font-semibold text-blue-700 dark:text-blue-200">
+                      <span className="inline-flex items-center gap-1 rounded-xl border border-yellow-400/20 bg-yellow-500/10 px-2 py-1 font-semibold text-yellow-800 dark:text-yellow-200">
                         <Clock3 className="h-3.5 w-3.5" />
                         {occupiedInfo.since} · {occupiedInfo.duration}
                       </span>
                     ) : null}
                     {table.currentOrderId ? (
-                      <span className="inline-flex max-w-full items-center gap-1 rounded-lg border border-slate-400/20 px-2 py-1">
+                      <span className="inline-flex max-w-full items-center gap-1 rounded-xl border border-slate-400/20 px-2 py-1">
                         <ReceiptText className="h-3.5 w-3.5" />
                         <span className="truncate">{String(table.currentOrderId).slice(0, 10)}</span>
                       </span>
                     ) : null}
                   </div>
 
+                  {needsAttention ? (
+                    <div className="mt-4">
+                      <span className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-amber-600 px-3 py-2 text-sm font-bold text-white transition-colors group-active:bg-amber-500">
+                        <AlertTriangle className="h-4 w-4" />
+                        {attentionActionLabel}
+                      </span>
+                    </div>
+                  ) : (
                   <div className="mt-4 grid grid-cols-2 gap-2">
-                    <span className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
+                    <span className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-bold transition-colors ${
                       hasOpenCheck
-                        ? 'bg-blue-600 text-white group-hover:bg-blue-500'
-                        : 'bg-emerald-600 text-white group-hover:bg-emerald-500'
+                        ? 'bg-yellow-400 text-black group-active:bg-yellow-300'
+                        : 'bg-emerald-600 text-white group-active:bg-emerald-500'
                     }`}>
                       {hasOpenCheck ? <WalletCards className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
                       {hasOpenCheck
                         ? t('tablesDashboard.openCheck', { defaultValue: 'Open check' })
                         : t('tablesDashboard.newOrder', { defaultValue: 'New order' })}
                     </span>
-                    <span className={`inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-bold ${
+                    <span className={`inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-bold ${
                       isDark
                         ? 'border-white/10 bg-white/[0.06] text-slate-200'
                         : 'border-slate-200 bg-white/75 text-slate-700'
@@ -1316,6 +1357,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                         : t('tablesDashboard.assign', { defaultValue: 'Assign' })}
                     </span>
                   </div>
+                  )}
                 </div>
               );
             })}
@@ -1336,10 +1378,10 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
             onNavigateToMenu={onNavigateToMenu}
           />
         ) : (
-          <div className={`w-80 shrink-0 rounded-xl border p-4 backdrop-blur-xl ${shellClass}`}>
+          <div className={`w-80 shrink-0 rounded-2xl border p-4 backdrop-blur-xl ${shellClass}`}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className={`text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
+                <p className={`text-xs font-semibold tracking-wide ${textMuted}`}>
                   {floorLabel(getFloorValue(selectedTable))}
                 </p>
                 <h3 className={`truncate text-xl font-black ${textStrong}`}>
@@ -1349,8 +1391,8 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
               <button
                 type="button"
                 onClick={handleClosePanel}
-                className={`rounded-lg p-2 transition-colors ${
-                  isDark ? 'text-slate-300 hover:bg-white/[0.08] hover:text-white' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                className={`rounded-xl p-2 transition-colors ${
+                  isDark ? 'text-slate-300 active:bg-white/[0.08]' : 'text-slate-500 active:bg-slate-100'
                 }`}
                 aria-label={t('common.close', { defaultValue: 'Close' })}
               >
@@ -1366,15 +1408,15 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
               const occupiedInfo = hasOpenCheck ? formatOccupiedDuration(selectedTable.occupiedSince) : null;
               return (
                 <div className="mt-4 space-y-3">
-                  <div className={`rounded-xl border p-3 ${subtleClass}`}>
+                  <div className={`rounded-2xl border p-3 ${subtleClass}`}>
                     <div className={`text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
                       {t('tablesDashboard.status', { defaultValue: 'Status' })}
                     </div>
-                    <div className={`mt-1 inline-flex rounded-lg border px-2.5 py-1 text-sm font-bold ${visual.badgeClass}`}>
+                    <div className={`mt-1 inline-flex rounded-xl border px-2.5 py-1 text-sm font-bold ${visual.badgeClass}`}>
                       {visual.label}
                     </div>
                   </div>
-                  <div className={`rounded-xl border p-3 ${subtleClass}`}>
+                  <div className={`rounded-2xl border p-3 ${subtleClass}`}>
                     <div className={`text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
                       {t('tablesDashboard.balance', { defaultValue: 'Balance' })}
                     </div>
@@ -1389,7 +1431,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                       </div>
                     </div>
                   </div>
-                  <div className={`rounded-xl border p-3 ${subtleClass}`}>
+                  <div className={`rounded-2xl border p-3 ${subtleClass}`}>
                     <div className={`flex items-center justify-between gap-3 text-sm ${textMuted}`}>
                       <span className="inline-flex items-center gap-1.5">
                         <Users className="h-4 w-4" />
@@ -1401,14 +1443,14 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                       </span>
                     </div>
                     {occupiedInfo ? (
-                      <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-blue-400/20 bg-blue-500/10 px-2 py-1 text-xs font-semibold text-blue-700 dark:text-blue-200">
+                      <div className="mt-2 inline-flex items-center gap-1.5 rounded-xl border border-yellow-400/20 bg-yellow-500/10 px-2 py-1 text-xs font-semibold text-yellow-800 dark:text-yellow-200">
                         <Clock3 className="h-3.5 w-3.5" />
                         {occupiedInfo.since} · {occupiedInfo.duration}
                       </div>
                     ) : null}
                   </div>
                   {selectedTable.notes ? (
-                    <div className={`rounded-xl border p-3 ${subtleClass}`}>
+                    <div className={`rounded-2xl border p-3 ${subtleClass}`}>
                       <div className={`text-xs font-semibold uppercase tracking-wide ${textMuted}`}>
                         {t('tablesDashboard.notes', { defaultValue: 'Notes' })}
                       </div>

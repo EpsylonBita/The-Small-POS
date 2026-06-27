@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 import {
   appointmentsService,
   Appointment,
@@ -62,6 +63,7 @@ export function useAppointments({
   filters: propFilters,
   enableRealtime = true,
 }: UseAppointmentsProps): UseAppointmentsReturn {
+  const { t } = useTranslation();
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -187,14 +189,14 @@ export function useAppointments({
         )
       );
       
-      toast.success('Appointment created successfully');
+      toast.success(t('appointmentsView.toasts.created', { defaultValue: 'Appointment created successfully' }));
       return newAppointment;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to create appointment';
+      const message = err instanceof Error ? err.message : t('appointmentsView.toasts.createFailed', { defaultValue: 'Failed to create appointment' });
       toast.error(message);
       return null;
     }
-  }, []);
+  }, [t]);
 
   // Update appointment status
   const updateStatus = useCallback(async (
@@ -209,14 +211,16 @@ export function useAppointments({
         prev.map((a) => (a.id === appointmentId ? updated : a))
       );
       
-      toast.success(`Appointment ${status.replace('_', ' ')}`);
+      // Explicit per-status keys (never raw enum text); the English
+      // "Appointment <status>" stays only as the defaultValue safety net.
+      toast.success(t(`appointmentsView.toasts.status.${status}`, { defaultValue: `Appointment ${status.replace('_', ' ')}` }));
       return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to update status';
+      const message = err instanceof Error ? err.message : t('appointmentsView.toasts.updateStatusFailed', { defaultValue: 'Failed to update status' });
       toast.error(message);
       return false;
     }
-  }, []);
+  }, [t]);
 
   // Check-in appointment
   const checkIn = useCallback(async (appointmentId: string): Promise<boolean> => {
@@ -227,14 +231,14 @@ export function useAppointments({
         prev.map((a) => (a.id === appointmentId ? updated : a))
       );
       
-      toast.success('Customer checked in');
+      toast.success(t('appointmentsView.toasts.checkedIn', { defaultValue: 'Customer checked in' }));
       return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to check in';
+      const message = err instanceof Error ? err.message : t('appointmentsView.toasts.checkInFailed', { defaultValue: 'Failed to check in' });
       toast.error(message);
       return false;
     }
-  }, []);
+  }, [t]);
 
   // Complete appointment
   const complete = useCallback(async (appointmentId: string): Promise<boolean> => {
@@ -245,14 +249,14 @@ export function useAppointments({
         prev.map((a) => (a.id === appointmentId ? updated : a))
       );
       
-      toast.success('Appointment completed');
+      toast.success(t('appointmentsView.toasts.completed', { defaultValue: 'Appointment completed' }));
       return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to complete';
+      const message = err instanceof Error ? err.message : t('appointmentsView.toasts.completeFailed', { defaultValue: 'Failed to complete' });
       toast.error(message);
       return false;
     }
-  }, []);
+  }, [t]);
 
   return {
     appointments,

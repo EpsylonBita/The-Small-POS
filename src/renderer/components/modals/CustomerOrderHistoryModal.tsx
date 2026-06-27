@@ -79,8 +79,8 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
     const getStatusColor = (status: string) => {
         switch (status?.toLowerCase()) {
             case 'pending': return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
-            case 'preparing': return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
-            case 'ready': return 'bg-purple-500/20 text-purple-400 border-purple-500/30';
+            case 'preparing': return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
+            case 'ready': return 'bg-green-500/20 text-green-300 border-green-500/30';
             case 'completed':
             case 'delivered': return 'bg-green-500/20 text-green-400 border-green-500/30';
             case 'cancelled': return 'bg-red-500/20 text-red-400 border-red-500/30';
@@ -116,7 +116,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                 <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
                     <div className="flex justify-between items-center">
                         <div className="flex items-center gap-3">
-                            <div className="p-2 rounded-lg bg-blue-500/20 text-blue-400">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-yellow-400 text-black shadow-sm">
                                 <History className="w-5 h-5" />
                             </div>
                             <div>
@@ -169,7 +169,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                 <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0 scrollbar-hide">
                     {loading ? (
                         <div className="flex items-center justify-center py-12">
-                            <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500"></div>
+                            <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-yellow-400"></div>
                         </div>
                     ) : orders.length === 0 ? (
                         <div className="text-center py-12">
@@ -181,15 +181,17 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                     ) : (
                         <div className="space-y-3">
                             {orders.map((order) => (
-                                <div
+                                <button
+                                    type="button"
                                     key={order.id}
-                                    className="p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-colors cursor-pointer"
+                                    disabled={!onViewOrder}
+                                    className={`w-full rounded-2xl border border-white/10 bg-white/5 p-4 text-left transition-transform duration-150 active:scale-[0.99] active:bg-white/10 disabled:cursor-default disabled:active:scale-100 ${onViewOrder ? 'cursor-pointer' : ''}`}
                                     onClick={() => onViewOrder?.(order.id)}
                                 >
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-4">
                                             {/* Order Type Icon */}
-                                            <div className="p-2 rounded-lg bg-white/5 text-white/70">
+                                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-yellow-400/20 bg-white/5 text-yellow-300">
                                                 {getOrderTypeIcon(order.order_type)}
                                             </div>
 
@@ -225,7 +227,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                                             )}
                                         </div>
                                     </div>
-                                </div>
+                                </button>
                             ))}
                         </div>
                     )}
@@ -235,7 +237,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                 <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border">
                     <button
                         onClick={onClose}
-                        className="liquid-glass-modal-button w-full bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30"
+                        className="liquid-glass-modal-button w-full border-yellow-400/40 bg-yellow-400/15 text-yellow-200 active:bg-yellow-400/25"
                     >
                         {t('common.actions.close') || 'Close'}
                     </button>

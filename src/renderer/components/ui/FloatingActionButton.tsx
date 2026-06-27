@@ -1,5 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
+import { Plus } from 'lucide-react';
 import { cn } from '../../utils/cn';
 
 interface FloatingActionButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -132,7 +133,10 @@ const readStoredPosition = (storageKey: string, width: number, height: number): 
 };
 
 const FloatingActionButton = React.forwardRef<HTMLButtonElement, FloatingActionButtonProps>(
-  ({ className, effect = 'animated', icon, style, disabled, movable = false, positionStorageKey, onClick, ...props }, ref) => {
+  ({ className, effect = 'animated', icon, style, disabled, movable = false, positionStorageKey, onClick, title, 'aria-label': ariaLabel, ...props }, ref) => {
+    // Touchscreen POS: never forward a native `title` onto the button (it renders a hover tooltip).
+    // Preserve the caller's intent by falling back to the title string as the accessible name.
+    const resolvedAriaLabel = ariaLabel ?? title;
     const wrapperRef = React.useRef<HTMLDivElement | null>(null);
     const dragStateRef = React.useRef<DragState | null>(null);
     const storedPositionRef = React.useRef<StoredFabPosition | null>(null);
@@ -387,6 +391,7 @@ const FloatingActionButton = React.forwardRef<HTMLButtonElement, FloatingActionB
             effect === 'animated' ? 'pos-fab--animated' : 'pos-fab--static',
             disabled && 'pos-fab--disabled',
           )}
+          aria-label={resolvedAriaLabel}
           {...props}
         >
           <span aria-hidden="true" className="pos-fab__light" />
@@ -394,11 +399,9 @@ const FloatingActionButton = React.forwardRef<HTMLButtonElement, FloatingActionB
             <span key={`pos-fab-gradient-${index}`} aria-hidden="true" className="pos-fab__gradient-layer" style={layerStyle} />
           ))}
           <span aria-hidden="true" className="pos-fab__button-layer" />
-          {icon ? (
-            <span aria-hidden="true" className="pos-fab__overlay">
-              {icon}
-            </span>
-          ) : null}
+          <span aria-hidden="true" className="pos-fab__overlay">
+            {icon ?? <Plus aria-hidden="true" />}
+          </span>
         </button>
       </div>
     );

@@ -1,10 +1,9 @@
 'use client'
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
-import { Lock, Sparkles, Check, ExternalLink, X, ChevronRight, Loader2, Package } from 'lucide-react'
-import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components'
+import { Lock, Sparkles, Check, ExternalLink, ChevronRight, Loader2 } from 'lucide-react'
+import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { liquidGlassModalButton, liquidGlassModalCard, liquidGlassModalBadge } from '../../styles/designSystem'
-import { useTheme } from '../../contexts/theme-context'
 import type { ModuleUpsellInfo, UpsellCardVariant } from '@shared/types/upsell'
 import {
   generateModulePurchaseUrl,
@@ -52,7 +51,6 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
   onLearnMore,
   moduleInfo: externalModuleInfo,
 }) => {
-  const { resolvedTheme } = useTheme()
   const [moduleInfo, setModuleInfo] = useState<ModuleUpsellInfo | null>(externalModuleInfo || null)
   const [isLoading, setIsLoading] = useState(!externalModuleInfo)
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -171,7 +169,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
     return (
       <div className={liquidGlassModalCard()}>
         <div className="flex items-center justify-center py-8">
-          <Loader2 className="h-6 w-6 animate-spin text-blue-400" />
+          <Loader2 className="h-6 w-6 animate-spin text-amber-300" />
         </div>
       </div>
     )
@@ -186,11 +184,15 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
   if (variant === 'compact') {
     return (
       <>
-        <div className={`${liquidGlassModalCard()} cursor-pointer hover:bg-white/5 transition-colors`} onClick={handleLearnMore}>
+        <button
+          type="button"
+          className={`${liquidGlassModalCard()} w-full cursor-pointer text-left transition-transform active:scale-[0.99] active:bg-white/10`}
+          onClick={handleLearnMore}
+        >
           <div className="flex items-center gap-3">
             {/* Lock icon with gradient */}
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500/30 to-purple-500/30 flex items-center justify-center flex-shrink-0">
-              <Lock className="h-5 w-5 text-blue-400" />
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-amber-400/25 to-white/10 flex items-center justify-center flex-shrink-0 border border-amber-400/25">
+              <Lock className="h-5 w-5 text-amber-300" />
             </div>
 
             <div className="flex-1 min-w-0">
@@ -200,7 +202,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
 
             <ChevronRight className="h-5 w-5 text-gray-500 flex-shrink-0" />
           </div>
-        </div>
+        </button>
 
         {/* Expanded modal */}
         <LiquidGlassModal
@@ -287,8 +289,8 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
     <div className="space-y-6">
       {/* Header with icon and description */}
       <div className="flex items-start gap-4">
-        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500/30 to-purple-500/30 flex items-center justify-center flex-shrink-0">
-          <Lock className="h-8 w-8 text-blue-400" />
+        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-400/25 to-white/10 flex items-center justify-center flex-shrink-0 border border-amber-400/25">
+          <Lock className="h-8 w-8 text-amber-300" />
         </div>
         <div>
           {compact && (
@@ -388,4 +390,3 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
 }
 
 export default ModuleUpsellCard
-

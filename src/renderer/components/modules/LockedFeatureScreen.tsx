@@ -1,10 +1,9 @@
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { Lock, ExternalLink, ArrowLeft, Loader2, Package, Sparkles, Check } from 'lucide-react'
-import { LiquidGlassModal, POSGlassButton, POSGlassCard } from '../ui/pos-glass-components'
+import { Lock, ExternalLink, ArrowLeft, Loader2, Sparkles, Check } from 'lucide-react'
+import { LiquidGlassModal, POSGlassCard } from '../ui/pos-glass-components'
 import { liquidGlassModalButton, liquidGlassModalCard, liquidGlassModalBadge } from '../../styles/designSystem'
-import { useTheme } from '../../contexts/theme-context'
 import type { ModuleUpsellInfo } from '@shared/types/upsell'
 import {
   generateModulePurchaseUrl,
@@ -47,7 +46,6 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
   moduleInfo: externalModuleInfo,
   backLabel = 'Go Back',
 }) => {
-  const { resolvedTheme } = useTheme()
   const [moduleInfo, setModuleInfo] = useState<ModuleUpsellInfo | null>(externalModuleInfo || null)
   const [isLoading, setIsLoading] = useState(!externalModuleInfo)
   const [isCheckoutLoading, setIsCheckoutLoading] = useState(false)
@@ -192,9 +190,9 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
         {/* Main card */}
         <POSGlassCard className="p-8 text-center">
           {/* Lock icon with gradient */}
-          <div className="mx-auto w-24 h-24 rounded-full bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center mb-6 relative">
-            <div className="absolute inset-0 rounded-full bg-gradient-to-br from-blue-500/10 to-purple-500/10 blur-xl" />
-            <Lock className="h-12 w-12 text-blue-400 relative z-10" />
+          <div className="mx-auto w-24 h-24 rounded-[28px] bg-gradient-to-br from-amber-400/25 to-white/10 flex items-center justify-center mb-6 relative border border-amber-400/25">
+            <div className="absolute inset-0 rounded-[28px] bg-amber-400/10 blur-xl" />
+            <Lock className="h-12 w-12 text-amber-300 relative z-10" />
           </div>
 
           {/* Title */}
@@ -210,7 +208,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
           {/* Loading state */}
           {isLoading ? (
             <div className="flex justify-center py-4">
-              <Loader2 className="h-6 w-6 animate-spin text-blue-400" />
+              <Loader2 className="h-6 w-6 animate-spin text-amber-300" />
             </div>
           ) : (
             <>
@@ -233,7 +231,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
               {/* Benefits preview */}
               {moduleInfo && moduleInfo.features.length > 0 && (
                 <button
-                  className="text-sm text-blue-400 hover:text-blue-300 transition-colors mb-6 flex items-center gap-1 mx-auto"
+                  className="mb-6 mx-auto flex min-h-[44px] items-center gap-1 rounded-2xl px-3 text-sm font-semibold text-amber-300 transition-transform active:scale-[0.98] active:bg-amber-400/10"
                   onClick={() => setShowLearnMore(true)}
                 >
                   <Sparkles className="h-4 w-4" />
@@ -387,4 +385,3 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
 }
 
 export default LockedFeatureScreen
-

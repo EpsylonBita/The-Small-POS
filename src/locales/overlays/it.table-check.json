@@ -37,6 +37,8 @@
       "paidAmount": "Pagato {{amount}}",
       "total": "Totale",
       "totalAmount": "Totale {{amount}}",
+      "discount": "Sconto",
+      "discountAmount": "Sconto {{amount}}",
       "totalAndQty": "Totale {{amount}} · Qtà {{quantity}}",
       "tips": "Mance",
       "tip": "Mancia",
@@ -143,6 +145,10 @@
     }
   },
   "tablesDashboard": {
+    "viewMode": {
+      "list": "Lista",
+      "floorPlan": "2D"
+    },
     "allFloors": "Tutti i piani",
     "floorNumber": "Piano {{floor}}",
     "floor": "Piano",
@@ -169,6 +175,10 @@
     "newOrder": "Nuovo ordine",
     "pay": "Paga",
     "assign": "Assegna",
+    "needsCleaning": "Da pulire",
+    "outOfService": "Fuori servizio",
+    "markCleaned": "Segna pulito",
+    "backInService": "Rimetti in servizio",
     "balance": "Saldo",
     "noMatchingTables": "Nessun tavolo corrisponde a questi filtri",
     "time": {

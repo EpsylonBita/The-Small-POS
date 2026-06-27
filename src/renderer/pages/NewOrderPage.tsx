@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
@@ -10,6 +10,7 @@ import { AddCustomerModal } from '../components/modals/AddCustomerModal';
 import { CustomerSearchModal } from '../components/modals/CustomerSearchModal';
 import { CustomerInfoModal } from '../components/modals/CustomerInfoModal';
 import { OrderConflictBanner } from '../components/OrderConflictBanner';
+import PickupOrderIcon from '../components/icons/PickupOrderIcon';
 import { useOrderStore } from '../hooks/useOrderStore';
 import { useShift } from '../contexts/shift-context';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
@@ -33,6 +34,8 @@ import {
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
+import { buildTableOrderCreateFields } from '../utils/tableOrderFlow';
+import { formatTableDisplayNumber } from '../utils/table-display';
 import {
   hasValidSyncedPosMenuItemId,
   normalizePosOrderItems,
@@ -182,25 +185,29 @@ const buildCustomerInfoFromCustomer = (customer: Customer): CustomerInfo => {
 const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   const bridge = getBridge();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { conflicts, createOrder, silentRefresh } = useOrderStore();
   const { staff, activeShift, isShiftActive } = useShift();
   const { getSetting } = useTerminalSettings();
   const { branchId, organizationId, terminalId } = useResolvedPosIdentity('branch+organization');
-  const { isFeatureEnabled, isMobileWaiter } = useFeatures();
+  const { isFeatureEnabled, isMobileWaiter, loading: featuresLoading } = useFeatures();
   const canCreateOrders = isFeatureEnabled('orderCreation');
 
   // Check if delivery module is acquired (Requirement 10.2, 10.3)
   const { hasDeliveryModule, isLoading: isLoadingModules } = useAcquiredModules();
 
-  // Redirect to dashboard if order creation is disabled for this terminal
+  // Redirect to dashboard if order creation is disabled for this terminal.
+  // Wait for terminal features to load first: the fail-closed default
+  // (orderCreation=false) would otherwise redirect + toast during the brief loading
+  // window even on terminals where order creation is actually enabled.
   useEffect(() => {
-    if (!canCreateOrders) {
-      toast.error(t('terminal.messages.featureDisabled', 'Order creation is disabled for this terminal'));
+    if (!featuresLoading && !canCreateOrders) {
+      toast.error(t('settings.terminal.messages.orderCreationDisabled', 'Order creation is disabled for this terminal'));
       navigate('/');
     }
-  }, [canCreateOrders, navigate, t]);
+  }, [featuresLoading, canCreateOrders, navigate, t]);
 
   // Modal states
   const [showPhoneLookupModal, setShowPhoneLookupModal] = useState(false);
@@ -213,8 +220,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     items: SplitPaymentItem[];
     isGhostOrder: boolean;
   } | null>(null);
-  const [selectedOrderType, setSelectedOrderType] = useState<"pickup" | "delivery" | null>(null);
-  const [addCustomerMode, setAddCustomerMode] = useState<'new' | 'edit' | 'addAddress'>('new');
+  const [selectedOrderType, setSelectedOrderType] = useState<"pickup" | "delivery" | "dine-in" | null>(null);
+  const [addCustomerMode, setAddCustomerMode] = useState<'new' | 'edit' | 'addAddress' | 'editAddress'>('new');
   const [isProcessingOrder, setIsProcessingOrder] = useState(false);
   const [taxRatePercentage, setTaxRatePercentage] = useState<number>(24);
 
@@ -238,6 +245,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   // Additional states for customer form
   const [orderType, setOrderType] = useState<"dine-in" | "pickup" | "delivery">("pickup");
   const [tableNumber, setTableNumber] = useState('');
+  const [tableId, setTableId] = useState('');
   const [specialInstructions, setSpecialInstructions] = useState('');
   const [isValidatingAddress, setIsValidatingAddress] = useState(false);
   const [addressValid, setAddressValid] = useState(false);
@@ -246,6 +254,23 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   useEffect(() => {
     setTimeout(() => setIsInitializing(false), 0);
   }, []);
+
+  useEffect(() => {
+    const requestedOrderType = searchParams.get('orderType');
+    if (requestedOrderType !== 'dine-in') {
+      return;
+    }
+
+    setOrderType('dine-in');
+    setSelectedOrderType('dine-in');
+    setTableNumber(searchParams.get('tableNumber') || '');
+    setTableId(searchParams.get('tableId') || '');
+    setShowPhoneLookupModal(false);
+    setShowCustomerInfoModal(false);
+    setShowAddCustomerModal(false);
+    setShowMenuModal(true);
+    setIsInitializing(false);
+  }, [searchParams]);
 
   useEffect(() => {
     const rawConfiguredRate = getSetting<number | string>('tax', 'tax_rate_percentage', 24);
@@ -302,7 +327,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
 
   const handleEditCustomer = (customer: any) => {
     setExistingCustomer(customer);
-    setAddCustomerMode('edit');
+    // The address-row pencil passes editAddressId -> open address-only edit mode;
+    // the full "Edit Customer" button passes no editAddressId and stays full edit.
+    setAddCustomerMode(customer?.editAddressId ? 'editAddress' : 'edit');
     setShowPhoneLookupModal(false);
     setShowAddCustomerModal(true);
   };
@@ -413,7 +440,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     const ghostMetadata = isGhostOrder ? (orderData.ghost_metadata ?? null) : null;
 
     try {
-      const currentOrderType = (orderData.orderType || selectedOrderType || 'pickup') as 'pickup' | 'delivery';
+      const currentOrderType = (orderData.orderType || selectedOrderType || 'pickup') as 'pickup' | 'delivery' | 'dine-in';
       const currentCustomer = orderData.customer || null;
       const currentAddress = orderData.address || null;
       const resolvedBranchId = branchId || staff?.branchId || null;
@@ -569,6 +596,23 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       const clientRequestId =
         globalThis.crypto?.randomUUID?.() ??
         `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const tableOrderFields = buildTableOrderCreateFields({
+        serviceOrderType: currentOrderType,
+        pricingOrderType: currentOrderType,
+        table: tableId || tableNumber ? {
+          id: tableId || null,
+          tableNumber: tableNumber || null,
+        } : null,
+        tableNumber,
+        guestCount: 1,
+      });
+      const {
+        order_type: tableOrderType,
+        payment_method: _tablePaymentMethod,
+        payment_status: _tablePaymentStatus,
+        ...tableOrderCreateFields
+      } = tableOrderFields;
+      const resolvedOrderType = (tableOrderType || currentOrderType) as 'pickup' | 'delivery' | 'dine-in';
 
       const orderToCreate = {
         customer_id: resolvePersistedCustomerId(currentCustomer?.id),
@@ -614,9 +658,14 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           requiresManagerApproval: effectiveDeliveryZoneInfo.uiState?.requiresManagerApproval || false,
           validatedAt: new Date().toISOString(),
         }) : null,
-        customerName: currentCustomer?.name || '',
+        customerName: currentOrderType === 'dine-in' && tableNumber
+          ? t('orderFlow.tableCustomer', { table: formatTableDisplayNumber(tableNumber) })
+          : currentCustomer?.name || '',
         customerPhone: currentCustomer?.phone || currentCustomer?.phone_number || '',
-        orderType: currentOrderType,
+        order_type: resolvedOrderType,
+        orderType: resolvedOrderType,
+        ...tableOrderCreateFields,
+        payment_status: currentOrderType === 'dine-in' ? ('pending' as const) : undefined,
         paymentStatus: (
           isSplitPayment
             ? 'pending'
@@ -718,6 +767,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     staff?.branchId,
     staff?.staffId,
     staff?.terminalId,
+    tableId,
+    tableNumber,
     t,
     taxRatePercentage,
     terminalId,
@@ -894,9 +945,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       initial="hidden"
       animate="show"
       variants={pageMotionContainer}
-      className={`min-h-screen relative ${resolvedTheme === 'dark'
-      ? 'bg-gradient-to-br from-gray-900 via-blue-900/20 to-purple-900/20'
-      : 'bg-gradient-to-br from-blue-50 via-purple-50/30 to-pink-50/20'
+      className={`relative h-full min-h-0 overflow-y-auto scrollbar-hide ${resolvedTheme === 'dark'
+      ? 'bg-gradient-to-br from-gray-900 to-gray-950'
+      : 'bg-gradient-to-br from-gray-50 to-gray-100'
       }`}
     >
       {/* Header with glassmorphism */}
@@ -909,9 +960,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
             <div className="flex items-center">
               <button
                 onClick={handleBackToOrders}
-                className={`mr-4 flex items-center transition-all duration-300 px-3 py-2 rounded-xl ${resolvedTheme === 'dark'
-                  ? 'text-blue-400 hover:text-blue-300 hover:bg-blue-500/20'
-                  : 'text-blue-600 hover:text-blue-800 hover:bg-blue-500/10'
+                className={`mr-4 flex items-center transition-transform duration-200 px-3 py-2 rounded-xl active:scale-95 ${resolvedTheme === 'dark'
+                  ? 'text-gray-300 active:bg-white/10'
+                  : 'text-gray-700 active:bg-black/5'
                   }`}
               >
                 <svg
@@ -970,27 +1021,16 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
               <motion.button
                 variants={pageMotionItem}
                 onClick={() => handleOrderTypeSelect("pickup")}
-                className={`border-2 border-blue-500 rounded-2xl p-10 flex flex-col items-center transition-all duration-300 shadow-xl hover:scale-105 transform active:scale-95 backdrop-blur-sm ${resolvedTheme === 'dark'
-                  ? 'bg-gray-800/40 hover:bg-gray-700/50 hover:border-blue-400 hover:shadow-blue-500/25'
-                  : 'bg-white/40 hover:bg-blue-50/50 hover:border-blue-600 hover:shadow-blue-500/25'
+                className={`border-2 border-yellow-500 rounded-2xl p-10 flex flex-col items-center justify-center transition-all duration-300 shadow-xl active:scale-95 backdrop-blur-sm ${resolvedTheme === 'dark'
+                  ? 'bg-gray-800/40 active:bg-gray-700/50'
+                  : 'bg-white/40 active:bg-yellow-50/60'
                   }`}
               >
-                <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 ${resolvedTheme === 'dark' ? 'bg-blue-500/30' : 'bg-blue-100'
+                <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 ${resolvedTheme === 'dark' ? 'bg-yellow-500/20' : 'bg-yellow-100'
                   }`}>
-                  <svg
-                    className={`w-12 h-12 ${resolvedTheme === 'dark' ? 'text-blue-400' : 'text-blue-600'
-                      }`}
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
-                    />
-                  </svg>
+                  <PickupOrderIcon
+                    className={`w-12 h-12 ${resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-700'}`}
+                  />
                 </div>
                 <h3 className={`text-2xl font-bold mb-3 ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
                   }`}>
@@ -1007,9 +1047,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
                 <motion.button
                   variants={pageMotionItem}
                   onClick={() => handleOrderTypeSelect("delivery")}
-                  className={`border-2 border-emerald-500 rounded-2xl p-10 flex flex-col items-center transition-all duration-300 shadow-xl hover:scale-105 transform active:scale-95 backdrop-blur-sm ${resolvedTheme === 'dark'
-                    ? 'bg-gray-800/40 hover:bg-gray-700/50 hover:border-emerald-400 hover:shadow-emerald-500/25'
-                    : 'bg-white/40 hover:bg-emerald-50/50 hover:border-emerald-600 hover:shadow-emerald-500/25'
+                  className={`border-2 border-emerald-500 rounded-2xl p-10 flex flex-col items-center justify-center transition-all duration-300 shadow-xl active:scale-95 backdrop-blur-sm ${resolvedTheme === 'dark'
+                    ? 'bg-gray-800/40 active:bg-gray-700/50'
+                    : 'bg-white/40 active:bg-emerald-50/60'
                     }`}
                 >
                   <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 ${resolvedTheme === 'dark' ? 'bg-emerald-500/30' : 'bg-emerald-100'
@@ -1093,6 +1133,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
                     (existingCustomer as any).name_on_ringer,
                   addresses: existingCustomer.addresses || [],
                   selected_address_id: existingCustomer.selected_address_id,
+                  editAddressId: (existingCustomer as any).editAddressId,
                   version: existingCustomer.version,
                 };
               })()
@@ -1124,7 +1165,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           onClose={handleMenuModalClose}
           selectedCustomer={getCustomerForMenu()}
           selectedAddress={getSelectedAddress()}
-          orderType={selectedOrderType === "pickup" ? "pickup" : "delivery"}
+          orderType={orderType}
           isProcessingOrder={isProcessingOrder}
           onOrderComplete={handleOrderComplete}
         />

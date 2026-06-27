@@ -3,12 +3,16 @@
     "all": "Tutti",
     "actions": {
       "add": "Aggiungi",
+      "remove": "Rimuovi",
+      "decrease": "Diminuisci",
+      "increase": "Aumenta",
       "edit": "Modifica",
       "delete": "Elimina",
       "save": "Salva",
       "cancel": "Annulla",
       "confirm": "Conferma",
       "close": "Chiudi",
+      "done": "Fatto",
       "back": "Indietro",
       "next": "Avanti",
       "submit": "Invia",
@@ -46,6 +50,8 @@
     "clear": "Cancella",
     "back": "Indietro",
     "loading": "Caricamento...",
+    "online": "Connesso",
+    "offline": "Disconnesso",
     "notEntered": "Non inserito",
     "cancel": "Annulla",
     "hide": "Nascondi",
@@ -131,7 +137,17 @@
       "waiter": "Cameriere",
       "manager": "Responsabile",
       "admin": "Amministratore",
-      "staff": "Personale"
+      "staff": "Personale",
+      "server": "Cameriere",
+      "head_chef": "Chef di cucina",
+      "line_cook": "Cuoco di linea",
+      "bartender": "Barista",
+      "front_desk": "Reception",
+      "room_service": "Servizio in camera",
+      "housekeeper": "Addetto alle pulizie",
+      "housekeeping_supervisor": "Responsabile pulizie",
+      "shift_lead": "Capoturno",
+      "branch_manager": "Responsabile filiale"
     },
     "close": "Chiudi",
     "retry": "Riprova",
@@ -142,7 +158,12 @@
       "orders": "Ordini",
       "delivered": "Consegnati",
       "canceled": "Annullati",
-      "tables": "Tavoli"
+      "tables": "Tavoli",
+      "rooms": "Camere",
+      "services": "Servizi",
+      "tab": "{{label}} {{value}}",
+      "selectedTab": "{{label}} {{value}} — Selezionato",
+      "tablistLabel": "Schede di stato degli ordini"
     },
     "noOrders": "Nessun ordine trovato",
     "ordersWillAppear": "Gli ordini appariranno qui quando verranno creati"
@@ -279,6 +300,16 @@
   },
   "navigation": {
     "menu": {
+      "rooms": "Camere",
+      "tables": "Tavoli",
+      "appointments": "Appuntamenti",
+      "housekeeping": "Pulizie",
+      "staff_schedule": "Turni del personale",
+      "reservations": "Prenotazioni",
+      "service_catalog": "Servizi",
+      "suppliers": "Gestione fornitori",
+      "inventory": "Gestione inventario",
+      "loyalty": "Fedeltà e premi",
       "home": "Home",
       "orders": "Ordini",
       "menu": "Menu",
@@ -316,10 +347,15 @@
     "checkIn": "Inizio turno",
     "activeShift": "Turno attivo",
     "logout": "Disconnetti",
+    "currentPage": "{{label}} — Pagina corrente",
     "plugin_integrations": "Plugin",
     "integrations": "Plugin"
   },
   "orders": {
+    "pagination": {
+      "previous": "Pagina precedente",
+      "next": "Pagina successiva"
+    },
     "title": "Ordini",
     "subtitle": "Gestisci gli ordini dei clienti",
     "newOrder": "Nuovo ordine",
@@ -348,7 +384,8 @@
       "dineIn": "Al tavolo",
       "pickup": "Asporto",
       "delivery": "Consegna",
-      "online": "Online"
+      "online": "Online",
+      "roomService": "Servizio in camera"
     },
     "actions": {
       "create": "Crea ordine",
@@ -449,9 +486,62 @@
       "cancelled": "Annullati",
       "revenue": "Ricavi",
       "averageValue": "Valore medio ordine"
+    },
+    "loadingOrders": "Caricamento ordini...",
+    "ordersTotal": "{{count}} ordini totali",
+    "refreshOrders": "Aggiorna ordini",
+    "syncingOrders": "Sincronizzazione ordini",
+    "showFilters": "Mostra filtri",
+    "hideFilters": "Nascondi filtri",
+    "searchPlaceholder": "Cerca per numero ordine, cliente o telefono...",
+    "clearSearch": "Cancella ricerca",
+    "itemsCount": "{{count}} articoli",
+    "emptyTitle": "Nessun ordine trovato",
+    "emptyDescription": "Nessun ordine corrisponde ai filtri correnti.",
+    "pageOf": "Pagina {{current}} di {{total}}",
+    "filters": {
+      "status": "Stato",
+      "orderType": "Tipo ordine",
+      "allStatuses": "Tutti gli stati",
+      "allTypes": "Tutti i tipi",
+      "dateFrom": "Data da",
+      "clearAll": "Cancella tutti i filtri"
     }
   },
   "menu": {
+    "managementTabs": {
+      "categories": "Categorie",
+      "menuItems": "Voci di menu",
+      "ingredients": "Ingredienti",
+      "offers": "Offerte"
+    },
+    "refreshMenu": "Aggiorna menu",
+    "refreshingMenu": "Aggiornamento menu",
+    "unnamed": "Senza nome",
+    "featured": "In evidenza",
+    "enable": "Attiva",
+    "disable": "Disattiva",
+    "failedToLoadData": "Impossibile caricare i dati",
+    "failedToLoadCategories": "Impossibile caricare le categorie",
+    "failedToLoadMenuItems": "Impossibile caricare le voci di menu",
+    "failedToLoadIngredients": "Impossibile caricare gli ingredienti",
+    "failedToLoadOffers": "Impossibile caricare le offerte",
+    "categoryUpdated": "Categoria aggiornata",
+    "failedToUpdateCategory": "Impossibile aggiornare la categoria",
+    "menuItemUpdated": "Voce di menu aggiornata",
+    "failedToUpdateMenuItem": "Impossibile aggiornare la voce di menu",
+    "ingredientUpdated": "Ingrediente aggiornato",
+    "failedToUpdateIngredient": "Impossibile aggiornare l'ingrediente",
+    "offerUpdated": "Offerta aggiornata",
+    "failedToUpdateOffer": "Impossibile aggiornare l'offerta",
+    "onlineRequired": "Questa azione richiede una connessione a Internet.",
+    "offersEmpty": {
+      "title": "Nessuna offerta configurata",
+      "subtitle": "Crea offerte nella dashboard di amministrazione o aggiorna dopo la sincronizzazione.",
+      "searchTitle": "Nessuna offerta corrisponde alla ricerca",
+      "searchSubtitle": "Cancella la ricerca o prova un altro termine",
+      "clearSearch": "Cancella ricerca"
+    },
     "title": "Menu",
     "subtitle": "Sfoglia il menu",
     "header": "Gestione menu",
@@ -499,6 +589,12 @@
       "couponApplied": "Coupon applicato!",
       "couponInvalid": "Codice coupon non valido",
       "couponError": "Impossibile validare il coupon",
+      "couponNotFound": "Coupon non trovato",
+      "couponInactive": "Questo coupon è inattivo",
+      "couponExpired": "Questo coupon è scaduto",
+      "couponUsageLimit": "Il limite di utilizzo di questo coupon è stato raggiunto",
+      "couponNotAvailable": "Questo coupon non è disponibile per questa sede",
+      "couponMinOrder": "Il tuo ordine non raggiunge l'importo minimo del coupon",
       "couponDiscount": "Coupon",
       "loyaltyDiscount": "Fedeltà",
       "loyaltyButton": "Fedeltà",
@@ -512,6 +608,7 @@
       "scanCoupon": "Scansiona",
       "manualItem": "Articolo manuale",
       "addManualItem": "Articolo manuale",
+      "manualItemSubmit": "Aggiungi",
       "manualPricePlaceholder": "Prezzo",
       "manualNamePlaceholder": "Nome articolo (facoltativo)",
       "manualItemAdded": "Articolo manuale aggiunto",
@@ -525,6 +622,9 @@
       "percentMode": "% Percentuale",
       "fixedMode": "Fisso",
       "quickDiscounts": "Sconti rapidi",
+      "manualDiscount": "Sconto manuale",
+      "removeDiscount": "Rimuovi sconto",
+      "applyDiscount": "Applica sconto",
       "selectedCount": "{{count}} selezionati",
       "exitSelection": "Esci dalla selezione",
       "clearSelection": "Cancella selezione",
@@ -632,6 +732,8 @@
       "manualSync": "Sincronizzazione manuale richiesta"
     },
     "itemModal": {
+      "noIngredientsForFilter": "Nessun ingrediente disponibile per questo filtro.",
+      "noIngredientsForFilterHint": "Prova a selezionare \"{{all}}\" per vedere tutti gli ingredienti.",
       "customizeTitle": "Personalizza il tuo {{item}}",
       "currentSelection": "Selezione attuale",
       "maxIngredientsHint": "(Max {{count}} ingredienti)",
@@ -654,7 +756,10 @@
       "withoutHint": "Segna ingredienti da rimuovere (nessuna variazione di prezzo)",
       "withoutLabel": "Senza",
       "withoutCount": "Senza: {{count}} articolo/i",
-      "updateItem": "Aggiorna articolo"
+      "updateItem": "Aggiorna articolo",
+      "searchIngredients": "Cerca ingredienti...",
+      "addNotes": "Aggiungi note",
+      "editNotes": "Modifica note"
     },
     "ingredients": {
       "otherCategory": "Altro"
@@ -734,6 +839,7 @@
     "noUsers": "Nessun utente trovato",
     "tryAdjusting": "Prova a modificare la ricerca",
     "noUsersYet": "Nessun utente ancora",
+    "noMatches": "Nessun utente corrisponde alla ricerca o ai filtri",
     "customerDetails": "Dettagli cliente",
     "basicInfo": "Informazioni di base",
     "name": "Nome",
@@ -746,6 +852,18 @@
     "filterAppUsers": "Utenti dell'app",
     "unnamed": "Utente senza nome",
     "confirmDeleteAddress": "Sei sicuro di voler eliminare questo indirizzo?",
+    "deleteAddressTitle": "Elimina indirizzo",
+    "loyaltyTier": {
+      "bronze": "Bronzo",
+      "silver": "Argento",
+      "gold": "Oro",
+      "platinum": "Platino"
+    },
+    "pagination": {
+      "previous": "Precedente",
+      "next": "Successivo",
+      "pageOf": "Pagina {{current}} di {{total}}"
+    },
     "deleteAddressSuccess": "Indirizzo eliminato con successo",
     "deleteAddressError": "Impossibile eliminare l'indirizzo",
     "updateAddressSuccess": "Indirizzo aggiornato con successo",
@@ -757,6 +875,20 @@
       "floor": "Piano",
       "deliveryNotes": "Note di consegna",
       "default": "Predefinito"
+    },
+    "filters": {
+      "openLabel": "Filtra utenti",
+      "statusLabel": "Stato",
+      "loyaltyLabel": "Livello fedeltà",
+      "clear": "Cancella filtri",
+      "status": {
+        "all": "Tutti",
+        "active": "Attivi",
+        "banned": "Bloccati"
+      },
+      "loyalty": {
+        "all": "Tutti i livelli"
+      }
     }
   },
   "customer": {
@@ -1189,6 +1321,7 @@
     "shiftDetails": "Dettagli turno",
     "noActiveShift": "Nessun turno attivo",
     "duration": "{{hours}}h {{minutes}}m",
+    "durationHoursOnly": "{{hours}}h",
     "durationFallback": "0h 0m",
     "status": {
       "active": "Attivo",
@@ -1540,6 +1673,31 @@
     }
   },
   "settings": {
+    "settingsHub": {
+      "subtitle": "Configura e gestisci questa cassa",
+      "status": {
+        "register": "Questa cassa",
+        "sync": "Sincronizzazione",
+        "actions": "Azioni consentite",
+        "modules": "Moduli attivi"
+      },
+      "sections": {
+        "admin": { "label": "Avvio", "detail": "Stato rapido" },
+        "connection": { "label": "Connessione", "detail": "Collega questo POS" },
+        "terminal": { "label": "Schermo e audio", "detail": "Display, audio e lingua" },
+        "security": { "label": "PIN e blocco", "detail": "PIN del personale e blocco automatico" },
+        "database": { "label": "Dati", "detail": "Sincronizzazione e dati locali" },
+        "hardware": { "label": "Dispositivi", "detail": "Bilancia, scanner e hardware" },
+        "printing": { "label": "Stampante", "detail": "Configurazione scontrino" },
+        "payments": { "label": "Terminali di pagamento", "detail": "Dispositivi di pagamento con carta" },
+        "about": { "label": "Info", "detail": "Versione app" }
+      },
+      "groups": {
+        "daily": "Configurazione quotidiana",
+        "device": "Dispositivo",
+        "system": "Sistema"
+      }
+    },
     "title": "Impostazioni",
     "subtitle": "Configura le impostazioni del terminale",
     "header": "Impostazioni POS",
@@ -1571,12 +1729,17 @@
       "clearButton": "Ripristino di fabbrica",
       "clearing": "Cancellazione...",
       "resetting": "Ripristino di fabbrica in corso...",
-      "helpText": "⚠️ Questo ripristinerà completamente il POS alle impostazioni di fabbrica. Tutti i dati locali verranno eliminati e sarà necessario reinserire il codice di connessione.",
+      "helpText": "Questo ripristinerà completamente il POS alle impostazioni di fabbrica. Tutti i dati locali verranno eliminati e sarà necessario reinserire il codice di connessione.",
       "confirmClear": "⚠️ AVVISO RIPRISTINO DI FABBRICA ⚠️\n\nQuesta operazione ripristinerà completamente il terminale POS alle impostazioni di fabbrica:\n\n• Tutti gli ordini locali verranno eliminati\n• Tutte le impostazioni verranno cancellate\n• La configurazione del terminale verrà rimossa\n• Sarà necessario reinserire il codice di connessione\n\nConferma?",
       "confirmFactoryReset": "⚠️ CONFERMA FINALE ⚠️\n\nQuesta è l'ultima possibilità di annullare.\n\nTutti i dati verranno eliminati definitivamente e l'app verrà riavviata.\n\nClicca OK per procedere con il ripristino di fabbrica.",
       "cleared": "Eliminati con successo {{count}} ordini dal database locale",
       "resetSuccess": "Ripristino di fabbrica completato. L'app verrà riavviata...",
       "clearFailed": "Impossibile eseguire il ripristino di fabbrica",
+      "clearAllOrdersLabel": "Cancella tutti gli ordini",
+      "clearAllOrdersHelp": "Elimina tutti gli ordini, compresi quelli di oggi",
+      "clearAllOrdersButton": "Cancella",
+      "allOrdersCleared": "{{count}} ordini cancellati",
+      "allOrdersClearFailed": "Impossibile cancellare tutti gli ordini",
       "clearOperationalLabel": "Cancella tutti i dati operativi",
       "clearOperationalHelp": "Cancella ordini, turni, cassetti, pagamenti. Mantiene le impostazioni.",
       "clearOperationalButton": "Cancella",
@@ -1608,6 +1771,19 @@
       "operationalCleared": "Tutti i dati operativi cancellati con successo",
       "operationalClearFailed": "Impossibile cancellare i dati operativi",
       "management": "Gestione database",
+      "repairToolsTitle": "Correzioni sicure",
+      "repairToolsHelp": "Mantiene i tuoi dati",
+      "dangerZoneTitle": "Zona di pericolo",
+      "dangerZoneHelp": "Queste azioni eliminano i dati in modo permanente e non sono reversibili.",
+      "advancedResetTitle": "Strumenti di ripristino avanzati",
+      "advancedResetSummary": "Elimina dati",
+      "cannotUndo": "Irreversibile",
+      "dangerDeleteOrdersButton": "Elimina tutti gli ordini",
+      "dangerEraseDataButton": "Cancella dati operativi",
+      "dangerFactoryResetButton": "Ripristino di fabbrica",
+      "repairQueueButton": "Ripara coda",
+      "repairOldOrdersButton": "Pulisci ordini vecchi",
+      "repairDeletedOrdersButton": "Sincronizza eliminati",
       "clearSyncQueueLabel": "Svuota coda di sincronizzazione",
       "clearSyncQueueHelp": "Cancella gli elementi bloccati nella sincronizzazione senza eliminare i dati",
       "clearSyncButton": "Svuota",
@@ -1637,6 +1813,43 @@
     "connection": {
       "syncPolicy": "Sincronizza criteri"
     },
+    "deviceSetup": {
+      "overview": {
+        "statusTitle": "Questa cassa è configurata",
+        "statusHelp": "Tutto ciò che questa cassa può fare è mostrato sotto in parole semplici.",
+        "statusTitleWarning": "La sincronizzazione richiede attenzione",
+        "statusHelpWarning": "Esegui la sincronizzazione per aggiornare questa cassa prima di modificare dispositivi o impostazioni di pagamento.",
+        "registerType": "Tipo di cassa",
+        "syncState": "Sync",
+        "pinStatus": "PIN",
+        "pinResetShort": "Serve un nuovo PIN",
+        "pinOkShort": "PIN pronto",
+        "moreCount": "+{{count}} altri"
+      },
+      "title": "Configurazione dispositivo",
+      "help": "Collega questa cassa e scopri cosa può fare.",
+      "registerLabel": "Cassa",
+      "connectionLabel": "Connessione",
+      "registerId": "ID cassa",
+      "dashboardAddress": "Indirizzo dashboard",
+      "posKey": "Chiave POS",
+      "connectionCodeHelp": "Incolla il codice di connessione dalla tua dashboard.",
+      "dashboardAddressPlaceholder": "https://your-dashboard.example.com",
+      "syncStatus": "Sync",
+      "allowedActions": "Azioni consentite",
+      "noAllowedActions": "Nessuna azione consentita ancora",
+      "activeAreas": "Aree attive",
+      "coreAreasOnly": "Solo aree principali",
+      "unassignedRegister": "Cassa non assegnata",
+      "noDashboardAddress": "Nessun indirizzo dashboard",
+      "pinResetRequired": "È richiesto un nuovo PIN al prossimo accesso.",
+      "pinResetClear": "Nessun ripristino PIN in sospeso.",
+      "syncButton": "Sincronizza impostazioni",
+      "synced": "Impostazioni sincronizzate",
+      "syncFailed": "Impossibile sincronizzare le impostazioni",
+      "ghostModeOff": "La modalità Ghost è disattivata per questa cassa.",
+      "enterDashboardAddress": "Inserisci un indirizzo dashboard valido"
+    },
     "managedByAdmin": {
       "title": "Gestito dall'admin",
       "helpText": "L'admin controlla la politica di accesso. Questo terminale controlla l'hardware e il comportamento locale.",
@@ -1661,6 +1874,16 @@
         "healthy": "Sano",
         "error": "Errore",
         "blocked": "Bloccato",
+        "stale": "Obsoleto",
+        "failed": "Non riuscito",
+        "fail": "Non riuscito",
+        "disconnected": "Disconnesso",
+        "connected": "Connesso",
+        "good": "Buono",
+        "live": "In diretta",
+        "ok": "OK",
+        "synced": "Sincronizzato",
+        "degraded": "Degradato",
         "unknown": "Sconosciuto"
       }
     },
@@ -1673,13 +1896,20 @@
     "printQueue": {
       "title": "Coda di stampa",
       "helpText": "I lavori già inviati alla stampante LAN non possono essere richiamati dal dispositivo. Questi controlli fermano o ritentano solo i lavori ancora in coda localmente su questo POS.",
-      "pausedProfiles": "Profili in pausa per: {{profiles}}",
+      "pausedProfiles": "Pause attive per le stampanti configurate",
       "refresh": "Aggiorna",
       "resume": "Riprendi coda",
       "pause": "Metti in pausa la coda",
       "cancelPending": "Annulla in sospeso",
       "empty": "Al momento non ci sono lavori di stampa locali in coda.",
       "defaultPrinter": "Predefinita",
+      "configuredPrinter": "Stampante configurata",
+      "localJob": "Lavoro di stampa locale",
+      "reference": "Riferimento {{reference}}",
+      "issue": {
+        "hardwareProfileMissing": "Scegli una stampante per questo lavoro, poi riprova.",
+        "needsAttention": "Questo lavoro di stampa richiede prima la configurazione della stampante."
+      },
       "unknown": "Sconosciuto",
       "cancel": "Annulla",
       "retry": "Riprova",
@@ -1698,6 +1928,11 @@
         "status": "Stato",
         "printer": "Stampante",
         "action": "Azione"
+      },
+      "entityType": {
+        "order_receipt": "Ricevuta ordine",
+        "receipt": "Ricevuta",
+        "print_job": "Lavoro di stampa"
       },
       "status": {
         "pending": "In attesa",
@@ -1718,8 +1953,27 @@
       "sync": "Sincronizzazione",
       "advanced": "Avanzate"
     },
+    "security": {
+      "pinHelp": "Autenticazione locale del personale"
+    },
     "terminal": {
+      "screenTimeout": "Timeout schermo (minuti)",
+      "touchSensitivity": "Sensibilità al tocco",
+      "touchLow": "Bassa",
+      "touchMedium": "Media",
+      "touchHigh": "Alta",
+      "displayBrightness": "Luminosità schermo",
+      "audioEnabled": "Audio attivo",
+      "audioHelp": "Riproduci i suoni dell'interfaccia su questo dispositivo",
+      "receiptAutoPrint": "Stampa automatica scontrini",
+      "receiptAutoPrintHelp": "Stampa automaticamente dopo il pagamento riuscito",
+      "saveButton": "Salva preferenze cassa",
+      "saved": "Preferenze cassa salvate",
+      "saveFailed": "Impossibile salvare le preferenze cassa",
+      "invalidTimeout": "Il timeout schermo deve essere tra 1 e 120 minuti",
+      "invalidBrightness": "La luminosità deve essere tra 10 e 100",
       "title": "Impostazioni terminale",
+      "helpText": "Preferenze UX e operatore locali per questo dispositivo",
       "terminalId": "ID terminale (legacy)",
       "terminalName": "Nome terminale",
       "branchId": "ID filiale",
@@ -1742,6 +1996,7 @@
       },
       "messages": {
         "featureDisabled": "Questa funzionalità è disabilitata per il tipo di terminale",
+        "orderCreationDisabled": "La creazione di ordini è disabilitata per questo terminale",
         "zReportMainOnly": "Il Z-Report può essere eseguito solo dal terminale POS principale",
         "cashDrawerMainOnly": "Le operazioni del cassetto contanti sono gestite dal POS principale",
         "noPaymentMethods": "Nessun metodo di pagamento disponibile per questo terminale",
@@ -1773,10 +2028,80 @@
       "expertSettings": "Impostazioni avanzate",
       "verificationFirstHint": "Usa prima la configurazione rapida. Verifica un percorso di trasporto e codifica funzionante prima di affidarti alla stampante nel servizio live.",
       "startQuickSetup": "Avvia procedura guidata di verifica",
+      "quickSetupFirstTitle": "Prima la configurazione rapida",
+      "quickSetupFirstBody": "Usa la procedura guidata di verifica per il percorso normale. Questo modulo serve per l'inserimento manuale della connessione e le sostituzioni avanzate.",
+      "verificationSummaryNew": "I nuovi profili manuali iniziano come non verificati finché la procedura guidata non conferma un percorso funzionante.",
+      "discoveredNotPrintable": "Rilevato, ma non ancora stampabile. Esegui la procedura guidata per verificare un percorso funzionante.",
       "quickWizardAdvanced": "Impostazioni avanzate",
       "quickWizardDetectTitle": "Passaggio 1: rileva stampanti",
       "quickWizardDetectHint": "Prima rileviamo le stampanti vicine e installate, ma nessuna viene considerata pronta per la stampa finché la verifica non riesce.",
       "quickWizardDraftOnlyHint": "Configurazione orientata alla compatibilità: la procedura guidata testa trasporto e codifica usando un profilo bozza non salvato. Non vengono creati profili stampante temporanei.",
+      "transportWindowsQueue": "Coda Windows",
+      "transportRawTcp": "Raw TCP",
+      "transportSerial": "Seriale / RFCOMM",
+      "transportUnknown": "Non risolto",
+      "verificationVerified": "Verificato",
+      "verificationDegraded": "Degradato",
+      "verificationCandidate": "Candidato",
+      "verificationUnverified": "Verifica necessaria",
+      "unknown": "Sconosciuto",
+      "optional": "Opzionale",
+      "testing": "Test in corso...",
+      "quickWizardVerifyTransportTitle": "1. Campione trasporto + taglio",
+      "quickWizardVerifyTransportHint": "Verifica se questa stampante è raggiungibile tramite una coda funzionante, Raw TCP o una connessione seriale.",
+      "quickWizardVerifyEncodingTitle": "2. Campione lingua / codifica",
+      "quickWizardVerifyEncodingHint": "Conferma che la lingua attiva e il set di caratteri vengano stampati correttamente su questo dispositivo.",
+      "quickWizardVerifyBrandingTitle": "3. Campione logo / raster opzionale",
+      "quickWizardVerifyBrandingHint": "Miglioramento opzionale per l'output con marchio dopo che la stampa di solo testo è già confermata.",
+      "quickWizardFallbackReason": "Uso di impostazioni predefinite sicure per questa stampante.",
+      "quickWizardBrandingDispatched": "Campione di branding inviato. Conferma il risultato effettivo su carta prima di salvare.",
+      "quickWizardSampleDispatched": "Campione inviato. Conferma il risultato effettivo su carta prima di salvare.",
+      "quickWizardSavedUnverified": "Salvato solo come rilevato. Esegui la verifica prima di usarla come stampante predefinita.",
+      "quickWizardCandidateState": "Solo rilevata. Verifica prima dell'uso.",
+      "quickWizardAlreadyConfigured": "Profilo esistente trovato.",
+      "quickWizardNotConfiguredYet": "Nessun profilo salvato ancora.",
+      "quickWizardHighConfidence": "Alta affidabilità",
+      "quickWizardNeedsReview": "Da rivedere",
+      "quickWizardSendSample": "Invia campione",
+      "quickWizardVerifyLockedHint": "Conferma prima il campione di trasporto di base.",
+      "quickWizardSampleSent": "Campione inviato",
+      "quickWizardSampleFailed": "Campione non riuscito",
+      "quickWizardResolvedPath": "Percorso risolto",
+      "quickWizardTransportReachable": "Trasporto raggiungibile",
+      "quickWizardTransportNotReachable": "Trasporto non raggiungibile",
+      "quickWizardKnownQueues": "Code Windows rilevate",
+      "quickWizardConfirmPaperResult": "La carta è stata stampata correttamente?",
+      "quickWizardStageVerified": "Funzionamento confermato",
+      "quickWizardStageRejected": "Questa fase non è ancora affidabile. Regola le impostazioni o lascia il profilo non verificato.",
+      "quickWizardVerifyTitle": "Passaggio 2: Verifica compatibilità",
+      "quickWizardVerifyDraftHint": "Ogni fase usa solo un profilo bozza. La stampante non viene salvata fino all'ultimo passaggio.",
+      "quickWizardVerificationSummary": "Riepilogo verifica",
+      "quickWizardDiscoveredNotPrintableTitle": "Rilevata, non ancora stampabile",
+      "quickWizardDiscoveredNotPrintableBody": "Il dispositivo è stato rilevato, ma l'app non ha ancora potuto confermare una coda funzionante, un percorso Raw TCP o un trasporto seriale/RFCOMM.",
+      "quickWizardWhyTitle": "Perché questa raccomandazione",
+      "quickWizardProbeOrder": "Ordine di sondaggio",
+      "quickWizardSelectPrinterFirst": "Seleziona prima una stampante.",
+      "quickWizardStyleTitle": "Passaggio 3: Impostazioni predefinite e leggibilità",
+      "quickWizardCompatibilityDefaults": "Impostazioni predefinite sicure per i nuovi profili: modello Classico, modalità di rendering testo e selezione automatica del protocollo. Il supporto opzionale per logo / raster è affidabile solo dopo la conferma.",
+      "quickWizardReadability": {
+        "label": "Leggibilità",
+        "small": "Piccolo",
+        "normal": "Normale",
+        "large": "Grande"
+      },
+      "quickWizardLivePreview": "Anteprima stile in tempo reale",
+      "quickWizardReadabilityHint": "La regolazione fine resta disponibile nelle Impostazioni avanzate. Cambiare in seguito protocollo, modalità di rendering o dettagli di connessione reimposterà la verifica.",
+      "quickWizardSaveTitle": "Passaggio 4: Salva e assegna",
+      "quickWizardReadyVerifiedTitle": "Pronta per il salvataggio come verificata",
+      "quickWizardReadyUnverifiedTitle": "Pronta per il salvataggio come solo rilevata",
+      "quickWizardReadyVerifiedBody": "Questa stampante ora ha un percorso di trasporto confermato e può essere usata come stampante per scontrini funzionante.",
+      "quickWizardReadyUnverifiedBody": "Puoi comunque salvare il profilo, ma resterà non verificato e non dovrebbe ancora essere usato come stampante predefinita.",
+      "quickWizardDefaultLocked": "L'impostazione predefinita resta disattivata finché la verifica del trasporto non riesce",
+      "quickWizardAssignOtherRoles": "Assegna questa stampante ad altri ruoli (opzionale)",
+      "quickWizardSavedTemplate": "Modello",
+      "quickWizardSavedRenderMode": "Modalità di rendering",
+      "quickWizardSavedEmulation": "Emulazione",
+      "quickWizardSavedAddress": "Indirizzo risolto",
       "quickWizardStep": {
         "detect": "Rileva",
         "verify": "Verifica",
@@ -1857,7 +2182,55 @@
       "receiptTemplateClassic": "Classico (layout testo semplice)",
       "receiptTemplateModern": "Moderno (con stile e intestazioni)",
       "receiptTemplateHint": "Classico: layout semplice basato su testo. Moderno: layout stilizzato con intestazioni a sezione.",
+      "classicRenderMode": "Stile di stampa classico",
+      "classicRenderModeText": "Testo stampante",
+      "classicRenderModeRasterExact": "Ricevuta tipo immagine",
+      "classicEmulationMode": "Linguaggio stampante",
+      "classicEmulationAuto": "Rilevamento automatico",
+      "classicEmulationEscpos": "ESC/POS",
+      "classicEmulationStarLine": "Star Line",
+      "fontType": "Dimensione carattere",
+      "fontTypeA": "Più grande",
+      "fontTypeB": "Compatta",
       "escposCodePage": "Override pagina codici ESC/POS",
+      "bluetoothAddressRequired": "L'indirizzo Bluetooth è obbligatorio",
+      "chooseLogoFile": "Scegli file",
+      "classicLeftMarginDots": "Margine sinistro (punti)",
+      "classicPrintableWidthDots": "Larghezza stampabile (punti)",
+      "classicPrintableWidthDotsAuto": "Auto",
+      "classicRasterThreshold": "Soglia (1-255)",
+      "discoveredOnlyHint": "Il rilevamento non significa ancora stampabile. Completa la procedura guidata di verifica prima di usare in servizio una stampante rilevata.",
+      "enableLogo": "Abilita logo",
+      "greekTestPrintDispatched": "Stampa di prova greca inviata",
+      "logoFileLoaded": "File del logo caricato. Salva le impostazioni per applicare.",
+      "logoFileReadFailed": "Lettura del file del logo non riuscita",
+      "logoFileTooLarge": "Il file del logo è troppo grande (max 2 MB).",
+      "logoFileTypeUnsupported": "Scegli un file PNG o JPG",
+      "logoPreview": "Anteprima",
+      "logoSettingsSaveFailed": "Salvataggio delle impostazioni del logo della ricevuta non riuscito",
+      "logoSettingsSaved": "Impostazioni del logo della ricevuta salvate",
+      "logoSource": "Origine logo (URL / percorso file / data URL)",
+      "logoSourceCustomActive": "L'origine personalizzata del logo della ricevuta è attiva.",
+      "logoSourceFallbackActive": "Uso del logo dell'organizzazione di riserva dalle impostazioni del terminale.",
+      "logoSourcePlaceholder": "Incolla URL o scegli file",
+      "nameRequired": "Il nome della stampante è obbligatorio",
+      "networkIpRequired": "L'IP della stampante di rete è obbligatorio",
+      "previewUnavailable": "Anteprima non disponibile",
+      "receiptLogoHint": "Logo facoltativo per organizzazione per le ricevute stampate (PNG/JPG supportati).",
+      "receiptLogoTitle": "Logo ricevuta",
+      "resolvedAddress": "Indirizzo risolto",
+      "resolvedTransport": "Trasporto risolto",
+      "saveFailed": "Salvataggio dell'impostazione non riuscito",
+      "stateDegraded": "Degradato",
+      "stateUnresolved": "Non risolto",
+      "stateUnverified": "Verifica necessaria",
+      "systemNameRequired": "Il nome della stampante di sistema è obbligatorio",
+      "testPrintDispatched": "Stampa di prova inviata",
+      "transportUnreachable": "Trasporto irraggiungibile",
+      "useOrgLogo": "Usa il logo dell'organizzazione di riserva",
+      "verification": "Verifica",
+      "verificationResetWarning": "Queste modifiche manuali influiscono sulle impostazioni di trasporto o protocollo, quindi questo profilo tornerà a uno stato non verificato dopo il salvataggio.",
+      "verificationSummaryExisting": "Stato di verifica della stampante salvato dall'ultima configurazione riuscita.",
       "escposCodePageHint": "Lasciare vuoto per il rilevamento automatico. Valori comuni: Epson=14, Star=15 (CP737 greco). Consultare il manuale della stampante.",
       "escposCodePagePlaceholder": "Automatico (lasciare vuoto per il valore predefinito)",
       "fallbackPrinter": "Stampante di riserva",
@@ -1906,6 +2279,21 @@
       "errorUnknown": "Errore sconosciuto",
       "textScaleLabel": "Dimensione testo scontrino",
       "textScaleHint": "Regola la dimensione del testo sugli scontrini stampati",
+      "safeTypographyHint": "La modalità sicura evita comandi di dimensione rischiosi. Usa i preset di carattere, densità ed enfasi per ricevute affidabili.",
+      "textScaleTextModeHint": "Il testo stampante ignora la dimensione esatta. Spostando questo cursore, l'anteprima passa alla modalità ricevuta tipo immagine.",
+      "textScaleModernUnavailable": "Le ricevute moderne usano una dimensione di testo fissa. Passa a Classico + Ricevuta tipo immagine per regolare la dimensione del testo.",
+      "textScaleAutoSwitchInline": "Le modifiche alla dimensione del testo fanno passare questa bozza alla modalità ricevuta tipo immagine, così anteprima e stampa coincidono.",
+      "textScaleAutoSwitchToast": "Le modifiche alla dimensione del testo fanno passare questa bozza alla modalità ricevuta tipo immagine, così anteprima e stampa coincidono.",
+      "classicRenderModeHint": "La ricevuta tipo immagine è la scelta migliore quando conta la spaziatura esatta. Lascia i campi avanzati su Auto, a meno che l'assistenza non chieda modifiche.",
+      "layoutDensityPreset": "Preset densità",
+      "layoutDensityCompact": "Compatta",
+      "layoutDensityBalanced": "Bilanciata",
+      "layoutDensitySpacious": "Spaziosa",
+      "layoutDensity": "Densità layout",
+      "layoutDensityScaleHint": "Regola con precisione la spaziatura attorno al preset. Valori più bassi compattano la ricevuta, valori più alti la allargano.",
+      "headerEmphasis": "Enfasi intestazione",
+      "headerEmphasisStrong": "Forte",
+      "headerEmphasisNormal": "Normale",
       "logoScaleLabel": "Dimensione logo",
       "logoScaleHint": "Regola la dimensione del logo sugli scontrini stampati",
       "resetToDefault": "Ripristina",
@@ -1917,6 +2305,12 @@
       "sectionCalibration": "Calibrazione",
       "sectionRoleDefaults": "Ruolo & Predefiniti",
       "livePreview": "Anteprima dal vivo",
+      "previewExact": "Anteprima esatta",
+      "previewApproximate": "Anteprima approssimativa",
+      "previewTemplateClassic": "Classico",
+      "previewTemplateModern": "Moderno",
+      "previewRenderModeText": "Testo",
+      "previewRenderModeRasterExact": "Raster esatto",
       "previewLoading": "Generazione anteprima...",
       "receiptActions": {
         "sectionTitle": "[NEEDS TRANSLATION] Automatic Receipt Actions",
@@ -1944,7 +2338,10 @@
       "showImages": "Mostra immagini",
       "animationsEnabled": "Abilita animazioni",
       "langEnglish": "Inglese",
-      "langGreek": "Greco"
+      "langGreek": "Greco",
+      "langGerman": "Tedesco",
+      "langFrench": "Francese",
+      "langItalian": "Italiano"
     },
     "payment": {
       "title": "Impostazioni pagamento",
@@ -2008,11 +2405,61 @@
       "dateFormat": "Formato data",
       "timeFormat": "Formato ora"
     },
+    "recovery": {
+      "unknown": "Sconosciuto",
+      "countsSummary": "{{orders}} ordini • {{shifts}} turni • {{drawers}} cassetti",
+      "orders": "Ordini",
+      "shifts": "Turni",
+      "drawers": "Cassetti",
+      "snapshot": "Snapshot",
+      "businessDay": "Giorno lavorativo",
+      "supportNoteTitle": "Riferimento assistenza salvato",
+      "supportNoteHelp": "Esporta questo snapshot se l'assistenza lo richiede.",
+      "restoreNote": "I lavori di stampa ripristinati in stato di attesa o di stampa verranno annullati durante il ripristino, così il POS non ristampa vecchi scontrini dopo il riavvio.",
+      "kinds": {
+        "scheduled": "Programmato",
+        "manual": "Manuale",
+        "pre_factory_reset": "Prima del ripristino di fabbrica",
+        "pre_emergency_reset": "Prima del ripristino di emergenza",
+        "pre_clear_operational_data": "Prima della cancellazione dati",
+        "pre_restore": "Prima del ripristino",
+        "pre_migration": "Prima della migrazione",
+        "pre_recovery_action": "Prima dell'azione di ripristino",
+        "quarantined_open_failure": "In quarantena (errore di apertura)"
+      },
+      "title": "Ripristino locale",
+      "help": "Conserva i punti di ripristino SQLite locali e i pacchetti di esportazione fino a 7 giorni.",
+      "latestAutomatic": "Ultimo snapshot automatico",
+      "latestDestructive": "Ultimo snapshot protettivo",
+      "createSnapshot": "Crea snapshot",
+      "exportCurrent": "Esporta dati correnti",
+      "openFolder": "Apri cartella di ripristino",
+      "openFolderFailed": "Impossibile aprire la cartella di ripristino",
+      "noPoints": "Nessun punto di ripristino locale ancora disponibile.",
+      "loadFailed": "Impossibile caricare i punti di ripristino locali",
+      "snapshotCreated": "Snapshot di ripristino creato",
+      "snapshotCreateFailed": "Impossibile creare lo snapshot di ripristino",
+      "exportPinTitle": "Conferma esportazione ripristino",
+      "exportPinSubtitle": "Inserisci il PIN amministratore per esportare il pacchetto di ripristino locale.",
+      "exportCreated": "Esportazione di ripristino creata",
+      "exportFailed": "Impossibile esportare il pacchetto di ripristino",
+      "exportPointPinTitle": "Conferma esportazione ripristino",
+      "exportPointPinSubtitle": "Inserisci il PIN amministratore per esportare il punto di ripristino selezionato.",
+      "exportPointCreated": "Esportazione del punto di ripristino creata",
+      "exportPointFailed": "Impossibile esportare il punto di ripristino",
+      "restorePinTitle": "Conferma ripristino",
+      "restorePinSubtitle": "Inserisci il PIN amministratore per ripristinare il punto selezionato e riavviare il POS. Eventuali lavori di stampa in sospeso ripristinati verranno annullati invece di essere rieseguiti automaticamente.",
+      "restoreFailed": "Impossibile preparare il ripristino",
+      "exportSelected": "Esporta selezionato",
+      "restoreSelected": "Ripristina selezionato",
+      "selectPoint": "Seleziona un punto di ripristino per ispezionarlo o ripristinarlo."
+    },
     "peripherals": {
       "title": "Periferiche",
       "helpText": "Configura i dispositivi hardware esterni",
       "saved": "Impostazioni periferiche salvate",
       "saveFailed": "Impossibile salvare le impostazioni periferiche",
+      "saveButton": "Salva periferiche",
       "scale": {
         "title": "Bilancia",
         "port": "Porta COM",
@@ -2057,6 +2504,12 @@
         "stop": "Ferma"
       },
       "cashRegister": {
+        "fiscalPrintLabel": "Stampa fiscale automatica",
+        "fiscalPrintHelp": "Invia lo scontrino fiscale alla cassa a ogni ordine",
+        "fiscalPrintEnabled": "Stampa fiscale attivata",
+        "fiscalPrintDisabled": "Stampa fiscale disattivata",
+        "fiscalPrintSaveFailed": "Impossibile salvare l'impostazione",
+        "helpText": "Configura dispositivi fiscali e impostazioni fiscali",
         "title": "Registratore di cassa / Stampante fiscale",
         "addDevice": "Aggiungi dispositivo",
         "editDevice": "Modifica dispositivo",
@@ -2140,14 +2593,53 @@
         "disabled": "L'identificazione chiamante è stata disabilitata su questo terminale.",
         "testBeforeSave": "Esegui un test di connessione riuscito dopo le ultime modifiche prima di attivare l'identificazione chiamante.",
         "testRequiredHint": "Dopo ogni modifica esegui prima Test connessione prima di attivare l'identificazione chiamante su questo terminale.",
+        "presets": {
+          "genericEurope": {
+            "label": "SIP generico Europa",
+            "description": "Credenziali SIP standard da un provider o PBX in hosting."
+          },
+          "threeCx": {
+            "description": "Trasporto e porta SIP predefiniti di 3CX."
+          },
+          "freePbx": {
+            "description": "Impostazioni predefinite di registrazione SIP in stile Asterisk."
+          },
+          "yeastar": {
+            "description": "PBX Yeastar locale o in hosting con credenziali SIP standard."
+          }
+        },
+        "reason": {
+          "authFailed": "Autenticazione non riuscita. Controlla il nome utente SIP, il nome utente di autenticazione e la password.",
+          "timeout": "Il server SIP non ha risposto in tempo. Controlla server, porta (port) e firewall.",
+          "unsupportedProvider": "Questo provider richiede un challenge SIP non supportato o una configurazione bloccata dal router.",
+          "portInUse": "La porta di ascolto SIP locale è già in uso su questo terminale POS.",
+          "invalidConfig": "La configurazione SIP è incompleta.",
+          "networkError": "Impossibile raggiungere il server SIP tramite il trasporto selezionato.",
+          "failed": "Avvio del Caller ID non riuscito."
+        },
+        "testFailed": "Test di connessione non riuscito",
+        "saveFailed": "Impossibile salvare le impostazioni Caller ID",
+        "disableFailed": "Impossibile disattivare il Caller ID",
         "setup": {
           "providerPreset": "Preimpostazione provider",
           "providerPresetHelp": "Inizia dai valori SIP più comuni e modifica i dettagli del server.",
-          "generic": "SIP generico",
+          "generic": "SIP manuale",
           "genericHelp": "Usa server SIP, nome utente e password forniti dal tuo provider o PBX.",
-          "legacy": "Avanzato / PBX legacy",
+          "legacy": "PBX precedente",
           "legacyHelp": "Continua a usare un flusso di registrazione PBX basato su IP affidabile per le installazioni più vecchie."
         },
+        "steps": {
+          "choose": "Passo 1 · Scegli il tipo di telefono",
+          "details": "Passo 2 · Inserisci i dati della linea",
+          "activate": "Passo 3 · Prova, poi attiva"
+        },
+        "checklist": {
+          "title": "Cosa ti serve",
+          "server": "L'indirizzo del server telefonico (es. sip.example.com)",
+          "username": "Il tuo interno o nome utente (es. 200)",
+          "password": "La password di quella linea"
+        },
+        "routerNoteCompact": "Linea telefonica che esiste solo dentro il router di internet, senza nome utente o password? Non è ancora supportata.",
         "status": {
           "listening": "In ascolto",
           "registering": "Registrazione",
@@ -2505,6 +2997,13 @@
       "delivery": "Ordine consegna",
       "deliveryDescription": "Consegna l'ordine all'indirizzo del cliente"
     },
+    "printPreview": {
+      "zoomOut": "Riduci zoom",
+      "zoomIn": "Aumenta zoom",
+      "receiptFrame": "Anteprima ricevuta",
+      "previewUnavailable": "Anteprima non disponibile",
+      "defaultPrinter": "Stampante ricevute predefinita"
+    },
     "orderTypeSelection": {
       "title": "Scegli tipo di ordine",
       "subtitle": "Seleziona ordine asporto o consegna",
@@ -2578,6 +3077,12 @@
       "pleaseWait": "Attendere durante la creazione dell'ordine",
       "editOrder": "Modifica ordine",
       "editModeMessage": "Si sta modificando un ordine esistente. Aggiungere, rimuovere o modificare gli articoli secondo necessità.",
+      "discardOrder": {
+        "title": "Annullare questo ordine?",
+        "message": "Questo ordine contiene articoli nel carrello. Chiudendo ora verranno eliminati.",
+        "keepEditing": "Continua la modifica",
+        "discard": "Annulla ordine"
+      },
       "editFailed": "Impossibile salvare le modifiche. Riprovare.",
       "saveChanges": "Salva modifiche",
       "addCustomer": "Aggiungi cliente",
@@ -2614,7 +3119,7 @@
       "insufficientCash": "Contanti ricevuti insufficienti",
       "selectDriverRequired": "Seleziona un fattorino per gli ordini di consegna",
       "belowMinimumTitle": "Ordine minimo non raggiunto",
-      "belowMinimumMessage": "L'importo dell'ordine è inferiore all'ordine minimo di €{{amount}}",
+      "belowMinimumMessage": "L'importo dell'ordine è inferiore all'ordine minimo di {{amount}}",
       "paymentSuccess": "Pagamento completato! Resto: {{change}}",
       "paymentFailed": "Pagamento non riuscito. Riprovare.",
       "cashSuccess": "Pagamento in contanti riuscito!",
@@ -2739,6 +3244,11 @@
       "paymentMethod": "Metodo di pagamento"
     },
     "simplePricing": {
+      "orderTypePricing": "Prezzi per tipo ordine",
+      "pickupPrice": "Prezzo ritiro (\u20ac)",
+      "deliveryPrice": "Prezzo consegna (\u20ac)",
+      "pricingHelp": "Imposta prezzi diversi per ritiro e consegna.",
+      "savePricing": "Salva prezzi",
       "title": "Imposta prezzi"
     },
     "staffShift": {
@@ -2982,6 +3492,11 @@
       "enterPinAction": "Inserisci PIN",
       "enterPinHelper": "Usa il PIN POS a 4 cifre del dipendente per continuare.",
       "roleSelectionHelper": "Scegli il ruolo di questo turno prima di continuare.",
+      "cashierFirstCheckInRequired": "Il primo check-in di questa giornata lavorativa deve essere effettuato da un cassiere.",
+      "cashierFirstCheckInHelper": "Avvia prima un turno da cassiere. Gli altri ruoli si sbloccano dopo il check-in del cassiere.",
+      "cashierFirstCheckInBlocked": "Questo dipendente non ha un ruolo da cassiere. Torna indietro e scegli prima un cassiere.",
+      "cashierFirstRoleLockedHelper": "Un cassiere deve avviare la giornata lavorativa corrente prima che questo ruolo possa fare check-in.",
+      "roleLockedUntilCashier": "Bloccato finché non avvia il cassiere",
       "cashierRoleHelper": "Turno finanziario con conteggio cassa e riconciliazione a fine turno.",
       "driverRoleHelper": "Turno consegne. Il fondo iniziale dal cassiere attivo è facoltativo.",
       "serverRoleHelper": "Turno di sala. Il fondo iniziale dal cassiere attivo è facoltativo.",
@@ -3010,6 +3525,41 @@
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
+      "clarity": {
+        "totalSales": "Vendite totali",
+        "expectedCash": "Contante previsto",
+        "issues": "Problemi",
+        "nextStep": "Prossimo passo",
+        "readyHint": "Tutto a posto — invia all'amministrazione.",
+        "reviewHint": "Correggi {{count}} elemento/i sotto, poi invia.",
+        "seeIssuesTab": "Vedi la scheda Problemi",
+        "reviewIssues": "Esamina i problemi",
+        "tabMoney": "Denaro",
+        "tabReview": "Verifica",
+        "tabIssues": "Problemi",
+        "fixFirst": "Inizia da {{issue}}, poi invia.",
+        "statusReady": "Pronto",
+        "statusAttention": "Da verificare",
+        "statusAction": "Azione richiesta",
+        "statusChecking": "Verifica…",
+        "dayStepTitle": "Giornata lavorativa",
+        "readyStepTitle": "Chiudi la giornata",
+        "checksStepTitle": "Controlli",
+        "submitStepTitle": "Invia",
+        "allChecksPassed": "Tutti i controlli superati",
+        "checksNeedAttention": "{{count}} da correggere — inizia da {{issue}}",
+        "submitLocked": "L'invio si sblocca quando tutti i controlli sono superati.",
+        "assistantTitle": "Chiudi la giornata",
+        "locked": "Bloccato",
+        "dayLive": "Oggi",
+        "dayHistorical": "Giorno precedente",
+        "detailsSummary": "Dettagli",
+        "from": "Dalle",
+        "until": "Alle",
+        "fixAction": "Correggi {{issue}}",
+        "cashDrawerCheckoutAction": "Chiudi turno cassa",
+        "cashDrawerReconcileAction": "Riconcilia cassa"
+      },
       "selectDate": "Seleziona data report",
       "selectBusinessDay": "Seleziona giorno operativo",
       "businessDay": "Giorno operativo",
@@ -3043,7 +3593,9 @@
       "paymentsReady": "Tutti i pagamenti degli ordini sono bilanciati.",
       "paymentsNeedAction": "{{count}} blocco/i pagamento devono essere risolti prima della conferma.",
       "cashDrawerReady": "I totali di cassa sono bilanciati.",
-      "cashDrawerNeedsReview": "{{drawers}} cassetto/i non riconciliati. Variazione: {{variance}}.",
+      "cashDrawerNeedsReview": "Scostamento di cassa di {{variance}}. Effettua la riconciliazione prima della chiusura.",
+      "cashDrawerCheckoutNeeded": "Il cassiere deve chiudere il turno e riconciliare la cassa prima di chiudere la giornata.",
+      "cashDrawerCheckoutAndVariance": "Chiudi il turno cassa e verifica lo scostamento di {{variance}} prima della chiusura.",
       "expensesReady": "Nessuna spesa in attesa di verifica.",
       "expensesNeedReview": "{{count}} spesa/e richiedono ancora verifica.",
       "staffReady": "I turni del personale sono disponibili per questo report.",
@@ -3143,6 +3695,24 @@
         "card": "Carta"
       },
       "noOrdersMatchFilter": "Nessun ordine corrisponde ai filtri selezionati",
+      "orderTypes": {
+        "delivery": "Consegna",
+        "dineIn": "Al tavolo",
+        "pickup": "Ritiro",
+        "takeaway": "Da asporto",
+        "driveThrough": "Drive-through",
+        "roomService": "Servizio in camera",
+        "unknown": "Sconosciuto"
+      },
+      "paymentLabels": {
+        "cash": "Contanti",
+        "card": "Carta",
+        "split": "Diviso",
+        "roomCharge": "Addebito in camera",
+        "pending": "In sospeso",
+        "unpaid": "Non pagato",
+        "unknown": "Sconosciuto"
+      },
       "exportOrdersCSV": "Esporta ordini CSV",
       "exportCSV": "Esporta CSV",
       "exportStaffCSV": "Esporta personale CSV",
@@ -3274,18 +3844,20 @@
     },
     "orderCancellation": {
       "title": "Annulla ordini",
-      "message": "Stai per annullare {{count}} ordine/i. Fornisci un motivo per l'annullamento.",
+      "message_one": "Stai per annullare {{count}} ordine. Fornisci un motivo per l'annullamento.",
+      "message_other": "Stai per annullare {{count}} ordini. Fornisci un motivo per l'annullamento.",
       "reasonLabel": "Motivo annullamento *",
       "reasonPlaceholder": "Inserisci il motivo dell'annullamento...",
       "characterCount": "{{current}}/{{max}} caratteri",
       "confirm": "Conferma annullamento",
-      "cancel": "Annulla",
+      "keepOrder": "Mantieni ordine",
       "reasonRequired": "Fornisci un motivo per l'annullamento"
     },
     "addCustomer": {
       "title": "Aggiungi nuovo cliente",
       "editTitle": "Modifica cliente",
       "addAddressTitle": "Aggiungi nuovo indirizzo",
+      "editAddressTitle": "Modifica indirizzo",
       "customerInformation": "Informazioni cliente",
       "nameLabel": "Nome completo *",
       "namePlaceholder": "Inserisci il nome completo",
@@ -3293,15 +3865,17 @@
       "phonePlaceholder": "Inserisci il numero di telefono",
       "emailLabel": "Email (facoltativo)",
       "emailPlaceholder": "Inserisci l'indirizzo email",
-      "nameOnRingerLabel": "Nome sul citofono",
+      "nameOnRingerLabel": "Nome sul citofono (facoltativo)",
       "nameOnRingerPlaceholder": "Nome per il citofono",
       "addressLabel": "Indirizzo *",
       "streetPlaceholder": "Inserisci l'indirizzo di consegna...",
+      "manualAddressPlaceholder": "Inserisci l'indirizzo manualmente",
+      "manualAddressEntryHint": "Le zone di consegna sono disattivate per questo terminale. La ricerca dell'indirizzo e la validazione della zona sono disattivate, quindi l'indirizzo verrà salvato manualmente.",
       "cityLabel": "Città",
       "cityPlaceholder": "Inserisci la città",
       "postcodeLabel": "Codice postale",
       "postcodePlaceholder": "Inserisci il codice postale",
-      "floorLabel": "Numero piano",
+      "floorLabel": "Numero piano (facoltativo)",
       "floorPlaceholder": "es. 2° piano, Piano terra",
       "notesLabel": "Note (facoltativo)",
       "notesPlaceholder": "Note aggiuntive o istruzioni speciali per la consegna",
@@ -3323,6 +3897,7 @@
       "floorRequired": "Il numero del piano è obbligatorio",
       "save": "Aggiungi cliente",
       "saveAddress": "Salva indirizzo",
+      "saveChanges": "Salva modifiche",
       "saving": "Salvataggio...",
       "cancel": "Annulla",
       "success": "Cliente aggiunto con successo",
@@ -3357,7 +3932,8 @@
     },
     "editOptions": {
       "title": "Opzioni di modifica",
-      "message": "Scegli cosa modificare per {{count}} ordine/i selezionato/i.",
+      "message_one": "Scegli cosa modificare per {{count}} ordine selezionato.",
+      "message_other": "Scegli cosa modificare per {{count}} ordini selezionati.",
       "editCustomerInfo": "Modifica info cliente",
       "editCustomerInfoDesc": "Aggiorna nome, telefono, indirizzo del cliente",
       "editOrderItems": "Modifica articoli ordine",
@@ -3381,7 +3957,8 @@
     },
     "driverAssignment": {
       "title": "Assegna fattorino",
-      "message": "{{count}} ordine/i di consegna devono essere assegnati a un fattorino.",
+      "message_one": "{{count}} ordine di consegna deve essere assegnato a un fattorino.",
+      "message_other": "{{count}} ordini di consegna devono essere assegnati a un fattorino.",
       "fetchFailed": "Impossibile recuperare i fattorini",
       "assignedTo": "Assegnato a {{name}}",
       "notAvailable": "{{name}} non è disponibile",
@@ -3409,7 +3986,8 @@
     },
     "editOrderItems": {
       "title": "Modifica articoli ordine",
-      "message": "Modifica articoli e quantità per {{count}} ordine/i selezionato/i.",
+      "message_one": "Modifica articoli e quantità per {{count}} ordine selezionato.",
+      "message_other": "Modifica articoli e quantità per {{count}} ordini selezionati.",
       "atLeastOneItem": "Almeno un articolo deve avere una quantità maggiore di 0",
       "saveFailed": "Impossibile salvare gli articoli dell'ordine",
       "each": "cad.",
@@ -3426,13 +4004,16 @@
     },
     "editCustomer": {
       "title": "Modifica informazioni cliente",
-      "updateMessage": "Aggiorna i dettagli del cliente per {{count}} ordine/i selezionato/i.",
+      "updateMessage_one": "Aggiorna i dettagli del cliente per {{count}} ordine selezionato.",
+      "updateMessage_other": "Aggiorna i dettagli del cliente per {{count}} ordini selezionati.",
       "customerName": "Nome cliente *",
       "customerNamePlaceholder": "Inserisci il nome del cliente",
       "phoneNumber": "Numero di telefono *",
       "phoneNumberPlaceholder": "Inserisci il numero di telefono",
       "address": "Indirizzo",
       "addressPlaceholder": "Inizia a digitare per suggerimenti...",
+      "manualAddressPlaceholder": "Inserisci l'indirizzo manualmente",
+      "manualAddressEntryHint": "Le zone di consegna sono disattivate per questo terminale. La ricerca dell'indirizzo e la validazione della zona sono disattivate, quindi l'indirizzo verrà salvato manualmente.",
       "postalCode": "Codice postale",
       "postalCodePlaceholder": "es. 10678",
       "autoFilled": "✓ Compilato automaticamente",
@@ -3480,6 +4061,8 @@
       "subtitle": "Aggiunta indirizzo per {{name}}",
       "address": "Indirizzo *",
       "addressPlaceholder": "Inizia a digitare l'indirizzo...",
+      "manualAddressPlaceholder": "Inserisci l'indirizzo manualmente",
+      "manualAddressEntryHint": "Le zone di consegna sono disattivate per questo terminale. La ricerca dell'indirizzo e la validazione della zona sono disattivate, quindi l'indirizzo verrà salvato manualmente.",
       "postalCode": "Codice postale",
       "postalPlaceholder": "es. 10678",
       "floorNumber": "Numero piano",
@@ -3496,6 +4079,10 @@
       "unknownError": "Errore sconosciuto"
     },
     "connectionSettings": {
+      "ghostMode": "Modalità Ghost",
+      "ghostModeHelp": "Usa il codice articolo manuale X con prezzo 1 per attivare la modalità solo per il carrello attuale.",
+      "available": "Disponibile",
+      "unavailable": "Non disponibile",
       "title": "Impostazioni",
       "connectionSettings": "Impostazioni connessione",
       "terminalId": "ID terminale",
@@ -3521,9 +4108,18 @@
       "cancel": "Annulla",
       "savePin": "Salva PIN",
       "theme": "Tema",
-      "light": "☀️ Chiaro",
-      "dark": "🌙 Scuro",
-      "system": "🖥️ Sistema",
+      "light": "Chiaro",
+      "about": "Informazioni",
+      "aboutSubtitle": "Info versione",
+      "aboutVersion": "Versione",
+      "aboutBuildDate": "Data build",
+      "aboutGitSha": "Git SHA",
+      "aboutPlatform": "Piattaforma",
+      "aboutRust": "Rust",
+      "aboutCopyInfo": "Copia info",
+      "aboutCopied": "Copiato!",
+      "dark": "Scuro",
+      "system": "Sistema",
       "language": "Lingua",
       "close": "Chiudi",
       "enterBoth": "Incolla il codice di connessione o compila i campi legacy del terminale",
@@ -3555,6 +4151,44 @@
       "totalOrders": "Ordini totali",
       "totalSpent": "Totale speso",
       "noOrders": "Nessuno storico ordini trovato"
+    },
+    "refund": {
+      "title": "Storno / Rimborso",
+      "subtitle": "Gestisci rettifiche pagamento",
+      "orderTotal": "Totale ordine",
+      "noPayments": "Nessun pagamento trovato per questo ordine",
+      "tableSettledTitle": "Pagato sul conto tavolo",
+      "tableSettledBody": "Questo ordine è stato saldato tramite la sessione del tavolo, quindi qui non esiste un pagamento a livello ordine da stornare o rimborsare. Riapri il conto tavolo per rettificare o rimborsare il pagamento.",
+      "activePayments": "Active Payments",
+      "closedPayments": "Voided / Refunded",
+      "adjustmentHistory": "Adjustment History",
+      "statusCompleted": "Completed",
+      "statusVoided": "Voided",
+      "statusRefunded": "Refunded",
+      "voidButton": "Void",
+      "refundButton": "Refund",
+      "voidWarning": "This will fully reverse the payment of",
+      "confirmVoid": "Confirm Void",
+      "confirmRefund": "Confirm Refund",
+      "refundAmount": "Refund Amount",
+      "maxRefund": "Maximum refundable: {{amount}}",
+      "reason": "Reason",
+      "reasonPlaceholder": "Reason for this adjustment...",
+      "reasonRequired": "A reason is required",
+      "invalidAmount": "Enter a valid refund amount",
+      "exceedsBalance": "Refund amount exceeds remaining balance of {{amount}}",
+      "refundLabel": "Refund",
+      "voidLabel": "Void",
+      "refunded": "Refunded",
+      "remaining": "Remaining",
+      "cashierCash": "Cashier drawer",
+      "driverCash": "Driver shift cash",
+      "cardRefund": "Card Refund",
+      "loadFailed": "Failed to load payment data",
+      "refundSuccess": "Refund recorded successfully",
+      "refundFailed": "Refund failed",
+      "voidSuccess": "Payment voided successfully",
+      "voidFailed": "Void failed"
     }
   },
   "errors": {
@@ -3592,6 +4226,12 @@
     "keepLocal": "Mantieni modifiche locali"
   },
   "inventory": {
+    "filter": {
+      "all": "Tutti",
+      "critical": "Critico",
+      "low": "Basso",
+      "good": "Buono"
+    },
     "title": "Inventario",
     "subtitle": "Gestisci gli articoli dell'inventario e la disponibilità",
     "header": "Gestione inventario",
@@ -3718,7 +4358,8 @@
       "loadFailed": "Impossibile caricare l'inventario",
       "adjustmentNegative": "La rettifica produrrebbe scorte negative",
       "adjustmentFailed": "Impossibile rettificare le scorte"
-    }
+    },
+    "adjustmentQuantity": "Quantità di rettifica"
   },
   "theme": {
     "light": "Chiaro",
@@ -3750,6 +4391,7 @@
     "clear": "Cancella",
     "loggingIn": "Accesso in corso…",
     "loginButton": "Accedi",
+    "connectionSettings": "Impostazioni di connessione",
     "footer": "The Small POS",
     "enterWithoutPin": "Entra senza PIN",
     "noPinWarning": "Nessun PIN impostato. Puoi impostarne uno nelle Impostazioni dopo l'accesso.",
@@ -3817,6 +4459,29 @@
     "overrideRequiresApproval": "L'override richiede l'approvazione del responsabile",
     "tableOrder": "Ordine al tavolo",
     "tableDescription": "Al tavolo",
+    "roomOrder": "Camera",
+    "roomDescription": "Ordine camera, check-in o prenotazione",
+    "serviceOrder": "Servizio",
+    "serviceDescription": "Prenota un appuntamento",
+    "roomFlowTitle": "Camera",
+    "roomFlowOrder": "Ordine camera",
+    "roomFlowOrderDesc": "Addebita un ordine a una camera",
+    "roomFlowCheckin": "Check-in",
+    "roomFlowCheckinDesc": "Effettua il check-in di una camera prenotata",
+    "roomFlowReservation": "Crea prenotazione",
+    "roomFlowReservationDesc": "Prenota una camera disponibile",
+    "roomOrderTitle": "Seleziona una camera",
+    "roomOrderEmpty": "Nessuna camera occupata con conto aperto al momento",
+    "roomOrderEmptyHint": "L'addebito su camera richiede un ospite con check-in e un conto attivo. Effettua prima il check-in per aprirne uno.",
+    "roomOrderNoFolio": "Nessun conto attivo",
+    "roomCheckinSelectTitle": "Seleziona una camera prenotata",
+    "roomReservationSelectTitle": "Seleziona una camera disponibile",
+    "roomCheckinEmpty": "Nessuna camera prenotata per il check-in",
+    "roomCheckinEmptyHint": "Il check-in richiede una prenotazione camera esistente. Se qui non compare nessuna camera, crea prima una prenotazione e poi torna per registrare l'arrivo dell'ospite.",
+    "roomReservationEmpty": "Nessuna camera disponibile da prenotare",
+    "roomOrderSelectRoom": "Camera {{room}}",
+    "roomGuestCustomer": "Camera {{room}} — {{guest}}",
+    "roomCustomer": "Camera {{room}}",
     "tableCustomer": "Tavolo {{table}}",
     "reservationComingSoon": "Funzione prenotazione in arrivo"
   },
@@ -3854,6 +4519,8 @@
     "customerInfoUpdated": "Informazioni cliente aggiornate per {{count}} ordine/i",
     "customerInfoFailed": "Impossibile aggiornare le informazioni del cliente",
     "orderItemsUpdated": "Articoli ordine aggiornati per {{count}} ordine/i",
+    "orderEditPaymentRequiredToSave": "Scegli come incassare il pagamento aggiuntivo. La modifica dell'ordine sarà salvata dopo la registrazione del pagamento.",
+    "tableOrderUpdated": "Conto del tavolo aggiornato. Il saldo resta aperto finché il cliente non paga.",
     "orderItemsFailed": "Impossibile aggiornare gli articoli dell'ordine",
     "paymentMethodUpdated": "Metodo di pagamento aggiornato",
     "paymentMethodUpdateFailed": "Impossibile aggiornare il metodo di pagamento",
@@ -3867,7 +4534,8 @@
     "noCancelledOrdersSelected": "Nessun ordine annullato selezionato",
     "printFailed": "Receipt print failed",
     "fiscalPrintFailed": "Cash register print failed",
-    "orderCreateFailed": "Failed to create order"
+    "orderCreateFailed": "Failed to create order",
+    "collectPaymentFailed": "È necessario incassare il pagamento prima di continuare."
   },
   "bulkActions": {
     "driver": "Fattorino",
@@ -3983,7 +4651,9 @@
       "occupied": "Occupato",
       "reserved": "Riservato",
       "cleaning": "In pulizia",
-      "outOfService": "Fuori servizio"
+      "outOfService": "Fuori servizio",
+      "maintenance": "Manutenzione",
+      "unavailable": "Non disponibile"
     },
     "card": {
       "tableNumber": "Tavolo #{{number}}",
@@ -4005,7 +4675,13 @@
       "markReserved": "Segna come riservato",
       "changeStatus": "Cambia stato",
       "viewOrder": "Visualizza ordine",
-      "transferTable": "Trasferisci tavolo"
+      "transferTable": "Trasferisci tavolo",
+      "quickActions": "Azioni rapide",
+      "newOrder": "Nuovo ordine",
+      "newReservation": "Prenota",
+      "markMaintenance": "Segna manutenzione",
+      "markCleaned": "Pulito",
+      "markBackInService": "Di nuovo in servizio"
     },
     "filters": {
       "search": "Cerca tavoli...",
@@ -4017,7 +4693,9 @@
       "section": "Filtra per sezione",
       "allSections": "Tutte le sezioni",
       "floor": "Filtra per piano",
-      "allFloors": "Tutti i piani"
+      "allFloors": "Tutti i piani",
+      "title": "Filtra tavoli",
+      "clear": "Cancella filtri"
     },
     "messages": {
       "loading": "Caricamento tavoli...",
@@ -4032,7 +4710,10 @@
       "syncError": "Impossibile sincronizzare i tavoli",
       "lastSync": "Ultima sincronizzazione: {{time}}",
       "confirmClear": "Liberare questo tavolo e segnarlo come disponibile?",
-      "confirmStatusChange": "Cambiare lo stato del tavolo a {{status}}?"
+      "confirmStatusChange": "Cambiare lo stato del tavolo a {{status}}?",
+      "refreshed": "Tavoli aggiornati",
+      "noMatchingTables": "Nessun tavolo corrisponde ai filtri",
+      "noTablesOnFloorPlan": "Nessun tavolo da visualizzare"
     },
     "stats": {
       "total": "Tavoli totali",
@@ -4040,13 +4721,16 @@
       "occupied": "Occupati",
       "reserved": "Riservati",
       "occupancyRate": "Tasso di occupazione",
-      "avgTurnover": "Turnover medio"
+      "avgTurnover": "Turnover medio",
+      "availableTotal": "{{available}} disponibili / {{total}} totali"
     },
     "layout": {
       "title": "Disposizione tavoli",
       "gridView": "Vista griglia",
       "listView": "Vista lista",
-      "floorPlan": "Pianta del piano"
+      "floorPlan": "Pianta del piano",
+      "switchToFloorPlan": "Passa alla planimetria",
+      "switchToGrid": "Passa alla vista griglia"
     }
   },
   "reservations": {
@@ -4166,6 +4850,8 @@
     "owed": "Totale dovuto",
     "suppliers": "Fornitori",
     "search": "Cerca fornitori...",
+    "searchSuppliers": "Cerca fornitori...",
+    "searchInvoices": "Cerca fatture...",
     "orders": "Ordini",
     "spent": "Speso",
     "invoice": {
@@ -4408,11 +5094,46 @@
       "cleaning": "In pulizia"
     }
   },
+  "appointmentsView": {
+    "toasts": {
+      "created": "Appuntamento creato con successo",
+      "createFailed": "Impossibile creare l'appuntamento",
+      "updateStatusFailed": "Impossibile aggiornare lo stato",
+      "checkedIn": "Cliente registrato",
+      "checkInFailed": "Check-in non riuscito",
+      "completed": "Appuntamento completato",
+      "completeFailed": "Completamento non riuscito",
+      "status": {
+        "scheduled": "Appuntamento programmato",
+        "confirmed": "Appuntamento confermato",
+        "in_progress": "Appuntamento in corso",
+        "completed": "Appuntamento completato",
+        "cancelled": "Appuntamento annullato",
+        "no_show": "Appuntamento contrassegnato come mancata presentazione"
+      }
+    }
+  },
   "reservationsView": {
+    "toasts": {
+      "created": "Prenotazione creata con successo",
+      "createFailed": "Impossibile creare la prenotazione",
+      "updateStatusFailed": "Impossibile aggiornare lo stato",
+      "tableAssigned": "Tavolo assegnato",
+      "assignTableFailed": "Impossibile assegnare il tavolo",
+      "status": {
+        "pending": "Prenotazione in attesa",
+        "confirmed": "Prenotazione confermata",
+        "seated": "Prenotazione assegnata al tavolo",
+        "completed": "Prenotazione completata",
+        "no_show": "Prenotazione contrassegnata come mancata presentazione",
+        "cancelled": "Prenotazione annullata"
+      }
+    },
     "status": {
       "confirmed": "Confermata",
       "pending": "In attesa",
       "seated": "Seduti",
+      "completed": "Completata",
       "no_show": "Non presentato",
       "cancelled": "Annullata"
     },
@@ -4420,10 +5141,65 @@
       "total": "Totale",
       "confirmed": "Confermate",
       "pending": "In attesa",
-      "seated": "Seduti"
+      "seated": "Seduti",
+      "guests": "Ospiti"
+    },
+    "tabs": {
+      "tables": "Tavoli",
+      "rooms": "Camere",
+      "services": "Servizi"
+    },
+    "headers": {
+      "tables": "Prenotazioni tavoli",
+      "rooms": "Prenotazioni camere",
+      "services": "Prenotazioni servizi"
+    },
+    "actions": {
+      "confirm": "Conferma",
+      "seat": "Sistema",
+      "complete": "Completa",
+      "noShow": "Non presentato",
+      "checkIn": "Check-in"
+    },
+    "validation": {
+      "customerRequired": "Nome e telefono del cliente sono obbligatori",
+      "serviceRequired": "Servizio, personale, data e ora sono obbligatori",
+      "invalidReservation": "Inserisci data, ora e numero di ospiti validi",
+      "roomRequired": "Camera, data di arrivo e data di partenza sono obbligatorie"
+    },
+    "form": {
+      "customerName": "Nome cliente",
+      "service": "Servizio",
+      "staff": "Personale",
+      "selectService": "Seleziona un servizio",
+      "selectStaff": "Seleziona il personale",
+      "room": "Camera",
+      "selectRoom": "Seleziona una camera",
+      "customerPhone": "Telefono cliente",
+      "customerEmail": "Email cliente (facoltativo)",
+      "partySize": "Numero di ospiti",
+      "duration": "Durata (minuti)",
+      "tableId": "ID tavolo (facoltativo)",
+      "roomId": "ID camera",
+      "checkInDate": "Data di arrivo",
+      "checkOutDate": "Data di partenza",
+      "specialRequests": "Richieste speciali (facoltativo)",
+      "notes": "Note (facoltativo)",
+      "tableOptional": "Seleziona un tavolo (facoltativo)",
+      "reservationDate": "Data della prenotazione",
+      "reservationTime": "Ora della prenotazione"
     },
     "searchPlaceholder": "Cerca...",
     "addReservation": "Aggiungi",
+    "create": "Crea",
+    "createTitle": "Crea prenotazione",
+    "createServiceInAppointments": "Crea prenotazioni di servizi dagli Appuntamenti",
+    "createServiceTitle": "Crea prenotazione servizio",
+    "refresh": "Aggiorna",
+    "pendingAlert": "prenotazione/i in attesa di conferma",
+    "loading": "Caricamento prenotazioni...",
+    "walkInCustomer": "Cliente senza prenotazione",
+    "service": "Servizio",
     "filter": {
       "today": "Oggi",
       "tomorrow": "Domani",
@@ -4434,8 +5210,19 @@
       "timeline": "Linea temporale"
     },
     "table": "Tavolo",
+    "room": "Camera",
+    "noTable": "Nessun tavolo",
     "guests": "ospiti",
     "noReservations": "Nessuna prenotazione trovata",
+    "noReservationsHint": "Prova una data diversa o modifica la ricerca",
+    "noBranch": "Seleziona una filiale per vedere le prenotazioni",
+    "noModules": "Nessun modulo di prenotazione disponibile",
+    "noModulesHint": "Acquista Tavoli, Camere o Servizi per gestire le prenotazioni.",
+    "detailTitle": "Dettagli prenotazione",
+    "customer": "Cliente",
+    "when": "Data e ora",
+    "quickActions": "Azioni rapide",
+    "assignTable": "Assegna tavolo",
     "partySize": "Dimensione gruppo",
     "time": "Ora",
     "phone": "Telefono",
@@ -4444,7 +5231,8 @@
     "dateNavigation": {
       "previous": "Giorno precedente",
       "next": "Giorno successivo"
-    }
+    },
+    "selectTable": "Seleziona un tavolo"
   },
   "onboarding": {
     "connectionString": "Stringa di connessione",
@@ -4555,7 +5343,8 @@
     "validation": {
       "selectStaff": "Seleziona un membro del personale",
       "selectDateTime": "Seleziona data e ora di inizio e fine",
-      "endAfterStart": "L'ora di fine deve essere successiva all'ora di inizio"
+      "endAfterStart": "L'ora di fine deve essere successiva all'ora di inizio",
+      "tooLong": "La durata del turno deve essere inferiore a {{hours}} ore"
     },
     "ergani": {
       "noBranch": "Nessuna filiale configurata per questo terminale.",
@@ -4965,6 +5754,18 @@
     "loadError": "Impossibile caricare gli ordini",
     "noOrders": "Nessun ordine attivo",
     "noOrdersDesc": "I nuovi ordini appariranno qui automaticamente",
+    "view": {
+      "list": "Vista elenco",
+      "grid": "Vista griglia"
+    },
+    "sound": {
+      "disable": "Disattiva audio",
+      "enable": "Attiva audio"
+    },
+    "autoRefresh": {
+      "pause": "Metti in pausa aggiornamento live",
+      "resume": "Riprendi aggiornamento live"
+    },
     "externalDisplay": {
       "copyTvLink": "Copia link TV",
       "open": "Apri su display collegato",
@@ -4990,6 +5791,13 @@
     }
   },
   "loyalty": {
+    "tier": {
+      "none": "Nessun livello",
+      "bronze": "Bronzo",
+      "silver": "Argento",
+      "gold": "Oro",
+      "platinum": "Platino"
+    },
     "contextMissing": {
       "title": "Contesto fedeltà mancante",
       "body": "Questo terminale non ha le impostazioni dell'organizzazione. Controlla le impostazioni del terminale e riprova.",
@@ -5181,12 +5989,14 @@
   },
   "ecr": {
     "title": "Terminali di pagamento",
+    "configuredTerminals": "Terminali configurati",
     "subtitle": "Gestisci i terminali di pagamento con carta",
     "discover": "Cerca",
     "addManual": "Aggiungi terminale",
     "loading": "Caricamento terminali di pagamento...",
     "refreshSuccess": "Terminali aggiornati",
     "refreshError": "Impossibile aggiornare",
+    "refreshStatus": "Aggiorna stato connessione",
     "disconnectSuccess": "Terminale disconnesso",
     "deleteSuccess": "Terminale eliminato",
     "setDefaultSuccess": "Terminale predefinito aggiornato",
@@ -5238,6 +6048,7 @@
       "name": "Nome terminale",
       "namePlaceholder": "es. Terminale principale",
       "nameRequired": "Il nome del terminale è obbligatorio",
+      "missingRequired": "Inserisci il nome del terminale e i dati di connessione per abilitare Aggiungi.",
       "connection": "Tipo di connessione",
       "protocol": "Protocollo",
       "legacyGeneric": "Generic ECR (legacy)",
@@ -5311,9 +6122,59 @@
       "inactive": "Inattivo"
     },
     "noDescription": "Nessuna descrizione",
-    "noServices": "Nessun servizio trovato"
+    "noServices": "Nessun servizio trovato",
+    "addTitle": "Aggiungi servizio",
+    "editTitle": "Modifica servizio",
+    "fields": {
+      "name": "Nome",
+      "namePlaceholder": "Nome del servizio",
+      "category": "Categoria",
+      "noCategory": "Nessuna categoria",
+      "price": "Prezzo",
+      "duration": "Durata (minuti)",
+      "description": "Descrizione",
+      "descriptionPlaceholder": "Descrizione facoltativa",
+      "active": "Attivo"
+    },
+    "validation": {
+      "nameRequired": "Il nome del servizio è obbligatorio",
+      "priceInvalid": "Inserisci un prezzo valido",
+      "durationInvalid": "Inserisci una durata di almeno 1 minuto"
+    },
+    "delete": {
+      "title": "Elimina servizio",
+      "message": "Eliminare {{name}}? L'operazione non può essere annullata.",
+      "confirm": "Elimina"
+    },
+    "toast": {
+      "created": "Servizio creato",
+      "updated": "Servizio aggiornato",
+      "deleted": "Servizio eliminato",
+      "saveFailed": "Salvataggio del servizio non riuscito",
+      "deleteFailed": "Eliminazione del servizio non riuscita"
+    }
   },
   "appointments": {
+    "status": {
+      "scheduled": "Programmato",
+      "confirmed": "Confermato",
+      "in_progress": "In corso",
+      "completed": "Completato",
+      "cancelled": "Annullato",
+      "no_show": "Non presentato"
+    },
+    "validation": {
+      "availabilityFailed": "Verifica della disponibilità del personale non riuscita"
+    },
+    "walkIn": "Senza appuntamento",
+    "service": "Servizio",
+    "staff": "Personale",
+    "noAppointments": "Nessun appuntamento trovato",
+    "noAppointmentsHint": "Prova una data diversa o modifica i filtri",
+    "newAppointment": "Nuovo appuntamento",
+    "previousDay": "Giorno precedente",
+    "nextDay": "Giorno successivo",
+    "selectStaffService": "Seleziona personale e servizio",
     "selectBranch": "Seleziona una filiale per visualizzare gli appuntamenti",
     "stats": {
       "total": "Totale",
@@ -5341,6 +6202,10 @@
     "modal": {
       "title": "Nuovo appuntamento",
       "phoneSearchLabel": "Cerca cliente per telefono",
+      "sections": {
+        "guestService": "Cliente & Servizio",
+        "dateTime": "Data & Ora"
+      },
       "phonePlaceholder": "Inserisci il numero di telefono...",
       "search": "Cerca",
       "customerNotFound": "Cliente non trovato. Aggiungi un nuovo cliente:",
@@ -5355,6 +6220,13 @@
         "evening": "Sera"
       },
       "selectStaffAvailability": "Seleziona il personale per vedere la disponibilità",
+      "selectStaffServiceAvailability": "Scegli prima personale e servizio per vedere la disponibilità reale",
+      "slotsEmpty": {
+        "title": "Scegli prima staff e servizio",
+        "help": "Scegli prima un membro dello staff e un servizio, poi qui compariranno gli orari realmente disponibili.",
+        "staffStep": "Staff",
+        "serviceStep": "Servizio"
+      },
       "loadingSlots": "Caricamento...",
       "availability": {
         "available": "Disponibile",
@@ -5364,7 +6236,15 @@
       "notesPlaceholder": "Note facoltative...",
       "cancel": "Annulla",
       "create": "Crea",
-      "creating": "Creazione..."
+      "creating": "Creazione...",
+      "customer": "Cliente",
+      "bannedCustomer": "Cliente bloccato",
+      "clearCustomer": "Cancella",
+      "previousMonth": "Mese precedente",
+      "nextMonth": "Mese successivo",
+      "searchCustomer": "Cerca cliente",
+      "walkInName": "Nome (senza appuntamento)",
+      "walkInPhone": "Telefono"
     }
   },
   "integrations": {
@@ -5513,7 +6393,8 @@
     "itemsCount": "{{count}} articoli",
     "people": "People",
     "unassigned": "-- Unassigned --",
-    "unassignedWarning": "{{count}} item(s) not assigned",
+    "unassignedWarning_one": "{{count}} articolo non assegnato",
+    "unassignedWarning_other": "{{count}} articoli non assegnati",
     "noItems": "No items assigned",
     "receiptCombined": "Combined",
     "receiptIndividual": "Individual",
@@ -5521,7 +6402,28 @@
     "processing": "Processing...",
     "success": "Split payment completed successfully",
     "failed": "Split payment failed. Please try again.",
-    "discountPersistFailed": "Pagamento registrato, ma lo sconto non è stato salvato sull'ordine. Verifica il totale dell'ordine prima di chiuderlo."
+    "discountPersistFailed": "Pagamento registrato, ma lo sconto non è stato salvato sull'ordine. Verifica il totale dell'ordine prima di chiuderlo.",
+    "payable": "Da pagare",
+    "discount": "Sconto",
+    "outstanding": "Dovuto",
+    "alreadyPaid": "Già pagato",
+    "allItemsPaid": "Tutto il saldo rimanente è già stato assegnato a pagamenti di articoli precedenti",
+    "alreadyPaidSummary": "Già pagato {{paid}}. Saldo dovuto {{due}}",
+    "balanceAdjustment": "Rettifica saldo",
+    "balanceChanged": "Il saldo dell'ordine è cambiato mentre il pagamento diviso era aperto. La divisione è stata aggiornata all'ultimo importo dovuto di {{amount}}.",
+    "cardBusy": "Un altro pagamento con carta è già in corso",
+    "cardFailed": "Pagamento con carta non riuscito",
+    "cashierDrawer": "Cassiere",
+    "collectedBy": "Incassato da",
+    "driverShift": "Fattorino",
+    "loading": "Caricamento pagamento diviso",
+    "loadingHint": "Verifica dei pagamenti divisi esistenti e degli articoli pagati...",
+    "manualCardFallback": "Nessun terminale di pagamento pronto. Questa quota verrà registrata come pagamento con carta manuale alla conferma.",
+    "partialSuccess": "Pagamento diviso registrato. Saldo rimanente: {{amount}}",
+    "portionPaid": "{{person}} ha pagato con successo",
+    "priorPayments": "Pagamenti precedenti",
+    "terminalApproved": "Terminale",
+    "waitingForApproval": "In attesa dell'approvazione della carta sul terminale di pagamento..."
   },
   "recovery": {
     "common": {
@@ -5677,7 +6579,9 @@
       "guidedTitle": "Recupero sincronizzazione",
       "guidedSubtitle": "Il POS controlla il blocco, propone la soluzione nota più sicura e poi verifica di nuovo la sincronizzazione.",
       "blockedCount": "{{count}} bloccanti",
-      "terminalContextLine": "Terminale {{terminalId}}",
+      "thisTerminal": "Questa cassa",
+      "branchFallback": "Questa filiale",
+      "organizationFallback": "Questa attività",
       "remainingIssues": "{{count}} problemi visibili",
       "noVisibleBlockerTitle": "Nulla blocca la sincronizzazione",
       "noVisibleBlockerDescription": "Nessun ordine, pagamento o riga di coda richiede al momento un recupero manuale.",
@@ -5933,14 +6837,190 @@
       "loadFailed": "[NEEDS IT TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
     }
   },
+  "housekeepingView": {
+    "loading": "Caricamento attività di pulizia...",
+    "errorTitle": "Impossibile caricare le attività di pulizia",
+    "room": "Camera",
+    "unassigned": "Non assegnato",
+    "staffFallback": "Personale",
+    "status": {
+      "pending": "In sospeso",
+      "inProgress": "In corso",
+      "completed": "Completata",
+      "verified": "Verificata"
+    },
+    "stats": {
+      "totalTasks": "Attività totali",
+      "completedToday": "Completate oggi",
+      "avgTime": "Tempo medio"
+    },
+    "filter": {
+      "allFloors": "Tutti i piani",
+      "floor": "Piano",
+      "allTypes": "Tutti i tipi",
+      "allPriorities": "Tutte le priorità",
+      "allStaff": "Tutto il personale",
+      "unassigned": "Non assegnato"
+    },
+    "priority": {
+      "urgent": "Urgente",
+      "high": "Alta",
+      "normal": "Normale",
+      "low": "Bassa"
+    },
+    "assign": {
+      "none": "Non assegnato"
+    },
+    "action": {
+      "start": "Avvia",
+      "complete": "Completa",
+      "verify": "Verifica",
+      "createTask": "Crea attività"
+    },
+    "empty": {
+      "title": "Nessuna attività di pulizia",
+      "description": "Le attività di pulizia appaiono qui automaticamente quando le camere effettuano il check-out o vengono contrassegnate per la pulizia."
+    },
+    "toasts": {
+      "loadFailed": "Impossibile caricare le attività di pulizia",
+      "updateFailed": "Impossibile aggiornare l'attività",
+      "assignFailed": "Impossibile assegnare il personale",
+      "createSuccess": "Attività di pulizia creata",
+      "createFailed": "Impossibile creare l'attività"
+    },
+    "fallbackHint": "Mostrata da una camera in stato di pulizia. Le azioni saranno disponibili una volta creata l'attività di pulizia.",
+    "taskType": {
+      "cleaning": "Pulizia",
+      "checkout_clean": "Pulizia dopo il check-out",
+      "stayover_clean": "Pulizia durante il soggiorno",
+      "deep_clean": "Pulizia profonda",
+      "turndown": "Servizio serale",
+      "inspection": "Ispezione"
+    }
+  },
   "roomsView": {
     "noBranch": "Seleziona una filiale per visualizzare le camere",
+    "loading": "Caricamento camere...",
+    "searchPlaceholder": "Cerca camera o ospite...",
+    "filters": "Filtri",
+    "all": "Tutte",
+    "allFloors": "Tutti i piani",
+    "floor": "Piano {{floor}}",
+    "noRooms": "Nessuna camera trovata",
+    "noRoomsHint": "Prova a modificare i filtri",
+    "newCheckinOrReservation": "Nuovo check-in o prenotazione",
+    "changeStatus": "Cambia stato",
+    "roomTitle": "Camera {{number}}",
+    "settleRoomTitle": "Salda camera {{number}}",
+    "addChargeTitle": "Aggiungi addebito - Camera {{number}}",
+    "newCheckin": "Nuovo check-in",
+    "newReservation": "Nuova prenotazione",
+    "selectRoom": "Seleziona camera",
+    "chooseRoom": "Scegli una camera...",
+    "roomOption": "Camera {{number}} - {{type}} ({{rate}}/notte)",
+    "roomTypes": {
+      "standard": "Standard",
+      "deluxe": "Deluxe",
+      "suite": "Suite",
+      "penthouse": "Attico",
+      "accessible": "Accessibile"
+    },
+    "outstandingBalance": "Saldo dovuto",
+    "paymentMethod": "Metodo di pagamento",
+    "paymentMethods": {
+      "cash": "Contanti",
+      "card": "Carta",
+      "transfer": "Bonifico",
+      "bank_transfer": "Bonifico bancario",
+      "other": "Altro"
+    },
+    "paymentAmount": "Importo del pagamento",
+    "reference": "Riferimento",
+    "postPaymentCheckout": "Registra pagamento e partenza",
+    "chargeType": "Tipo di addebito",
+    "chargeTypes": {
+      "other": "Altro",
+      "room": "Camera",
+      "food": "Cibo",
+      "beverage": "Bevande",
+      "service": "Servizio",
+      "tax": "Tassa"
+    },
+    "description": "Descrizione",
+    "amount": "Importo",
+    "quantity": "Quantità",
+    "notes": "Note",
+    "notesPlaceholder": "Richieste speciali, note...",
+    "guestName": "Nome ospite",
+    "phone": "Telefono",
+    "email": "Email",
+    "idNumber": "Numero documento",
+    "numberOfNights": "Numero di notti",
+    "estimatedStayCharge": "Addebito soggiorno stimato",
+    "totalAmount": "Importo totale",
+    "completeCheckin": "Completa check-in",
+    "createReservation": "Crea prenotazione",
+    "checkInDate": "Data di arrivo",
+    "checkOutDate": "Data di partenza",
     "status": {
       "available": "Disponibile",
       "occupied": "Occupata",
       "reserved": "Prenotata",
       "maintenance": "Manutenzione",
       "cleaning": "Pulizia"
+    },
+    "stats": {
+      "total": "Totale",
+      "available": "Disponibili",
+      "occupied": "Occupate",
+      "cleaning": "Pulizia",
+      "occupancy": "Occupazione"
+    },
+    "fields": {
+      "status": "Stato",
+      "type": "Tipo",
+      "capacity": "Capacità",
+      "ratePerNight": "Tariffa/notte",
+      "guest": "Ospite",
+      "folioBalance": "Saldo conto",
+      "guestsCount": "{{count}} ospiti"
+    },
+    "actions": {
+      "checkin": "Check-in",
+      "reserve": "Prenota",
+      "checkout": "Partenza",
+      "addCharge": "Aggiungi addebito"
+    },
+    "toasts": {
+      "missingContext": "Contesto di filiale o organizzazione mancante",
+      "roomNotFound": "Camera selezionata non trovata",
+      "checkinQueued": "Check-in in coda per la sincronizzazione",
+      "checkinReceiptFailed": "Check-in completato, ma la ricevuta non è riuscita",
+      "checkinNoReceipt": "Camera registrata senza prenotazione o ricevuta",
+      "checkinSuccess": "Check-in completato con successo",
+      "reservationsModuleRequired": "Il modulo Prenotazioni è necessario per creare prenotazioni di camere",
+      "reservationCreated": "Prenotazione creata con successo",
+      "reservationFailed": "Creazione della prenotazione non riuscita",
+      "folioCheckoutOffline": "La partenza del conto richiede una connessione online",
+      "checkoutQueued": "Partenza in coda per la sincronizzazione",
+      "statusUpdated": "Stato della camera aggiornato a {{status}}",
+      "statusUpdateFailed": "Impossibile aggiornare lo stato della camera",
+      "checkoutHousekeepingFailed": "Partenza completata, ma la creazione dell'attività di pulizia non è riuscita",
+      "folioSkipped": "Partenza completata; la liquidazione del conto è stata saltata perché la fatturazione ospiti non è disponibile",
+      "checkoutAlreadyCompleted": "Partenza già completata",
+      "checkoutCompleted": "Partenza completata",
+      "invalidPaymentAmount": "Inserisci un importo di pagamento valido",
+      "paymentPosted": "Pagamento registrato",
+      "noActiveFolio": "Nessun conto attivo disponibile per questa camera",
+      "chargeOffline": "L'aggiunta di un addebito richiede una connessione online",
+      "chargeDescriptionRequired": "Inserisci una descrizione dell'addebito",
+      "invalidChargeAmount": "Inserisci un importo di addebito valido",
+      "invalidQuantity": "Inserisci una quantità valida",
+      "chargeAdded": "Addebito aggiunto",
+      "checkinFailed": "Impossibile completare il check-in",
+      "checkoutFailed": "Impossibile completare la partenza",
+      "paymentFailed": "Impossibile registrare il pagamento",
+      "chargeFailed": "Impossibile aggiungere l'addebito"
     }
   },
   "guestBilling": {
@@ -6024,5 +7104,128 @@
   },
   "filters": {
     "all": "Tutti"
+  },
+  "floorPlan": {
+    "tableProperties": {
+      "pax_one": "{{count}} persona",
+      "pax_other": "{{count}} persone"
+    }
+  },
+  "tableSelector": {
+    "title": "Seleziona un tavolo",
+    "subtitle_one": "{{count}} tavolo disponibile",
+    "subtitle_other": "{{count}} tavoli disponibili",
+    "searchPlaceholder": "Cerca per numero di tavolo...",
+    "minCapacity": "Capacità min.:",
+    "all": "Tutti",
+    "noTables": "Nessun tavolo disponibile",
+    "tryDifferentFilters": "Prova filtri diversi",
+    "allTablesOccupied": "Tutti i tavoli sono attualmente occupati o in pulizia",
+    "floor": "Piano",
+    "allFloors": "Tutti i piani",
+    "floorNumber": "Piano {{floor}}",
+    "status": {
+      "available": "Disponibile",
+      "reserved": "Prenotato",
+      "occupied": "Occupato",
+      "cleaning": "Pulizia",
+      "maintenance": "Manutenzione",
+      "unavailable": "Non disponibile"
+    }
+  },
+  "tableActionModal": {
+    "title": "Azioni tavolo",
+    "tableNumber": "Tavolo",
+    "guests_one": "ospite",
+    "guests_other": "ospiti",
+    "covers": "Coperti",
+    "coversDescription": "Ospiti su questo conto",
+    "decreaseCovers": "Riduci coperti",
+    "increaseCovers": "Aumenta coperti",
+    "unpaidBalance": "Saldo aperto: {{amount}}",
+    "newOrder": "Nuovo ordine",
+    "newOrderDescription": "Avvia un nuovo ordine per questo tavolo",
+    "newOrderCleaningDisabled": "Contrassegna il tavolo come pulito prima di prendere un nuovo ordine",
+    "newOrderMaintenanceDisabled": "Rimetti in servizio questo tavolo prima di prendere un nuovo ordine",
+    "newOrderUnavailableDisabled": "Rendi disponibile questo tavolo prima di prendere un nuovo ordine",
+    "markCleaned": "Pulito",
+    "markAvailable": "Rendi disponibile",
+    "markBackInService": "Di nuovo in servizio",
+    "markAvailableDescription": "Imposta questo tavolo come disponibile per gli ordini",
+    "markBackInServiceDescription": "Imposta questo tavolo come disponibile dopo la manutenzione",
+    "editReservation": "Modifica prenotazione",
+    "editReservationDescription": "Modifica orario, ospiti o note",
+    "noShowReservation": "Mancata presentazione",
+    "noShowReservationDescription": "L'ospite non si è presentato",
+    "cancelReservation": "Annulla prenotazione",
+    "cancelReservationDescription": "Annulla la prenotazione e libera il tavolo",
+    "newReservation": "Nuova prenotazione",
+    "newReservationDescription": "Prenota questo tavolo per un orario futuro",
+    "newReservationUnavailableDescription": "Rimetti in servizio questo tavolo prima di prenotare",
+    "cleaningHint": "Contrassegna il tavolo come pulito per renderlo disponibile per gli ordini",
+    "maintenanceHint": "I tavoli in manutenzione sono fuori servizio finché non vengono rimessi in servizio",
+    "reservedHint": "Gestisci questa prenotazione o avvia l'ordine al tavolo all'arrivo degli ospiti",
+    "unavailableHint": "Rendi disponibile il tavolo prima di usarlo per gli ospiti",
+    "hint": "Seleziona un'azione per continuare",
+    "reservationNotFound": "Nessuna prenotazione attiva trovata per questo tavolo",
+    "reservationReleased": "Prenotazione non più attiva; tavolo liberato",
+    "reservationLoadFailed": "Impossibile caricare la prenotazione",
+    "noShowSuccess": "Prenotazione contrassegnata come mancata presentazione",
+    "noShowFailed": "Impossibile contrassegnare la prenotazione come mancata presentazione",
+    "cancelReason": "Annullata dalle azioni tavolo del POS",
+    "cancelSuccess": "Prenotazione annullata",
+    "cancelFailed": "Impossibile annullare la prenotazione",
+    "setAvailableSuccess": "Tavolo contrassegnato come disponibile",
+    "setAvailableFailed": "Impossibile contrassegnare il tavolo come disponibile",
+    "status": {
+      "available": "Disponibile",
+      "reserved": "Prenotato",
+      "occupied": "Occupato",
+      "cleaning": "Pulizia",
+      "maintenance": "Manutenzione",
+      "unavailable": "Non disponibile"
+    }
+  },
+  "reservationForm": {
+    "title": "Nuova prenotazione",
+    "editTitle": "Modifica prenotazione",
+    "subtitle": "Tavolo {{tableNumber}} • Capacità: {{capacity}} {{guests}}",
+    "customerName": "Nome cliente",
+    "customerNamePlaceholder": "Inserisci il nome del cliente",
+    "phone": "Numero di telefono",
+    "phonePlaceholder": "+30 XXX XXX XXXX",
+    "date": "Data",
+    "time": "Ora",
+    "partySize": "Numero di ospiti",
+    "decreaseGuests": "Riduci ospiti",
+    "increaseGuests": "Aumenta ospiti",
+    "guests_one": "ospite",
+    "guests_other": "ospiti",
+    "guestCount_one": "{{count}} ospite",
+    "guestCount_other": "{{count}} ospiti",
+    "specialRequests": "Richieste speciali",
+    "specialRequestsPlaceholder": "Eventuali richieste speciali o note...",
+    "existingReservations": "Questo tavolo ha già delle prenotazioni:",
+    "existingReservationItem": "{{date}} alle {{time}} — {{customer}} ({{guests}})",
+    "andMore": "… e altri {{count}}",
+    "conflictWarning": "Rilevato conflitto di orario!",
+    "conflictDescription": "Esiste già una prenotazione a quest'ora:",
+    "conflictItem": "{{time}} — {{customer}} ({{guests}})",
+    "conflictAction": "Scegli un altro orario o annulla prima la prenotazione esistente.",
+    "cancel": "Annulla",
+    "save": "Salva modifiche",
+    "create": "Crea prenotazione",
+    "saving": "Salvataggio...",
+    "creating": "Creazione...",
+    "checking": "Verifica...",
+    "errors": {
+      "nameRequired": "Il nome del cliente è obbligatorio",
+      "phoneRequired": "Il numero di telefono è obbligatorio",
+      "phoneInvalid": "Inserisci un numero di telefono valido",
+      "dateRequired": "La data di prenotazione è obbligatoria",
+      "timeRequired": "L'ora di prenotazione è obbligatoria",
+      "partySizeMin": "Il numero di ospiti deve essere almeno 1",
+      "partySizeExceedsCapacity": "Il numero di ospiti supera la capacità del tavolo di {{capacity}}"
+    }
   }
 }

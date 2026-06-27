@@ -132,7 +132,7 @@ export const modalHeaderBar = 'flex items-center justify-between p-6 border-b li
  * @see {@link ../components/ui/pos-glass-components.tsx#LiquidGlassModal}
  */
 export const closeButton = (theme: ResolvedTheme, size: 'md' | 'lg' = 'md') => {
-  const base = 'rounded-full flex items-center justify-center transition-all duration-200 hover:bg-white/10 dark:hover:bg-black/10 liquid-glass-modal-text';
+  const base = 'rounded-full flex items-center justify-center transition-transform duration-150 active:scale-95 liquid-glass-modal-text';
   const dim = size === 'lg' ? 'w-10 h-10' : 'w-8 h-8';
   return `${base} ${dim}`;
 };
@@ -190,7 +190,8 @@ export const sectionSubtle = (theme: ResolvedTheme) =>
  * @see {@link ../components/ui/pos-glass-components.tsx#POSGlassInput} for a React component alternative
  */
 export const inputBase = (theme: ResolvedTheme) =>
-  `liquid-glass-modal-input w-full px-3 py-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-all`;
+  // radius comes from the shared .liquid-glass-modal-input token (--pos-glass-radius-small)
+  `liquid-glass-modal-input w-full px-3 py-3 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 transition-colors`;
 
 /**
  * Button styling with liquid glass effect.
@@ -209,16 +210,15 @@ export const inputBase = (theme: ResolvedTheme) =>
  * @see {@link ../components/ui/pos-glass-components.tsx#POSGlassButton} for a React component alternative
  */
 export const liquidGlassModalButton = (variant = 'primary', size: 'sm' | 'md' | 'lg' = 'md') => {
-  const base = 'liquid-glass-modal-button font-medium transition-all duration-200';
+  const base = 'liquid-glass-modal-button font-medium transition-transform duration-150 active:scale-[0.98]';
   let sizeCls = 'px-4 py-2'; // default md
   if (size === 'sm') sizeCls = 'px-3 py-1.5';
   else if (size === 'lg') sizeCls = 'px-6 py-3';
 
-  // Primary: Blue Tinted Glass
-  // Secondary: Standard White/Clear Glass
+  // Primary: yellow action; secondary: neutral glass.
   const variantCls = variant === 'primary'
-    ? 'bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.1)]'
-    : 'text-gray-300';
+    ? 'bg-yellow-400/20 text-yellow-900 dark:text-yellow-200 border-yellow-400/40'
+    : 'text-gray-700 dark:text-gray-200';
 
   return `${base} ${sizeCls} ${variantCls}`;
 };
@@ -238,7 +238,8 @@ export const liquidGlassModalButton = (variant = 'primary', size: 'sm' | 'md' | 
  *
  * @see {@link ../components/ui/pos-glass-components.tsx#POSGlassCard} for a React component alternative
  */
-export const liquidGlassModalCard = () => 'liquid-glass-modal-card p-4 rounded-xl';
+// radius comes from the shared .liquid-glass-modal-card token (--pos-glass-radius-medium)
+export const liquidGlassModalCard = () => 'liquid-glass-modal-card p-4';
 
 /**
  * Badge styling with liquid glass effect.
@@ -256,8 +257,8 @@ export const liquidGlassModalCard = () => 'liquid-glass-modal-card p-4 rounded-x
 export const liquidGlassModalBadge = (variant = 'default') => {
   const base = 'px-2 py-1 rounded-full text-xs font-medium backdrop-blur-sm border';
   const variantCls = variant === 'success'
-    ? 'bg-green-500/10 text-green-400 border-green-500/20'
-    : 'bg-white/5 text-gray-400 border-white/10';
+    ? 'bg-yellow-400/15 text-yellow-800 dark:text-yellow-200 border-yellow-400/30'
+    : 'bg-white/5 text-gray-500 dark:text-gray-300 border-white/10';
   return `${base} ${variantCls}`;
 };
 

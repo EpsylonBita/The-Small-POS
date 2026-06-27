@@ -7,7 +7,8 @@
  * Task 17.2: Create POS appointments interface
  */
 
-import React, { memo, useState, useMemo, useEffect, useCallback } from 'react';
+import React, { memo, useState, useMemo, useEffect, useCallback, useId, useRef } from 'react';
+import { renderModalPortal } from '../../../utils/render-modal-portal';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
@@ -15,7 +16,8 @@ import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useAppointments } from '../../../hooks/useAppointments';
 import { formatDate, formatTime } from '../../../utils/format';
-import { Calendar, Clock, User, Scissors, Search, ChevronLeft, ChevronRight, RefreshCw, CheckCircle, Play, XCircle, X, Plus, Ban } from 'lucide-react';
+import { parseLocalDateString } from '../../../utils/date';
+import { Calendar, Clock, User, Scissors, Search, ChevronLeft, ChevronRight, ChevronDown, RefreshCw, CheckCircle, Check, Play, XCircle, X, Plus, Ban } from 'lucide-react';
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
 import { CustomerSearchModal } from '../../../components/modals/CustomerSearchModal';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../../../lib';
@@ -30,16 +32,50 @@ import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page
 type ViewMode = 'timeline' | 'list';
 type QuickFilter = 'today' | 'tomorrow' | 'week';
 
-const statusConfig: Record<AppointmentStatus, { color: string; label: string }> = {
-  scheduled: { color: 'blue', label: 'Scheduled' },
-  confirmed: { color: 'green', label: 'Confirmed' },
-  in_progress: { color: 'yellow', label: 'In Progress' },
-  completed: { color: 'gray', label: 'Completed' },
-  cancelled: { color: 'red', label: 'Cancelled' },
-  no_show: { color: 'red', label: 'No Show' },
+const statusConfig: Record<AppointmentStatus, { label: string; border: string; chip: string }> = {
+  scheduled: {
+    label: 'Scheduled',
+    border: 'border-l-amber-400',
+    chip: 'border border-amber-500/30 bg-amber-500/10 text-amber-500',
+  },
+  confirmed: {
+    label: 'Confirmed',
+    border: 'border-l-emerald-500',
+    chip: 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-500',
+  },
+  in_progress: {
+    label: 'In Progress',
+    border: 'border-l-yellow-400',
+    chip: 'border border-yellow-500/30 bg-yellow-500/10 text-yellow-500',
+  },
+  completed: {
+    label: 'Completed',
+    border: 'border-l-zinc-400',
+    chip: 'border border-zinc-500/30 bg-zinc-500/10 text-zinc-500',
+  },
+  cancelled: {
+    label: 'Cancelled',
+    border: 'border-l-red-500',
+    chip: 'border border-red-500/30 bg-red-500/10 text-red-500',
+  },
+  no_show: {
+    label: 'No Show',
+    border: 'border-l-red-500',
+    chip: 'border border-red-500/30 bg-red-500/10 text-red-500',
+  },
 };
 
-export const AppointmentsView: React.FC = memo(() => {
+interface AppointmentsViewProps {
+  /** Rendered inside the Orders hub: hides the internal FAB (the hub owns New Order). */
+  embedded?: boolean;
+  /** Bump to open the Create Appointment modal from the hub New Order -> Services flow. */
+  openCreateSignal?: number;
+}
+
+export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
+  embedded = false,
+  openCreateSignal = 0,
+}) => {
   const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -92,6 +128,14 @@ export const AppointmentsView: React.FC = memo(() => {
   
   // Create appointment modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
+  // Round 236: the Orders hub opens Create Appointment by bumping openCreateSignal. The
+  // existing staff/service/day/time availability check inside handleCreateAppointment is
+  // unchanged — this only opens the same modal.
+  useEffect(() => {
+    if (openCreateSignal && openCreateSignal > 0) {
+      setShowCreateModal(true);
+    }
+  }, [openCreateSignal]);
   const [staffList, setStaffList] = useState<{ id: string; name: string }[]>([]);
   const [servicesList, setServicesList] = useState<{ id: string; name: string; duration: number }[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -105,7 +149,7 @@ export const AppointmentsView: React.FC = memo(() => {
     staffId: '',
     serviceId: '',
     date: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })(),
-    startTime: '09:00',
+    startTime: '',
     notes: '',
   });
 
@@ -162,7 +206,7 @@ export const AppointmentsView: React.FC = memo(() => {
                 name:
                   String(member?.name ?? '').trim() ||
                   `${member?.firstName ?? member?.first_name ?? ''} ${member?.lastName ?? member?.last_name ?? ''}`.trim() ||
-                  'Staff',
+                  t('appointments.staff', { defaultValue: 'Staff' }),
               }))
               .filter((member: { id: string; name: string }) => !!member.id)
           : [];
@@ -199,7 +243,7 @@ export const AppointmentsView: React.FC = memo(() => {
               })
               .map((service: any) => ({
                 id: String(service?.id ?? ''),
-                name: service?.name || service?.title || 'Service',
+                name: service?.name || service?.title || t('appointments.service', { defaultValue: 'Service' }),
                 duration:
                   Number(
                     service?.duration_minutes ??
@@ -217,10 +261,11 @@ export const AppointmentsView: React.FC = memo(() => {
       }
     };
     
-    if (showCreateModal) {
-      loadDropdownData();
-    }
-  }, [bridge, branchId, effectiveOrgId, formData.date, showCreateModal]);
+    // Load branch staff (and services) for the whole page, not only when the create
+    // modal is open, so the page-level staff filter has branch staff to choose from
+    // even on days with no appointments.
+    loadDropdownData();
+  }, [bridge, branchId, effectiveOrgId, formData.date, t]);
 
   // Helper: format a Date as YYYY-MM-DD using local timezone
   const toLocalDateStr = (d: Date): string => {
@@ -277,6 +322,26 @@ export const AppointmentsView: React.FC = memo(() => {
     enableRealtime: true,
   });
 
+  // Page-level staff filter options: prefer the branch staff the create modal loads
+  // (so staff are selectable even before any appointments exist), and fall back to the
+  // appointment-derived staff only when the branch-staff source is unavailable.
+  const filterStaffOptions = useMemo(
+    () => (staffList.length > 0 ? staffList : staff),
+    [staffList, staff],
+  );
+
+  // If the active staff filter is no longer among the loaded options, reset to "all"
+  // so the filter can't get stuck on an invisible selection.
+  useEffect(() => {
+    if (
+      staffFilter !== 'all' &&
+      filterStaffOptions.length > 0 &&
+      !filterStaffOptions.some((member) => member.id === staffFilter)
+    ) {
+      setStaffFilter('all');
+    }
+  }, [staffFilter, filterStaffOptions]);
+
 
   const handleQuickFilter = (filter: QuickFilter) => {
     setQuickFilter(filter);
@@ -295,7 +360,7 @@ export const AppointmentsView: React.FC = memo(() => {
   // Handle create appointment
   const handleCreateAppointment = async () => {
     if (!formData.staffId || !formData.serviceId) {
-      toast.error('Please select staff and service');
+      toast.error(t('appointments.selectStaffService', { defaultValue: 'Please select staff and service' }));
       return;
     }
 
@@ -329,7 +394,7 @@ export const AppointmentsView: React.FC = memo(() => {
           });
 
       if (!availabilityResult.success) {
-        toast.error(availabilityResult.error || 'Failed to validate staff availability');
+        toast.error(availabilityResult.error || t('appointments.validation.availabilityFailed', { defaultValue: 'Failed to validate staff availability' }));
         return;
       }
 
@@ -341,7 +406,7 @@ export const AppointmentsView: React.FC = memo(() => {
       };
 
       if (availabilityPayload.success === false) {
-        toast.error(availabilityPayload.error || 'Failed to validate staff availability');
+        toast.error(availabilityPayload.error || t('appointments.validation.availabilityFailed', { defaultValue: 'Failed to validate staff availability' }));
         return;
       }
 
@@ -377,7 +442,7 @@ export const AppointmentsView: React.FC = memo(() => {
         staffId: '',
         serviceId: '',
         date: toLocalDateStr(new Date()),
-        startTime: '09:00',
+        startTime: '',
         notes: '',
       });
       setSelectedCustomer(null);
@@ -456,46 +521,60 @@ export const AppointmentsView: React.FC = memo(() => {
 
   return (
     <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
-      {/* Header */}
-      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
-        <motion.div variants={pageMotionContainer} className="flex gap-4">
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('appointments.stats.total', 'Total')}</div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.total}</div>
-          </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500 shadow-sm'}`}>
-            <div className="text-sm text-green-500">{t('appointments.stats.confirmed', 'Confirmed')}</div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.confirmed}</div>
-          </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500 shadow-sm'}`}>
-            <div className="text-sm text-yellow-500">{t('appointments.stats.inProgress', 'In Progress')}</div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.inProgress}</div>
-          </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
-            <div className="text-sm text-gray-500">{t('appointments.stats.completed', 'Completed')}</div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.completed}</div>
-          </motion.div>
-        </motion.div>
+      <motion.section
+        variants={pageMotionItem}
+        data-vertical-hero="appointments"
+        className={`mb-4 rounded-3xl border p-4 backdrop-blur-xl ${isDark ? 'border-white/10 bg-zinc-950/72 shadow-[0_18px_46px_rgba(0,0,0,0.35)]' : 'border-yellow-200/80 bg-white/74 shadow-[0_18px_44px_rgba(15,23,42,0.10)]'}`}
+      >
+        <div className="mb-4 min-w-0">
+          <h1 className="truncate text-3xl font-bold tracking-tight">
+            {t('navigation.menu.appointments', { defaultValue: 'Appointments' })}
+          </h1>
+        </div>
 
-        <div className="flex gap-2">
-          <button
-            onClick={() => refetch()}
-            className={`p-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800' : 'bg-gray-100 border-gray-300 text-gray-700 hover:bg-gray-200'}`}
-          >
-            <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`} />
-          </button>
-          <div className="relative">
-            <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder={t('appointments.searchPlaceholder', 'Search...')}
-              className={`pl-10 pr-4 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-            />
+        {/* Header */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <motion.div variants={pageMotionContainer} className="flex flex-wrap gap-3">
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-950/80 border-zinc-800' : 'bg-white/86 border-gray-200 shadow-sm'}`}>
+              <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('appointments.stats.total', 'Total')}</div>
+              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.total}</div>
+            </motion.div>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-zinc-950/80 border-zinc-800 border-t-emerald-400' : 'bg-white/86 border-gray-200 border-t-emerald-500 shadow-sm'}`}>
+              <div className="text-sm text-green-500">{t('appointments.stats.confirmed', 'Confirmed')}</div>
+              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.confirmed}</div>
+            </motion.div>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-zinc-950/80 border-zinc-800 border-t-amber-400' : 'bg-white/86 border-gray-200 border-t-amber-500 shadow-sm'}`}>
+              <div className="text-sm text-yellow-500">{t('appointments.stats.inProgress', 'In Progress')}</div>
+              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.inProgress}</div>
+            </motion.div>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-950/80 border-zinc-800' : 'bg-white/86 border-gray-200 shadow-sm'}`}>
+              <div className="text-sm text-gray-500">{t('appointments.stats.completed', 'Completed')}</div>
+              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.completed}</div>
+            </motion.div>
+          </motion.div>
+
+          <div className="flex flex-wrap justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => refetch()}
+              aria-label={t('common.refresh', 'Refresh')}
+              className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition active:scale-95 ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-300 active:bg-zinc-800' : 'bg-gray-100 border-gray-300 text-gray-700 active:bg-gray-200'}`}
+            >
+              <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
+            <div className="relative">
+              <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder={t('appointments.searchPlaceholder', 'Search...')}
+                className={`pl-10 pr-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+              />
+            </div>
           </div>
         </div>
-      </motion.div>
+      </motion.section>
 
       {/* Filters Row */}
       <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
@@ -505,10 +584,10 @@ export const AppointmentsView: React.FC = memo(() => {
               variants={pageMotionItem}
               key={filter}
               onClick={() => handleQuickFilter(filter)}
-              className={`px-3 py-1.5 rounded-lg text-sm ${
+              className={`px-3 py-1.5 rounded-xl text-sm ${
                 quickFilter === filter
-                  ? 'bg-zinc-100 text-black border border-zinc-300'
-                  : isDark ? 'bg-gray-800 text-gray-300 hover:bg-gray-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  ? 'bg-yellow-400 text-black border border-yellow-400'
+                  : isDark ? 'bg-gray-800 text-gray-300 active:bg-gray-700' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
               }`}
             >
               {t(`appointments.filters.${filter}`, filter.charAt(0).toUpperCase() + filter.slice(1))}
@@ -517,7 +596,7 @@ export const AppointmentsView: React.FC = memo(() => {
         </motion.div>
 
         <div className="flex items-center gap-2">
-          <button onClick={() => navigateDate('prev')} className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}>
+          <button type="button" onClick={() => navigateDate('prev')} aria-label={t('appointments.previousDay', 'Previous day')} className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition active:scale-95 ${isDark ? 'active:bg-gray-800' : 'active:bg-gray-100'}`}>
             <ChevronLeft className="w-5 h-5" />
           </button>
           <input
@@ -532,9 +611,9 @@ export const AppointmentsView: React.FC = memo(() => {
               // Reset quick filter when manually selecting date
               setQuickFilter('today');
             }}
-            className={`px-3 py-2 rounded-lg ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
+            className={`px-3 py-2 rounded-xl ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
           />
-          <button onClick={() => navigateDate('next')} className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}>
+          <button type="button" onClick={() => navigateDate('next')} aria-label={t('appointments.nextDay', 'Next day')} className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition active:scale-95 ${isDark ? 'active:bg-gray-800' : 'active:bg-gray-100'}`}>
             <ChevronRight className="w-5 h-5" />
           </button>
         </div>
@@ -543,17 +622,17 @@ export const AppointmentsView: React.FC = memo(() => {
           <select
             value={staffFilter}
             onChange={(e) => setStaffFilter(e.target.value)}
-            className={`px-3 py-2 rounded-lg ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
+            className={`px-3 py-2 rounded-xl ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
           >
             <option value="all">{t('appointments.filters.allStaff', 'All Staff')}</option>
-            {staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            {filterStaffOptions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <div className={`flex rounded-lg overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
+          <div className={`flex rounded-xl overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
             {(['timeline', 'list'] as ViewMode[]).map(mode => (
               <button
                 key={mode}
                 onClick={() => setViewMode(mode)}
-                className={`px-3 py-2 text-sm ${viewMode === mode ? 'bg-zinc-100 text-black border border-zinc-300' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
+                className={`px-3 py-2 text-sm ${viewMode === mode ? 'bg-yellow-400 text-black border border-yellow-400' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
               >
                 {t(`appointments.view.${mode}`, mode.charAt(0).toUpperCase() + mode.slice(1))}
               </button>
@@ -574,7 +653,7 @@ export const AppointmentsView: React.FC = memo(() => {
       {!isLoading && (
         <motion.div variants={pageMotionItem} className="flex-1 overflow-hidden">
           {viewMode === 'timeline' ? (
-            <motion.div variants={pageMotionContainer} className="h-full overflow-y-auto">
+            <motion.div variants={pageMotionContainer} className="h-full overflow-y-auto scrollbar-hide">
               <div className="grid grid-cols-[60px_1fr] gap-2">
                 {timeSlots.map(hour => {
                   const hourAppointments = appointmentsByHour[hour] || [];
@@ -583,26 +662,26 @@ export const AppointmentsView: React.FC = memo(() => {
                       <div className={`text-sm font-medium py-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                         {hour}:00
                       </div>
-                      <div className={`min-h-[60px] p-2 rounded-lg ${isDark ? 'bg-gray-800/50' : 'bg-gray-50'}`}>
+                      <div className={`min-h-[60px] p-2 rounded-2xl ${isDark ? 'bg-gray-800/50' : 'bg-gray-50'}`}>
                         <div className="flex flex-wrap gap-2">
                           {hourAppointments.map(apt => (
                             <motion.div
                               variants={pageMotionItem}
                               key={apt.id}
-                              className={`px-3 py-2 rounded-lg border-l-4 border-${statusConfig[apt.status].color}-500 ${
+                              className={`px-3 py-2 rounded-2xl border-l-4 ${statusConfig[apt.status].border} ${
                                 isDark ? 'bg-gray-700' : 'bg-white shadow-sm'
                               }`}
                             >
                               <div className="flex items-center gap-2">
                                 <span className={`font-medium text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                                  {apt.customerName || 'Walk-in'}
+                                  {apt.customerName || t('appointments.walkIn', { defaultValue: 'Walk-in' })}
                                 </span>
-                                <span className={`text-xs px-2 py-0.5 rounded bg-${statusConfig[apt.status].color}-500/10 text-${statusConfig[apt.status].color}-500`}>
-                                  {statusConfig[apt.status].label}
+                                <span className={`text-xs px-2 py-0.5 rounded-full ${statusConfig[apt.status].chip}`}>
+                                  {t(`appointments.status.${apt.status}`, { defaultValue: statusConfig[apt.status].label })}
                                 </span>
                               </div>
                               <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                                {apt.serviceName || 'Service'} • {apt.staffName || 'Staff'} • {apt.duration}min
+                                {apt.serviceName || t('appointments.service', { defaultValue: 'Service' })} <span aria-hidden="true">&middot;</span> {apt.staffName || t('appointments.staff', { defaultValue: 'Staff' })} <span aria-hidden="true">&middot;</span> {apt.duration}{t('common.minutes', 'min')}
                               </div>
                               <div className="flex gap-1 mt-2">
                                 {getQuickActions(apt).slice(0, 2).map((action, idx) => {
@@ -611,8 +690,8 @@ export const AppointmentsView: React.FC = memo(() => {
                                     <button
                                       key={idx}
                                       onClick={action.action}
-                                      className={`px-2 py-1 rounded text-xs font-medium flex items-center gap-1 ${
-                                        action.variant === 'primary' ? 'bg-zinc-100 text-black border border-zinc-300' :
+                                      className={`px-2 py-1 rounded-xl text-xs font-medium flex items-center gap-1 ${
+                                        action.variant === 'primary' ? 'bg-yellow-400 text-black border border-yellow-400' :
                                         action.variant === 'success' ? 'bg-green-600 text-white' :
                                         action.variant === 'danger' ? 'bg-red-600 text-white' :
                                         isDark ? 'bg-gray-600 text-white' : 'bg-gray-200 text-gray-800'
@@ -634,19 +713,19 @@ export const AppointmentsView: React.FC = memo(() => {
               </div>
             </motion.div>
           ) : (
-            <motion.div variants={pageMotionContainer} className="h-full overflow-y-auto space-y-2">
+            <motion.div variants={pageMotionContainer} className="h-full overflow-y-auto space-y-2 scrollbar-hide">
               {appointments.map(apt => (
                 <motion.div
                   variants={pageMotionItem}
                   key={apt.id}
-                  className={`p-4 rounded-xl border-l-4 border-${statusConfig[apt.status].color}-500 ${
+                  className={`p-4 rounded-2xl border-l-4 ${statusConfig[apt.status].border} ${
                     isDark ? 'bg-gray-800' : 'bg-white shadow-sm'
                   }`}
                 >
                   <div className="flex items-center justify-between">
                     <div>
                       <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                        {apt.customerName || 'Walk-in'}
+                        {apt.customerName || t('appointments.walkIn', { defaultValue: 'Walk-in' })}
                       </div>
                       <div className="flex items-center gap-4 mt-1 text-sm">
                         <span className="flex items-center gap-1">
@@ -655,17 +734,17 @@ export const AppointmentsView: React.FC = memo(() => {
                         </span>
                         <span className="flex items-center gap-1">
                           <Scissors className="w-3 h-3" />
-                          {apt.serviceName || 'Service'}
+                          {apt.serviceName || t('appointments.service', { defaultValue: 'Service' })}
                         </span>
                         <span className="flex items-center gap-1">
                           <User className="w-3 h-3" />
-                          {apt.staffName || 'Staff'}
+                          {apt.staffName || t('appointments.staff', { defaultValue: 'Staff' })}
                         </span>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className={`px-3 py-1 rounded-full text-sm bg-${statusConfig[apt.status].color}-500/10 text-${statusConfig[apt.status].color}-500`}>
-                        {statusConfig[apt.status].label}
+                      <span className={`px-3 py-1 rounded-full text-sm ${statusConfig[apt.status].chip}`}>
+                        {t(`appointments.status.${apt.status}`, { defaultValue: statusConfig[apt.status].label })}
                       </span>
                       {getQuickActions(apt).map((action, idx) => {
                         const Icon = action.icon;
@@ -673,10 +752,10 @@ export const AppointmentsView: React.FC = memo(() => {
                           <button
                             key={idx}
                             onClick={action.action}
-                            className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1 ${
-                              action.variant === 'primary' ? 'bg-zinc-100 text-black border border-zinc-300 hover:bg-white' :
-                              action.variant === 'success' ? 'bg-green-600 text-white hover:bg-green-700' :
-                              action.variant === 'danger' ? 'bg-red-600 text-white hover:bg-red-700' :
+                            className={`px-3 py-1.5 rounded-xl text-sm font-medium flex items-center gap-1 ${
+                              action.variant === 'primary' ? 'bg-yellow-400 text-black border border-yellow-400 active:bg-yellow-300' :
+                              action.variant === 'success' ? 'bg-green-600 text-white active:bg-green-700' :
+                              action.variant === 'danger' ? 'bg-red-600 text-white active:bg-red-700' :
                               isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
                             }`}
                           >
@@ -695,19 +774,21 @@ export const AppointmentsView: React.FC = memo(() => {
           {appointments.length === 0 && !isLoading && (
             <motion.div variants={pageMotionItem} className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
               <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p className="text-lg font-medium mb-2">No appointments found</p>
-              <p className="text-sm">Try selecting a different date or adjusting your filters</p>
+              <p className="text-lg font-medium mb-2">{t('appointments.noAppointments', { defaultValue: 'No appointments found' })}</p>
+              <p className="text-sm">{t('appointments.noAppointmentsHint', { defaultValue: 'Try selecting a different date or adjusting your filters' })}</p>
             </motion.div>
           )}
         </motion.div>
       )}
 
-      {/* Floating Action Button */}
-      <FloatingActionButton
-        onClick={() => setShowCreateModal(true)}
-        aria-label="New Appointment"
-        className="!bottom-20 sm:!bottom-6"
-      />
+      {/* Floating Action Button - hidden when embedded in the Orders hub (the hub owns New Order). */}
+      {!embedded && !showCreateModal && !showCustomerSearch && (
+        <FloatingActionButton
+          onClick={() => setShowCreateModal(true)}
+          aria-label={t('appointments.newAppointment', { defaultValue: 'New Appointment' })}
+          className="!bottom-20 sm:!bottom-6"
+        />
+      )}
 
       {/* Create Appointment Modal */}
       {showCreateModal && (
@@ -736,7 +817,7 @@ export const AppointmentsView: React.FC = memo(() => {
               staffId: '',
               serviceId: '',
               date: toLocalDateStr(new Date()),
-              startTime: '09:00',
+              startTime: '',
               notes: '',
             });
           }}
@@ -791,6 +872,112 @@ interface CreateAppointmentModalContentProps {
   organizationId: string;
 }
 
+// Round 308 (live QA, Greek/dark): the New Appointment staff + service fields used native <select>
+// controls, whose OS/WebView dropdown rendered a harsh grey strip outside the glass surface and cramped
+// the selected label under the arrow. GlassSelect is a touch-first, in-modal glass listbox replacement:
+// a >=44px trigger whose selected value truncates (never overlaps the chevron), and a blurred, rounded
+// popup rendered inside the modal DOM with role=listbox/option + aria-haspopup/expanded/controls. Escape
+// closes the open dropdown via a capture-phase listener that stops propagation, so the modal's own
+// document-level Escape handler does not also fire (a closed dropdown lets Escape close the modal).
+interface GlassSelectOption {
+  value: string;
+  label: string;
+}
+
+interface GlassSelectProps {
+  value: string;
+  onChange: (value: string) => void;
+  options: GlassSelectOption[];
+  placeholder: string;
+  ariaLabel: string;
+  isDark: boolean;
+}
+
+const GlassSelect: React.FC<GlassSelectProps> = ({ value, onChange, options, placeholder, ariaLabel, isDark }) => {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const listboxId = useId();
+  const selected = options.find((option) => option.value === value) ?? null;
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    // Capture phase: an open dropdown swallows Escape (closing only itself) before the event can bubble
+    // to the modal's document-level Escape handler, which would otherwise close the whole dialog.
+    const handleEscapeCapture = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleEscapeCapture, true);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleEscapeCapture, true);
+    };
+  }, [open]);
+
+  return (
+    // Round 333: raise this select's OWN stacking context while open (z-50) so its absolutely-positioned
+    // listbox paints above sibling fields/cards; closed it sits at a low z-10 so triggers don't fight.
+    <div ref={containerRef} className={`relative ${open ? 'z-50' : 'z-10'}`}>
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listboxId}
+        aria-label={ariaLabel}
+        onClick={() => setOpen((prev) => !prev)}
+        className={`flex w-full items-center gap-2 min-h-[44px] px-3.5 py-2.5 rounded-xl border text-sm text-left transition active:scale-[0.99] focus:outline-none ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100 active:bg-zinc-900 focus:ring-2 focus:ring-zinc-600' : 'bg-white border-gray-300 text-gray-900 active:bg-gray-50 focus:ring-2 focus:ring-gray-300'}`}
+      >
+        <span className={`min-w-0 flex-1 truncate ${selected ? '' : (isDark ? 'text-zinc-500' : 'text-gray-400')}`}>
+          {selected ? selected.label : placeholder}
+        </span>
+        <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${open ? 'rotate-180' : ''} ${isDark ? 'text-zinc-400' : 'text-gray-500'}`} />
+      </button>
+      {open && (
+        <div
+          id={listboxId}
+          role="listbox"
+          aria-label={ariaLabel}
+          className={`absolute left-0 right-0 top-full z-50 mt-1.5 max-h-60 overflow-y-auto scrollbar-hide rounded-xl border p-1 shadow-[0_18px_50px_rgba(0,0,0,0.45)] ${isDark ? 'bg-zinc-900/90 backdrop-blur-2xl border-white/10' : 'bg-white/80 backdrop-blur-2xl border-white/60'}`}
+        >
+          {options.length === 0 ? (
+            <div className={`px-3 py-2 text-sm ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{placeholder}</div>
+          ) : (
+            options.map((option) => {
+              const isSelected = option.value === value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  onClick={() => { onChange(option.value); setOpen(false); }}
+                  className={`flex w-full items-center gap-2 min-h-[44px] rounded-xl px-3 py-2 text-sm text-left transition ${
+                    isSelected
+                      ? 'bg-yellow-400 text-black'
+                      : (isDark ? 'text-zinc-200 active:bg-white/10' : 'text-gray-800 active:bg-black/5')
+                  }`}
+                >
+                  <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                  {isSelected && <Check className="h-4 w-4 shrink-0" />}
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps> = ({
   isDark,
   formData,
@@ -806,15 +993,58 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   branchId,
   organizationId,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const bridge = getBridge();
-  const [calendarDate, setCalendarDate] = useState(new Date());
-  const [selectedDay, setSelectedDay] = useState<Date | null>(null);
+  // The modal remounts on each open, so seed its visible date state from the parent's
+  // formData.date (the open-time default, today). This makes the calendar, the time-slot
+  // grid (gated on selectedDay) and the summary visible with the default startTime ('09:00')
+  // already selected, instead of leaving a hidden default time that enables Create while no
+  // slot is shown. parseLocalDateString keeps local-calendar handling (no UTC drift).
+  const resolveInitialModalDate = (): Date => {
+    const parsed = parseLocalDateString(formData.date);
+    return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  };
+  const [calendarDate, setCalendarDate] = useState<Date>(resolveInitialModalDate);
+  const [selectedDay, setSelectedDay] = useState<Date | null>(resolveInitialModalDate);
   const [timePeriod, setTimePeriod] = useState<'morning' | 'afternoon' | 'evening'>('morning');
   const [existingAppointments, setExistingAppointments] = useState<{ staffId: string; startTime: string; endTime: string; status: string }[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
 
-  const weekDays = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  // Ref + stable title id so the portaled modal declares labelled dialog semantics and
+  // joins the topmost-[role="dialog"] Escape stack used across the POS modals.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+
+  // Escape closes the New Appointment modal, matching the Reservations/Rooms modals. The
+  // component is mounted only while open, so no isOpen gate is needed. Only the frontmost
+  // [role="dialog"] reacts, so a nested dialog above it (e.g. the customer search) closes
+  // first. Routes through onClose (close-only) and never submits/creates an appointment.
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== dialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      onClose();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+
+  // Locale-aware narrow weekday initials, Sunday-first
+  // to match the date grid. 2023-01-01 is a Sunday; format the 7 days from it through
+  // the shared locale-aware date formatter so the row never leaks English S/M/T/W/F.
+  const weekDays = useMemo(
+    () =>
+      Array.from({ length: 7 }, (_, index) =>
+        formatDate(new Date(2023, 0, 1 + index), { weekday: 'narrow' }),
+      ),
+    [i18n.language],
+  );
 
   // Generate calendar days
   const calendarDays = useMemo(() => {
@@ -940,41 +1170,63 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   };
 
   const handleTimeSelect = (time: string) => {
-    if (isTimeSlotBooked(time)) return;
+    // Round 285 follow-up: hard guard -- a slot can only be picked once staff + service exist (and it is
+    // not booked), so the yellow selected state can never appear before there is real availability context.
+    if (!formData.staffId || !formData.serviceId || isTimeSlotBooked(time)) return;
     setFormData((prev: AppointmentFormData) => ({ ...prev, startTime: time }));
   };
 
   const selectedService = servicesList.find(s => s.id === formData.serviceId);
+  // Round 285: a time slot must not be selectable until BOTH staff and service are chosen -- otherwise
+  // the slot grid implies availability was checked when it was not. The backend availability validation
+  // in handleCreateAppointment is unchanged; this only gates the UI affordance + the guidance copy.
+  const hasStaffAndService = Boolean(formData.staffId && formData.serviceId);
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-6">
-      <div className={`w-full max-w-6xl rounded-3xl border shadow-[0_30px_90px_rgba(0,0,0,0.55)] max-h-[94vh] flex flex-col overflow-hidden ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+  return renderModalPortal(
+    <div className={`fixed inset-0 z-[1000] flex items-center justify-center backdrop-blur-xl p-3 sm:p-6 ${isDark ? 'bg-black/55' : 'bg-black/22'}`}>
+      <motion.div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        initial={{ opacity: 0, scale: 0.97 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+        className={`w-full max-w-6xl rounded-3xl border ring-1 shadow-[0_30px_90px_rgba(0,0,0,0.55)] max-h-[calc(100%-1.5rem)] sm:max-h-[calc(100%-3rem)] flex flex-col overflow-hidden ${isDark ? 'bg-zinc-950/55 backdrop-blur-2xl border-white/10 ring-white/10' : 'bg-white/18 backdrop-blur-2xl border-white/70 ring-white/45'}`}
+      >
         {/* Header */}
-        <div className={`flex items-start justify-between px-4 sm:px-6 py-4 border-b shrink-0 ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
+        <div className={`flex items-start justify-between px-4 sm:px-6 py-4 border-b shrink-0 ${isDark ? 'border-white/10 bg-zinc-950/25' : 'border-white/40 bg-white/12'}`}>
           <div>
-            <h2 className={`text-lg sm:text-xl font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
+            <h2 id={titleId} className={`text-lg sm:text-xl font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
               {t('appointments.modal.title', 'New Appointment')}
             </h2>
             <p className={`text-xs sm:text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
               {selectedDay && formData.startTime
-                ? `${formatDate(selectedDay)} • ${formData.startTime}`
+                ? `${formatDate(selectedDay)} - ${formData.startTime}`
                 : t('appointments.modal.phoneSearchLabel', 'Search Customer by Phone')}
             </p>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className={`p-2 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+            aria-label={t('common.actions.close', 'Close')}
+            className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition active:scale-95 ${isDark ? 'bg-zinc-900/70 border-white/10 text-zinc-300 active:bg-zinc-800' : 'bg-white/25 border-white/65 text-gray-800 active:bg-white/45'}`}
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Body */}
-        <div className="p-4 sm:p-6 overflow-y-auto flex-1">
+        {/* Body — min-h-0 lets this flex child shrink and scroll so the sticky footer always keeps
+            its reserved space and nothing (availability guidance / time slots) is clipped at short
+            viewport heights (e.g. 1282x802). */}
+        <div className="p-4 sm:p-6 overflow-y-auto flex-1 min-h-0 scrollbar-hide">
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-5">
-            <div className="xl:col-span-5 space-y-4">
+            <div className="xl:col-span-5 space-y-3">
+              <p className={`text-xs font-semibold ${isDark ? 'text-zinc-300' : 'text-gray-600'}`}>
+                {t('appointments.modal.sections.guestService', 'Customer & Service')}
+              </p>
           {/* Customer Selection */}
-          <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
+          <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
             <label className={`block text-sm font-medium mb-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
               <User className="w-4 h-4 inline mr-1" /> {t('appointments.modal.customer', 'Customer')}
             </label>
@@ -1000,8 +1252,8 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     <button
                       type="button"
                       onClick={onClearCustomer}
-                      className={`p-1.5 rounded-lg ${isDark ? 'hover:bg-zinc-700' : 'hover:bg-gray-200'}`}
-                      title={t('appointments.modal.clearCustomer', 'Clear')}
+                      aria-label={t('appointments.modal.clearCustomer', 'Clear')}
+                      className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition active:scale-95 ${isDark ? 'active:bg-zinc-700' : 'active:bg-gray-200'}`}
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -1014,7 +1266,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                 <button
                   type="button"
                   onClick={onSearchCustomer}
-                  className={`w-full px-4 py-2.5 rounded-xl border text-sm font-medium flex items-center justify-center gap-2 ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+                  className={`w-full px-4 py-2.5 rounded-xl border text-sm font-medium flex items-center justify-center gap-2 ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100'}`}
                 >
                   <Search className="w-4 h-4" />
                   {t('appointments.modal.searchCustomer', 'Search Customer')}
@@ -1039,45 +1291,74 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
             )}
           </div>
 
-          {/* Staff & Service */}
-          <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
+          {/* Staff & Service — Round 308: native <select> replaced with the touch-first GlassSelect
+              listbox so the dropdown stays inside the glass modal (no OS/WebView grey strip).
+              Round 333: this card's backdrop-blur makes it its own stacking context, and the Notes card
+              below (also backdrop-blur) was painting OVER an open listbox. Lift this card (relative z-20)
+              above Notes (z-10) and keep overflow visible so the open dropdown overlays the panels below. */}
+          <div data-appointment-staff-service className={`relative z-20 overflow-visible grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
             <div>
               <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
                 {t('appointments.modal.staffLabel', 'Staff *')}
               </label>
-              <select
+              <GlassSelect
                 value={formData.staffId}
-                onChange={(e) => setFormData(prev => ({ ...prev, staffId: e.target.value }))}
-                className={`w-full px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-              >
-                <option value="">{t('appointments.modal.selectPlaceholder', 'Select...')}</option>
-                {staffList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
+                onChange={(value) => setFormData(prev => ({ ...prev, staffId: value, startTime: '' }))}
+                options={staffList.map(s => ({ value: s.id, label: s.name }))}
+                placeholder={t('appointments.modal.selectPlaceholder', 'Select...')}
+                ariaLabel={t('appointments.modal.staffLabel', 'Staff *')}
+                isDark={isDark}
+              />
             </div>
             <div>
               <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
                 {t('appointments.modal.serviceLabel', 'Service *')}
               </label>
-              <select
+              <GlassSelect
                 value={formData.serviceId}
-                onChange={(e) => setFormData(prev => ({ ...prev, serviceId: e.target.value }))}
-                className={`w-full px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-              >
-                <option value="">{t('appointments.modal.selectPlaceholder', 'Select...')}</option>
-                {servicesList.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration}{t('common.minutes', 'min')})</option>)}
-              </select>
+                onChange={(value) => setFormData(prev => ({ ...prev, serviceId: value, startTime: '' }))}
+                options={servicesList.map(s => ({ value: s.id, label: `${s.name} (${s.duration}${t('common.minutes', 'min')})` }))}
+                placeholder={t('appointments.modal.selectPlaceholder', 'Select...')}
+                ariaLabel={t('appointments.modal.serviceLabel', 'Service *')}
+                isDark={isDark}
+              />
             </div>
           </div>
 
+          {/* Notes — moved to the left column (Round 279) so it is not clipped by the sticky footer
+              under the overloaded Date/Time column; the left column had spare vertical space. Round 333:
+              kept at a LOWER stacking level (relative z-10) than the Staff & Service card (z-20) so an open
+              GlassSelect listbox overlays Notes instead of rendering behind it. */}
+          <div className={`relative z-10 rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
+            <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+              {t('appointments.modal.notesLabel', 'Notes')}
+            </label>
+            <textarea
+              value={formData.notes}
+              onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
+              placeholder={t('appointments.modal.notesPlaceholder', 'Optional notes...')}
+              rows={3}
+              className={`w-full px-3.5 py-2.5 rounded-xl border text-sm resize-none ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+            />
+          </div>
+
             </div>
-            <div className="xl:col-span-7 space-y-4">
+            <div className="xl:col-span-7 space-y-3">
+              <p className={`text-xs font-semibold ${isDark ? 'text-zinc-300' : 'text-gray-600'}`}>
+                {t('appointments.modal.sections.dateTime', 'Date & Time')}
+              </p>
+          {/* Date & Time grid — Calendar | Time Slots sit side-by-side on xl/desktop so the first
+              time-slot row is visible in the first viewport (not pushed below the calendar/footer).
+              Stacked on mobile/tablet. */}
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
           {/* Calendar */}
-          <div className={`p-4 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
-            <div className="flex items-center justify-between mb-3">
+          <div className={`p-3 rounded-2xl border ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
+            <div className="flex items-center justify-between mb-2">
               <button
                 type="button"
                 onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
-                className={`p-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+                aria-label={t('appointments.modal.previousMonth', 'Previous month')}
+                className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition active:scale-95 ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100'}`}
               >
                 <ChevronLeft className="w-4 h-4" />
               </button>
@@ -1085,15 +1366,16 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
               <button
                 type="button"
                 onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
-                className={`p-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+                aria-label={t('appointments.modal.nextMonth', 'Next month')}
+                className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition active:scale-95 ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100'}`}
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
-            <div className="grid grid-cols-7 gap-1.5 mb-2">
+            <div className="grid grid-cols-7 gap-1 mb-1.5">
               {weekDays.map((d, i) => <div key={i} className={`text-center text-xs py-1 ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>{d}</div>)}
             </div>
-            <div className="grid grid-cols-7 gap-1.5">
+            <div className="grid grid-cols-7 gap-1">
               {calendarDays.map((day, idx) => {
                 const isCurrentMonth = day.getMonth() === calendarDate.getMonth();
                 const isSelected = selectedDay?.toDateString() === day.toDateString();
@@ -1105,12 +1387,12 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     type="button"
                     disabled={isPast}
                     onClick={() => handleDateSelect(day)}
-                    className={`h-10 rounded-xl text-sm transition-all border
+                    className={`h-9 rounded-xl text-sm transition-all border
                       ${!isCurrentMonth ? (isDark ? 'text-zinc-600' : 'text-gray-400') : ''}
                       ${isPast
                         ? (isDark ? 'text-zinc-700 border-zinc-800 bg-zinc-900/40 cursor-not-allowed' : 'text-gray-300 border-gray-200 bg-gray-100 cursor-not-allowed')
-                        : (isDark ? 'border-zinc-800 hover:bg-zinc-800/80' : 'border-gray-200 hover:bg-gray-100')}
-                      ${isSelected ? (isDark ? 'bg-zinc-100 text-black border-zinc-200' : 'bg-black text-white border-black') : ''}
+                        : (isDark ? 'border-zinc-800 active:bg-zinc-800/80' : 'border-gray-200 active:bg-gray-100')}
+                      ${isSelected ? 'bg-yellow-400 text-black border-yellow-400' : ''}
                       ${isToday && !isSelected ? (isDark ? 'ring-1 ring-zinc-500' : 'ring-1 ring-gray-400') : ''}
                     `}
                   >
@@ -1121,9 +1403,49 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
             </div>
           </div>
 
-          {/* Time Slots */}
-          {selectedDay && (
-            <div className={`p-4 rounded-2xl border space-y-3 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
+          {/* Time Slots — Round 307: before BOTH staff and service are chosen we show a friendly warm-glass
+              empty state with a Staff/Service checklist (NOT a grid of disabled times, which read like broken
+              availability). Once both exist, the real period buttons + available/booked slots render. */}
+          {!hasStaffAndService ? (
+            <div
+              data-appointment-slots-empty
+              className={`flex flex-col items-center justify-center gap-3 p-6 text-center rounded-2xl border ${isDark ? 'bg-amber-500/[0.06] backdrop-blur-md border-amber-400/20' : 'bg-amber-50/60 backdrop-blur-xl border-amber-200/70'}`}
+            >
+              <div className={`flex h-12 w-12 items-center justify-center rounded-2xl border ${isDark ? 'bg-amber-500/15 border-amber-400/30 text-amber-300' : 'bg-amber-100/80 border-amber-200 text-amber-600'}`}>
+                <Clock className="h-6 w-6" />
+              </div>
+              <div>
+                <p className={`text-sm font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
+                  {t('appointments.modal.slotsEmpty.title', 'Pick staff and service first')}
+                </p>
+                <p className={`mt-1 text-xs leading-5 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+                  {t('appointments.modal.slotsEmpty.help', 'Choose a staff member and a service first, then the real available times show up here.')}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                {([
+                  { key: 'staff', done: Boolean(formData.staffId), label: t('appointments.modal.slotsEmpty.staffStep', 'Staff'), Icon: User },
+                  { key: 'service', done: Boolean(formData.serviceId), label: t('appointments.modal.slotsEmpty.serviceStep', 'Service'), Icon: Scissors },
+                ] as const).map(step => {
+                  const StepIcon = step.Icon;
+                  return (
+                    <span
+                      key={step.key}
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium ${
+                        step.done
+                          ? (isDark ? 'bg-emerald-500/15 border-emerald-400/30 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-700')
+                          : (isDark ? 'bg-white/[0.04] border-white/15 text-zinc-400' : 'bg-white/50 border-gray-200 text-gray-500')
+                      }`}
+                    >
+                      {step.done ? <CheckCircle className="h-3.5 w-3.5" /> : <StepIcon className="h-3.5 w-3.5" />}
+                      {step.label}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          ) : selectedDay ? (
+            <div className={`p-3 rounded-2xl border space-y-2.5 ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
               <div className="grid grid-cols-3 gap-2">
                 {(['morning', 'afternoon', 'evening'] as const).map(p => (
                   <button
@@ -1132,8 +1454,8 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     onClick={() => setTimePeriod(p)}
                     className={`py-2 text-xs sm:text-sm rounded-xl border font-medium transition-all ${
                       timePeriod === p
-                        ? (isDark ? 'bg-zinc-100 text-black border-zinc-200' : 'bg-black text-white border-black')
-                        : (isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-700 hover:bg-zinc-800' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100')
+                        ? 'bg-yellow-400 text-black border-yellow-400'
+                        : (isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-700 active:bg-zinc-800' : 'bg-white text-gray-700 border-gray-300 active:bg-gray-100')
                     }`}
                   >
                     {p === 'morning'
@@ -1144,11 +1466,10 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                   </button>
                 ))}
               </div>
-              
-              {!formData.staffId && <p className="text-xs text-amber-500">{t('appointments.modal.selectStaffAvailability', 'Select staff to see availability')}</p>}
+
               {loadingSlots && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>{t('appointments.modal.loadingSlots', 'Loading...')}</p>}
-              
-              <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 xl:grid-cols-5 gap-2 max-h-56 overflow-y-auto pr-1">
+
+              <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 xl:grid-cols-5 gap-2 max-h-56 overflow-y-auto pr-1 scrollbar-hide">
                 {timeSlots.map(slot => {
                   const booked = isTimeSlotBooked(slot);
                   const selected = formData.startTime === slot;
@@ -1158,12 +1479,12 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                       type="button"
                       disabled={booked}
                       onClick={() => handleTimeSelect(slot)}
-                      className={`py-2 px-2 text-xs sm:text-sm rounded-xl border relative transition-all
+                      className={`flex items-center justify-center min-h-[44px] py-2 px-2 text-xs sm:text-sm rounded-xl border relative transition-all
                         ${selected
-                          ? (isDark ? 'bg-zinc-100 text-black border-zinc-200' : 'bg-black text-white border-black')
+                          ? 'bg-yellow-400 text-black border-yellow-400'
                           : booked
                             ? (isDark ? 'bg-red-500/10 border-red-500/30 text-red-300 line-through cursor-not-allowed' : 'bg-red-50 border-red-200 text-red-500 line-through cursor-not-allowed')
-                            : (isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100')}
+                            : (isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100')}
                       `}
                     >
                       {slot}
@@ -1172,17 +1493,18 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                   );
                 })}
               </div>
-              
+
               <div className={`flex gap-4 text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>
                 <span className="flex items-center gap-1"><span className={`w-3 h-3 rounded border ${isDark ? 'bg-zinc-800 border-zinc-600' : 'bg-white border-gray-300'}`} /> {t('appointments.modal.availability.available', 'Available')}</span>
                 <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-100 border border-red-200 rounded" /> {t('appointments.modal.availability.booked', 'Booked')}</span>
               </div>
             </div>
-          )}
+          ) : null}
+          </div>
 
           {/* Summary */}
           {formData.startTime && selectedService && selectedDay && (
-            <div className={`p-4 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-200'}`}>
+            <div className={`p-4 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-emerald-500/10 border-emerald-500/25' : 'bg-emerald-50/70 border-emerald-200'}`}>
               <div className="flex items-center justify-between text-sm">
                 <span className={isDark ? 'text-zinc-300' : 'text-gray-600'}>{formatDate(selectedDay)}</span>
                 <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{formData.startTime}</span>
@@ -1199,40 +1521,28 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
               </div>
             </div>
           )}
-
-          {/* Notes */}
-          <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
-            <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
-              {t('appointments.modal.notesLabel', 'Notes')}
-            </label>
-            <textarea
-              value={formData.notes}
-              onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
-              placeholder={t('appointments.modal.notesPlaceholder', 'Optional notes...')}
-              rows={3}
-              className={`w-full px-3.5 py-2.5 rounded-xl border text-sm resize-none ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-            />
-          </div>
             </div>
           </div>
         </div>
 
-        {/* Footer */}
-        <div className={`px-4 sm:px-6 py-4 border-t shrink-0 ${isDark ? 'border-zinc-800 bg-zinc-950/90' : 'border-gray-200 bg-white/90'}`}>
+        {/* Footer — sticky glass bar; reserved by the flex column so it never overlaps the body. */}
+        <div className={`px-4 sm:px-6 py-4 border-t shrink-0 backdrop-blur-xl ${isDark ? 'border-white/10 bg-zinc-950/55' : 'border-white/40 bg-white/14'}`}>
           <div className="flex flex-col-reverse sm:flex-row gap-3 sm:justify-end">
-          <button onClick={onClose} className={`px-5 py-2.5 rounded-xl font-medium border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-100 border-gray-300 text-gray-700 hover:bg-gray-200'}`}>
+          {/* Cancel = soft destructive red */}
+          <button onClick={onClose} className={`px-5 py-2.5 rounded-xl font-medium border transition-transform duration-150 active:scale-95 ${isDark ? 'border-red-500/40 bg-red-500/10 text-red-300 active:bg-red-500/20' : 'border-red-300 bg-red-50 text-red-700 active:bg-red-100'}`}>
             {t('appointments.modal.cancel', 'Cancel')}
           </button>
+          {/* Create = green primary, with a clear disabled state */}
           <button
             onClick={handleCreateAppointment}
             disabled={isSubmitting || !formData.staffId || !formData.serviceId || !formData.startTime}
-            className="px-5 py-2.5 rounded-xl font-semibold bg-zinc-100 text-black border border-zinc-300 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-5 py-2.5 rounded-xl font-semibold bg-emerald-600 text-white border border-emerald-500 shadow-sm shadow-emerald-600/30 transition-transform duration-150 active:scale-95 active:bg-emerald-700 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {isSubmitting ? t('appointments.modal.creating', 'Creating...') : t('appointments.modal.create', 'Create')}
           </button>
           </div>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 };

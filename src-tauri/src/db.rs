@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 65;
+const CURRENT_SCHEMA_VERSION: i32 = 68;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -439,6 +439,15 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 65 {
         run_migration_tx(conn, 65, migrate_v65)?;
+    }
+    if current < 66 {
+        run_migration_tx(conn, 66, migrate_v66)?;
+    }
+    if current < 67 {
+        run_migration_tx(conn, 67, migrate_v67)?;
+    }
+    if current < 68 {
+        run_migration_tx(conn, 68, migrate_v68)?;
     }
 
     Ok(())
@@ -4239,6 +4248,175 @@ fn migrate_v65(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v66: persist tenant context on local order rows.
+///
+/// Fiscal payload building reads `orders.organization_id` so fiscal enqueue can
+/// carry tenant scope into `parity_sync_queue`. The sync payload already had
+/// organization context, but the local order header table did not, so the
+/// fiscal handoff failed on real terminal databases with
+/// "no such column: organization_id".
+fn migrate_v66(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "organization_id")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN organization_id TEXT", [])
+            .map_err(|e| format!("v66 add orders.organization_id: {e}"))?;
+    }
+
+    if column_exists(conn, "local_settings", "setting_value")? {
+        conn.execute_batch(
+            "
+            UPDATE orders
+               SET organization_id = (
+                   SELECT setting_value
+                     FROM local_settings
+                    WHERE setting_category = 'terminal'
+                      AND setting_key = 'organization_id'
+                    LIMIT 1
+               )
+             WHERE (organization_id IS NULL OR TRIM(organization_id) = '')
+               AND EXISTS (
+                   SELECT 1
+                     FROM local_settings
+                    WHERE setting_category = 'terminal'
+                      AND setting_key = 'organization_id'
+                      AND TRIM(setting_value) <> ''
+               );
+            ",
+        )
+        .map_err(|e| format!("v66 backfill orders.organization_id: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_orders_organization_id
+          ON orders(organization_id)
+          WHERE organization_id IS NOT NULL;
+        ",
+    )
+    .map_err(|e| format!("v66 index orders.organization_id: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (66)", [])
+        .map_err(|e| format!("v66 record schema_version: {e}"))?;
+
+    info!("Applied migration v66 (orders.organization_id for fiscal payload scope)");
+    Ok(())
+}
+
+/// Migration v67: add the fiscal receipt identifier column to local order rows,
+/// and backfill it ONLY for fiscal-entitled organizations.
+///
+/// Fiscal payload building reads `orders.receipt_number`, falling back to `id`
+/// only after the column exists. Existing terminals had `order_number` and
+/// `display_order_number` but not this fiscal-facing alias. The column is always
+/// added, but the value is backfilled only when the org/branch has acquired
+/// government order reporting (myDATA / fiscalization_*) — non-fiscal databases
+/// must never gain a persisted receipt number just from migrating (see v68 for
+/// cleaning up DBs that ran the original unconditional backfill).
+fn migrate_v67(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "receipt_number")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN receipt_number TEXT", [])
+            .map_err(|e| format!("v67 add orders.receipt_number: {e}"))?;
+    }
+
+    // Only backfill the fiscal-facing receipt_number for orgs/branches that have
+    // acquired/enabled government order reporting (myDATA / fiscalization_*).
+    // Non-fiscal (or not-yet-known) databases must NOT gain persisted receipt
+    // numbers just from migrating — fiscal payload building can fall back to `id`
+    // at build time, and create_order already gates persistence the same way
+    // (sync::should_persist_receipt_number_for_branch). Fail closed: unknown
+    // entitlement (None) is treated as non-fiscal here.
+    if crate::sync::cached_fiscal_order_reporting_entitlement(conn).unwrap_or(false) {
+        let mut receipt_candidates = Vec::new();
+        if column_exists(conn, "orders", "display_order_number")? {
+            receipt_candidates.push("NULLIF(TRIM(display_order_number), '')");
+        }
+        if column_exists(conn, "orders", "order_number")? {
+            receipt_candidates.push("NULLIF(TRIM(order_number), '')");
+        }
+        let receipt_expr = if receipt_candidates.is_empty() {
+            "id".to_string()
+        } else {
+            format!("COALESCE({}, id)", receipt_candidates.join(", "))
+        };
+
+        conn.execute(
+            &format!(
+                "
+        UPDATE orders
+           SET receipt_number = {receipt_expr}
+         WHERE receipt_number IS NULL OR TRIM(receipt_number) = ''
+        "
+            ),
+            [],
+        )
+        .map_err(|e| format!("v67 backfill orders.receipt_number: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_orders_receipt_number
+          ON orders(receipt_number)
+          WHERE receipt_number IS NOT NULL;
+        ",
+    )
+    .map_err(|e| format!("v67 index orders.receipt_number: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (67)", [])
+        .map_err(|e| format!("v67 record schema_version: {e}"))?;
+
+    info!("Applied migration v67 (orders.receipt_number for fiscal payload scope)");
+    Ok(())
+}
+
+/// Migration v68: undo the original v67 receipt_number backfill on NON-fiscal DBs.
+///
+/// The first version of v67 backfilled `orders.receipt_number` unconditionally,
+/// so databases that already ran it carry fiscal-facing receipt numbers on every
+/// historical order even when the org never acquired government order reporting.
+/// This migration clears those values — but ONLY when the cached entitlement is
+/// explicitly non-fiscal (`Some(false)`). When entitlement is unknown (`None`,
+/// e.g. a fresh DB before the integrations cache has synced) or fiscal
+/// (`Some(true)`), values are left untouched so a genuine fiscal receipt
+/// identifier is never destroyed. To stay conservative even on a confirmed
+/// non-fiscal DB, only rows whose `receipt_number` still equals the v67 fallback
+/// (display_order_number / order_number / id) are cleared.
+fn migrate_v68(conn: &Connection) -> Result<(), String> {
+    if column_exists(conn, "orders", "receipt_number")?
+        && crate::sync::cached_fiscal_order_reporting_entitlement(conn) == Some(false)
+    {
+        let mut receipt_candidates = Vec::new();
+        if column_exists(conn, "orders", "display_order_number")? {
+            receipt_candidates.push("NULLIF(TRIM(display_order_number), '')");
+        }
+        if column_exists(conn, "orders", "order_number")? {
+            receipt_candidates.push("NULLIF(TRIM(order_number), '')");
+        }
+        let fallback_expr = if receipt_candidates.is_empty() {
+            "id".to_string()
+        } else {
+            format!("COALESCE({}, id)", receipt_candidates.join(", "))
+        };
+
+        conn.execute(
+            &format!(
+                "
+        UPDATE orders
+           SET receipt_number = NULL
+         WHERE receipt_number IS NOT NULL
+           AND receipt_number = {fallback_expr}
+        "
+            ),
+            [],
+        )
+        .map_err(|e| format!("v68 clear non-fiscal receipt_number: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (68)", [])
+        .map_err(|e| format!("v68 record schema_version: {e}"))?;
+
+    info!("Applied migration v68 (clear non-fiscal receipt_number backfill)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -5045,6 +5223,192 @@ mod tests {
     }
 
     #[test]
+    fn test_migrations_add_orders_organization_id_for_fiscal_payloads() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        assert!(
+            column_exists(&conn, "orders", "organization_id").expect("column_exists probe"),
+            "orders.organization_id should exist for fiscal payload building"
+        );
+    }
+
+    #[test]
+    fn test_migrations_add_orders_receipt_number_for_fiscal_payloads() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        assert!(
+            column_exists(&conn, "orders", "receipt_number").expect("column_exists probe"),
+            "orders.receipt_number should exist for fiscal payload building"
+        );
+    }
+
+    // --- receipt_number fiscal-entitlement migration scoping (v67/v68) --------
+
+    /// Build a minimal pre-v67 schema: an `orders` row with NO receipt_number
+    /// column yet, plus the `schema_version` and `local_settings` tables the
+    /// migrations need.
+    fn setup_pre_v67_orders(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE orders (id TEXT PRIMARY KEY, order_number TEXT, display_order_number TEXT);
+             INSERT INTO orders (id, order_number, display_order_number)
+               VALUES ('o1', '00014', '00014');
+             CREATE TABLE schema_version (version INTEGER);
+             CREATE TABLE local_settings (
+               id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+               setting_category TEXT NOT NULL,
+               setting_key TEXT NOT NULL,
+               setting_value TEXT,
+               updated_at TEXT,
+               UNIQUE(setting_category, setting_key)
+             );",
+        )
+        .expect("pre-v67 schema");
+    }
+
+    /// Cache the POS integrations entitlement: `acquired=true` records an active
+    /// myDATA plugin (Some(true)); `acquired=false` records an empty integrations
+    /// list (Some(false)). Omitting the call leaves entitlement unknown (None).
+    fn set_fiscal_entitlement(conn: &Connection, acquired: bool) {
+        let json = if acquired {
+            r#"{"data":[{"plugin_id":"mydata","is_purchased":true,"is_enabled":true}]}"#
+        } else {
+            r#"{"data":[]}"#
+        };
+        set_setting(conn, "local", "admin_api_get::/api/pos/integrations", json)
+            .expect("set integrations entitlement cache");
+    }
+
+    fn order_receipt_number(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT receipt_number FROM orders WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .expect("query order receipt_number")
+    }
+
+    #[test]
+    fn test_migrate_v67_skips_receipt_backfill_on_non_fiscal_db() {
+        // Non-fiscal: no entitlement cached at all → None → treated as non-fiscal.
+        let conn = test_db();
+        setup_pre_v67_orders(&conn);
+
+        migrate_v67(&conn).expect("v67");
+
+        assert!(
+            column_exists(&conn, "orders", "receipt_number").expect("column probe"),
+            "the receipt_number column is always added",
+        );
+        assert_eq!(
+            order_receipt_number(&conn, "o1"),
+            None,
+            "a non-fiscal DB must NOT backfill a persisted receipt_number",
+        );
+    }
+
+    #[test]
+    fn test_migrate_v67_skips_receipt_backfill_when_integrations_have_no_fiscal_plugin() {
+        // Explicit Some(false): integrations synced but no fiscal plugin acquired.
+        let conn = test_db();
+        setup_pre_v67_orders(&conn);
+        set_fiscal_entitlement(&conn, false);
+
+        migrate_v67(&conn).expect("v67");
+
+        assert_eq!(
+            order_receipt_number(&conn, "o1"),
+            None,
+            "an org without an acquired fiscal plugin must not get a receipt_number",
+        );
+    }
+
+    #[test]
+    fn test_migrate_v67_backfills_receipt_number_on_fiscal_db() {
+        // Fiscal: myDATA acquired + enabled → Some(true) → backfill from display number.
+        let conn = test_db();
+        setup_pre_v67_orders(&conn);
+        set_fiscal_entitlement(&conn, true);
+
+        migrate_v67(&conn).expect("v67");
+
+        assert_eq!(
+            order_receipt_number(&conn, "o1").as_deref(),
+            Some("00014"),
+            "a fiscal DB backfills receipt_number from display_order_number",
+        );
+    }
+
+    #[test]
+    fn test_migrate_v68_clears_backfilled_receipt_on_confirmed_non_fiscal_db() {
+        // Simulate a DB that already ran the ORIGINAL unconditional v67 backfill.
+        let conn = test_db();
+        setup_pre_v67_orders(&conn);
+        conn.execute_batch("ALTER TABLE orders ADD COLUMN receipt_number TEXT;")
+            .expect("add receipt_number");
+        conn.execute(
+            "UPDATE orders SET receipt_number = display_order_number",
+            [],
+        )
+        .expect("simulate v67 backfill");
+        set_fiscal_entitlement(&conn, false); // confirmed non-fiscal
+
+        migrate_v68(&conn).expect("v68");
+
+        assert_eq!(
+            order_receipt_number(&conn, "o1"),
+            None,
+            "a confirmed non-fiscal DB clears the wrongly-backfilled receipt_number",
+        );
+    }
+
+    #[test]
+    fn test_migrate_v68_preserves_receipt_on_fiscal_and_unknown_dbs() {
+        // Fiscal (Some(true)): genuine receipt identifiers must be preserved.
+        let fiscal = test_db();
+        setup_pre_v67_orders(&fiscal);
+        fiscal
+            .execute_batch("ALTER TABLE orders ADD COLUMN receipt_number TEXT;")
+            .expect("add receipt_number");
+        fiscal
+            .execute(
+                "UPDATE orders SET receipt_number = display_order_number",
+                [],
+            )
+            .expect("seed receipt_number");
+        set_fiscal_entitlement(&fiscal, true);
+
+        migrate_v68(&fiscal).expect("v68 fiscal");
+        assert_eq!(
+            order_receipt_number(&fiscal, "o1").as_deref(),
+            Some("00014"),
+            "a fiscal DB must keep its receipt numbers",
+        );
+
+        // Unknown (None): cannot confirm non-fiscal → leave values untouched (fail-safe).
+        let unknown = test_db();
+        setup_pre_v67_orders(&unknown);
+        unknown
+            .execute_batch("ALTER TABLE orders ADD COLUMN receipt_number TEXT;")
+            .expect("add receipt_number");
+        unknown
+            .execute(
+                "UPDATE orders SET receipt_number = display_order_number",
+                [],
+            )
+            .expect("seed receipt_number");
+        // No entitlement cached → None.
+
+        migrate_v68(&unknown).expect("v68 unknown");
+        assert_eq!(
+            order_receipt_number(&unknown, "o1").as_deref(),
+            Some("00014"),
+            "an unknown-entitlement DB must not destroy receipt numbers it cannot confirm",
+        );
+    }
+
+    #[test]
     fn test_migrate_v55_column_exists_guard_tolerates_rerun() {
         // The `column_exists` guard inside `migrate_v55` is what protects
         // against partial-retry after a mid-migration crash. Verify it by
@@ -5124,6 +5488,51 @@ mod tests {
             })
             .expect("read schema version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    fn max_schema_version(conn: &Connection) -> i32 {
+        conn.query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+            row.get(0)
+        })
+        .expect("read schema version")
+    }
+
+    #[test]
+    fn test_run_migrations_advances_existing_v67_database_to_current() {
+        // CURRENT_SCHEMA_VERSION must include the registered v68 cleanup migration;
+        // otherwise the early-return guard (current == CURRENT_SCHEMA_VERSION) skips
+        // v68 for databases the old app left at v67, and fresh DBs record a version
+        // newer than the app claims to support.
+        assert!(
+            CURRENT_SCHEMA_VERSION >= 68,
+            "CURRENT_SCHEMA_VERSION must cover the registered v68 migration",
+        );
+
+        let conn = test_db();
+        run_migrations(&conn).expect("initial migrations");
+        assert_eq!(
+            max_schema_version(&conn),
+            CURRENT_SCHEMA_VERSION,
+            "a fresh DB migrates exactly to CURRENT_SCHEMA_VERSION",
+        );
+
+        // Simulate a database the OLD app left at v67 (it never knew about v68).
+        conn.execute("DELETE FROM schema_version WHERE version >= 68", [])
+            .expect("roll recorded version back to v67");
+        assert_eq!(
+            max_schema_version(&conn),
+            67,
+            "precondition: the simulated existing database sits at v67",
+        );
+
+        // The early-return guard compares against CURRENT_SCHEMA_VERSION (now 68),
+        // so current (67) < CURRENT and the pending v68 cleanup still runs.
+        run_migrations(&conn).expect("rerun must apply the pending v68 migration");
+        assert_eq!(
+            max_schema_version(&conn),
+            CURRENT_SCHEMA_VERSION,
+            "an existing v67 DB must be advanced to CURRENT; the early return must not skip v68",
+        );
     }
 
     #[test]

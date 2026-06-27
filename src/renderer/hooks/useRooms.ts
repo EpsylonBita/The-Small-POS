@@ -8,9 +8,11 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import {
   roomsService,
+  getRoomEffectiveStatus,
   Room,
   RoomFilters,
   RoomStats,
@@ -27,6 +29,10 @@ interface UseRoomsProps {
 interface UseRoomsReturn {
   // Data
   rooms: Room[];
+  // The full, unfiltered branch room set (not narrowed by the grid's search/status/floor
+  // filters). Action surfaces (create/check-in/reservation selectors and their selected-room
+  // lookups) must use this so a grid search for one room can't hide every other room.
+  allRooms: Room[];
   stats: RoomStats;
   floors: number[];
   isLoading: boolean;
@@ -34,7 +40,7 @@ interface UseRoomsReturn {
 
   // Actions
   refetch: () => Promise<void>;
-  updateStatus: (roomId: string, status: RoomStatus) => Promise<boolean>;
+  updateStatus: (roomId: string, status: RoomStatus) => Promise<Room | null>;
 
   // Filters
   setFilters: (filters: RoomFilters) => void;
@@ -46,6 +52,7 @@ export function useRooms({
   filters: externalFilters,
   enableRealtime = true,
 }: UseRoomsProps): UseRoomsReturn {
+  const { t } = useTranslation();
   const [allRooms, setAllRooms] = useState<Room[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -88,7 +95,9 @@ export function useRooms({
     const { statusFilter, floorFilter, roomTypeFilter, searchTerm } = filters;
     
     if (statusFilter && statusFilter !== 'all') {
-      filtered = filtered.filter(r => r.status === statusFilter);
+      // Filter by the effective status the grid cards render, so the Reserved/Available
+      // filters select exactly the rooms whose visible card matches the chosen status.
+      filtered = filtered.filter(r => getRoomEffectiveStatus(r) === statusFilter);
     }
     if (floorFilter && floorFilter !== 'all') {
       filtered = filtered.filter(r => r.floor === floorFilter);
@@ -144,26 +153,41 @@ export function useRooms({
   }, [allRooms]);
 
   // Update room status
-  const updateStatus = useCallback(async (roomId: string, status: RoomStatus): Promise<boolean> => {
+  const updateStatus = useCallback(async (roomId: string, status: RoomStatus): Promise<Room | null> => {
     try {
       const updated = await roomsService.updateStatus(roomId, status);
-      
+
+      // An explicit manual status change is authoritative for display. Align the
+      // server-computed effectiveStatus to the chosen status so the stats (which read
+      // room.status) and the cards/modal summary (which read effectiveStatus || status)
+      // agree immediately, instead of disagreeing until a refetch reconciles a lagging
+      // effective_status. Returning this normalized room lets callers sync their own copy.
+      const normalized: Room = { ...updated, status, effectiveStatus: status };
+
       // Update local state
       setAllRooms((prev) =>
-        prev.map((r) => (r.id === roomId ? updated : r))
+        prev.map((r) => (r.id === roomId ? normalized : r))
       );
-      
-      toast.success(`Room status updated to ${status}`);
-      return true;
+
+      const statusLabel = t(`roomsView.status.${status}`, { defaultValue: status });
+      toast.success(
+        t('roomsView.toasts.statusUpdated', {
+          status: statusLabel,
+          defaultValue: 'Room status updated to {{status}}',
+        }),
+      );
+      return normalized;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to update status';
-      toast.error(message);
-      return false;
+      toast.error(
+        t('roomsView.toasts.statusUpdateFailed', { defaultValue: 'Failed to update room status' }),
+      );
+      return null;
     }
-  }, []);
+  }, [t]);
 
   return {
     rooms,
+    allRooms,
     stats,
     floors,
     isLoading,

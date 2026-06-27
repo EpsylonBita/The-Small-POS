@@ -70,8 +70,8 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
         onClick={() => setShowDropdown(!showDropdown)}
         className={`p-2 rounded-full transition-all duration-200 ${
           resolvedTheme === 'dark'
-            ? 'text-white/70 hover:text-white hover:bg-white/10'
-            : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100/50'
+            ? 'text-white/70 active:bg-white/10'
+            : 'text-gray-600 active:bg-gray-100/50'
         }`}
       >
         <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
@@ -81,7 +81,7 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
 
       {/* Dropdown menu */}
       {showDropdown && (
-        <div className={`absolute right-0 top-full mt-2 w-48 rounded-lg shadow-lg border z-50 ${
+        <div className={`absolute right-0 top-full mt-2 w-48 rounded-2xl shadow-lg border z-50 ${
           resolvedTheme === 'dark'
             ? 'bg-gray-800/95 border-gray-700/50 backdrop-blur-xl'
             : 'bg-white/95 border-gray-200/50 backdrop-blur-xl'
@@ -91,8 +91,8 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
               onClick={() => handleAction('edit')}
               className={`w-full text-left px-4 py-2 text-sm transition-colors ${
                 resolvedTheme === 'dark'
-                  ? 'text-gray-300 hover:bg-gray-700/50 hover:text-white'
-                  : 'text-gray-700 hover:bg-gray-100/50 hover:text-gray-900'
+                  ? 'text-gray-300 active:bg-gray-700/50'
+                  : 'text-gray-700 active:bg-gray-100/50'
               }`}
             >
               {t('orders.actions.editOrder')}
@@ -101,8 +101,8 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
               onClick={() => handleAction('delivered')}
               className={`w-full text-left px-4 py-2 text-sm transition-colors ${
                 resolvedTheme === 'dark'
-                  ? 'text-gray-300 hover:bg-gray-700/50 hover:text-white'
-                  : 'text-gray-700 hover:bg-gray-100/50 hover:text-gray-900'
+                  ? 'text-gray-300 active:bg-gray-700/50'
+                  : 'text-gray-700 active:bg-gray-100/50'
               }`}
             >
               {t('orders.actions.markAsDelivered')}
@@ -111,8 +111,8 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
               onClick={() => setShowCancelModal(true)}
               className={`w-full text-left px-4 py-2 text-sm transition-colors ${
                 resolvedTheme === 'dark'
-                  ? 'text-red-300 hover:bg-red-900/20 hover:text-red-200'
-                  : 'text-red-600 hover:bg-red-50 hover:text-red-700'
+                  ? 'text-red-300 active:bg-red-900/20'
+                  : 'text-red-600 active:bg-red-50'
               }`}
             >
               {t('orders.actions.cancelOrder')}
@@ -124,7 +124,7 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
       {/* Cancel Modal */}
       {showCancelModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className={`bg-white/95 backdrop-blur-xl rounded-xl p-6 max-w-md w-full mx-4 ${
+          <div className={`bg-white/95 backdrop-blur-xl rounded-3xl p-6 max-w-md w-full mx-4 ${
             resolvedTheme === 'dark' ? 'bg-gray-800/95 text-white' : 'text-gray-900'
           }`}>
             <h3 className="text-lg font-semibold mb-4">{t('orders.cancel.title')}</h3>
@@ -149,7 +149,7 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
               </button>
               <button
                 onClick={() => handleAction('cancel', cancelNotes)}
-                className="flex-1 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+                className="flex-1 px-4 py-2 bg-red-500 text-white rounded-lg active:bg-red-600 transition-colors"
               >
                 {t('orders.cancel.confirmCancel')}
               </button>
@@ -161,7 +161,7 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
       {/* Driver Assignment Modal */}
       {showDriverModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className={`bg-white/95 backdrop-blur-xl rounded-xl p-6 max-w-md w-full mx-4 ${
+          <div className={`bg-white/95 backdrop-blur-xl rounded-3xl p-6 max-w-md w-full mx-4 ${
             resolvedTheme === 'dark' ? 'bg-gray-800/95 text-white' : 'text-gray-900'
           }`}>
             <h3 className="text-lg font-semibold mb-4">{t('orders.driver.assignTitle')}</h3>
@@ -172,8 +172,8 @@ export const OrderActions: React.FC<OrderActionsProps> = ({
                   onClick={() => handleAction('assign_driver', driver.id)}
                   className={`w-full text-left p-3 border rounded-lg transition-colors ${
                     resolvedTheme === 'dark'
-                      ? 'border-gray-600 hover:bg-gray-700/50'
-                      : 'border-gray-300 hover:bg-gray-50'
+                      ? 'border-gray-600 active:bg-gray-700/50'
+                      : 'border-gray-300 active:bg-gray-50'
                   }`}
                 >
                   <div className="font-medium">{driver.name}</div>

@@ -500,7 +500,6 @@ const IntegrationLogo: React.FC<IntegrationLogoProps> = ({ integration, isDark }
           ? 'bg-zinc-900 border border-zinc-800 text-zinc-100'
           : 'bg-gray-100 text-gray-700'
       }`}
-      title={logo?.label || integration.name}
       aria-label={logo ? `${logo.label} logo` : integration.name}
     >
       {logo ? (
@@ -561,10 +560,10 @@ const IntegrationCard = memo<IntegrationCardProps>(({
   return (
     <motion.div
       variants={pageMotionItem}
-      className={`relative p-4 rounded-xl border transition-all duration-200 hover:shadow-md ${
+      className={`relative p-4 rounded-2xl border transition-all duration-200 ${
         isDark
-          ? 'bg-zinc-950 border-zinc-800 hover:border-zinc-600'
-          : 'bg-white border-gray-200 hover:border-gray-300'
+          ? 'bg-zinc-950 border-zinc-800 active:border-zinc-600'
+          : 'bg-white border-gray-200 active:border-gray-300'
       }`}
     >
       <div className="flex items-start gap-4">
@@ -609,12 +608,12 @@ const IntegrationCard = memo<IntegrationCardProps>(({
           {(integration.status === 'connected' || integration.status === 'pending') && !isLocked ? (
             <button
               onClick={() => onConfigure(integration)}
-              className={`p-2 rounded-lg transition-colors ${
+              className={`p-2 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 active:scale-95 ${
                 isDark
-                  ? 'hover:bg-white/10 text-gray-400 hover:text-white'
-                  : 'hover:bg-gray-100 text-gray-500 hover:text-gray-700'
+                  ? 'active:bg-white/10 text-gray-400 active:text-white'
+                  : 'active:bg-gray-100 text-gray-500 active:text-gray-700'
               }`}
-              title={t('integrations.configure', 'Configure')}
+              aria-label={t('integrations.configure', 'Configure')}
             >
               <Settings size={18} />
             </button>
@@ -623,10 +622,9 @@ const IntegrationCard = memo<IntegrationCardProps>(({
             type="button"
             role="switch"
             aria-checked={isEnabled}
-            aria-label={t('integrations.togglePlugin', 'Toggle plugin')}
+            aria-label={isToggleDisabled && toggleDisabledMessage ? toggleDisabledMessage : t('integrations.togglePlugin', 'Toggle plugin')}
             onClick={() => !isToggleDisabled && onToggle(integration.id)}
             disabled={isToggleDisabled}
-            title={toggleDisabledMessage || undefined}
             className={`relative inline-flex h-6 w-14 shrink-0 items-center rounded-full border transition-all duration-200 ${
               isEnabled
                 ? 'bg-[#67d75f] border-[#67d75f] shadow-[0_0_12px_rgba(103,215,95,0.45)]'
@@ -691,13 +689,13 @@ const CategorySection = memo<CategorySectionProps>(({
     <motion.section variants={pageMotionItem} className="mb-6">
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className={`w-full flex items-center justify-between p-3 rounded-lg mb-3 transition-colors ${
-          isDark ? 'hover:bg-zinc-900/80' : 'hover:bg-gray-50'
+        className={`w-full flex items-center justify-between p-3 rounded-2xl mb-3 transition-transform active:scale-[0.99] ${
+          isDark ? 'active:bg-zinc-900/80' : 'active:bg-gray-50'
         }`}
       >
         <div className="flex items-center gap-3">
           <div
-            className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+            className={`w-8 h-8 rounded-2xl flex items-center justify-center ${
               isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-100'
             }`}
           >
@@ -754,10 +752,10 @@ interface StatsCardProps {
 const StatsCard = memo<StatsCardProps>(({ label, value, icon: Icon, color, isDark }) => (
   <motion.div
     variants={pageMotionItem}
-    className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
+    className={`p-4 rounded-2xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
   >
     <div className="flex items-center gap-3">
-      <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+      <div className={`w-10 h-10 rounded-2xl flex items-center justify-center ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
         <Icon size={20} style={{ color }} />
       </div>
       <div>
@@ -1269,7 +1267,7 @@ export const IntegrationsPage: React.FC = () => {
     return (
       <div className={`min-h-screen flex items-center justify-center ${isDark ? 'bg-black' : 'bg-[#fdfaf5]'}`}>
         <div className="text-center">
-          <Loader2 className={`w-8 h-8 animate-spin mx-auto mb-3 ${isDark ? 'text-emerald-400' : 'text-blue-500'}`} />
+          <Loader2 className={`w-8 h-8 animate-spin mx-auto mb-3 ${isDark ? 'text-emerald-400' : 'text-emerald-600'}`} />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
             {t('integrations.loading', 'Loading plugins...')}
           </p>
@@ -1320,13 +1318,12 @@ export const IntegrationsPage: React.FC = () => {
                 type="button"
                 onClick={handleRefresh}
                 disabled={isRefreshing || !isOnline}
-                title={t('common.refresh', 'Refresh')}
                 aria-label={t('common.refresh', 'Refresh')}
-                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
                   isDark
-                    ? 'border border-white/80 bg-white text-black hover:bg-zinc-200'
-                    : 'border border-black bg-black text-white hover:bg-zinc-800'
-                } ${isRefreshing || !isOnline ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+                    ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
+                    : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
+                } ${isRefreshing || !isOnline ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
               >
                 <RefreshCw
                   size={20}
@@ -1371,7 +1368,7 @@ export const IntegrationsPage: React.FC = () => {
 
         {/* Error State */}
         {error && (
-          <motion.div variants={pageMotionItem} className={`p-4 rounded-xl mb-6 ${isDark ? 'bg-red-500/10 border border-red-500/20' : 'bg-red-50 border border-red-200'}`}>
+          <motion.div variants={pageMotionItem} className={`p-4 rounded-2xl mb-6 ${isDark ? 'bg-red-500/10 border border-red-500/20' : 'bg-red-50 border border-red-200'}`}>
             <div className="flex items-center gap-3">
               <AlertCircle className="text-red-500" size={20} />
               <div>
@@ -1388,7 +1385,7 @@ export const IntegrationsPage: React.FC = () => {
 
         {/* Empty State */}
         {groupedIntegrations.length === 0 && !error && (
-          <motion.div variants={pageMotionItem} className={`text-center py-12 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+          <motion.div variants={pageMotionItem} className={`text-center py-12 rounded-2xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
             <Plug size={48} className={`mx-auto mb-4 ${isDark ? 'text-zinc-600' : 'text-gray-400'}`} />
             <h3 className={`text-lg font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('integrations.empty.title', 'No purchased plugins')}
@@ -1427,12 +1424,12 @@ export const IntegrationsPage: React.FC = () => {
         >
         <div className="space-y-4">
             {saveMyDataAction.disabled && (
-              <div className={`rounded-lg p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+              <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
                 {saveMyDataAction.message}
               </div>
             )}
             {myDataConfigError && (
-              <div className={`rounded-lg p-3 text-sm ${
+              <div className={`rounded-2xl p-3 text-sm ${
                 isMyDataMissing
                   ? (isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700')
                   : (isDark ? 'bg-red-500/10 text-red-300' : 'bg-red-50 text-red-700')
@@ -1446,7 +1443,7 @@ export const IntegrationsPage: React.FC = () => {
               </div>
             )}
 
-          <div className={`rounded-lg p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
+          <div className={`rounded-2xl p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
             <div className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('integrations.mydata.currentSetup', 'Current setup')}
             </div>
@@ -1554,11 +1551,11 @@ export const IntegrationsPage: React.FC = () => {
             {activePlugin && (
               <>
                 {saveAction.disabled && (
-                  <div className={`rounded-lg p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+                  <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
                     {saveAction.message}
                   </div>
                 )}
-                <div className={`rounded-lg p-3 text-xs ${isDark ? 'bg-white/5 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+                <div className={`rounded-2xl p-3 text-xs ${isDark ? 'bg-white/5 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
                   {t('integrations.credentialsHelp', 'Enter the credentials provided by the platform. Leave fields blank to keep existing values.')}
                 </div>
 
@@ -1651,7 +1648,7 @@ export const IntegrationsPage: React.FC = () => {
                       )}
 
                       {(config.supportsAutoAccept || config.supportsPrepMinutes) && (
-                        <div className={`rounded-lg p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
+                        <div className={`rounded-2xl p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
                           <div className="flex items-center justify-between mb-3">
                             <div className="text-sm font-medium">
                               {t('integrations.autoAccept', 'Auto-accept orders')}
@@ -1676,7 +1673,7 @@ export const IntegrationsPage: React.FC = () => {
                         </div>
                       )}
 
-                      <div className={`rounded-lg p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
+                      <div className={`rounded-2xl p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
                         <div className="space-y-1 mb-3">
                           <div className="text-sm font-medium">
                             {t('integrations.routingTitle', 'Order routing')}
@@ -1727,7 +1724,7 @@ export const IntegrationsPage: React.FC = () => {
                       </div>
 
                       {(config.supportsMenuSync || config.supportsAvailabilitySync || config.supportsProductSync || config.supportsOrderSync || config.supportsInventorySync) && (
-                        <div className={`rounded-lg p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
+                        <div className={`rounded-2xl p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
                           <div className="text-sm font-medium mb-2">{t('integrations.syncOptions', 'Sync Options')}</div>
                           {config.supportsMenuSync && (
                             <label className="flex items-center gap-2 text-xs mb-2">

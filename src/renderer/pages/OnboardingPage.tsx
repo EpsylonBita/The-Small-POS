@@ -89,13 +89,13 @@ const OnboardingPage: React.FC = () => {
             initial="hidden"
             animate="show"
             variants={pageMotionContainer}
-            className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4 text-white"
+            className="flex h-full min-h-0 flex-col items-center justify-center bg-slate-900 p-4 text-white"
         >
-            <motion.div variants={pageMotionItem} className="w-full max-w-md bg-slate-800 rounded-2xl shadow-2xl p-8 border border-slate-700">
+            <motion.div variants={pageMotionItem} className="w-full max-w-md bg-slate-800 rounded-3xl shadow-2xl p-8 border border-slate-700">
 
                 {/* Header */}
                 <motion.div variants={pageMotionItem} className="text-center mb-8">
-                    <h1 className="text-3xl font-bold mb-2 text-blue-400">{t('onboarding.title', { defaultValue: 'POS Terminal Setup' })}</h1>
+                    <h1 className="text-3xl font-bold mb-2 text-yellow-300">{t('onboarding.title', { defaultValue: 'POS Terminal Setup' })}</h1>
                     <p className="text-slate-400">{t('onboarding.step', { defaultValue: 'Step {{current}} of {{total}}', current: step, total: 2 })}</p>
                 </motion.div>
 
@@ -107,9 +107,9 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('en')}
-                                className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'en'
-                                    ? 'border-blue-500 bg-blue-500/10 text-blue-400'
-                                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
+                                className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'en'
+                                    ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
+                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.english', { defaultValue: 'English' })}</span>
@@ -118,9 +118,9 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('el')}
-                                className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'el'
-                                    ? 'border-blue-500 bg-blue-500/10 text-blue-400'
-                                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
+                                className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'el'
+                                    ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
+                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.greek', { defaultValue: 'Greek' })}</span>
@@ -129,9 +129,9 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('de')}
-                                className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'de'
-                                    ? 'border-blue-500 bg-blue-500/10 text-blue-400'
-                                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
+                                className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'de'
+                                    ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
+                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.german', { defaultValue: 'Deutsch' })}</span>
@@ -140,20 +140,20 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('fr')}
-                                className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'fr'
-                                    ? 'border-blue-500 bg-blue-500/10 text-blue-400'
-                                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
+                                className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'fr'
+                                    ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
+                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
                                     }`}
                             >
-                                <span className="text-lg font-medium">{t('onboarding.language.french', { defaultValue: 'Français' })}</span>
+                                <span className="text-lg font-medium">{t('onboarding.language.french', { defaultValue: 'Fran\u00e7ais' })}</span>
                                 {language === 'fr' && <Check className="w-4 h-4" aria-hidden="true" />}
                             </motion.button>
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('it')}
-                                className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'it'
-                                    ? 'border-blue-500 bg-blue-500/10 text-blue-400'
-                                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
+                                className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'it'
+                                    ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
+                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.italian', { defaultValue: 'Italiano' })}</span>
@@ -176,7 +176,7 @@ const OnboardingPage: React.FC = () => {
                             <textarea
                                 value={connectionString}
                                 onChange={(e) => setConnectionString(e.target.value)}
-                                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all font-mono text-sm"
+                                className="w-full bg-slate-900 border border-slate-600 rounded-2xl px-4 py-3 text-white focus:ring-2 focus:ring-yellow-400 focus:border-transparent outline-none transition-all font-mono text-sm"
                                 placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste connection string here...' })}
                                 rows={3}
                                 required
@@ -184,7 +184,7 @@ const OnboardingPage: React.FC = () => {
                         </motion.div>
 
                         {error && (
-                            <motion.div variants={pageMotionItem} className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+                            <motion.div variants={pageMotionItem} className="p-3 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-sm">
                                 {error}
                             </motion.div>
                         )}
@@ -194,7 +194,7 @@ const OnboardingPage: React.FC = () => {
                                 variants={pageMotionItem}
                                 type="button"
                                 onClick={() => setStep(1)}
-                                className="flex-1 px-4 py-3 rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
+                                className="flex-1 px-4 py-3 rounded-2xl border border-slate-600 text-slate-300 bg-slate-900/40 transition-transform duration-150 active:scale-[0.98] active:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400"
                                 disabled={isSubmitting}
                             >
                                 {t('common.back', { defaultValue: 'Back' })}
@@ -203,7 +203,7 @@ const OnboardingPage: React.FC = () => {
                                 variants={pageMotionItem}
                                 type="submit"
                                 disabled={isSubmitting}
-                                className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-medium py-3 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+                                className="flex-1 bg-yellow-400 text-black font-semibold py-3 px-4 rounded-2xl transition-transform duration-150 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300"
                             >
                                 {isSubmitting ? (
                                     <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -216,7 +216,7 @@ const OnboardingPage: React.FC = () => {
                 )}
             </motion.div>
 
-            <motion.div variants={pageMotionItem} className="w-full max-w-md mt-4 bg-slate-800 rounded-2xl shadow-2xl p-6 border border-slate-700">
+            <motion.div variants={pageMotionItem} className="w-full max-w-md mt-4 bg-slate-800 rounded-3xl shadow-2xl p-6 border border-slate-700">
                 <RecoveryPanel compact />
             </motion.div>
 

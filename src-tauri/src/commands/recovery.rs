@@ -1014,11 +1014,12 @@ pub async fn recovery_execute_action(
                 || stats.remaining_parent_wait_blockers > 0
             {
                 return Err(format!(
-                    "Order replay repair retried {} parent insert row(s), {} update row(s), repaired {} parent link(s), and quarantined {} stale parent-wait row(s), but {} parent insert row(s) still fail, {} order update row(s) still fail, and {} row(s) still wait for a parent remote order. Last parent insert error: {} Last order error: {}{}",
+                    "Order replay repair retried {} parent insert row(s), {} update row(s), repaired {} parent link(s), quarantined {} stale parent-wait row(s), and force-requeued {} settled table close row(s), but {} parent insert row(s) still fail, {} order update row(s) still fail, and {} row(s) still wait for a parent remote order. Last parent insert error: {} Last order error: {}{}",
                     stats.requeued_parent_order_inserts,
                     stats.requeued_orders,
                     stats.repaired_parent_orders,
                     stats.quarantined_stale_parent_wait_orders,
+                    stats.forced_table_session_closes,
                     stats.remaining_parent_order_inserts,
                     stats.remaining_order_blockers,
                     stats.remaining_parent_wait_blockers,
@@ -1043,12 +1044,13 @@ pub async fn recovery_execute_action(
                 "success": true,
                 "requiresRefresh": true,
                 "message": format!(
-                    "Order replay repair requeued {} parent insert row(s), attached {} parent remote order link(s), requeued {} parent-wait row(s), quarantined {} stale parent-wait row(s), retried {} order update row(s). Parent pass processed {}, failed {}, conflicts {}. Update pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Payment pass processed {}, failed {}, conflicts {}.",
+                    "Order replay repair requeued {} parent insert row(s), attached {} parent remote order link(s), requeued {} parent-wait row(s), quarantined {} stale parent-wait row(s), retried {} order update row(s), force-requeued {} settled table close row(s). Parent pass processed {}, failed {}, conflicts {}. Update pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Payment pass processed {}, failed {}, conflicts {}. Table-close pass processed {}, failed {}, conflicts {}.",
                     stats.requeued_parent_order_inserts,
                     stats.repaired_parent_orders,
                     stats.requeued_parent_wait_orders,
                     stats.quarantined_stale_parent_wait_orders,
                     stats.requeued_orders,
+                    stats.forced_table_session_closes,
                     stats.parent_insert_pass.as_ref().map(|value| value.processed).unwrap_or(0),
                     stats.parent_insert_pass.as_ref().map(|value| value.failed).unwrap_or(0),
                     stats.parent_insert_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
@@ -1059,6 +1061,9 @@ pub async fn recovery_execute_action(
                     stats.second_pass.as_ref().map(|value| value.processed).unwrap_or(0),
                     stats.second_pass.as_ref().map(|value| value.failed).unwrap_or(0),
                     stats.second_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
+                    stats.table_session_pass.as_ref().map(|value| value.processed).unwrap_or(0),
+                    stats.table_session_pass.as_ref().map(|value| value.failed).unwrap_or(0),
+                    stats.table_session_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
                 ),
             }))
         }

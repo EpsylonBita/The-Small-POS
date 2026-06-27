@@ -54,6 +54,17 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
+  const panelClass = `w-80 rounded-3xl border p-6 shadow-2xl backdrop-blur-xl ${
+    isDark
+      ? 'border-white/10 bg-black/78 shadow-black/45'
+      : 'border-black/10 bg-white/82 shadow-black/18'
+  }`;
+  const detailCardClass = `rounded-2xl border p-3 ${
+    isDark ? 'border-white/10 bg-white/[0.06]' : 'border-black/10 bg-white/70'
+  }`;
+  const closeButtonClass = `inline-flex h-10 w-10 items-center justify-center rounded-2xl transition-transform duration-150 active:scale-95 ${
+    isDark ? 'text-gray-300 active:bg-white/10' : 'text-gray-600 active:bg-black/10'
+  }`;
 
   const [reservation, setReservation] = useState<Reservation | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -147,9 +158,9 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
 
   if (isLoading) {
     return (
-      <div className={`w-80 rounded-2xl p-6 ${isDark ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+      <div className={panelClass}>
         <div className="flex items-center justify-center py-8">
-          <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+          <Loader2 className="w-8 h-8 animate-spin text-yellow-400" />
         </div>
       </div>
     );
@@ -157,12 +168,17 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
 
   if (error || !reservation) {
     return (
-      <div className={`w-80 rounded-2xl p-6 ${isDark ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+      <div className={panelClass}>
         <div className="flex items-center justify-between mb-4">
           <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
             {t('reservationInfoPanel.title', { defaultValue: 'Table' })} #{tableNumber}
           </h3>
-          <button onClick={onClose} className={isDark ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-700'}>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t('common.actions.close', { defaultValue: 'Close' })}
+            className={closeButtonClass}
+          >
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -175,20 +191,25 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
   }
 
   return (
-    <div className={`w-80 rounded-2xl p-6 ${isDark ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+    <div className={panelClass}>
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
           {t('reservationInfoPanel.title', { defaultValue: 'Table' })} #{tableNumber}
         </h3>
-        <button onClick={onClose} className={isDark ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-700'}>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={t('common.actions.close', { defaultValue: 'Close' })}
+          className={closeButtonClass}
+        >
           <X className="w-5 h-5" />
         </button>
       </div>
 
       {/* Late Warning */}
       {isLate && (
-        <div className={`mb-4 p-3 rounded-lg flex items-center gap-2 ${
+        <div className={`mb-4 flex items-center gap-2 rounded-2xl p-3 ${
           isDark ? 'bg-red-500/20 border border-red-500/30' : 'bg-red-50 border border-red-200'
         }`}>
           <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0" />
@@ -202,10 +223,10 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
       )}
 
       {/* Reservation Number */}
-      <div className={`mb-4 px-3 py-2 rounded-lg text-center ${
-        isDark ? 'bg-blue-500/20' : 'bg-blue-50'
+      <div className={`mb-4 rounded-2xl border px-3 py-2 text-center ${
+        isDark ? 'border-yellow-400/30 bg-yellow-400/12' : 'border-yellow-500/25 bg-yellow-50'
       }`}>
-        <span className={`text-sm font-mono font-bold ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>
+        <span className={`text-sm font-mono font-bold ${isDark ? 'text-yellow-200' : 'text-yellow-800'}`}>
           {reservation.reservationNumber}
         </span>
       </div>
@@ -213,7 +234,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
       {/* Customer Info */}
       <div className="space-y-3">
         {/* Customer Name */}
-        <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+        <div className={detailCardClass}>
           <div className="flex items-center gap-2">
             <User className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
             <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -226,7 +247,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
         </div>
 
         {/* Phone */}
-        <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+        <div className={detailCardClass}>
           <div className="flex items-center gap-2">
             <Phone className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
             <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -240,7 +261,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
 
         {/* Date & Time */}
         <div className="grid grid-cols-2 gap-2">
-          <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+          <div className={detailCardClass}>
             <div className="flex items-center gap-2">
               <Calendar className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
               <span className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -251,7 +272,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
               {formatDate(reservation.reservationDate)}
             </div>
           </div>
-          <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+          <div className={detailCardClass}>
             <div className="flex items-center gap-2">
               <Clock className={`w-4 h-4 ${isLate ? 'text-red-500' : isDark ? 'text-gray-400' : 'text-gray-500'}`} />
               <span className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -265,7 +286,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
         </div>
 
         {/* Party Size */}
-        <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+        <div className={detailCardClass}>
           <div className="flex items-center gap-2">
             <Users className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
             <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -279,7 +300,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
 
         {/* Special Requests */}
         {reservation.specialRequests && (
-          <div className={`p-3 rounded-lg ${isDark ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-50 border border-yellow-200'}`}>
+          <div className={`p-3 rounded-2xl ${isDark ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-50 border border-yellow-200'}`}>
             <div className="flex items-center gap-2">
               <MessageSquare className="w-4 h-4 text-yellow-500" />
               <span className={`text-sm text-yellow-600`}>
@@ -293,12 +314,12 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
         )}
 
         {/* Status */}
-        <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+        <div className={detailCardClass}>
           <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
             {t('reservationInfoPanel.status', { defaultValue: 'Status' })}
           </div>
           <div className={`font-medium mt-1 capitalize ${
-            reservation.status === 'confirmed' ? 'text-blue-500' :
+            reservation.status === 'confirmed' ? 'text-green-500' :
             reservation.status === 'pending' ? 'text-yellow-500' :
             reservation.status === 'seated' ? 'text-green-500' :
             isDark ? 'text-white' : 'text-gray-900'
@@ -313,9 +334,10 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
         {/* Seat Guest Button - only show for confirmed/pending reservations */}
         {['confirmed', 'pending'].includes(reservation.status) && (
           <button
+            type="button"
             onClick={handleSeatGuest}
             disabled={isSeating}
-            className="w-full py-3 rounded-xl bg-green-600 text-white font-medium hover:bg-green-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-green-600 py-3 font-medium text-white transition-transform duration-150 active:scale-[0.98] active:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100"
           >
             {isSeating ? (
               <Loader2 className="w-5 h-5 animate-spin" />
@@ -329,10 +351,11 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
         {/* Cancel Reservation Button */}
         {['confirmed', 'pending'].includes(reservation.status) && (
           <button
-            className={`w-full py-2 rounded-xl transition-colors flex items-center justify-center gap-2 ${
+            type="button"
+            className={`flex w-full items-center justify-center gap-2 rounded-2xl py-2.5 transition-transform duration-150 active:scale-[0.98] ${
               isDark 
-                ? 'bg-gray-700 text-red-400 hover:bg-gray-600' 
-                : 'bg-gray-100 text-red-600 hover:bg-gray-200'
+                ? 'border border-red-400/30 bg-red-500/12 text-red-300 active:bg-red-500/20'
+                : 'border border-red-500/25 bg-red-50 text-red-700 active:bg-red-100'
             }`}
           >
             <XCircle className="w-4 h-4" />

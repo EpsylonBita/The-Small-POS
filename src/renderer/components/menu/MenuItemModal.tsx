@@ -3,9 +3,10 @@ import { toast } from 'react-hot-toast';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { menuService, MenuItem, Ingredient } from '../../services/MenuService';
-import { Ban, Check, MessageSquare, Minus, Search, ShoppingCart, X } from 'lucide-react';
+import { Ban, Check, MessageSquare, Minus, Plus, Search, ShoppingCart, X } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { renderModalPortal } from '../../utils/render-modal-portal';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -332,9 +333,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             className={`px-3.5 py-1.5 rounded-full font-semibold text-sm transition-all duration-300 ${
               isWithoutMode
                 ? 'bg-red-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.6),0_0_40px_rgba(239,68,68,0.3)] scale-105 border-2 border-red-300'
-                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent hover:bg-red-100 dark:hover:bg-red-900/30 hover:border-red-300 dark:hover:border-red-700'
+                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent active:bg-red-100 dark:active:bg-red-900/30 active:border-red-300 dark:active:border-red-700'
             }`}
-            title={t('menu.itemModal.withoutHint') || 'Mark ingredients to remove (no price change)'}
             style={{
               textRendering: 'geometricPrecision',
               WebkitFontSmoothing: 'subpixel-antialiased'
@@ -350,10 +350,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             }}
             className={`px-3.5 py-1.5 rounded-full font-semibold text-sm transition-all duration-300 ${
               isLittleMode
-                ? 'bg-orange-500 text-white shadow-[0_0_20px_rgba(249,115,22,0.6),0_0_40px_rgba(249,115,22,0.3)] scale-105 border-2 border-orange-300'
-                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent hover:bg-orange-100 dark:hover:bg-orange-900/30 hover:border-orange-300 dark:hover:border-orange-700'
+                ? 'bg-orange-500 text-white shadow-[0_0_20px_rgba(245,158,11,0.6),0_0_40px_rgba(245,158,11,0.3)] scale-105 border-2 border-orange-300'
+                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent active:bg-orange-100 dark:active:bg-orange-900/30 active:border-orange-300 dark:active:border-orange-700'
             }`}
-            title={t('menu.itemModal.littleHint')}
             style={{
               textRendering: 'geometricPrecision',
               WebkitFontSmoothing: 'subpixel-antialiased'
@@ -367,9 +366,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             className="liquid-glass-modal-button p-1.5 min-h-0 min-w-0"
             aria-label={t('common.actions.close')}
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" />
           </button>
         </div>
       </div>
@@ -383,12 +380,12 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           value={ingredientSearch}
           onChange={(e) => setIngredientSearch(e.target.value)}
           placeholder={t('menu.itemModal.searchIngredients', 'Search ingredients...')}
-          className="w-full pl-9 pr-8 py-1.5 rounded-lg bg-white/10 border border-white/20 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          className="w-full pl-9 pr-8 py-1.5 rounded-lg bg-white/10 border border-white/20 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
         />
         {ingredientSearch && (
           <button
             onClick={() => setIngredientSearch('')}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 active:text-white"
           >
             <X className="w-4 h-4" />
           </button>
@@ -399,8 +396,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         <button
           onClick={() => setActiveFlavorType('savory')}
           className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'savory'
-              ? 'border-orange-400/70 bg-orange-500 text-white shadow-[0_8px_18px_rgba(249,115,22,0.22)]'
-              : 'border-white/20 bg-white/[0.05] liquid-glass-modal-text hover:border-white/35 hover:bg-white/[0.08]'
+              ? 'border-orange-400/70 bg-orange-500 text-white shadow-[0_8px_18px_rgba(245,158,11,0.22)]'
+              : 'border-white/20 bg-white/[0.05] liquid-glass-modal-text active:border-white/35 active:bg-white/[0.08]'
             }`}
         >
           {t('menu.itemModal.savory')}
@@ -408,8 +405,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         <button
           onClick={() => setActiveFlavorType('sweet')}
           className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'sweet'
-              ? 'border-pink-400/70 bg-pink-500 text-white shadow-[0_8px_18px_rgba(236,72,153,0.22)]'
-              : 'border-white/20 bg-white/[0.05] liquid-glass-modal-text hover:border-white/35 hover:bg-white/[0.08]'
+              ? 'border-slate-300/70 bg-slate-500 text-white shadow-[0_8px_18px_rgba(82,82,91,0.22)]'
+              : 'border-white/20 bg-white/[0.05] liquid-glass-modal-text active:border-white/35 active:bg-white/[0.08]'
             }`}
         >
           {t('menu.itemModal.sweet')}
@@ -460,13 +457,13 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                   return (
                     <span
                       key={`selected-${selectedItem.ingredient.id}`}
-                      className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-blue-500/15 text-blue-700 dark:bg-blue-500/25 dark:text-blue-200 border border-blue-500/20"
+                      className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-slate-500/15 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200 border border-slate-500/20"
                     >
                       <span className="max-w-[180px] truncate">
                         + {ingredientName}
                       </span>
                       {selectedItem.quantity > 1 && (
-                        <span className="font-bold text-blue-800 dark:text-blue-100">
+                        <span className="font-bold text-slate-800 dark:text-slate-100">
                           x{selectedItem.quantity}
                         </span>
                       )}
@@ -482,8 +479,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                       )}
                       <button
                         onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
-                        className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-blue-500/20 hover:bg-blue-500/35 transition-colors"
-                        title={t('common.actions.remove')}
+                        className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-500/20 active:bg-slate-500/35 transition-colors"
                         aria-label={t('common.actions.remove')}
                       >
                         <X className="w-3 h-3" />
@@ -503,8 +499,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                     </span>
                     <button
                       onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
-                      className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-red-500/20 hover:bg-red-500/35 transition-colors"
-                      title={t('common.actions.remove')}
+                      className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-red-500/20 active:bg-red-500/35 transition-colors"
                       aria-label={t('common.actions.remove')}
                     >
                       <X className="w-3 h-3" />
@@ -521,18 +516,20 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={() => setQuantity(Math.max(1, quantity - 1))}
-            className="liquid-glass-modal-button w-9 h-9 rounded-full flex items-center justify-center text-base font-bold text-white/95"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-white/45 bg-white/20 text-white shadow-[0_0_0_1px_rgba(255,255,255,0.12)] transition-colors active:bg-white/35"
+            aria-label={t('common.actions.decrease', { defaultValue: 'Decrease quantity' })}
           >
-            <Minus className="w-5 h-5" strokeWidth={3} />
+            <Minus className="h-5 w-5 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]" strokeWidth={3.5} aria-hidden="true" />
           </button>
           <span className="text-lg font-bold liquid-glass-modal-text min-w-[1.75rem] text-center">
             {quantity}
           </span>
           <button
             onClick={() => setQuantity(quantity + 1)}
-            className="liquid-glass-modal-button w-9 h-9 rounded-full flex items-center justify-center text-base font-bold"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-white/45 bg-white/20 text-white shadow-[0_0_0_1px_rgba(255,255,255,0.12)] transition-colors active:bg-white/35"
+            aria-label={t('common.actions.increase', { defaultValue: 'Increase quantity' })}
           >
-            +
+            <Plus className="h-5 w-5 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]" strokeWidth={3.5} aria-hidden="true" />
           </button>
         </div>
 
@@ -554,9 +551,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
       <button
         onClick={handleAddToCart}
-        className={`liquid-glass-modal-button w-full py-3 rounded-xl font-bold text-base shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98 ${isEditMode
-            ? 'liquid-glass-modal-warning'
-            : 'liquid-glass-modal-success shadow-[0_0_24px_rgba(34,197,94,0.24)] hover:shadow-[0_0_32px_rgba(34,197,94,0.32)]'
+        className={`liquid-glass-modal-button w-full py-3 rounded-xl font-bold text-base shadow-lg transition-all duration-200 transform active:scale-98 flex items-center justify-center ${isEditMode
+            ? 'liquid-glass-modal-success'
+            : 'liquid-glass-modal-success shadow-[0_0_24px_rgba(34,197,94,0.24)]'
           }`}
       >
         {isEditMode ? (
@@ -591,8 +588,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           <div className="space-y-4">
                   {Object.keys(filteredByColor).length === 0 ? (
                     <div className="text-center py-8 liquid-glass-modal-text-muted">
-                      <p>No ingredients available for this filter.</p>
-                      <p className="text-sm mt-2">Try selecting "All" to see all ingredients.</p>
+                      <p>{t('menu.itemModal.noIngredientsForFilter', { defaultValue: 'No ingredients available for this filter.' })}</p>
+                      <p className="text-sm mt-2">{t('menu.itemModal.noIngredientsForFilterHint', { all: t('menu.itemModal.all', { defaultValue: 'All' }), defaultValue: 'Try selecting "{{all}}" to see all ingredients.' })}</p>
                     </div>
                   ) : (
                     Object.entries(filteredByColor).map(([color, ingredients]) => {
@@ -638,7 +635,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                     ? isWithout
                                       ? 'border-red-400 shadow-lg scale-[1.02]'
                                       : 'shadow-lg scale-[1.02]'
-                                    : 'hover:scale-[1.01]'
+                                    : 'active:scale-[0.98]'
                                   }`}
                                 style={{
                                   backgroundColor: isSelected
@@ -671,7 +668,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       {isWithout && <Ban className="w-3 h-3 inline-block mr-1 text-red-400" aria-hidden="true" />}
                                       {getIngredientName(ingredient)}
                                       {isLittle && isSelected && !isWithout && (
-                                        <span className="ml-1 text-xs text-blue-400 font-medium">({t('menu.itemModal.little')})</span>
+                                        <span className="ml-1 text-xs text-orange-400 font-medium">({t('menu.itemModal.little')})</span>
                                       )}
                                     </span>
                                     {getIngredientUnitPrice(ingredient) > 0 && !isWithout && (
@@ -706,7 +703,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       style={{
                                         backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.15)',
                                       }}
-                                      title={t('common.actions.decrease')}
+                                      aria-label={t('common.actions.decrease')}
                                     >
                                       <Minus className={`w-4 h-4 ${resolvedTheme === 'dark' ? 'text-white' : 'text-slate-900'}`} />
                                     </button>
@@ -733,7 +730,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       style={{
                                         backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.15)',
                                       }}
-                                      title={t('common.actions.increase')}
+                                      aria-label={t('common.actions.increase')}
                                     >
                                       <span style={{ color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b', fontWeight: 700, fontSize: '16px', textShadow: '0 1px 2px rgba(0,0,0,0.2)' }}>+</span>
                                     </button>
@@ -745,8 +742,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       e.stopPropagation();
                                       handleIngredientToggle(ingredient, false);
                                     }}
-                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full bg-red-500/40 hover:bg-red-500/60 flex items-center justify-center transition-all"
-                                    title={t('common.actions.remove')}
+                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full bg-red-500/40 active:bg-red-500/60 flex items-center justify-center transition-all"
+                                    aria-label={t('common.actions.remove')}
                                   >
                                     <X className="w-4 h-4 text-white" />
                                   </button>
@@ -757,11 +754,11 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       e.stopPropagation();
                                       handleIngredientToggle(ingredient, true);
                                     }}
-                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center transition-all touch-feedback opacity-70 hover:opacity-100"
+                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center transition-all touch-feedback opacity-70 active:opacity-100"
                                     style={{
                                       backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.1)',
                                     }}
-                                    title={t('common.actions.add')}
+                                    aria-label={t('common.actions.add')}
                                   >
                                     <span style={{ color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b', fontWeight: 700, fontSize: '16px' }}>+</span>
                                   </button>
@@ -778,9 +775,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         </div>
 
         {/* Notes overlay */}
-        {showNotesOverlay && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-2xl">
-            <div className="bg-gray-900/95 border border-white/15 rounded-xl p-5 mx-6 max-w-md w-full shadow-2xl">
+        {showNotesOverlay && renderModalPortal(
+          <div className="fixed inset-0 z-[20050] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <div className="bg-black/40 backdrop-blur-2xl border border-white/20 rounded-3xl p-5 mx-6 max-w-md w-full shadow-2xl">
               <h3 className="text-sm font-semibold text-white mb-3">
                 {t('menu.itemModal.specialInstructions')}
               </h3>
@@ -789,10 +786,22 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                 onChange={(e) => setNotes(e.target.value)}
                 onClick={(e) => e.stopPropagation()}
                 onFocus={(e) => e.stopPropagation()}
-                onKeyDown={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  // Escape closes ONLY the notes overlay. The textarea otherwise swallows
+                  // key events (stopPropagation, below) so Escape never reaches the parent;
+                  // handle it here and stop it so the item-customization / order-entry
+                  // modals behind the overlay stay open.
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowNotesOverlay(false);
+                    return;
+                  }
+                  e.stopPropagation();
+                }}
                 onKeyUp={(e) => e.stopPropagation()}
                 onKeyPress={(e) => e.stopPropagation()}
-                className="w-full p-3 rounded-xl bg-black/30 border border-white/10 focus:ring-2 focus:ring-blue-500 transition-all resize-none text-sm text-white placeholder:text-gray-500 pointer-events-auto cursor-text"
+                className="w-full p-3 rounded-xl bg-black/30 border border-white/10 focus:ring-2 focus:ring-amber-400 transition-all resize-none text-sm text-white placeholder:text-gray-500 pointer-events-auto cursor-text"
                 rows={3}
                 placeholder={t('menu.itemModal.specialInstructionsPlaceholder')}
                 autoFocus
@@ -800,7 +809,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               <div className="flex gap-2 justify-end mt-3">
                 <button
                   onClick={() => setShowNotesOverlay(false)}
-                  className="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+                  className="px-4 py-2 text-sm font-semibold rounded-lg bg-amber-500 active:bg-amber-600 text-black transition-colors"
                 >
                   {t('common.actions.done', { defaultValue: 'Done' })}
                 </button>

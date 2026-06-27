@@ -144,7 +144,7 @@ const CheckingState: React.FC = () => {
   const { t } = useI18n();
   return (
     <div className="flex flex-col items-center justify-center py-8 space-y-4">
-      <div className="w-12 h-12 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+      <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin" />
       <p className="text-gray-300 text-center">
         {t('updates.checking')}
       </p>
@@ -172,7 +172,7 @@ const AvailableState: React.FC<AvailableStateProps> = ({
   return (
     <div className="space-y-4">
       {/* Version info header */}
-      <div className="flex items-center space-x-3 text-cyan-400">
+      <div className="flex items-center space-x-3 text-amber-300">
         <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path
             strokeLinecap="round"
@@ -200,7 +200,7 @@ const AvailableState: React.FC<AvailableStateProps> = ({
 
       {/* Release notes */}
       {releaseNotes && (
-        <div className="bg-black/20 rounded-lg p-4 max-h-48 overflow-y-auto">
+        <div className="bg-black/20 rounded-2xl p-4 max-h-48 overflow-y-auto">
           <h4 className="text-sm font-semibold text-gray-300 mb-2">{t('updates.available.whatsNew')}</h4>
           <div
             className="text-sm text-gray-400 prose prose-invert prose-sm"
@@ -254,26 +254,26 @@ const DownloadingState: React.FC<DownloadingStateProps> = ({
       {/* Progress bar */}
       <div className="relative w-full h-4 bg-gray-700 rounded-full overflow-hidden">
         <div
-          className="absolute top-0 left-0 h-full bg-cyan-500 transition-all duration-300 ease-out"
+          className="absolute top-0 left-0 h-full bg-amber-400 transition-all duration-300 ease-out"
           style={{ width: `${percent}%` }}
         />
       </div>
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 gap-4 text-sm">
-        <div className="bg-white/5 p-3 rounded-lg">
+        <div className="bg-white/5 p-3 rounded-2xl">
           <span className="block text-gray-400">{t('updates.downloading.progress')}</span>
           <span className="block text-xl font-bold text-white">
             {percent.toFixed(0)}%
           </span>
         </div>
-        <div className="bg-white/5 p-3 rounded-lg">
+        <div className="bg-white/5 p-3 rounded-2xl">
           <span className="block text-gray-400">{t('updates.downloading.speed')}</span>
           <span className="block text-xl font-bold text-white">
             {speed.toFixed(1)} MB/s
           </span>
         </div>
-        <div className="col-span-2 bg-white/5 p-3 rounded-lg">
+        <div className="col-span-2 bg-white/5 p-3 rounded-2xl">
           <span className="block text-gray-400">{t('updates.downloading.downloaded')}</span>
           <span className="block text-xl font-bold text-white">
             {transferred.toFixed(1)} / {total.toFixed(1)} MB
@@ -353,7 +353,7 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
       </p>
 
       {/* Warning note */}
-      <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-sm text-yellow-200">
+      <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-3 text-sm text-yellow-200">
         {t('updates.downloaded.warning')}
       </div>
 
@@ -362,14 +362,14 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
         <button
           type="button"
           onClick={handleInstall}
-          className="w-full px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold transition-colors cursor-pointer"
+          className="w-full min-h-12 rounded-2xl bg-green-600 px-6 py-3 font-bold text-white transition-transform active:scale-[0.98] active:bg-green-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300/80"
         >
           {t('updates.actions.installNow')}
         </button>
         <button
           type="button"
           onClick={handleClose}
-          className="w-full px-6 py-3 bg-gray-600 hover:bg-gray-700 text-white rounded-xl transition-colors cursor-pointer"
+          className="w-full min-h-12 rounded-2xl bg-gray-600 px-6 py-3 font-semibold text-white transition-transform active:scale-[0.98] active:bg-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
         >
           {t('updates.actions.installLater')}
         </button>
@@ -462,7 +462,7 @@ const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion, 
     <div className="space-y-6 text-center">
       {/* Check icon */}
       <div className="flex justify-center mb-4">
-        <div className="w-16 h-16 bg-cyan-500/20 rounded-full flex items-center justify-center text-cyan-400">
+        <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center text-green-400">
           <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path
               strokeLinecap="round"
@@ -482,7 +482,7 @@ const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion, 
 
       {/* Current version display */}
       {currentVersion && (
-        <div className="bg-white/5 rounded-lg p-3">
+        <div className="bg-white/5 rounded-2xl p-3">
           <span className="text-sm text-gray-400">{t('updates.upToDate.currentVersion', { version: currentVersion })}</span>
         </div>
       )}

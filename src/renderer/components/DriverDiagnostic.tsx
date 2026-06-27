@@ -98,19 +98,19 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
           <div className="space-y-4">
             {/* Summary */}
             <div className="grid grid-cols-4 gap-4">
-              <div className="bg-blue-500/10 border border-blue-400/20 rounded-lg p-3">
+              <div className="bg-blue-500/10 border border-blue-400/20 rounded-2xl p-3">
                 <div className="text-2xl font-bold text-white">{result.total}</div>
                 <div className="text-sm text-white/60">Total Delivered</div>
               </div>
-              <div className="bg-green-500/10 border border-green-400/20 rounded-lg p-3">
+              <div className="bg-green-500/10 border border-green-400/20 rounded-2xl p-3">
                 <div className="text-2xl font-bold text-green-400">{result.withDriver}</div>
                 <div className="text-sm text-white/60">With Driver</div>
               </div>
-              <div className="bg-red-500/10 border border-red-400/20 rounded-lg p-3">
+              <div className="bg-red-500/10 border border-red-400/20 rounded-2xl p-3">
                 <div className="text-2xl font-bold text-red-400">{result.withoutDriver}</div>
                 <div className="text-sm text-white/60">Missing Driver</div>
               </div>
-              <div className="bg-purple-500/10 border border-purple-400/20 rounded-lg p-3">
+              <div className="bg-purple-500/10 border border-purple-400/20 rounded-2xl p-3">
                 <div className="text-2xl font-bold text-purple-400">{result.earningsCount}</div>
                 <div className="text-sm text-white/60">Driver Earnings</div>
               </div>
@@ -118,7 +118,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
 
             {/* Driver Selection */}
             {result.withoutDriver > 0 && (
-              <div className="bg-yellow-500/10 border border-yellow-400/20 rounded-lg p-4">
+              <div className="bg-yellow-500/10 border border-yellow-400/20 rounded-2xl p-4">
                 <h3 className="text-lg font-semibold text-white mb-3">
                   Fix Missing Driver Assignments
                 </h3>

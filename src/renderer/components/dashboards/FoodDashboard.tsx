@@ -60,7 +60,7 @@ export const FoodDashboard = memo<FoodDashboardProps>(({ className = '' }) => {
 
   return (
     <div
-      className={`p-4 md:p-6 space-y-4 md:space-y-6 ${className}`}
+      className={`flex h-full min-h-0 flex-col gap-4 overflow-hidden p-4 md:gap-6 md:p-6 ${className}`}
       data-testid="food-dashboard"
       data-business-category="food"
     >

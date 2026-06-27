@@ -31,3 +31,6 @@ npm-debug.log*
 
 # TypeScript
 *.tsbuildinfo
+
+# Local QA scratch (screenshots, CDP probe scripts, crawl reports) — not source
+.hermes/

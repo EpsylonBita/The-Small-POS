@@ -115,7 +115,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
       className="!max-w-[400px] max-h-[calc(100dvh-1.5rem)]"
       contentClassName="space-y-3"
     >
-      <div className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-emerald-950 shadow-sm shadow-emerald-950/5 dark:text-emerald-50">
+      <div className="rounded-2xl border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-emerald-950 shadow-sm shadow-emerald-950/5 dark:text-emerald-50">
         <div className="flex items-start gap-3">
           <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white">
             <ShieldCheck size={16} aria-hidden="true" />
@@ -133,7 +133,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
 
       <div
         aria-label={t('auth.login.pinEntry', 'PIN entry')}
-        className="rounded-lg border border-slate-300 bg-white p-3 text-center shadow-inner dark:border-white/15 dark:bg-slate-950/80"
+        className="rounded-2xl border border-slate-300 bg-white p-3 text-center shadow-inner dark:border-white/15 dark:bg-slate-950/80"
       >
         <div className="mb-2 flex items-center justify-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
           <LockKeyhole size={16} aria-hidden="true" />
@@ -163,7 +163,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
       {error && (
         <div
           role="alert"
-          className="rounded-lg border border-red-400/50 bg-red-500/10 px-3 py-2 text-center text-sm font-semibold text-red-700 dark:text-red-200"
+          className="rounded-2xl border border-red-400/50 bg-red-500/10 px-3 py-2 text-center text-sm font-semibold text-red-700 dark:text-red-200"
         >
           {error}
         </div>
@@ -176,7 +176,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
             type="button"
             onClick={() => handleNumber(n)}
             disabled={loading}
-            className="min-h-[48px] rounded-lg border border-slate-300 bg-white text-lg font-semibold text-slate-950 shadow-sm transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white dark:hover:bg-slate-800"
+            className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-lg font-semibold text-slate-950 shadow-sm transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white"
           >
             {n}
           </button>
@@ -185,7 +185,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           type="button"
           onClick={handleClear}
           disabled={loading || !pin}
-          className="min-h-[48px] rounded-lg border border-slate-300 bg-white px-2 text-sm font-semibold text-slate-800 shadow-sm transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white px-2 text-center text-sm font-semibold text-slate-800 shadow-sm transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100"
         >
           {t('common.clear', 'Clear')}
         </button>
@@ -193,7 +193,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           type="button"
           onClick={() => handleNumber('0')}
           disabled={loading}
-          className="min-h-[48px] rounded-lg border border-slate-300 bg-white text-lg font-semibold text-slate-950 shadow-sm transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white dark:hover:bg-slate-800"
+          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-lg font-semibold text-slate-950 shadow-sm transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white"
         >
           0
         </button>
@@ -202,9 +202,9 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           onClick={handleBack}
           disabled={loading || !pin}
           aria-label={t('common.actions.backspace', 'Backspace')}
-          className="flex min-h-[48px] items-center justify-center rounded-lg border border-slate-300 bg-white text-slate-800 shadow-sm transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-slate-800 shadow-sm transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100"
         >
-          <DeleteIcon size={20} aria-hidden="true" />
+          <DeleteIcon size={20} className="shrink-0" aria-hidden="true" />
         </button>
       </div>
 
@@ -212,7 +212,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
         type="button"
         onClick={handleSubmit}
         disabled={!pin || loading}
-        className="min-h-[48px] w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 dark:disabled:bg-slate-700 dark:disabled:text-slate-300"
+        className="inline-flex min-h-[48px] w-full items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-center text-base font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 dark:disabled:bg-slate-700 dark:disabled:text-slate-300"
       >
         {loading
           ? t('auth.login.loading')

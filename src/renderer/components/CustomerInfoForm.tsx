@@ -1,7 +1,9 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
 import { useTheme } from "../contexts/theme-context";
-import { Package, Truck, Utensils } from "lucide-react";
+import { Truck } from "lucide-react";
+import TableOrderIcon from "./icons/TableOrderIcon";
+import PickupOrderIcon from "./icons/PickupOrderIcon";
 
 interface CustomerInfo {
   name: string;
@@ -46,7 +48,22 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
   addressValid,
 }) => {
   const { t } = useTranslation();
-  const { theme, resolvedTheme } = useTheme();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
+  const inputClass = `w-full rounded-2xl border px-3 py-3 transition-colors duration-150 backdrop-blur-sm ${
+    isDark
+      ? 'border-white/12 bg-black/25 text-white placeholder-white/45 focus:border-yellow-400/80 focus:bg-black/35'
+      : 'border-black/12 bg-white/65 text-gray-950 placeholder-gray-500 focus:border-yellow-500 focus:bg-white/90'
+  } focus:outline-none focus:ring-2 focus:ring-yellow-400/40`;
+  const orderTypeCardClass = (type: "dine-in" | "pickup" | "delivery") => `rounded-2xl border p-4 text-center backdrop-blur-sm transition-transform duration-150 ${
+    orderType === type
+      ? isDark
+        ? 'border-yellow-400 bg-yellow-400/16 text-yellow-200'
+        : 'border-yellow-500 bg-yellow-50 text-yellow-800'
+      : isDark
+        ? 'border-white/12 bg-black/25 text-gray-300 active:border-white/20 active:bg-black/35'
+        : 'border-black/10 bg-white/55 text-gray-700 active:border-black/15 active:bg-white/75'
+  } active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-yellow-400/40`;
 
   const handleAddressChange = (field: string, value: string) => {
     setCustomerInfo((prev) => ({
@@ -83,18 +100,13 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
           {(["dine-in", "pickup", "delivery"] as const).map((type) => (
             <button
               key={type}
+              type="button"
               onClick={() => setOrderType(type)}
-              className={`p-4 border rounded-lg text-center transition-all duration-300 backdrop-blur-sm ${
-                orderType === type
-                  ? "border-blue-500 bg-blue-50 text-blue-700"
-                  : resolvedTheme === 'dark'
-                    ? "border-gray-600/50 bg-gray-700/30 text-gray-300 hover:border-gray-500/70 hover:bg-gray-700/50"
-                    : "border-gray-200 bg-white/50 text-gray-700 hover:border-gray-300 hover:bg-white/70"
-              } hover:scale-[1.02] transform focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+              className={orderTypeCardClass(type)}
             >
               <div className="text-2xl mb-2 flex items-center justify-center">
-                {type === "dine-in" && <Utensils className="w-6 h-6" />}
-                {type === "pickup" && <Package className="w-6 h-6" />}
+                {type === "dine-in" && <TableOrderIcon className="w-6 h-6" />}
+                {type === "pickup" && <PickupOrderIcon className="w-6 h-6" />}
                 {type === "delivery" && <Truck className="w-6 h-6" />}
               </div>
               <div className="font-medium capitalize">
@@ -128,11 +140,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
                 setCustomerInfo((prev) => ({ ...prev, name: e.target.value }))
               }
               placeholder={t('forms.customerInfo.customerNamePlaceholder')}
-              className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-                resolvedTheme === 'dark'
-                  ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                  : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-              } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+              className={inputClass}
               required
             />
           </div>
@@ -150,11 +158,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
                 setCustomerInfo((prev) => ({ ...prev, phone: e.target.value }))
               }
               placeholder={t('forms.customerInfo.phoneNumberPlaceholder')}
-              className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-                resolvedTheme === 'dark'
-                  ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                  : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-              } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+              className={inputClass}
               required
             />
           </div>
@@ -172,11 +176,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
                 setCustomerInfo((prev) => ({ ...prev, email: e.target.value }))
               }
               placeholder={t('forms.customerInfo.emailAddressPlaceholder')}
-              className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-                resolvedTheme === 'dark'
-                  ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                  : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-              } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+              className={inputClass}
             />
           </div>
         </div>
@@ -199,11 +199,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
               value={tableNumber}
               onChange={(e) => setTableNumber(e.target.value)}
               placeholder={t('forms.tableInfo.tableNumberPlaceholder')}
-              className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-                resolvedTheme === 'dark'
-                  ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                  : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-              } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+              className={inputClass}
               required
             />
           </div>
@@ -228,11 +224,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
                 value={customerInfo.address?.street || ""}
                 onChange={(e) => handleAddressChange("street", e.target.value)}
                 placeholder={t('forms.deliveryAddress.streetAddressPlaceholder')}
-                className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-                  resolvedTheme === 'dark'
-                    ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                    : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-                } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+                className={inputClass}
                 required
               />
             </div>
@@ -249,11 +241,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
                   value={customerInfo.address?.city || ""}
                   onChange={(e) => handleAddressChange("city", e.target.value)}
                   placeholder={t('forms.deliveryAddress.cityPlaceholder')}
-                  className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-                    resolvedTheme === 'dark'
-                      ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                      : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-                  } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+                  className={inputClass}
                   required
                 />
               </div>
@@ -271,11 +259,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
                     handleAddressChange("postalCode", e.target.value)
                   }
                   placeholder={t('forms.deliveryAddress.postalCodePlaceholder')}
-                  className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm ${
-                    resolvedTheme === 'dark'
-                      ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-                      : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-                  } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+                  className={inputClass}
                 />
               </div>
             </div>
@@ -283,20 +267,21 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
             {/* Address Validation */}
             <div className="flex items-center space-x-4">
               <button
+                type="button"
                 onClick={handleValidateAddress}
                 disabled={
                   isValidatingAddress ||
                   !customerInfo.address?.street ||
                   !customerInfo.address?.city
                 }
-                className={`px-4 py-2 rounded-md font-medium transition-all duration-300 backdrop-blur-sm ${
+                className={`rounded-2xl px-4 py-3 font-semibold transition-transform duration-150 backdrop-blur-sm active:scale-[0.98] ${
                   isValidatingAddress ||
                   !customerInfo.address?.street ||
                   !customerInfo.address?.city
                     ? resolvedTheme === 'dark'
                       ? "bg-gray-500/20 border border-gray-500/30 text-gray-400 cursor-not-allowed"
                       : "bg-gray-400/20 border border-gray-400/30 text-gray-500 cursor-not-allowed"
-                    : "bg-blue-600/80 text-white hover:bg-blue-600/90 border border-blue-500/50 hover:border-blue-400/70"
+                    : "bg-yellow-400 text-black active:bg-yellow-500 border border-yellow-500/50 active:border-yellow-400/70"
                 }`}
               >
                 {isValidatingAddress ? (
@@ -330,7 +315,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
             </div>
 
             {/* Delivery Zone Warning */}
-            <div className={`border rounded-md p-4 backdrop-blur-sm ${
+            <div className={`border rounded-2xl p-4 backdrop-blur-sm ${
               resolvedTheme === 'dark'
                 ? 'bg-yellow-900/20 border-yellow-700/50'
                 : 'bg-yellow-50/80 border-yellow-200/70'
@@ -375,11 +360,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
           onChange={(e) => setSpecialInstructions(e.target.value)}
           placeholder={t('forms.specialInstructions.placeholder')}
           rows={4}
-          className={`w-full px-3 py-2 border rounded-md transition-all duration-200 backdrop-blur-sm resize-none ${
-            resolvedTheme === 'dark'
-              ? 'bg-gray-700/50 border-gray-600/50 text-white placeholder-gray-400 focus:border-blue-400/70 focus:bg-gray-700/70'
-              : 'bg-white/70 border-gray-300 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:bg-white/90'
-          } focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+          className={`${inputClass} resize-none`}
         />
       </div>
 

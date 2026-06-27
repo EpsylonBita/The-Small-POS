@@ -112,9 +112,9 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
     <div className={`relative ${className}`}>
       {/* Badge Button */}
       <button
-        className={`group relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-all duration-200 hover:bg-white/10 ${getBadgeColors()}`}
+        className={`group relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-all duration-200 active:bg-white/10 ${getBadgeColors()}`}
         onClick={() => setShowDetailPanel(!showDetailPanel)}
-        title={getTypeLabel()}
+        aria-label={getTypeLabel()}
       >
         {getTypeIcon()}
         <span className="text-xs font-semibold">{getTypeLabel()}</span>
@@ -149,7 +149,8 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
               </div>
               <button
                 onClick={() => setShowDetailPanel(false)}
-                className="text-gray-400 hover:text-white transition-colors p-1 rounded-lg hover:bg-white/10"
+                aria-label={t('common.actions.close', 'Close')}
+                className="text-gray-400 active:text-white transition-colors p-1 rounded-lg active:bg-white/10"
               >
                 <svg
                   className="w-5 h-5"
@@ -168,7 +169,7 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
             </div>
 
             {/* Terminal Type Info */}
-            <div className="bg-white/5 rounded-xl p-4 border border-white/10">
+            <div className="bg-white/5 rounded-2xl p-4 border border-white/10">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-sm text-gray-400">
                   {t('terminal.labels.terminalType', 'Terminal Type')}
@@ -195,7 +196,7 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
             </div>
 
             {/* Feature Summary */}
-            <div className="bg-white/5 rounded-xl p-4 border border-white/10">
+            <div className="bg-white/5 rounded-2xl p-4 border border-white/10">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-sm text-gray-400">
                   {t('terminal.labels.enabledFeatures', 'Enabled Features')}
@@ -251,7 +252,7 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
 
             {/* Mobile Waiter Info Message */}
             {isMobileWaiter && (
-              <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-3">
+              <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl p-3">
                 <div className="flex items-start gap-2">
                   <svg
                     className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5"

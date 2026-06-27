@@ -29,7 +29,7 @@ export function StaffShiftCheckoutFooterActions({
         onClick={onPrint}
         disabled={isPrintDisabled}
         data-testid="staff-checkout-print-button"
-        className="flex w-full items-center justify-center gap-3 rounded-xl border border-slate-300/80 bg-white px-5 py-4 text-base font-bold text-slate-700 shadow-[0_4px_16px_0_rgba(15,23,42,0.08)] transition-all duration-300 hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none dark:border-white/15 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08] sm:w-auto sm:min-w-[180px]"
+        className="flex w-full items-center justify-center gap-3 rounded-xl border border-slate-300/80 bg-white px-5 py-4 text-base font-bold text-slate-700 shadow-[0_4px_16px_0_rgba(15,23,42,0.08)] transition-all duration-300 active:border-slate-400 active:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none dark:border-white/15 dark:bg-white/[0.04] dark:text-slate-100 dark:active:bg-white/[0.08] sm:w-auto sm:min-w-[180px]"
       >
         {isPrinting ? (
           <>
@@ -49,7 +49,7 @@ export function StaffShiftCheckoutFooterActions({
         onClick={onCheckout}
         disabled={isCheckoutDisabled}
         data-testid="staff-checkout-confirm-button"
-        className="flex w-full items-center justify-center gap-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-6 py-4 text-lg font-bold text-white shadow-[0_4px_16px_0_rgba(239,68,68,0.5)] transition-all duration-300 hover:from-red-700 hover:to-red-800 hover:shadow-[0_6px_24px_0_rgba(239,68,68,0.7)] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none sm:w-auto sm:min-w-[220px]"
+        className="flex w-full items-center justify-center gap-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-6 py-4 text-lg font-bold text-white shadow-[0_4px_16px_0_rgba(239,68,68,0.5)] transition-all duration-300 active:from-red-700 active:to-red-800 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none sm:w-auto sm:min-w-[220px]"
       >
         {isCheckoutLoading ? (
           <>

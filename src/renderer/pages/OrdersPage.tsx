@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -12,14 +12,18 @@ import {
   Phone,
   Package,
   Truck,
-  Store,
-  X
+  X,
+  RotateCcw,
+  Bed
 } from 'lucide-react';
+import TableOrderIcon from '../components/icons/TableOrderIcon';
+import PickupOrderIcon from '../components/icons/PickupOrderIcon';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import OrderDetailsModal from '../components/modals/OrderDetailsModal';
 import { formatCurrency } from '../utils/format';
-import { formatCompactOrderNumberForDisplay } from '../utils/orderNumberUtils';
+import { formatCompactOrderNumberForDisplay, resolveMergedOrderNumber } from '../utils/orderNumberUtils';
+import { resolveTableServiceCustomerNumber } from '../utils/tableOrderFlow';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 
 interface OrderItem {
@@ -98,24 +102,40 @@ const normalizeOrderType = (value: string | undefined): string => {
 };
 
 const getDisplayOrderNumber = (order: Order): string =>
-  formatCompactOrderNumberForDisplay(order.order_number) || order.order_number;
+  formatCompactOrderNumberForDisplay(order.order_number, order.created_at) || order.order_number;
 
-const ORDER_STATUS_TEXT_CLASSES: Record<string, string> = {
-  pending: 'text-yellow-600 dark:text-yellow-400',
-  confirmed: 'text-blue-600 dark:text-blue-400',
-  processing: 'text-purple-600 dark:text-purple-400',
-  preparing: 'text-purple-600 dark:text-purple-400',
-  ready: 'text-green-600 dark:text-green-400',
-  out_for_delivery: 'text-cyan-600 dark:text-cyan-400',
-  completed: 'text-gray-600 dark:text-gray-400',
-  delivered: 'text-gray-600 dark:text-gray-400',
-  cancelled: 'text-red-600 dark:text-red-400',
+// Per-status PILL skins (background + border + text), light and dark. Data-driven via the `dark:`
+// Tailwind variant (darkMode: 'class' + the theme context's root `.dark` toggle) so each status is one
+// source of truth -- no per-call isDark branching. Base palette stays white/black/grey/yellow with small
+// semantic accents (amber/green/red); unknown statuses fall back to the yellow pending
+// skin. No hover utilities: the pill is informational, not an action.
+const ORDER_STATUS_PILL_CLASSES: Record<string, string> = {
+  pending: 'bg-amber-200 text-amber-900 border-amber-300 dark:bg-amber-400/20 dark:text-amber-200 dark:border-amber-400/45',
+  confirmed: 'bg-yellow-200 text-yellow-950 border-yellow-300 dark:bg-yellow-400/20 dark:text-yellow-100 dark:border-yellow-400/45',
+  processing: 'bg-zinc-200 text-zinc-900 border-zinc-300 dark:bg-zinc-500/20 dark:text-zinc-100 dark:border-zinc-400/35',
+  preparing: 'bg-zinc-200 text-zinc-900 border-zinc-300 dark:bg-zinc-500/20 dark:text-zinc-100 dark:border-zinc-400/35',
+  ready: 'bg-green-200 text-green-900 border-green-300 dark:bg-green-400/20 dark:text-green-200 dark:border-green-400/45',
+  out_for_delivery: 'bg-amber-300 text-amber-950 border-amber-400 dark:bg-amber-400/25 dark:text-amber-100 dark:border-amber-300/50',
+  completed: 'bg-gray-300 text-gray-900 border-gray-400 dark:bg-zinc-600/60 dark:text-zinc-100 dark:border-zinc-500/60',
+  delivered: 'bg-gray-300 text-gray-900 border-gray-400 dark:bg-zinc-600/60 dark:text-zinc-100 dark:border-zinc-500/60',
+  cancelled: 'bg-red-200 text-red-900 border-red-300 dark:bg-red-400/20 dark:text-red-200 dark:border-red-400/45',
 };
 
-const getOrderStatusTextClasses = (status?: string) => {
+const getOrderStatusPillClasses = (status?: string) => {
   const normalized = (status || '').toLowerCase();
-  return ORDER_STATUS_TEXT_CLASSES[normalized] || ORDER_STATUS_TEXT_CLASSES.pending;
+  return ORDER_STATUS_PILL_CLASSES[normalized] || ORDER_STATUS_PILL_CLASSES.pending;
 };
+
+const ORDER_STATUS_FILTER_OPTIONS = [
+  'pending',
+  'confirmed',
+  'preparing',
+  'ready',
+  'completed',
+  'cancelled',
+] as const;
+
+const ORDER_TYPE_FILTER_OPTIONS = ['dine-in', 'pickup', 'delivery'] as const;
 
 const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
   if (!raw || typeof raw !== 'object') return null;
@@ -135,7 +155,12 @@ const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
 
   return {
     id,
-    order_number: asString(raw.order_number) || asString(raw.orderNumber) || id.slice(0, 8),
+    order_number:
+      asString(raw.display_order_number) ||
+      asString(raw.displayOrderNumber) ||
+      asString(raw.order_number) ||
+      asString(raw.orderNumber) ||
+      id.slice(0, 8),
     status: asString(raw.status) || 'pending',
     order_type: normalizeOrderType(asString(raw.order_type) || asString(raw.orderType)),
     payment_method: asString(raw.payment_method) || asString(raw.paymentMethod) || 'cash',
@@ -216,7 +241,11 @@ const mergeHybridOrders = (localOrders: Order[], remoteOrders: Order[]): Order[]
     const existingTs = new Date(existing.updated_at).getTime();
     const incomingTs = new Date(incoming.updated_at).getTime();
     if (Number.isNaN(existingTs) || incomingTs >= existingTs) {
-      merged[index] = { ...existing, ...incoming };
+      merged[index] = {
+        ...existing,
+        ...incoming,
+        order_number: resolveMergedOrderNumber(existing.order_number, incoming.order_number),
+      };
     }
   };
 
@@ -315,11 +344,6 @@ const OrdersPage: React.FC = () => {
     });
   }, [statusFilter, orderTypeFilter, dateFrom, dateTo, searchTerm]);
 
-  const paginateOrders = useCallback((input: Order[]) => {
-    const start = (currentPage - 1) * pageSize;
-    return input.slice(start, start + pageSize);
-  }, [currentPage, pageSize]);
-
   const fetchOrders = useCallback(async () => {
     if (isBrowser()) {
       console.error('[OrdersPage] Desktop API not available');
@@ -347,7 +371,7 @@ const OrdersPage: React.FC = () => {
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
       );
       setTotal(filtered.length);
-      setOrders(paginateOrders(filtered));
+      setOrders(filtered);
 
       try {
         const remoteResult = await bridge.sync.fetchOrders(remoteOptions);
@@ -360,7 +384,7 @@ const OrdersPage: React.FC = () => {
             (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
           );
           setTotal(filtered.length);
-          setOrders(paginateOrders(filtered));
+          setOrders(filtered);
         } else if (localOrders.length === 0) {
           toast.error(remoteResult?.error || 'Failed to load remote orders');
         }
@@ -384,7 +408,6 @@ const OrdersPage: React.FC = () => {
     dateFrom,
     dateTo,
     applyFilters,
-    paginateOrders,
     bridge.orders,
     bridge.sync,
   ]);
@@ -392,6 +415,17 @@ const OrdersPage: React.FC = () => {
   useEffect(() => {
     fetchOrders();
   }, [fetchOrders]);
+
+  // Round 282: clamp a stranded page. When the filtered/fetched result count shrinks (a refetch, a
+  // realtime update, or a filter narrowing), currentPage can be left beyond the last available page,
+  // which renders the empty state even though orders exist. Reset it to the last available page (never
+  // below 1) so page-1 data shows whenever filtered orders exist. No data fetch / filter change here.
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(total / pageSize));
+    if (currentPage > maxPage) {
+      setCurrentPage(maxPage);
+    }
+  }, [total, pageSize, currentPage]);
 
   useEffect(() => {
     const consumeStoredRecoveryTarget = () => {
@@ -521,18 +555,72 @@ const OrdersPage: React.FC = () => {
     };
   }, [fetchOrders]);
 
+  // Pickup / takeaway (and the default fall-through) render the shared PickupOrderIcon as a plain bag
+  // silhouette at row scale -- the same bag glyph as the order-type chooser, sized (w-6 h-6) to match
+  // the sibling delivery/table row icons. No green badge/holder: a semantic green stroke
+  // (light text-green-600 / dark text-green-400) keeps it readable on both the cream and dark rows
+  // while reading as a bag, not a boxed chip. Never a Store/Package/storefront glyph or a raw
+  // ShoppingBag for the order-type icon (the bag always goes through the shared PickupOrderIcon).
+  const pickupRowIcon = (
+    <PickupOrderIcon
+      className={`w-6 h-6 ${isDark ? 'text-green-400' : 'text-green-600'}`}
+      strokeWidth={2}
+    />
+  );
   const getOrderTypeIcon = (type: string) => {
+    // Room service is matched first via the ZReportModal slug-collapse idea ('-'/'_'/space -> '_') so
+    // room_service / room-service / room service all resolve to the Bed icon and never fall through to
+    // the pickup bag. Delivery / pickup / dine-in keep their existing icons unchanged (round 218).
+    const collapsed = String(type || '').trim().toLowerCase().replace(/[\s_-]+/g, '_');
+    if (collapsed === 'room_service') return <Bed className="w-6 h-6" />;
     switch (type) {
-      case 'delivery': return <Truck className="w-4 h-4" />;
-      case 'pickup': return <ShoppingBag className="w-4 h-4" />;
-      case 'dine-in': return <Store className="w-4 h-4" />;
-      default: return <ShoppingBag className="w-4 h-4" />;
+      case 'delivery': return <Truck className="w-6 h-6" />;
+      case 'pickup': return pickupRowIcon;
+      case 'dine-in': return <TableOrderIcon className="w-6 h-6" />;
+      default: return pickupRowIcon;
     }
   };
 
+  const getOrderStatusLabel = useCallback((status?: string) => {
+    const normalized = String(status || '').trim().toLowerCase();
+    if (!normalized) return '';
+    return t(`orders.status.${normalized}`, { defaultValue: status || '' });
+  }, [t]);
+
+  const getOrderTypeLabel = useCallback((type?: string) => {
+    const normalized = String(type || '').trim().toLowerCase();
+    if (!normalized) return '';
+    // Collapse '-'/'_'/whitespace (the ZReportModal slug idea) so dine-in/dine_in and
+    // room_service/room-service/room service each resolve to one localized orders.type.* key
+    // instead of leaking the raw slug.
+    const collapsed = normalized.replace(/[\s_-]+/g, '_');
+    const key =
+      collapsed === 'dine_in' ? 'dineIn' :
+      collapsed === 'room_service' ? 'roomService' :
+      normalized;
+    return t(`orders.type.${key}`, { defaultValue: type || '' });
+  }, [t]);
+
   const totalPages = Math.ceil(total / pageSize);
-  const refreshLabel = syncing ? 'Syncing orders' : 'Refresh orders';
-  const filterLabel = showFilters ? 'Hide filters' : 'Show filters';
+  // Round 283: derive the visible page from the FULL filtered list (stored in `orders`) at render time,
+  // clamped to the available range. Next/Previous update currentPage and this slice recomputes
+  // immediately -- no refetch. The empty state stays driven by the full `orders` length, not this slice.
+  const visibleOrders = useMemo(() => {
+    const maxPage = Math.max(1, Math.ceil(orders.length / pageSize));
+    const safePage = Math.min(currentPage, maxPage);
+    const start = (safePage - 1) * pageSize;
+    return orders.slice(start, start + pageSize);
+  }, [orders, currentPage, pageSize]);
+  const refreshLabel = syncing
+    ? t('orders.syncingOrders', { defaultValue: 'Syncing orders' })
+    : t('orders.refreshOrders', { defaultValue: 'Refresh orders' });
+  const filterLabel = showFilters
+    ? t('orders.hideFilters', { defaultValue: 'Hide filters' })
+    : t('orders.showFilters', { defaultValue: 'Show filters' });
+  const clearSearchLabel = t('orders.clearSearch', { defaultValue: 'Clear search' });
+  const statusFilterLabel = t('orders.filters.status', { defaultValue: 'Status' });
+  const orderTypeFilterLabel = t('orders.filters.orderType', { defaultValue: 'Order Type' });
+  const dateFromFilterLabel = t('orders.filters.dateFrom', { defaultValue: 'Date From' });
 
   const handleClearFilters = () => {
     setStatusFilter('all');
@@ -547,8 +635,10 @@ const OrdersPage: React.FC = () => {
     return (
       <div className={`flex items-center justify-center h-full ${isDark ? 'bg-black text-zinc-200' : 'bg-[#fdfaf5] text-gray-800'}`}>
         <div className="text-center">
-          <RefreshCw className={`w-12 h-12 animate-spin mx-auto mb-4 ${isDark ? 'text-cyan-500' : 'text-blue-500'}`} />
-          <p className={isDark ? 'text-zinc-300' : 'text-gray-700'}>Loading orders...</p>
+          <RefreshCw className={`w-12 h-12 animate-spin mx-auto mb-4 ${isDark ? 'text-yellow-300' : 'text-yellow-600'}`} />
+          <p className={isDark ? 'text-zinc-300' : 'text-gray-700'}>
+            {t('orders.loadingOrders', { defaultValue: 'Loading orders...' })}
+          </p>
         </div>
       </div>
     );
@@ -563,15 +653,14 @@ const OrdersPage: React.FC = () => {
             <div>
               <h1 className={`text-3xl font-bold tracking-tight mb-1 ${isDark ? 'text-white' : 'text-gray-900'}`}>{t('orders.title', 'Orders')}</h1>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-                {total} {total === 1 ? 'order' : 'orders'} total
+                {t('orders.ordersTotal', { count: total, defaultValue: '{{count}} orders total' })}
               </p>
             </div>
             <button
               onClick={fetchOrders}
               disabled={syncing}
               aria-label={refreshLabel}
-              title={refreshLabel}
-              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black hover:bg-zinc-200' : 'border border-black bg-black text-white hover:bg-zinc-800'} ${syncing ? 'opacity-60 cursor-not-allowed' : 'hover:scale-[1.03]'}`}
+              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black active:bg-zinc-200' : 'border border-black bg-black text-white active:bg-zinc-800'} ${syncing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
             >
               <RefreshCw className={`w-5 h-5 ${syncing ? 'animate-spin' : ''}`} />
             </button>
@@ -579,17 +668,24 @@ const OrdersPage: React.FC = () => {
 
           {/* Search and Filters */}
           <div className="space-y-3">
-            <div className={`flex items-center gap-2 px-4 py-3 rounded-xl border ${isDark ? 'bg-zinc-900/90 border-zinc-800 focus-within:border-cyan-500/50' : 'bg-[#fffdf8] border-amber-100/80 focus-within:border-amber-300'}`}>
+            <div className={`flex items-center gap-2 px-4 py-3 rounded-xl border ${isDark ? 'bg-zinc-900/90 border-zinc-800 focus-within:border-yellow-500/50' : 'bg-[#fffdf8] border-amber-100/80 focus-within:border-amber-300'}`}>
               <Search className={`w-5 h-5 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
               <input
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search by order number, customer name, or phone..."
+                placeholder={t('orders.searchPlaceholder', {
+                  defaultValue: 'Search by order number, customer name, or phone...',
+                })}
                 className={`flex-1 bg-transparent outline-none ${isDark ? 'text-zinc-100 placeholder:text-zinc-500' : 'text-gray-900 placeholder:text-gray-500'}`}
               />
               {searchTerm && (
-                <button onClick={() => setSearchTerm('')} className={`${isDark ? 'text-zinc-500 hover:text-zinc-200' : 'text-gray-400 hover:text-gray-700'} transition-colors`}>
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm('')}
+                  aria-label={clearSearchLabel}
+                  className={`${isDark ? 'text-zinc-500 active:text-zinc-200' : 'text-gray-400 active:text-gray-700'} transition-colors`}
+                >
                   <X className="w-4 h-4" />
                 </button>
               )}
@@ -597,10 +693,9 @@ const OrdersPage: React.FC = () => {
                 type="button"
                 onClick={() => setShowFilters(!showFilters)}
                 aria-label={filterLabel}
-                title={filterLabel}
                 className={`ml-2 inline-flex shrink-0 items-center justify-center transition-colors ${showFilters
                   ? isDark ? 'text-yellow-300' : 'text-yellow-600'
-                  : isDark ? 'text-zinc-400 hover:text-yellow-300' : 'text-gray-500 hover:text-yellow-600'
+                  : isDark ? 'text-zinc-400 active:text-yellow-300' : 'text-gray-500 active:text-yellow-600'
                   }`}
               >
                 <Filter className="w-5 h-5" />
@@ -618,49 +713,68 @@ const OrdersPage: React.FC = () => {
                 >
                   <div className={`grid grid-cols-1 md:grid-cols-3 gap-3 p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-[#fffdf8] border-amber-100/80'}`}>
                     <div>
-                      <label className="text-xs mb-1 block opacity-70">Status</label>
+                      <label className="text-xs mb-1 block opacity-70">
+                        {t('orders.filters.status', { defaultValue: 'Status' })}
+                      </label>
                       <select
                         value={statusFilter}
                         onChange={(e) => setStatusFilter(e.target.value)}
-                        className={`w-full px-3 py-2 rounded-lg text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
+                        aria-label={statusFilterLabel}
+                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
                       >
-                        <option value="all">All Statuses</option>
-                        <option value="pending">Pending</option>
-                        <option value="confirmed">Confirmed</option>
-                        <option value="preparing">Preparing</option>
-                        <option value="ready">Ready</option>
-                        <option value="completed">Completed</option>
-                        <option value="cancelled">Cancelled</option>
+                        <option value="all">{t('orders.filters.allStatuses', { defaultValue: 'All Statuses' })}</option>
+                        {ORDER_STATUS_FILTER_OPTIONS.map((status) => (
+                          <option key={status} value={status}>
+                            {getOrderStatusLabel(status)}
+                          </option>
+                        ))}
                       </select>
                     </div>
                     <div>
-                      <label className="text-xs mb-1 block opacity-70">Order Type</label>
+                      <label className="text-xs mb-1 block opacity-70">
+                        {t('orders.filters.orderType', { defaultValue: 'Order Type' })}
+                      </label>
                       <select
                         value={orderTypeFilter}
                         onChange={(e) => setOrderTypeFilter(e.target.value)}
-                        className={`w-full px-3 py-2 rounded-lg text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
+                        aria-label={orderTypeFilterLabel}
+                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
                       >
-                        <option value="all">All Types</option>
-                        <option value="dine-in">Dine-In</option>
-                        <option value="pickup">Pickup</option>
-                        <option value="delivery">Delivery</option>
+                        <option value="all">{t('orders.filters.allTypes', { defaultValue: 'All Types' })}</option>
+                        {ORDER_TYPE_FILTER_OPTIONS.map((type) => (
+                          <option key={type} value={type}>
+                            {getOrderTypeLabel(type)}
+                          </option>
+                        ))}
                       </select>
                     </div>
                     <div>
-                      <label className="text-xs mb-1 block opacity-70">Date From</label>
+                      <label className="text-xs mb-1 block opacity-70">
+                        {t('orders.filters.dateFrom', { defaultValue: 'Date From' })}
+                      </label>
                       <input
                         type="date"
                         value={dateFrom}
                         onChange={(e) => setDateFrom(e.target.value)}
-                        className={`w-full px-3 py-2 rounded-lg text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
+                        aria-label={dateFromFilterLabel}
+                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
                       />
                     </div>
                   </div>
+                  {/* Touch-first clear-filters action: a real ~44px button (not loose text) so it is an
+                      obvious, reliable tap target on the POS touchscreen. Amber/yellow neutral styling that
+                      fits the cream page; press feedback only (active:), no hover utilities. */}
                   <button
+                    type="button"
                     onClick={handleClearFilters}
-                    className={`mt-2 text-sm transition-colors ${isDark ? 'text-cyan-400 hover:text-cyan-300' : 'text-blue-600 hover:text-blue-700'}`}
+                    className={`mt-3 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border px-4 py-2 text-sm font-medium transition active:scale-[0.97] ${
+                      isDark
+                        ? 'border-yellow-300/30 bg-yellow-400/10 text-yellow-200 active:bg-yellow-400/20'
+                        : 'border-amber-300 bg-amber-100/70 text-amber-800 active:bg-amber-200'
+                    }`}
                   >
-                    Clear all filters
+                    <RotateCcw className="w-4 h-4" strokeWidth={2} />
+                    <span>{t('orders.filters.clearAll', { defaultValue: 'Clear all filters' })}</span>
                   </button>
                 </motion.div>
               )}
@@ -674,14 +788,16 @@ const OrdersPage: React.FC = () => {
         {orders.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <ShoppingBag className={`w-16 h-16 mb-4 ${isDark ? 'text-zinc-700' : 'text-gray-400'}`} />
-            <h3 className="text-lg font-semibold mb-2">No Orders Found</h3>
+            <h3 className="text-lg font-semibold mb-2">
+              {t('orders.emptyTitle', { defaultValue: 'No Orders Found' })}
+            </h3>
             <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>
-              No orders match your current filters.
+              {t('orders.emptyDescription', { defaultValue: 'No orders match your current filters.' })}
             </p>
           </div>
         ) : (
           <div className="space-y-3">
-            {orders.map((order) => (
+            {visibleOrders.map((order) => (
               (() => {
                 const orderStatus = String(order.status || '').toLowerCase();
                 const orderType = String(order.order_type || '').toLowerCase();
@@ -691,33 +807,40 @@ const OrdersPage: React.FC = () => {
                   orderType === 'delivery' &&
                   (orderStatus === 'completed' || orderStatus === 'delivered') &&
                   !!deliveredDriverName;
+                // Table-service rows show the table as the customer, formatted
+                // through the shared display convention ("Τραπέζι #TB01"); real
+                // pickup/delivery customers keep their own name.
+                const tableCustomerNumber = resolveTableServiceCustomerNumber(order as any);
+                const customerDisplayName = tableCustomerNumber
+                  ? t('orderFlow.tableCustomer', { table: tableCustomerNumber })
+                  : order.customer_name;
 
                 return (
                   <motion.div
                     key={order.id}
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className={`p-5 rounded-xl border cursor-pointer transition-all ${isDark ? 'border-zinc-800 bg-zinc-950/80 hover:border-cyan-500/50 hover:bg-zinc-900' : 'border-amber-100/80 bg-[#fffaf1]/90 hover:border-amber-300/90 hover:bg-[#fff7e8] hover:shadow-md'}`}
+                    className={`p-5 rounded-xl border cursor-pointer transition-all ${isDark ? 'border-zinc-800 bg-zinc-950/80 active:border-amber-400/40 active:bg-zinc-900' : 'border-amber-100/80 bg-[#fffaf1]/90 active:border-amber-300/90 active:bg-[#fff7e8] active:shadow-md'}`}
                     onClick={() => setSelectedOrder(order)}
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-3 mb-2">
                           <span className="font-mono font-bold text-lg">{displayOrderNumber}</span>
-                          <span className={`text-xs font-semibold ${getOrderStatusTextClasses(order.status)}`}>
-                            {order.status}
+                          <span className={`inline-flex items-center justify-center rounded-full border px-3 py-1.5 text-[13px] leading-none font-bold whitespace-nowrap ${getOrderStatusPillClasses(order.status)}`}>
+                            {getOrderStatusLabel(order.status)}
                           </span>
                           <div className={`flex items-center gap-1 text-xs font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                             {getOrderTypeIcon(order.order_type)}
-                            <span>{order.order_type}</span>
+                            <span>{getOrderTypeLabel(order.order_type)}</span>
                           </div>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
-                          {order.customer_name && (
+                          {customerDisplayName && (
                             <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
                               <User className={`w-4 h-4 ${isDark ? 'text-yellow-300' : 'text-yellow-600'}`} />
-                              <span>{order.customer_name}</span>
+                              <span>{customerDisplayName}</span>
                             </div>
                           )}
                           {order.customer_phone && (
@@ -728,7 +851,12 @@ const OrdersPage: React.FC = () => {
                           )}
                           <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                             <Package className={`w-4 h-4 ${isDark ? 'text-yellow-300' : 'text-yellow-600'}`} />
-                            <span>{order.order_items?.length || 0} items</span>
+                            <span>
+                              {t('orders.itemsCount', {
+                                count: order.order_items?.length || 0,
+                                defaultValue: '{{count}} items',
+                              })}
+                            </span>
                           </div>
                         </div>
 
@@ -762,15 +890,20 @@ const OrdersPage: React.FC = () => {
         <div className={`border-t p-4 ${isDark ? 'border-zinc-800 bg-zinc-950/90' : 'border-amber-100/70 bg-[#fffaf1]'}`}>
           <div className="flex items-center justify-between">
             <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-              Page {currentPage} of {totalPages}
+              {t('orders.pageOf', {
+                current: currentPage,
+                total: totalPages,
+                defaultValue: 'Page {{current}} of {{total}}',
+              })}
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
                 disabled={currentPage === 1}
-                className={`px-3 py-2 rounded-lg border ${currentPage === 1
+                aria-label={t('orders.pagination.previous', { defaultValue: 'Previous page' })}
+                className={`px-3 py-2 rounded-2xl border ${currentPage === 1
                   ? isDark ? 'opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-700' : 'opacity-40 cursor-not-allowed bg-[#fffdf8] border-amber-200/70'
-                  : isDark ? 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700' : 'bg-[#fffdf8] hover:bg-[#fff7e8] border-amber-200/70'
+                  : isDark ? 'bg-zinc-800 active:bg-zinc-700 border-zinc-700' : 'bg-[#fffdf8] active:bg-[#fff7e8] border-amber-200/70'
                   }`}
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -778,9 +911,10 @@ const OrdersPage: React.FC = () => {
               <button
                 onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
                 disabled={currentPage === totalPages}
-                className={`px-3 py-2 rounded-lg border ${currentPage === totalPages
+                aria-label={t('orders.pagination.next', { defaultValue: 'Next page' })}
+                className={`px-3 py-2 rounded-2xl border ${currentPage === totalPages
                   ? isDark ? 'opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-700' : 'opacity-40 cursor-not-allowed bg-[#fffdf8] border-amber-200/70'
-                  : isDark ? 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700' : 'bg-[#fffdf8] hover:bg-[#fff7e8] border-amber-200/70'
+                  : isDark ? 'bg-zinc-800 active:bg-zinc-700 border-zinc-700' : 'bg-[#fffdf8] active:bg-[#fff7e8] border-amber-200/70'
                   }`}
               >
                 <ChevronRight className="w-4 h-4" />

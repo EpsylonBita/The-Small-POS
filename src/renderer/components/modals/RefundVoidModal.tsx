@@ -72,6 +72,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
+  // True when the order is paid but the payment was settled through a table
+  // session/check, so there are no order-linked payment rows to adjust here.
+  const [tableSettledPaid, setTableSettledPaid] = useState(false);
 
   // Refund form state (per-payment)
   const [activeRefundId, setActiveRefundId] = useState<string | null>(null);
@@ -93,6 +96,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   const loadData = useCallback(async () => {
     if (!orderId) return;
     setLoading(true);
+    setTableSettledPaid(false);
     try {
       // Load payments for this order
       const orderPayments = await bridge.payments.getOrderPayments(orderId);
@@ -110,6 +114,36 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
           (order as any)?.driverId || (order as any)?.driver_id,
         );
         setAllowDriverCashHandler(isDelivery && hasDriver);
+
+        // A dine-in/table order can be fully paid even though no payment row is
+        // linked to the order id (the payment lives on the table session). Detect
+        // that case so the UI can explain it instead of showing "No payments".
+        const paymentStatus = String(
+          (order as any)?.paymentStatus || (order as any)?.payment_status || "",
+        ).toLowerCase();
+        const paidAmount = Number(
+          (order as any)?.paidAmount ?? (order as any)?.paid_amount ?? 0,
+        );
+        const looksPaid =
+          [
+            "paid",
+            "completed",
+            "partially_paid",
+            "partially_refunded",
+            "refunded",
+          ].includes(paymentStatus) || paidAmount > 0;
+        const tableLinked = Boolean(
+          (order as any)?.tableSessionId ||
+            (order as any)?.table_session_id ||
+            (order as any)?.tableId ||
+            (order as any)?.table_id ||
+            String(
+              (order as any)?.orderType || (order as any)?.order_type || "",
+            ).toLowerCase() === "dine-in",
+        );
+        setTableSettledPaid(
+          paymentList.length === 0 && looksPaid && tableLinked,
+        );
       } catch {
         setAllowDriverCashHandler(false);
       }
@@ -306,7 +340,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       case "cash":
         return <Banknote className="w-5 h-5 text-green-400" />;
       case "card":
-        return <CreditCard className="w-5 h-5 text-blue-400" />;
+        return <CreditCard className="w-5 h-5 text-slate-300" />;
       default:
         return <Clock className="w-5 h-5 text-gray-400" />;
     }
@@ -317,19 +351,19 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       case "completed":
         return (
           <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 border border-green-500/30">
-            Completed
+            {t("modals.refund.statusCompleted", { defaultValue: "Completed" })}
           </span>
         );
       case "voided":
         return (
           <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 border border-red-500/30">
-            Voided
+            {t("modals.refund.statusVoided", { defaultValue: "Voided" })}
           </span>
         );
       case "refunded":
         return (
           <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
-            Refunded
+            {t("modals.refund.statusRefunded", { defaultValue: "Refunded" })}
           </span>
         );
       default:
@@ -375,7 +409,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
     <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
       <button
         onClick={onClose}
-        className="w-full liquid-glass-modal-button bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30 gap-2"
+        className="w-full liquid-glass-modal-button bg-slate-600/20 active:bg-slate-600/30 text-slate-200 border-slate-500/30 gap-2"
       >
         {t("common.actions.close", { defaultValue: "Close" })}
       </button>
@@ -396,16 +430,32 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0 scrollbar-hide">
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500" />
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-500" />
           </div>
         ) : payments.length === 0 ? (
           <div className="text-center py-12">
             <CreditCard className="w-12 h-12 mx-auto mb-3 liquid-glass-modal-text-muted opacity-50" />
-            <p className="text-sm liquid-glass-modal-text-muted">
-              {t("modals.refund.noPayments", {
-                defaultValue: "No payments found for this order",
-              })}
-            </p>
+            {tableSettledPaid ? (
+              <>
+                <p className="text-sm font-semibold liquid-glass-modal-text">
+                  {t("modals.refund.tableSettledTitle", {
+                    defaultValue: "Paid on the table check",
+                  })}
+                </p>
+                <p className="mx-auto mt-2 max-w-md text-sm liquid-glass-modal-text-muted">
+                  {t("modals.refund.tableSettledBody", {
+                    defaultValue:
+                      "This order was settled through its table session, so there is no order-level payment to void or refund here. Reopen the table check to adjust or refund the payment.",
+                  })}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm liquid-glass-modal-text-muted">
+                {t("modals.refund.noPayments", {
+                  defaultValue: "No payments found for this order",
+                })}
+              </p>
+            )}
           </div>
         ) : (
           <div className="space-y-4">
@@ -433,7 +483,8 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           {getMethodIcon(payment.method)}
                           <div>
                             <div className="font-semibold liquid-glass-modal-text capitalize">
-                              {payment.method || "Unknown"}
+                              {payment.method ||
+                                t("common.unknown", { defaultValue: "Unknown" })}
                             </div>
                             <div className="text-xs liquid-glass-modal-text-muted">
                               {new Date(payment.created_at).toLocaleString()}
@@ -470,7 +521,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                               setVoidReason("");
                             }}
                             disabled={processing}
-                            className="flex-1 liquid-glass-modal-button bg-red-600/10 hover:bg-red-600/20 text-red-400 border-red-500/20 gap-2 text-sm py-2 disabled:opacity-50"
+                            className="flex-1 liquid-glass-modal-button bg-red-600/10 active:bg-red-600/20 text-red-400 border-red-500/20 gap-2 text-sm py-2 disabled:opacity-50"
                           >
                             <XCircle className="w-4 h-4" />
                             {t("modals.refund.voidButton", {
@@ -492,7 +543,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             disabled={
                               processing || (balance && balance.remaining <= 0)
                             }
-                            className="flex-1 liquid-glass-modal-button bg-orange-600/10 hover:bg-orange-600/20 text-orange-400 border-orange-500/20 gap-2 text-sm py-2 disabled:opacity-50"
+                            className="flex-1 liquid-glass-modal-button bg-orange-600/10 active:bg-orange-600/20 text-orange-400 border-orange-500/20 gap-2 text-sm py-2 disabled:opacity-50"
                           >
                             <RotateCcw className="w-4 h-4" />
                             {t("modals.refund.refundButton", {
@@ -528,7 +579,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             <button
                               onClick={() => handleVoid(payment.id)}
                               disabled={processing || !voidReason.trim()}
-                              className="flex-1 liquid-glass-modal-button bg-red-600/20 hover:bg-red-600/30 text-red-400 border-red-500/30 gap-2 disabled:opacity-50"
+                              className="flex-1 liquid-glass-modal-button bg-red-600/20 active:bg-red-600/30 text-red-400 border-red-500/30 gap-2 disabled:opacity-50"
                             >
                               <XCircle className="w-4 h-4" />
                               {processing
@@ -624,7 +675,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                                 !refundAmount ||
                                 parseFloat(refundAmount) <= 0
                               }
-                              className="flex-1 liquid-glass-modal-button bg-orange-600/20 hover:bg-orange-600/30 text-orange-400 border-orange-500/30 gap-2 disabled:opacity-50"
+                              className="flex-1 liquid-glass-modal-button bg-orange-600/20 active:bg-orange-600/30 text-orange-400 border-orange-500/30 gap-2 disabled:opacity-50"
                             >
                               <RotateCcw className="w-4 h-4" />
                               {processing
@@ -701,7 +752,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
               <div className="space-y-3">
                 <button
                   onClick={() => setShowHistory(!showHistory)}
-                  className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted hover:text-white transition-colors"
+                  className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted active:text-white transition-colors"
                 >
                   {showHistory ? (
                     <ChevronUp className="w-4 h-4" />

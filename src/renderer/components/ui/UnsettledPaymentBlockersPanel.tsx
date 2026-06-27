@@ -27,9 +27,9 @@ function getMethodBadgeClasses(method: string): string {
     case "cash":
       return "border-emerald-400/30 bg-emerald-500/10 text-emerald-200";
     case "card":
-      return "border-sky-400/30 bg-sky-500/10 text-sky-200";
+      return "border-zinc-300/25 bg-white/[0.06] text-zinc-100";
     case "split":
-      return "border-fuchsia-400/30 bg-fuchsia-500/10 text-fuchsia-200";
+      return "border-amber-400/30 bg-amber-500/10 text-amber-200";
     default:
       return "border-amber-400/30 bg-amber-500/10 text-amber-200";
   }
@@ -128,7 +128,7 @@ export function UnsettledPaymentBlockersPanel({
                 </div>
 
                 <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[330px]">
-                  <div className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.totalLabel", {
                         defaultValue: "Total",
@@ -138,7 +138,7 @@ export function UnsettledPaymentBlockersPanel({
                       {formatCurrency(blocker.totalAmount || 0)}
                     </div>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.settledLabel", {
                         defaultValue: "Settled",
@@ -148,7 +148,7 @@ export function UnsettledPaymentBlockersPanel({
                       {formatCurrency(blocker.settledAmount || 0)}
                     </div>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.outstandingLabel", {
                         defaultValue: "Outstanding",
@@ -176,8 +176,8 @@ export function UnsettledPaymentBlockersPanel({
                   </span>
                 </div>
 
-                <div className="rounded-xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-100 xl:max-w-[60%]">
-                  <span className="mr-2 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200/80">
+                <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-50 xl:max-w-[60%]">
+                  <span className="mr-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-200/80">
                     {t("paymentIntegrity.fixLabel", {
                       defaultValue: "Fix",
                     })}
@@ -195,9 +195,9 @@ export function UnsettledPaymentBlockersPanel({
                     const isPreferred = preferredMethod === method;
                     const baseClasses = isPreferred
                       ? method === "cash"
-                        ? "border-transparent bg-emerald-500 text-slate-950 hover:bg-emerald-400"
-                        : "border-transparent bg-sky-500 text-slate-950 hover:bg-sky-400"
-                      : "border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]";
+                        ? "border-transparent bg-emerald-500 text-slate-950 active:bg-emerald-400"
+                        : "border-transparent bg-amber-400 text-slate-950 active:bg-amber-300"
+                      : "border-white/10 bg-white/[0.04] text-white active:bg-white/[0.08]";
                     const icon =
                       method === "cash" ? (
                         <Banknote className="h-4 w-4" />
@@ -211,7 +211,7 @@ export function UnsettledPaymentBlockersPanel({
                         type="button"
                         disabled={Boolean(resolvingKey)}
                         onClick={() => onResolveBlocker?.(blocker, method)}
-                        className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors ${baseClasses} ${
+                        className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border px-3 py-2 text-sm font-semibold transition-transform active:scale-[0.98] ${baseClasses} ${
                           Boolean(resolvingKey)
                             ? "cursor-not-allowed opacity-60"
                             : ""

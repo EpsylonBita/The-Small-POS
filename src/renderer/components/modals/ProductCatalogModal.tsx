@@ -679,7 +679,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                   placeholder={scannerState.isScanning
                     ? t('productCatalog.scanning', 'Scanning...')
                     : t('productCatalog.scanBarcode', 'Scan barcode or enter SKU...')}
-                  className={`w-full pl-10 pr-4 py-2 rounded-lg bg-white/10 text-white border placeholder-gray-400 transition-colors ${
+                  className={`w-full pl-10 pr-4 py-2 rounded-2xl bg-white/10 text-white border placeholder-gray-400 transition-colors ${
                     scannerState.isScanning
                       ? 'border-green-400/50 ring-1 ring-green-400/30'
                       : 'border-white/20'
@@ -699,18 +699,18 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder={t('productCatalog.search', 'Search products...')}
-                  className="w-48 pl-10 pr-4 py-2 rounded-lg bg-white/10 text-white border border-white/20 placeholder-gray-400"
+                  className="w-48 pl-10 pr-4 py-2 rounded-2xl bg-white/10 text-white border border-white/20 placeholder-gray-400"
                 />
               </div>
             </div>
             {/* Category Tabs */}
-            <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
+            <div className="flex gap-2 mb-4 overflow-x-auto scrollbar-hide pb-2">
               <button
                 onClick={() => setCategoryFilter('all')}
-                className={`px-4 py-2 rounded-lg whitespace-nowrap transition ${
+                className={`px-4 py-2 rounded-2xl whitespace-nowrap transition-transform duration-150 active:scale-[0.98] ${
                   categoryFilter === 'all'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-white/10 text-white hover:bg-white/20'
+                    ? 'bg-yellow-400 text-black'
+                    : 'bg-white/10 text-white active:bg-white/20'
                 }`}
               >
                 {t('productCatalog.allProducts', 'All Products')}
@@ -719,10 +719,10 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 <button
                   key={cat.id}
                   onClick={() => setCategoryFilter(cat.id)}
-                  className={`px-4 py-2 rounded-lg whitespace-nowrap transition ${
+                  className={`px-4 py-2 rounded-2xl whitespace-nowrap transition-transform duration-150 active:scale-[0.98] ${
                     categoryFilter === cat.id
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white/10 text-white hover:bg-white/20'
+                      ? 'bg-yellow-400 text-black'
+                      : 'bg-white/10 text-white active:bg-white/20'
                   }`}
                 >
                   {cat.name}
@@ -746,10 +746,10 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                     <button
                       key={product.id}
                       onClick={() => addToCart(product)}
-                      className="p-4 rounded-xl bg-white/10 hover:bg-white/20 text-left transition group"
+                      className="p-4 rounded-2xl bg-white/10 text-left transition-transform duration-150 active:scale-[0.99] active:bg-white/20"
                     >
                       <div className="flex items-start justify-between mb-2">
-                        <Package className="w-8 h-8 text-blue-400" />
+                        <Package className="w-8 h-8 text-yellow-300" />
                         {product.quantity <= product.lowStockThreshold && (
                           <span className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
                             {t('productCatalog.lowStock', 'Low Stock')}
@@ -773,7 +773,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             </div>
           </div>
           {/* Right: Cart */}
-          <div className="w-80 flex flex-col bg-white/5 rounded-xl p-4">
+          <div className="w-80 flex flex-col bg-white/5 rounded-2xl p-4">
             <div className="flex items-center gap-2 mb-4">
               <ShoppingCart className="w-5 h-5 text-white" />
               <h3 className="text-lg font-semibold text-white">
@@ -782,7 +782,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             </div>
             {/* Customer Info */}
             {selectedCustomer && (
-              <div className="p-3 mb-4 rounded-lg bg-white/10">
+              <div className="p-3 mb-4 rounded-2xl bg-white/10">
                 <p className="text-sm text-gray-400">{t('productCatalog.customer', 'Customer')}</p>
                 <p className="text-white font-medium">{selectedCustomer.name}</p>
                 {selectedCustomer.phone && (
@@ -798,7 +798,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 </div>
               ) : (
                 cartItems.map(item => (
-                  <div key={item.id} className="p-3 rounded-lg bg-white/10">
+                  <div key={item.id} className="p-3 rounded-2xl bg-white/10">
                     <div className="flex justify-between items-start mb-2">
                       <div className="flex-1 min-w-0">
                         <span className="text-white font-medium truncate block">{item.name}</span>
@@ -817,7 +817,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                       {!item.is_offer_reward && (
                         <button
                           onClick={() => removeFromCart(item.id)}
-                          className="text-red-400 hover:text-red-300 ml-2"
+                          aria-label={t('common.remove', 'Remove')}
+                          className="text-red-400 active:text-red-300 ml-2 transition-transform duration-150 active:scale-95"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -828,7 +829,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                         <button
                           onClick={() => updateCartQuantity(item.id, -1)}
                           disabled={item.is_offer_reward}
-                          className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-40"
+                          className="w-7 h-7 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100"
                         >
                           <Minus className="w-4 h-4 text-white" />
                         </button>
@@ -836,13 +837,13 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                         <button
                           onClick={() => updateCartQuantity(item.id, 1)}
                           disabled={item.is_offer_reward}
-                          className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-40"
+                          className="w-7 h-7 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100"
                         >
                           <Plus className="w-4 h-4 text-white" />
                         </button>
                       </div>
                       {item.is_offer_reward ? (
-                        <span className="rounded-md bg-emerald-500/10 px-2 py-1 text-sm font-medium text-emerald-300">
+                        <span className="rounded-full bg-emerald-500/10 px-2 py-1 text-sm font-medium text-emerald-300">
                           {t('menu.cart.freeLabel', 'Free')}
                         </span>
                       ) : (
@@ -857,7 +858,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             </div>
             {/* Discount */}
             {cartItems.length > 0 && maxDiscountPercentage > 0 && (
-              <div className="mt-4 p-3 rounded-lg bg-white/10">
+              <div className="mt-4 p-3 rounded-2xl bg-white/10">
                 <label className="text-sm text-gray-400 block mb-2">
                   {t('productCatalog.discount', 'Discount')} (max {maxDiscountPercentage}%)
                 </label>
@@ -867,7 +868,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                   max={maxDiscountPercentage}
                   value={discountPercentage}
                   onChange={(e) => setDiscountPercentage(Math.min(maxDiscountPercentage, Math.max(0, Number(e.target.value))))}
-                  className="w-full px-3 py-2 rounded-lg bg-white/10 text-white border border-white/20"
+                  className="w-full px-3 py-2 rounded-2xl bg-white/10 text-white border border-white/20"
                 />
               </div>
             )}
@@ -911,7 +912,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                         setManualDeliveryFee(parseMoneyInputValue(formatted))
                       }}
                       placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
-                      className="w-24 rounded-lg border bg-white/10 px-2 py-1 text-right text-white border-white/20 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-24 rounded-2xl border bg-white/10 px-2 py-1 text-right text-white border-white/20 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-yellow-400"
                     />
                   )}
                 </div>
@@ -929,7 +930,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 isProcessingOrder ||
                 (orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus !== 'resolved')
               }
-              className="mt-4 w-full py-3 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold flex items-center justify-center gap-2 transition"
+              className="mt-4 w-full py-3 rounded-2xl bg-green-600 active:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold flex items-center justify-center gap-2 transition-transform duration-150 active:scale-[0.98] disabled:active:scale-100"
             >
               <DollarSign className="w-5 h-5" />
               {isProcessingOrder 

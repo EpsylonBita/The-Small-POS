@@ -24,8 +24,8 @@ const severityMeta: Record<
 > = {
   info: {
     icon: Info,
-    badgeClassName: 'bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/30',
-    borderClassName: 'border-sky-500/20',
+    badgeClassName: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
+    borderClassName: 'border-amber-500/25',
   },
   warning: {
     icon: AlertTriangle,
@@ -36,8 +36,8 @@ const severityMeta: Record<
   high: {
     icon: Wrench,
     badgeClassName:
-      'bg-orange-500/15 text-orange-700 dark:text-orange-300 border-orange-500/30',
-    borderClassName: 'border-orange-500/25',
+      'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
+    borderClassName: 'border-amber-500/25',
   },
   critical: {
     icon: ShieldAlert,
@@ -58,7 +58,7 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
 
   return (
     <div
-      className={`liquid-glass-modal-card rounded-xl border p-3 space-y-3 ${meta.borderClassName}`}
+      className={`liquid-glass-modal-card rounded-[22px] border p-3 space-y-3 ${meta.borderClassName}`}
       data-testid={`support-panel-${explanation.surface}`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -87,7 +87,7 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
           <button
             type="button"
             onClick={onClose}
-            className="text-xs font-semibold text-slate-500 hover:text-slate-200"
+            className="inline-flex min-h-[44px] items-center rounded-2xl px-3 text-xs font-semibold text-slate-600 transition-transform active:scale-95 active:bg-black/5 dark:text-slate-300 dark:active:bg-white/10"
           >
             {t('common.actions.close')}
           </button>
@@ -110,7 +110,7 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
             {explanation.evidence.map((item) => (
               <div
                 key={item.id}
-                className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-2"
+                className="rounded-2xl border border-white/10 bg-white/5 px-2.5 py-2"
               >
                 <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
                   {t(item.labelKey, { defaultValue: item.fallbackLabel })}
@@ -154,10 +154,10 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
               type="button"
               onClick={() => onAction(action.id)}
               disabled={busyActionId === action.id}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all disabled:opacity-60 ${
+              className={`inline-flex min-h-[44px] items-center justify-center rounded-2xl px-3 py-2 text-xs font-semibold transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100 ${
                 action.variant === 'primary'
-                  ? 'bg-blue-500/20 hover:bg-blue-500/30 text-blue-700 dark:text-blue-300'
-                  : 'bg-white/8 hover:bg-white/12 text-slate-700 dark:text-slate-200 border border-white/10'
+                  ? 'border border-amber-500/35 bg-amber-400 text-black active:bg-amber-300 dark:border-amber-300/40 dark:bg-amber-400 dark:text-black'
+                  : 'border border-white/10 bg-white/[0.08] text-slate-700 active:bg-white/[0.14] dark:text-slate-200'
               }`}
             >
               {busyActionId === action.id ? t('support.actions.running') : action.label}

@@ -1,12 +1,13 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { posApiGet } from '../../utils/api-helpers'
+import { resolveNavigationLabel } from '../../utils/i18nLabels'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check, Wrench, AlertTriangle, ChevronDown } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
-import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
 import CashRegisterSection, { type CashRegisterSetupIntent } from '../peripherals/CashRegisterSection';
 import CallerIdSection from '../peripherals/CallerIdSection';
@@ -34,6 +35,22 @@ import {
   getResetStartingMessage,
   startResetAction,
 } from '../../utils/reset-actions';
+
+// Semantic form-action buttons (round 158): solid-green Save, soft-red Cancel — sized to
+// match liquidGlassModalButton('*','md'). Tap/focus feedback only, no hover. Soft red (not
+// solid) so Cancel is not confused with a destructive Delete.
+const SAVE_BTN_MD =
+  'inline-flex items-center justify-center gap-2 rounded-xl border border-green-500 bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed';
+const CANCEL_BTN_MD =
+  'inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-700 dark:text-red-300 transition-transform duration-150 active:scale-[0.98] active:bg-red-500/20 disabled:opacity-50';
+// Round 325: Data/Database section buttons share one touch geometry so safe-repair and danger actions line
+// up consistently (44px+, centered icon/text, tap feedback only — no hover). They differ ONLY in semantic
+// color: safe repair is calm green ("keeps your data"), danger is red and lives behind a collapsed
+// disclosure so it is never openly mixed with normal maintenance.
+const DB_ACTION_GEOMETRY =
+  'inline-flex min-h-[44px] items-center justify-center flex-shrink-0 px-4 py-2 rounded-xl transition-transform duration-150 active:scale-[0.98] font-medium text-sm whitespace-nowrap';
+const DB_REPAIR_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200 active:bg-emerald-500/25`;
+const DB_DANGER_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-red-500 bg-red-600/30 text-red-300 active:bg-red-600/50`;
 
 interface Props {
   isOpen: boolean
@@ -108,8 +125,6 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [adminDashboardUrl, setAdminDashboardUrl] = useState('')
   const [pin, setPin] = useState('')
   const [confirmPin, setConfirmPin] = useState('')
-  const [showConnectionSettings, setShowConnectionSettings] = useState(false)
-  const [showPinSettings, setShowPinSettings] = useState(false)
   const [editingPin, setEditingPin] = useState(false)
   const [showPrinterSettingsModal, setShowPrinterSettingsModal] = useState(false)
   const [printerSettingsInitialMode, setPrinterSettingsInitialMode] = useState<'quick' | 'expert'>('quick')
@@ -117,10 +132,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [showPaymentTerminalsSection, setShowPaymentTerminalsSection] = useState(false)
   const [cashRegisterSetupIntent, setCashRegisterSetupIntent] = useState<CashRegisterSetupIntent | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
-  const [showDatabaseSettings, setShowDatabaseSettings] = useState(false)
   const [showClearOperationalConfirm, setShowClearOperationalConfirm] = useState(false)
   const [isClearingOperational, setIsClearingOperational] = useState(false)
-  const [showTerminalPreferences, setShowTerminalPreferences] = useState(false)
 
   // Factory reset confirmation dialogs
   const [showFactoryResetWarning, setShowFactoryResetWarning] = useState(false)
@@ -128,7 +141,6 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [isResetting, setIsResetting] = useState(false)
 
   // Session timeout settings
-  const [showSecuritySettings, setShowSecuritySettings] = useState(false)
   const [sessionTimeoutEnabled, setSessionTimeoutEnabled] = useState(false)
   const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState('15')
   const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false)
@@ -142,9 +154,12 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [runtimeAdminUrl, setRuntimeAdminUrl] = useState('')
   const [runtimeSyncHealth, setRuntimeSyncHealth] = useState('offline')
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>('admin')
+  // Right detail pane: reset its scroll to the top whenever the active section
+  // changes so a new section always starts at its header, instead of inheriting
+  // the previous section's scroll offset. useLayoutEffect runs before paint so
+  // there is no visible flash of the old scroll position.
+  const detailScrollRef = useRef<HTMLDivElement>(null)
 
-  const [showPeripheralsSettings, setShowPeripheralsSettings] = useState(false)
-  const [showAboutInfo, setShowAboutInfo] = useState(false)
   const [aboutData, setAboutData] = useState<DiagnosticsAboutInfo | null>(null)
   const [aboutCopied, setAboutCopied] = useState(false)
   // Peripheral settings state
@@ -356,49 +371,30 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     if (!isOpen) return
     if (initialSection === 'recovery') {
       setActiveSettingsSection('database')
-      setShowDatabaseSettings(true)
     }
   }, [initialSection, isOpen])
 
-  useEffect(() => {
-    if (!isOpen) return
-    let cancelled = false
-    const maybeOpenPrinterQuickSetup = async () => {
-      try {
-        const result: any = await bridge.printer.getAll()
-        const printers = Array.isArray(result)
-          ? result
-          : Array.isArray(result?.printers)
-            ? result.printers
-            : []
-        const hasReceiptPrinter = printers.some((printer: any) => {
-          const enabled = printer?.enabled !== false
-          const role = typeof printer?.role === 'string' ? printer.role : 'receipt'
-          return enabled && role === 'receipt'
-        })
-        if (!hasReceiptPrinter && !cancelled) {
-          setPrinterSettingsInitialMode('quick')
-          setPrinterSettingsAutoStartWizard(true)
-          setShowPrinterSettingsModal(true)
-        }
-      } catch (error) {
-        console.warn('[ConnectionSettings] failed to evaluate receipt printer onboarding state', error)
-      }
-    }
-    void maybeOpenPrinterQuickSetup()
-    return () => {
-      cancelled = true
-    }
-  }, [bridge.printer, isOpen])
+  // Whenever the shown section changes (left-rail openSection, the recovery deep
+  // link above, or a programmatic jump into hardware), scroll the right detail
+  // pane back to the top so its header/top controls are visible.
+  useLayoutEffect(() => {
+    detailScrollRef.current?.scrollTo({ top: 0 })
+  }, [activeSettingsSection, isOpen])
 
-  // Lazy-load about info when the About section is expanded
+  // NOTE: Opening Settings must NOT auto-open the printer wizard. Printer setup
+  // is reached deliberately from the Printer section's "Configure Printer"
+  // button below (quick mode, autoStartWizard=false). A prior effect here
+  // auto-launched PrinterSettingsModal on open when no receipt printer existed,
+  // which made Settings "get lost" in a submodal; it was removed.
+
+  // Lazy-load about info when the Info section becomes active
   useEffect(() => {
-    if (!showAboutInfo || aboutData) return
+    if (activeSettingsSection !== 'about' || aboutData) return
     bridge.diagnostics
       .getAbout()
       .then((data) => setAboutData(data))
       .catch((err: unknown) => console.error('Failed to load about info:', err))
-  }, [showAboutInfo, aboutData, bridge.diagnostics])
+  }, [activeSettingsSection, aboutData, bridge.diagnostics])
 
   const handleCopyAboutInfo = async () => {
     if (!aboutData) return
@@ -416,24 +412,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     } catch { /* fallback */ }
   }
 
-  const handleSettingsSectionSelect = (section: SettingsSectionId) => {
+  // Navigation: the left rail selects which section is shown. Each section now
+  // renders its content directly (no inner accordion), so selecting is all we do.
+  const openSection = (section: SettingsSectionId) => {
     setActiveSettingsSection(section)
-
-    if (section === 'connection') setShowConnectionSettings(true)
-    if (section === 'terminal') setShowTerminalPreferences(true)
-    if (section === 'security') {
-      setShowPinSettings(true)
-      setShowSecuritySettings(true)
-    }
-    if (section === 'database') setShowDatabaseSettings(true)
-    if (section === 'hardware') setShowPeripheralsSettings(true)
-    if (section === 'about') setShowAboutInfo(true)
-
-    window.setTimeout(() => {
-      document
-        .getElementById(`settings-section-${section}`)
-        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }, 0)
   }
 
   const handleSaveConnection = async () => {
@@ -478,7 +460,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
     const normalizedAdminDashboardUrl = normalizeAdminDashboardUrl(nextAdminDashboardUrl)
     if (!normalizedAdminDashboardUrl) {
-      toast.error(t('modals.connectionSettings.enterAdminUrl', { defaultValue: 'Enter a valid Admin Dashboard URL' }))
+      toast.error(t('settings.deviceSetup.enterDashboardAddress', { defaultValue: 'Enter a valid dashboard address' }))
       return
     }
 
@@ -541,10 +523,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         : {}
       setPinResetRequired(parseBooleanSetting(getNestedSetting(settingsMap, 'terminal', 'pin_reset_required')))
 
-      toast.success(t('settings.connection.policySynced', 'Admin policy synced'))
+      toast.success(t('settings.deviceSetup.synced', 'Settings synced'))
     } catch (error: any) {
-      console.error('[ConnectionSettings] Failed to sync admin policy:', error)
-      toast.error(error?.message || t('settings.connection.policySyncFailed', 'Failed to sync admin policy'))
+      console.error('[ConnectionSettings] Failed to sync settings:', error)
+      toast.error(error?.message || t('settings.deviceSetup.syncFailed', 'Could not sync settings'))
     }
   }
 
@@ -811,6 +793,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     }
   }
 
+  // Overview chip cap: render the first N localized labels as soft chips, then a calm "+N more"
+  // summary chip. No data is dropped from the model -- enabledFeatureLabels / enabledModuleNames keep
+  // every entry; this only condenses the on-screen display so staff can scan it (round 222).
+  const OVERVIEW_CHIP_LIMIT = 8
+
   const enabledFeatureLabels = Object.entries({
     [t('settings.features.orderCreation', 'Order creation')]: features.orderCreation,
     [t('settings.features.orderModification', 'Order editing')]: features.orderModification,
@@ -825,7 +812,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     .filter(([, enabled]) => enabled)
     .map(([label]) => label)
 
-  const enabledModuleNames = enabledModules.map((module) => module.module.name)
+  const enabledModuleNames = enabledModules.map((module) =>
+    resolveNavigationLabel(t, module.module.id, module.module.name),
+  )
   const resolvedTerminalTypeLabel =
     terminalType === 'mobile_waiter'
       ? t('settings.terminal.type.mobile_waiter', 'Mobile POS')
@@ -844,83 +833,122 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const syncHealthLabel = t(`settings.managedByAdmin.syncHealth.${runtimeSyncHealth}`, {
     defaultValue: runtimeSyncHealth,
   })
-  const sectionButtonClass = (section: SettingsSectionId) =>
-    `min-h-[4.75rem] w-56 shrink-0 rounded-xl border px-3 py-2.5 text-left transition-all xs:w-60 sm:w-64 md:min-h-[4.25rem] md:w-full md:shrink md:px-3 md:py-3 ${
-      activeSettingsSection === section
-        ? 'border-cyan-400/70 bg-cyan-500/15 text-cyan-950 shadow-[0_0_18px_rgba(34,211,238,0.16)] dark:text-cyan-100'
-        : 'liquid-glass-modal-border bg-white/5 text-slate-700 hover:bg-white/10 dark:text-slate-200 dark:hover:bg-white/10'
-    }`
-  const compactPanelClass = 'rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-3 dark:bg-black/10'
-  const settingsSections: Array<{
-    id: SettingsSectionId
-    label: string
-    detail: string
-    icon: React.ReactNode
-  }> = [
-    {
-      id: 'admin',
-      label: t('settings.managedByAdmin.title', 'Managed by Admin'),
-      detail: syncHealthLabel,
-      icon: <Settings className="h-4 w-4 text-emerald-400" />,
+  // Derived sync-health boolean from the runtime value (not a CSS class string): healthy => the
+  // existing "set up" status copy + a green dot; otherwise (offline / stale / failed / degraded /
+  // disconnected / not_connected / unknown / ...) => a plain warning title/help + a red dot.
+  // Visual-only -- this never triggers a sync. The runtime value is normalized (trimmed + lowercased)
+  // and matched EXACTLY against the healthy set -- never via substring .includes(), which would wrongly
+  // mark "disconnected" / "not connected" as healthy (both contain the substring "connected").
+  const HEALTHY_SYNC_STATES = new Set(['healthy', 'online', 'ok', 'synced', 'connected', 'good', 'live'])
+  const isSyncHealthy = HEALTHY_SYNC_STATES.has((runtimeSyncHealth || '').trim().toLowerCase())
+  const syncToneClass = isSyncHealthy ? 'bg-green-500' : 'bg-red-500'
+  // Plain-language title + one-line description for each area. Reused by the
+  // right-column row list and by the detail header. 'admin' is surfaced as the
+  // left "This register" card rather than a row.
+  const sectionMeta: Record<SettingsSectionId, { label: string; detail: string }> = {
+    admin: {
+      label: t('settings.settingsHub.status.register', 'This register'),
+      detail: t('settings.deviceSetup.title', 'Device setup'),
     },
-    {
-      id: 'connection',
-      label: t('modals.connectionSettings.connectionSettings', 'Connection'),
-      detail: runtimeTerminalId || terminalId || t('settings.managedByAdmin.unassignedTerminal', 'Unassigned terminal'),
-      icon: <Wifi className="h-4 w-4 text-green-400" />,
+    connection: {
+      label: t('settings.settingsHub.sections.connection.label', 'Connection'),
+      detail: t('settings.settingsHub.sections.connection.detail', 'Link this POS'),
     },
-    {
-      id: 'terminal',
-      label: t('settings.terminal.title', 'Terminal'),
-      detail: t('modals.connectionSettings.theme', 'Theme'),
-      icon: <Monitor className="h-4 w-4 text-cyan-400" />,
+    terminal: {
+      label: t('settings.settingsHub.sections.terminal.label', 'Screen & Sound'),
+      detail: t('settings.settingsHub.sections.terminal.detail', 'Display, sound and language'),
     },
-    {
-      id: 'security',
-      label: t('modals.connectionSettings.security', 'Security'),
-      detail: sessionTimeoutEnabled
-        ? t('modals.connectionSettings.sessionTimeoutStatus', { minutes: sessionTimeoutMinutes })
-        : t('modals.connectionSettings.sessionTimeoutOff', 'Session timeout disabled'),
-      icon: <Lock className="h-4 w-4 text-amber-400" />,
+    security: {
+      label: t('settings.settingsHub.sections.security.label', 'PIN & Lock'),
+      detail: t('settings.settingsHub.sections.security.detail', 'Staff PIN and auto lock'),
     },
-    {
-      id: 'database',
-      label: t('settings.database.management', 'Database Management'),
-      detail: t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue'),
-      icon: <Database className="h-4 w-4 text-orange-400" />,
+    database: {
+      label: t('settings.settingsHub.sections.database.label', 'Data'),
+      detail: t('settings.settingsHub.sections.database.detail', 'Sync and local data'),
     },
-    {
-      id: 'hardware',
-      label: t('settings.hardware.title', 'Hardware'),
-      detail: t('settings.hardware.helpText', 'Configure local hardware devices for this POS'),
-      icon: <Cable className="h-4 w-4 text-cyan-400" />,
+    hardware: {
+      label: t('settings.settingsHub.sections.hardware.label', 'Devices'),
+      detail: t('settings.settingsHub.sections.hardware.detail', 'Scale, scanner and hardware'),
     },
-    {
-      id: 'printing',
-      label: t('settings.printer.label', 'Printer Settings'),
-      detail: t('settings.printer.helpText', 'Receipt printer configuration'),
-      icon: <Printer className="h-4 w-4 text-purple-400" />,
+    printing: {
+      label: t('settings.settingsHub.sections.printing.label', 'Printer'),
+      detail: t('settings.settingsHub.sections.printing.detail', 'Receipt setup'),
     },
-    {
-      id: 'payments',
-      label: t('settings.paymentTerminals.label', 'Payment Terminals'),
-      detail: t('settings.paymentTerminals.helpText', 'Configure ECR payment devices'),
-      icon: <CreditCard className="h-4 w-4 text-emerald-400" />,
+    payments: {
+      label: t('settings.settingsHub.sections.payments.label', 'Card Machines'),
+      detail: t('settings.settingsHub.sections.payments.detail', 'Card payment devices'),
     },
-    {
-      id: 'about',
-      label: t('modals.connectionSettings.about', 'About'),
-      detail: aboutData ? `v${aboutData.version}` : t('modals.connectionSettings.aboutSubtitle', 'Version info'),
-      icon: <Info className="h-4 w-4 text-blue-400" />,
+    about: {
+      label: t('settings.settingsHub.sections.about.label', 'Info'),
+      detail: t('settings.settingsHub.sections.about.detail', 'App version'),
     },
+  }
+
+  // Left-rail navigation. One entry per settings area, in the order an operator
+  // is most likely to reach for them. The icon chip is solid yellow with black
+  // strokes; the active row is highlighted in the render below.
+  const settingsNav: Array<{ id: SettingsSectionId; icon: React.ReactNode }> = [
+    { id: 'admin', icon: <Settings className="h-5 w-5 text-black" /> },
+    { id: 'connection', icon: <Wifi className="h-5 w-5 text-black" /> },
+    { id: 'printing', icon: <Printer className="h-5 w-5 text-black" /> },
+    { id: 'payments', icon: <CreditCard className="h-5 w-5 text-black" /> },
+    { id: 'terminal', icon: <Monitor className="h-5 w-5 text-black" /> },
+    { id: 'security', icon: <Lock className="h-5 w-5 text-black" /> },
+    { id: 'hardware', icon: <Cable className="h-5 w-5 text-black" /> },
+    { id: 'database', icon: <Database className="h-5 w-5 text-black" /> },
+    { id: 'about', icon: <Info className="h-5 w-5 text-black" /> },
   ]
+
+  // Grouped left-rail navigation: three calm groups (daily / device / system) instead
+  // of nine equal-weight rows, to lower cognitive load. Labels, details, and icons are
+  // unchanged (sectionMeta + settingsNav); only the grouping and the small uppercase
+  // group headers are new. Group strings come from settings.settingsHub.groups.*.
+  const settingsNavGroups: Array<{ id: 'daily' | 'device' | 'system'; items: SettingsSectionId[] }> = [
+    { id: 'daily', items: ['admin', 'connection'] },
+    { id: 'device', items: ['printing', 'payments', 'hardware', 'terminal'] },
+    { id: 'system', items: ['security', 'database', 'about'] },
+  ]
+
+  // Calm, non-clickable header for a detail section: a yellow icon chip beside a
+  // plain title (and optional one-line help). The section content renders directly
+  // beneath it — no accordion toggle, nothing hidden behind a chevron.
+  const sectionHeader = (icon: React.ReactNode, title: string, help?: string) => (
+    <div className="flex items-center gap-3">
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-yellow-400 text-black ring-1 ring-yellow-500/55 shadow-[0_8px_20px_rgba(250,204,21,0.22)]">
+        {icon}
+      </span>
+      <div className="min-w-0">
+        <span className="block font-semibold liquid-glass-modal-text">{title}</span>
+        {help ? <span className="block text-xs liquid-glass-modal-text-muted">{help}</span> : null}
+      </div>
+    </div>
+  )
 
   return (
     <>
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
-      title={t('modals.connectionSettings.title')}
+      ariaLabel={t('modals.connectionSettings.title')}
+      header={
+        <div className="liquid-glass-modal-header">
+          <div className="min-w-0">
+            <h2 className="liquid-glass-modal-title">{t('modals.connectionSettings.title')}</h2>
+            <p className="mt-0.5 text-sm liquid-glass-modal-text-muted">
+              {t('settings.settingsHub.subtitle', 'Set up and manage this register')}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="liquid-glass-modal-close"
+            aria-label={t('common.actions.close', 'Close')}
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      }
       size="full"
       className="!max-w-[min(1180px,96vw)] !max-h-[min(900px,94vh)]"
       contentClassName="!overflow-hidden !p-4 sm:!p-5"
@@ -932,7 +960,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           onBack={() => setShowPaymentTerminalsSection(false)}
           onOpenCashRegisterSetup={() => {
             setShowPaymentTerminalsSection(false)
-            setShowPeripheralsSettings(true)
+            setActiveSettingsSection('hardware')
             setCashRegisterSetupIntent({
               mode: 'rbs_network',
               token: Date.now(),
@@ -941,404 +969,481 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         />
       ) : (
       <div
-        data-settings-workbench
-        className="settings-workbench flex min-h-0 flex-1 flex-col gap-4 overflow-hidden"
+        data-settings-hub
+        className="settings-hub flex min-h-0 flex-1 flex-col overflow-hidden"
       >
-        <div className="grid shrink-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div className={compactPanelClass}>
-            <div className="flex items-center gap-3">
-              <Monitor className="h-5 w-5 text-cyan-400" />
-              <div className="min-w-0">
-                <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
-                  {t('settings.managedByAdmin.terminalUnitLabel', 'Terminal unit')}
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(0,300px)_minmax(0,1fr)]">
+          {/* Left column — the settings navigation list. One row per area; the
+              active row carries the single yellow accent. */}
+          <nav
+            aria-label={t('modals.connectionSettings.title')}
+            className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-0 scrollbar-hide lg:pr-1"
+          >
+            {settingsNavGroups.map((group) => (
+              <div key={group.id} className="space-y-1">
+                <div className="px-2 pb-1 text-[11px] font-semibold liquid-glass-modal-text-muted">
+                  {t(`settings.settingsHub.groups.${group.id}`, group.id)}
                 </div>
-                <div className="truncate text-sm font-semibold liquid-glass-modal-text">
-                  {managedTerminalSummary || resolvedTerminalTypeLabel}
-                </div>
+                {group.items.map((id) => {
+                  const isActive = activeSettingsSection === id
+                  const navItem = settingsNav.find((entry) => entry.id === id)
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => openSection(id)}
+                      aria-current={isActive ? 'page' : undefined}
+                      className={
+                        'flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors duration-150 ' +
+                        (isActive
+                          ? 'border-yellow-400/40 bg-yellow-400/15 liquid-glass-modal-text'
+                          : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text active:bg-white/10 dark:bg-black/10 dark:active:bg-white/5')
+                      }
+                    >
+                      <span
+                        className={
+                          'flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-yellow-400 text-black ring-1 ring-yellow-500/55 shadow-[0_8px_20px_rgba(250,204,21,0.22)]'
+                        }
+                      >
+                        {navItem?.icon}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block break-words text-sm font-semibold leading-tight">
+                          {sectionMeta[id].label}
+                        </span>
+                        <span className="block break-words text-xs leading-snug liquid-glass-modal-text-muted">
+                          {sectionMeta[id].detail}
+                        </span>
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
-            </div>
-          </div>
-          <div className={compactPanelClass}>
-            <div className="flex items-center gap-3">
-              <Wifi className="h-5 w-5 text-green-400" />
-              <div className="min-w-0">
-                <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
-                  {t('settings.managedByAdmin.syncStatusLabel', 'Sync')}
-                </div>
-                <div className="truncate text-sm font-semibold liquid-glass-modal-text">{syncHealthLabel}</div>
-              </div>
-            </div>
-          </div>
-          <div className={compactPanelClass}>
-            <div className="flex items-center gap-3">
-              <Settings className="h-5 w-5 text-emerald-400" />
-              <div className="min-w-0">
-                <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
-                  {t('settings.managedByAdmin.enabledFeaturesLabel', 'Enabled features')}
-                </div>
-                <div className="truncate text-sm font-semibold liquid-glass-modal-text">
-                  {enabledFeatureLabels.length
-                    ? `${enabledFeatureLabels.length}`
-                    : t('settings.managedByAdmin.noRemoteFeaturesEnabled', 'No remote features enabled')}
-                </div>
-              </div>
-            </div>
-          </div>
-          <div className={compactPanelClass}>
-            <div className="flex items-center gap-3">
-              <Database className="h-5 w-5 text-orange-400" />
-              <div className="min-w-0">
-                <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
-                  {t('settings.managedByAdmin.enabledModulesLabel', 'Enabled modules')}
-                </div>
-                <div className="truncate text-sm font-semibold liquid-glass-modal-text">
-                  {enabledModuleNames.length
-                    ? `${enabledModuleNames.length}`
-                    : t('settings.managedByAdmin.coreModulesOnly', 'Core modules only')}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(220px,248px)_minmax(0,1fr)]">
-          <aside className="flex min-w-0 gap-2 overflow-x-auto rounded-xl border liquid-glass-modal-border bg-white/5 p-2 scrollbar-hide touch-pan-x md:min-h-0 md:flex-col md:overflow-y-auto md:overflow-x-hidden md:touch-pan-y">
-            {settingsSections.map((section) => (
-              <button
-                key={section.id}
-                type="button"
-                onClick={() => handleSettingsSectionSelect(section.id)}
-                className={sectionButtonClass(section.id)}
-                aria-current={activeSettingsSection === section.id ? 'page' : undefined}
-              >
-                <span className="flex min-w-0 items-center gap-3">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-black/5 dark:bg-white/10">
-                    {section.icon}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="line-clamp-2 text-sm font-semibold leading-tight">{section.label}</span>
-                    <span className="mt-0.5 block truncate text-xs leading-snug opacity-70">{section.detail}</span>
-                  </span>
-                </span>
-              </button>
             ))}
-          </aside>
+          </nav>
 
-          <div className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-0 scrollbar-hide lg:pr-1">
-        <div id="settings-section-admin" className="rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-emerald-500/10 dark:bg-emerald-500/10 px-4 py-4 transition-all">
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <Settings className="w-5 h-5 text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
-                <div>
-                  <span className="font-medium block liquid-glass-modal-text">
-                    {t('settings.managedByAdmin.title', 'Managed by Admin')}
-                  </span>
-                  <span className="text-xs liquid-glass-modal-text-muted">
-                    {t('settings.managedByAdmin.helpText', 'Admin controls access policy. This terminal controls hardware and local behavior.')}
-                  </span>
+          {/* Right column — the active section body. */}
+          <div ref={detailScrollRef} className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-0 scrollbar-hide lg:pr-1">
+        {activeSettingsSection === 'admin' && (
+        <div
+          id="settings-section-admin"
+          data-settings-register-overview
+          className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all"
+        >
+          {sectionHeader(
+            <Settings className="h-5 w-5 text-black" />,
+            t('settings.deviceSetup.title', 'Device setup'),
+            t('settings.deviceSetup.help', 'Link this register and see what it can do.'),
+          )}
+
+          {/* 1. Plain-language status card with the sync-health tone dot AND the primary Sync
+              action. The button lives here (not at the bottom) so the main action is visible in the
+              first viewport at 1280x800 without scrolling. */}
+          <div
+            data-register-status-card
+            className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3.5 dark:bg-black/10"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-3">
+                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border liquid-glass-modal-border bg-white/5 dark:bg-black/10">
+                  <span className={`h-2.5 w-2.5 rounded-full ${syncToneClass}`} />
+                </span>
+                <div className="min-w-0">
+                  <div className="font-semibold liquid-glass-modal-text">
+                    {isSyncHealthy
+                      ? t('settings.deviceSetup.overview.statusTitle', 'This register is set up')
+                      : t('settings.deviceSetup.overview.statusTitleWarning', 'Sync needs attention')}
+                  </div>
+                  <div className="text-xs liquid-glass-modal-text-muted">
+                    {isSyncHealthy
+                      ? t('settings.deviceSetup.overview.statusHelp', 'Everything this register can do is shown below in plain words.')
+                      : t('settings.deviceSetup.overview.statusHelpWarning', 'Run sync to refresh this register before changing devices or payment settings.')}
+                  </div>
+                  <div className="mt-1.5 inline-flex items-center gap-1.5 text-xs liquid-glass-modal-text-muted">
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${syncToneClass}`} />
+                    {t('settings.deviceSetup.syncStatus', 'Sync')}: {syncHealthLabel}
+                  </div>
                 </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2">
-                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
-                    {t('settings.managedByAdmin.terminalUnitLabel', 'Terminal unit')}
-                  </div>
-                  <div className="mt-1 liquid-glass-modal-text">{managedTerminalSummary}</div>
-                  <div className="text-xs liquid-glass-modal-text-muted mt-1">
-                    {posOperatingMode || 'legacy_branch_shared'}
-                  </div>
+              <button
+                data-register-sync-action
+                onClick={handleManualPolicySync}
+                className={liquidGlassModalButton('primary', 'sm') + ' inline-flex shrink-0 items-center justify-center gap-2'}
+              >
+                <Wifi className="h-4 w-4 shrink-0" />
+                {t('settings.deviceSetup.syncButton', 'Sync settings')}
+              </button>
+            </div>
+          </div>
+
+          {/* 2. Large readable summary tiles: register type, sync state, PIN status. */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div
+              data-register-summary-tile
+              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
+            >
+              <div className="flex items-center gap-2">
+                <Monitor className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
+                <div className="text-xs font-semibold liquid-glass-modal-text-muted">
+                  {t('settings.deviceSetup.overview.registerType', 'Register type')}
                 </div>
-                <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2">
-                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
-                    {t('settings.managedByAdmin.connectionLabel', 'Connection')}
-                  </div>
-                  <div className="mt-1 liquid-glass-modal-text break-all">
-                    {runtimeTerminalId ||
-                      terminalId ||
-                      t('settings.managedByAdmin.unassignedTerminal', 'Unassigned terminal')}
-                  </div>
-                  <div className="text-xs liquid-glass-modal-text-muted mt-1 break-all">
-                    {runtimeAdminUrl ||
-                      adminDashboardUrl ||
-                      t('settings.managedByAdmin.noAdminUrl', 'No admin URL')}
-                  </div>
-                  <div className="text-xs liquid-glass-modal-text-muted mt-1">
-                    {t('settings.managedByAdmin.syncStatusLabel', 'Sync')}: {syncHealthLabel}
-                  </div>
+              </div>
+              <div className="mt-1.5 text-base font-semibold liquid-glass-modal-text">{managedTerminalSummary}</div>
+            </div>
+
+            <div
+              data-register-summary-tile
+              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
+            >
+              <div className="flex items-center gap-2">
+                <Wifi className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
+                <div className="text-xs font-semibold liquid-glass-modal-text-muted">
+                  {t('settings.deviceSetup.overview.syncState', 'Sync')}
                 </div>
-                <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2 md:col-span-2">
-                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
-                    {t('settings.managedByAdmin.enabledFeaturesLabel', 'Enabled features')}
-                  </div>
-                  <div className="mt-1 liquid-glass-modal-text">
-                    {enabledFeatureLabels.length
-                      ? enabledFeatureLabels.join(', ')
-                      : t(
-                          'settings.managedByAdmin.noRemoteFeaturesEnabled',
-                          'No remote features enabled',
-                        )}
-                  </div>
-                </div>
-                <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2 md:col-span-2">
-                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">
-                    {t('settings.managedByAdmin.enabledModulesLabel', 'Enabled modules')}
-                  </div>
-                  <div className="mt-1 liquid-glass-modal-text">
-                    {enabledModuleNames.length
-                      ? enabledModuleNames.join(', ')
-                      : t('settings.managedByAdmin.coreModulesOnly', 'Core modules only')}
-                  </div>
-                  <div className="text-xs liquid-glass-modal-text-muted mt-1">
-                    {pinResetRequired
-                      ? t(
-                          'settings.managedByAdmin.pinResetRequired',
-                          'Admin requires a new local PIN on next login.',
-                        )
-                      : t(
-                          'settings.managedByAdmin.pinResetClear',
-                          'No remote PIN reset request pending.',
-                        )}
-                  </div>
-                </div>
+              </div>
+              <div className="mt-1.5 inline-flex items-center gap-2 text-base font-semibold liquid-glass-modal-text">
+                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${syncToneClass}`} />
+                {syncHealthLabel}
               </div>
             </div>
-            <button
-              onClick={handleManualPolicySync}
-              className={liquidGlassModalButton('secondary', 'md')}
+
+            <div
+              data-register-summary-tile
+              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
             >
-              {t('settings.managedByAdmin.syncNow', 'Sync Policy')}
-            </button>
+              <div className="flex items-center gap-2">
+                <Lock className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
+                <div className="text-xs font-semibold liquid-glass-modal-text-muted">
+                  {t('settings.deviceSetup.overview.pinStatus', 'PIN')}
+                </div>
+              </div>
+              <div className="mt-1.5 inline-flex items-center gap-2 text-base font-semibold liquid-glass-modal-text">
+                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${pinResetRequired ? 'bg-yellow-400' : 'bg-green-500'}`} />
+                {pinResetRequired
+                  ? t('settings.deviceSetup.overview.pinResetShort', 'New PIN needed')
+                  : t('settings.deviceSetup.overview.pinOkShort', 'PIN ready')}
+              </div>
+              <div className="mt-1 text-xs liquid-glass-modal-text-muted">
+                {pinResetRequired
+                  ? t('settings.deviceSetup.pinResetRequired', 'A new PIN is required at next sign-in.')
+                  : t('settings.deviceSetup.pinResetClear', 'No PIN reset pending.')}
+              </div>
+            </div>
           </div>
+
+          {/* 4. Allowed actions + Active areas — calm, scannable chips: a count badge plus the first
+              OVERVIEW_CHIP_LIMIT localized labels as soft rounded chips, then a "+N more" summary chip
+              (no unlimited wall of pills, no paragraph dump). enabledModuleNames is still built via
+              resolveNavigationLabel; no data is dropped, only the display is condensed. */}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div
+              data-register-allowed-actions
+              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Settings className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
+                  <div className="text-xs font-semibold liquid-glass-modal-text-muted">
+                    {t('settings.deviceSetup.allowedActions', 'Allowed actions')}
+                  </div>
+                </div>
+                <span className="rounded-full bg-yellow-400/15 px-2 py-0.5 text-xs font-semibold text-yellow-900 dark:text-yellow-200">
+                  {enabledFeatureLabels.length}
+                </span>
+              </div>
+              {enabledFeatureLabels.length ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {enabledFeatureLabels.slice(0, OVERVIEW_CHIP_LIMIT).map((label, index) => (
+                    <span
+                      key={`${label}-${index}`}
+                      className="inline-flex items-center rounded-full border border-yellow-400/30 bg-yellow-400/10 px-2.5 py-1 text-xs font-medium text-yellow-900 dark:text-yellow-100"
+                    >
+                      {label}
+                    </span>
+                  ))}
+                  {enabledFeatureLabels.length > OVERVIEW_CHIP_LIMIT ? (
+                    <span className="inline-flex items-center rounded-full border liquid-glass-modal-border bg-white/5 px-2.5 py-1 text-xs font-semibold liquid-glass-modal-text-muted dark:bg-black/20">
+                      {t('settings.deviceSetup.overview.moreCount', '+{{count}} more', {
+                        count: enabledFeatureLabels.length - OVERVIEW_CHIP_LIMIT,
+                      })}
+                    </span>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="mt-1.5 text-sm liquid-glass-modal-text">
+                  {t('settings.deviceSetup.noAllowedActions', 'No allowed actions yet')}
+                </div>
+              )}
+            </div>
+
+            <div
+              data-register-active-areas
+              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Database className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
+                  <div className="text-xs font-semibold liquid-glass-modal-text-muted">
+                    {t('settings.deviceSetup.activeAreas', 'Active areas')}
+                  </div>
+                </div>
+                <span className="rounded-full bg-white/10 px-2 py-0.5 text-xs font-semibold liquid-glass-modal-text dark:bg-black/20">
+                  {enabledModuleNames.length}
+                </span>
+              </div>
+              {enabledModuleNames.length ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {enabledModuleNames.slice(0, OVERVIEW_CHIP_LIMIT).map((label, index) => (
+                    <span
+                      key={`${label}-${index}`}
+                      className="inline-flex items-center rounded-full border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-xs font-medium text-green-900 dark:text-green-100"
+                    >
+                      {label}
+                    </span>
+                  ))}
+                  {enabledModuleNames.length > OVERVIEW_CHIP_LIMIT ? (
+                    <span className="inline-flex items-center rounded-full border liquid-glass-modal-border bg-white/5 px-2.5 py-1 text-xs font-semibold liquid-glass-modal-text-muted dark:bg-black/20">
+                      {t('settings.deviceSetup.overview.moreCount', '+{{count}} more', {
+                        count: enabledModuleNames.length - OVERVIEW_CHIP_LIMIT,
+                      })}
+                    </span>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="mt-1.5 text-sm liquid-glass-modal-text">
+                  {t('settings.deviceSetup.coreAreasOnly', 'Core areas only')}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Round 347: the raw register ID / dashboard address disclosure is removed entirely. A cashier
+              never needs these and they are a raw-ID leak surface; the editable terminal-id / admin-url
+              credential fields live in the Connection section. The runtime values stay internal (used only by
+              the credential/auth logic), never rendered in this overview. */}
         </div>
+        )}
 
         {/* Connection Settings */}
-        <div id="settings-section-connection" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showConnectionSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
-          }`}>
-          <button
-            onClick={() => setShowConnectionSettings(!showConnectionSettings)}
-            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
-          >
-            <div className="flex items-center gap-3">
-              <Wifi className="w-5 h-5 text-green-400 drop-shadow-[0_0_8px_rgba(74,222,128,0.6)]" />
-              <span className="font-medium">{t('modals.connectionSettings.connectionSettings')}</span>
-            </div>
-            <ChevronDown className={`w-5 h-5 transition-transform ${showConnectionSettings ? 'rotate-180' : ''}`} />
-          </button>
-
-          {showConnectionSettings && (
-            <div className={`px-4 pb-4 space-y-3 border-t liquid-glass-modal-border`}>
-              <div className="pt-3">
-                <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
-                  {t('onboarding.connectionString', { defaultValue: 'Connection Code' })}
-                </label>
-                <p className="text-xs liquid-glass-modal-text-muted mb-3">
-                  {t('onboarding.connectionStringHelp', {
-                    defaultValue: 'Paste the connection code from Admin Dashboard (Branches → POS → Regenerate credentials).',
-                  })}
-                </p>
-                <textarea
-                  value={connectionCode}
-                  onChange={e => setConnectionCode(e.target.value)}
-                  className="liquid-glass-modal-input min-h-[90px] font-mono text-xs"
-                  placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste connection code here...' })}
-                />
-              </div>
-              {allowManualCredentials && (
-                <>
-                  <div>
-                    <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.terminalId')}</label>
-                    <input
-                      value={terminalId}
-                      onChange={e => setTerminalId(e.target.value)}
-                      className="liquid-glass-modal-input"
-                      placeholder={t('modals.connectionSettings.terminalPlaceholder')}
-                    />
-                  </div>
-                  <div>
-                    <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
-                      {t('modals.connectionSettings.adminDashboardUrl', { defaultValue: 'Admin Dashboard URL' })}
-                    </label>
-                    <input
-                      value={adminDashboardUrl}
-                      onChange={e => setAdminDashboardUrl(e.target.value)}
-                      className="liquid-glass-modal-input"
-                      placeholder={t('modals.connectionSettings.adminDashboardUrlPlaceholder', { defaultValue: 'https://admin-dashboard.example.com' })}
-                    />
-                  </div>
-                  <div>
-                    <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.apiKey')}</label>
-                    <div className="relative">
-                      <input
-                        value={apiKey}
-                        onChange={e => setApiKey(e.target.value)}
-                        type={showApiKey ? 'text' : 'password'}
-                        className="liquid-glass-modal-input pr-10"
-                        placeholder={t('modals.connectionSettings.apiKeyPlaceholder')}
-                      />
-                      <button
-                        type="button"
-                        aria-label={showApiKey ? t('common.hide') : t('common.show')}
-                        onClick={() => setShowApiKey(v => !v)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-white/20 dark:hover:bg-gray-700/40"
-                      >
-                        {showApiKey ? (
-                          <EyeOff className="w-4 h-4 text-gray-400" />
-                        ) : (
-                          <Eye className="w-4 h-4 text-gray-400" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </>
-              )}
-              <div className="flex gap-2 pt-2">
-                <button
-                  onClick={handlePasteBoth}
-                  title={t('modals.connectionSettings.pasteBothTooltip')}
-                  className={liquidGlassModalButton('secondary', 'md') + ' flex items-center gap-2'}
-                >
-                  <Clipboard className="w-4 h-4" />
-                  {t('modals.connectionSettings.pasteBoth')}
-                </button>
-                {allowManualCredentials && (
-                  <button onClick={handleTest} className={liquidGlassModalButton('secondary', 'md')}>
-                    {t('modals.connectionSettings.test')}
-                  </button>
-                )}
-                <button onClick={handleManualPolicySync} className={liquidGlassModalButton('secondary', 'md')}>
-                  {t('settings.connection.syncPolicy', 'Sync Policy')}
-                </button>
-                <button onClick={handleSaveConnection} className={liquidGlassModalButton('primary', 'md')}>
-                  {t('modals.connectionSettings.save')}
-                </button>
-              </div>
-            </div>
+        {activeSettingsSection === 'connection' && (
+        <div id="settings-section-connection" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 pt-4 pb-5 space-y-2.5 transition-all">
+          {sectionHeader(
+            <Wifi className="h-5 w-5 text-black" />,
+            t('modals.connectionSettings.connectionSettings'),
           )}
+          <div>
+            <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+              {t('onboarding.connectionString', { defaultValue: 'Connection Code' })}
+            </label>
+            <p className="text-xs liquid-glass-modal-text-muted mb-2">
+              {t('settings.deviceSetup.connectionCodeHelp', { defaultValue: 'Paste the connection code from your dashboard.' })}
+            </p>
+            <textarea
+              value={connectionCode}
+              onChange={e => setConnectionCode(e.target.value)}
+              className="liquid-glass-modal-input w-full min-h-[72px] font-mono text-xs"
+              placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste connection code here...' })}
+            />
+          </div>
+          {allowManualCredentials && (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">{t('settings.deviceSetup.registerId', 'Register ID')}</label>
+                  <input
+                    value={terminalId}
+                    onChange={e => setTerminalId(e.target.value)}
+                    className="liquid-glass-modal-input w-full"
+                    placeholder={t('modals.connectionSettings.terminalPlaceholder')}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                    {t('settings.deviceSetup.dashboardAddress', 'Dashboard address')}
+                  </label>
+                  <input
+                    value={adminDashboardUrl}
+                    onChange={e => setAdminDashboardUrl(e.target.value)}
+                    className="liquid-glass-modal-input w-full"
+                    placeholder={t('settings.deviceSetup.dashboardAddressPlaceholder', { defaultValue: 'https://your-dashboard.example.com' })}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">{t('settings.deviceSetup.posKey', 'POS key')}</label>
+                <div className="relative">
+                  <input
+                    value={apiKey}
+                    onChange={e => setApiKey(e.target.value)}
+                    type={showApiKey ? 'text' : 'password'}
+                    className="liquid-glass-modal-input w-full pr-12"
+                    placeholder={t('modals.connectionSettings.apiKeyPlaceholder')}
+                  />
+                  <button
+                    type="button"
+                    aria-label={showApiKey ? t('common.hide') : t('common.show')}
+                    onClick={() => setShowApiKey(v => !v)}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 inline-flex h-10 w-10 items-center justify-center rounded-lg transition-transform active:scale-95 active:bg-white/15 dark:active:bg-white/10"
+                  >
+                    {showApiKey ? (
+                      <EyeOff className="w-5 h-5 text-gray-400" />
+                    ) : (
+                      <Eye className="w-5 h-5 text-gray-400" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+          {/* Connection actions: balanced secondary group plus primary Save slot. */}
+          <div data-connection-action-bar className="flex flex-col gap-3 pt-2">
+            <div data-connection-secondary-actions className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+              <button
+                onClick={handlePasteBoth}
+                aria-label={t('modals.connectionSettings.pasteBothTooltip')}
+                className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-[44px] flex-1 items-center justify-center gap-2 text-center leading-tight'}
+              >
+                <Clipboard className="w-4 h-4 shrink-0" />
+                {t('modals.connectionSettings.pasteBoth')}
+              </button>
+              {allowManualCredentials && (
+                <button
+                  onClick={handleTest}
+                  className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-[44px] flex-1 items-center justify-center text-center leading-tight'}
+                >
+                  {t('modals.connectionSettings.test')}
+                </button>
+              )}
+              <button
+                onClick={handleManualPolicySync}
+                className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-[44px] flex-1 items-center justify-center text-center leading-tight'}
+              >
+                {t('settings.deviceSetup.syncButton', 'Sync settings')}
+              </button>
+            </div>
+            <div data-connection-primary-action className="flex justify-center">
+              <button
+                onClick={handleSaveConnection}
+                className={SAVE_BTN_MD + ' min-h-[44px] w-full sm:w-auto sm:min-w-[240px]'}
+              >
+                <Check className="w-4 h-4" />
+                {t('modals.connectionSettings.save')}
+              </button>
+            </div>
+          </div>
         </div>
+        )}
 
         {/* PIN Settings */}
-        <div id="settings-section-security" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPinSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
-          }`}>
-          <button
-            onClick={() => setShowPinSettings(!showPinSettings)}
-            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
-          >
-            <div className="flex items-center gap-3">
-              <Lock className="w-5 h-5 text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.6)]" />
-              <div className="text-left">
-                <span className="font-medium block">{t('modals.connectionSettings.pinSetup', 'Local PIN')}</span>
-                <span className={`text-xs liquid-glass-modal-text-muted`}>
-                  {pinResetRequired
-                    ? t('settings.security.pinResetRequired', 'Admin requires a new PIN before next login')
-                    : pin && !editingPin
-                      ? '••••'
-                      : t('settings.security.pinHelp', 'Local staff authentication')}
-                </span>
+        {activeSettingsSection === 'security' && (
+        <div id="settings-section-security" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-3 transition-all">
+          {sectionHeader(
+            <Lock className="h-5 w-5 text-black" />,
+            t('modals.connectionSettings.pinSetup', 'Local PIN'),
+            pinResetRequired
+              ? t('settings.deviceSetup.pinResetRequired', 'A new PIN is required at next sign-in.')
+              : pin && !editingPin
+                ? '••••'
+                : t('settings.security.pinHelp', 'Local staff authentication'),
+          )}
+          {!editingPin ? (
+            <button
+              onClick={() => setEditingPin(true)}
+              className={liquidGlassModalButton('primary', 'md')}
+            >
+              {t('modals.connectionSettings.changePin')}
+            </button>
+          ) : (
+            <>
+              <div>
+                <label className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">{t('modals.connectionSettings.newPin')}</label>
+                <input
+                  value={pin}
+                  onChange={e => setPin(e.target.value.replace(/[^0-9]/g, ''))}
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  className="liquid-glass-modal-input"
+                  placeholder={t('modals.connectionSettings.enterPin')}
+                />
               </div>
-            </div>
-            <ChevronDown className={`w-5 h-5 transition-transform ${showPinSettings ? 'rotate-180' : ''}`} />
-          </button>
-
-          {showPinSettings && (
-            <div className={`px-4 pb-4 space-y-3 border-t liquid-glass-modal-border`}>
-              {!editingPin ? (
+              <div>
+                <label className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">{t('modals.connectionSettings.confirmPin')}</label>
+                <input
+                  value={confirmPin}
+                  onChange={e => setConfirmPin(e.target.value.replace(/[^0-9]/g, ''))}
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  className="liquid-glass-modal-input"
+                  placeholder={t('modals.connectionSettings.confirmPinPlaceholder')}
+                />
+              </div>
+              <div className="flex gap-2 pt-2">
                 <button
-                  onClick={() => setEditingPin(true)}
-                  className={liquidGlassModalButton('primary', 'md') + ' mt-3'}
+                  onClick={() => setEditingPin(false)}
+                  className={CANCEL_BTN_MD}
                 >
-                  {t('modals.connectionSettings.changePin')}
+                  {t('modals.connectionSettings.cancel')}
                 </button>
-              ) : (
-                <>
-                  <div className="pt-3">
-                    <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.newPin')}</label>
-                    <input
-                      value={pin}
-                      onChange={e => setPin(e.target.value.replace(/[^0-9]/g, ''))}
-                      type="password"
-                      inputMode="numeric"
-                      maxLength={6}
-                      className="liquid-glass-modal-input"
-                      placeholder={t('modals.connectionSettings.enterPin')}
-                    />
-                  </div>
-                  <div>
-                    <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.confirmPin')}</label>
-                    <input
-                      value={confirmPin}
-                      onChange={e => setConfirmPin(e.target.value.replace(/[^0-9]/g, ''))}
-                      type="password"
-                      inputMode="numeric"
-                      maxLength={6}
-                      className="liquid-glass-modal-input"
-                      placeholder={t('modals.connectionSettings.confirmPinPlaceholder')}
-                    />
-                  </div>
-                  <div className="flex gap-2 pt-2">
-                    <button
-                      onClick={() => setEditingPin(false)}
-                      className={liquidGlassModalButton('secondary', 'md')}
-                    >
-                      {t('modals.connectionSettings.cancel')}
-                    </button>
-                    <button onClick={handleSavePin} className={liquidGlassModalButton('primary', 'md')}>
-                      {t('modals.connectionSettings.savePin')}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+                <button onClick={handleSavePin} className={SAVE_BTN_MD}>
+                  {t('modals.connectionSettings.savePin')}
+                </button>
+              </div>
+            </>
           )}
         </div>
+        )}
 
         {/* Theme Switcher */}
-        <div id="settings-section-terminal" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
+        {activeSettingsSection === 'terminal' && (
+        <>
+        <div id="settings-section-terminal" className={`rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <Palette className="w-5 h-5 text-pink-400 drop-shadow-[0_0_8px_rgba(244,114,182,0.6)]" />
+              <Palette className="w-5 h-5 text-yellow-500" />
               <span className={`font-medium liquid-glass-modal-text`}>{t('modals.connectionSettings.theme')}</span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => handleSaveTheme('light')}
-                className={`p-2 rounded-lg transition-all ${theme === 'light'
+                className={`p-2 rounded-lg transition-all inline-flex items-center justify-center ${theme === 'light'
                   ? 'bg-yellow-500/30 border-2 border-yellow-400 shadow-[0_0_12px_rgba(250,204,21,0.5)]'
-                  : 'bg-white/10 border border-gray-600 hover:bg-white/20'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20'
                   }`}
-                title={t('modals.connectionSettings.light')}
+                aria-label={t('modals.connectionSettings.light')}
               >
                 <Sun className={`w-5 h-5 ${theme === 'light' ? 'text-yellow-300' : 'text-gray-400'}`} />
               </button>
               <button
                 onClick={() => handleSaveTheme('dark')}
-                className={`p-2 rounded-lg transition-all ${theme === 'dark'
-                  ? 'bg-indigo-500/30 border-2 border-indigo-400 shadow-[0_0_12px_rgba(129,140,248,0.5)]'
-                  : 'bg-white/10 border border-gray-600 hover:bg-white/20'
+                className={`p-2 rounded-lg transition-all inline-flex items-center justify-center ${theme === 'dark'
+                  ? 'bg-yellow-500/30 border-2 border-yellow-400 shadow-[0_0_12px_rgba(250,204,21,0.5)]'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20'
                   }`}
-                title={t('modals.connectionSettings.dark')}
+                aria-label={t('modals.connectionSettings.dark')}
               >
-                <Moon className={`w-5 h-5 ${theme === 'dark' ? 'text-indigo-300' : 'text-gray-400'}`} />
+                <Moon className={`w-5 h-5 ${theme === 'dark' ? 'text-yellow-300' : 'text-gray-400'}`} />
               </button>
               <button
                 onClick={() => handleSaveTheme('auto')}
-                className={`p-2 rounded-lg transition-all ${theme === 'auto'
-                  ? 'bg-cyan-500/30 border-2 border-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.5)]'
-                  : 'bg-white/10 border border-gray-600 hover:bg-white/20'
+                className={`p-2 rounded-lg transition-all inline-flex items-center justify-center ${theme === 'auto'
+                  ? 'bg-yellow-400/25 border-2 border-yellow-400 shadow-[0_0_12px_rgba(234,179,8,0.4)]'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20'
                   }`}
-                title={t('modals.connectionSettings.system')}
+                aria-label={t('modals.connectionSettings.system')}
               >
-                <Monitor className={`w-5 h-5 ${theme === 'auto' ? 'text-cyan-300' : 'text-gray-400'}`} />
+                <Monitor className={`w-5 h-5 ${theme === 'auto' ? 'text-yellow-600 dark:text-yellow-400' : 'text-gray-400'}`} />
               </button>
             </div>
           </div>
         </div>
 
         {/* Language Switcher */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
+        <div className={`rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <Globe className="w-5 h-5 text-blue-400 drop-shadow-[0_0_8px_rgba(96,165,250,0.6)]" />
+              <Globe className="w-5 h-5 text-yellow-500" />
               <span className={`font-medium liquid-glass-modal-text`}>{t('modals.connectionSettings.language')}</span>
             </div>
             <div className="flex items-center gap-2">
@@ -1347,11 +1452,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   setLanguage('en')
                   toast.success(t('modals.connectionSettings.languageSaved'))
                 }}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'en'
-                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
-                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'en'
+                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
                   }`}
-                title={t('settings.display.langEnglish')}
+                aria-label={t('settings.display.langEnglish')}
               >
                 EN
               </button>
@@ -1360,11 +1465,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   setLanguage('el')
                   toast.success(t('modals.connectionSettings.languageSaved'))
                 }}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'el'
-                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
-                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'el'
+                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
                   }`}
-                title={t('settings.display.langGreek')}
+                aria-label={t('settings.display.langGreek')}
               >
                 EL
               </button>
@@ -1373,11 +1478,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   setLanguage('de')
                   toast.success(t('modals.connectionSettings.languageSaved'))
                 }}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'de'
-                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
-                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'de'
+                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
                   }`}
-                title={t('settings.display.langGerman')}
+                aria-label={t('settings.display.langGerman')}
               >
                 DE
               </button>
@@ -1386,11 +1491,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   setLanguage('fr')
                   toast.success(t('modals.connectionSettings.languageSaved'))
                 }}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'fr'
-                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
-                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'fr'
+                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
                   }`}
-                title={t('settings.display.langFrench')}
+                aria-label={t('settings.display.langFrench')}
               >
                 FR
               </button>
@@ -1399,11 +1504,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   setLanguage('it')
                   toast.success(t('modals.connectionSettings.languageSaved'))
                 }}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'it'
-                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
-                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'it'
+                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
                   }`}
-                title={t('settings.display.langItalian')}
+                aria-label={t('settings.display.langItalian')}
               >
                 IT
               </button>
@@ -1411,437 +1516,400 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </div>
         </div>
 
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showTerminalPreferences ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
-          <button
-            onClick={() => setShowTerminalPreferences(!showTerminalPreferences)}
-            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
-          >
-            <div className="flex items-center gap-3">
-              <Monitor className="w-5 h-5 text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.6)]" />
-              <div className="text-left">
-                <span className="font-medium block">{t('settings.terminal.title', 'Terminal')}</span>
-                <span className="text-xs liquid-glass-modal-text-muted">
-                  {t('settings.terminal.helpText', 'Local UX and operator preferences for this device')}
-                </span>
-              </div>
-            </div>
-            <ChevronDown className={`w-5 h-5 transition-transform ${showTerminalPreferences ? 'rotate-180' : ''}`} />
-          </button>
-
-          {showTerminalPreferences && (
-            <div className={`px-4 pb-4 space-y-4 border-t liquid-glass-modal-border pt-4`}>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
-                    {t('settings.terminal.screenTimeout', 'Screen timeout (minutes)')}
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={120}
-                    value={screenTimeoutMinutes}
-                    onChange={e => setScreenTimeoutMinutes(e.target.value)}
-                    className="liquid-glass-modal-input"
-                  />
-                </div>
-                <div>
-                  <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
-                    {t('settings.terminal.touchSensitivity', 'Touch sensitivity')}
-                  </label>
-                  <select
-                    value={touchSensitivity}
-                    onChange={e => setTouchSensitivity(e.target.value)}
-                    className="liquid-glass-modal-input"
-                  >
-                    <option value="low">{t('settings.terminal.touchLow', 'Low')}</option>
-                    <option value="medium">{t('settings.terminal.touchMedium', 'Medium')}</option>
-                    <option value="high">{t('settings.terminal.touchHigh', 'High')}</option>
-                  </select>
-                </div>
-                <div className="md:col-span-2">
-                  <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
-                    {t('settings.terminal.displayBrightness', 'Display brightness')}
-                  </label>
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="range"
-                      min={10}
-                      max={100}
-                      step={5}
-                      value={displayBrightness}
-                      onChange={e => setDisplayBrightness(e.target.value)}
-                      className="flex-1"
-                    />
-                    <div className="w-16 text-right text-sm liquid-glass-modal-text">{displayBrightness}%</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="flex items-center justify-between rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-3">
-                  <div>
-                    <div className="font-medium liquid-glass-modal-text">{t('settings.terminal.audioEnabled', 'Audio enabled')}</div>
-                    <div className="text-xs liquid-glass-modal-text-muted">{t('settings.terminal.audioHelp', 'Play UI sounds on this device')}</div>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" checked={audioEnabled} onChange={(e) => setAudioEnabled(e.target.checked)} className="sr-only peer" />
-                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-                  </label>
-                </div>
-                <div className="flex items-center justify-between rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-3">
-                  <div>
-                    <div className="font-medium liquid-glass-modal-text">{t('settings.terminal.receiptAutoPrint', 'Auto-print receipts')}</div>
-                    <div className="text-xs liquid-glass-modal-text-muted">{t('settings.terminal.receiptAutoPrintHelp', 'Automatically print after successful checkout')}</div>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" checked={receiptAutoPrint} onChange={(e) => setReceiptAutoPrint(e.target.checked)} className="sr-only peer" />
-                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-                  </label>
-                </div>
-              </div>
-
-              <div className="pt-2 border-t liquid-glass-modal-border">
-                <button
-                  onClick={handleSaveTerminalPreferences}
-                  className={liquidGlassModalButton('primary', 'md')}
-                >
-                  {t('settings.terminal.saveButton', 'Save Terminal Preferences')}
-                </button>
-              </div>
-            </div>
+        <div className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
+          {sectionHeader(
+            <Monitor className="h-5 w-5 text-black" />,
+            t('settings.terminal.title', 'Terminal'),
+            t('settings.terminal.helpText', 'Local UX and operator preferences for this device'),
           )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="terminal-screen-timeout" className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
+                {t('settings.terminal.screenTimeout', 'Screen timeout (minutes)')}
+              </label>
+              <input
+                id="terminal-screen-timeout"
+                type="number"
+                min={1}
+                max={120}
+                value={screenTimeoutMinutes}
+                onChange={e => setScreenTimeoutMinutes(e.target.value)}
+                className="liquid-glass-modal-input"
+              />
+            </div>
+            <div>
+              <label htmlFor="terminal-touch-sensitivity" className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
+                {t('settings.terminal.touchSensitivity', 'Touch sensitivity')}
+              </label>
+              <select
+                id="terminal-touch-sensitivity"
+                value={touchSensitivity}
+                onChange={e => setTouchSensitivity(e.target.value)}
+                className="liquid-glass-modal-input"
+              >
+                <option value="low">{t('settings.terminal.touchLow', 'Low')}</option>
+                <option value="medium">{t('settings.terminal.touchMedium', 'Medium')}</option>
+                <option value="high">{t('settings.terminal.touchHigh', 'High')}</option>
+              </select>
+            </div>
+            <div className="md:col-span-2">
+              <label htmlFor="terminal-display-brightness" className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
+                {t('settings.terminal.displayBrightness', 'Display brightness')}
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  id="terminal-display-brightness"
+                  type="range"
+                  min={10}
+                  max={100}
+                  step={5}
+                  value={displayBrightness}
+                  onChange={e => setDisplayBrightness(e.target.value)}
+                  className="flex-1 accent-yellow-500"
+                />
+                <div className="w-16 text-right text-sm liquid-glass-modal-text">{displayBrightness}%</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="flex items-center justify-between rounded-2xl border liquid-glass-modal-border bg-white/5 px-3 py-3">
+              <div>
+                <div id="terminal-audio-label" className="font-medium liquid-glass-modal-text">{t('settings.terminal.audioEnabled', 'Audio enabled')}</div>
+                <div className="text-xs liquid-glass-modal-text-muted">{t('settings.terminal.audioHelp', 'Play UI sounds on this device')}</div>
+              </div>
+              <POSGlassSwitch aria-labelledby="terminal-audio-label" checked={audioEnabled} onChange={setAudioEnabled} />
+            </div>
+            <div className="flex items-center justify-between rounded-2xl border liquid-glass-modal-border bg-white/5 px-3 py-3">
+              <div>
+                <div id="terminal-receipt-autoprint-label" className="font-medium liquid-glass-modal-text">{t('settings.terminal.receiptAutoPrint', 'Auto-print receipts')}</div>
+                <div className="text-xs liquid-glass-modal-text-muted">{t('settings.terminal.receiptAutoPrintHelp', 'Automatically print after successful checkout')}</div>
+              </div>
+              <POSGlassSwitch aria-labelledby="terminal-receipt-autoprint-label" checked={receiptAutoPrint} onChange={setReceiptAutoPrint} />
+            </div>
+          </div>
+
+          <div className="pt-2 border-t liquid-glass-modal-border">
+            <button
+              onClick={handleSaveTerminalPreferences}
+              className={SAVE_BTN_MD}
+            >
+              {t('settings.terminal.saveButton', 'Save Terminal Preferences')}
+            </button>
+          </div>
         </div>
+        </>
+        )}
 
         {/* Security Settings - Session Timeout */}
-        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showSecuritySettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
-          <button
-            onClick={() => setShowSecuritySettings(!showSecuritySettings)}
-            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
-          >
-            <div className="flex items-center gap-3">
-              <Timer className="w-5 h-5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
-              <div className="text-left">
-                <span className="font-medium block">{t('modals.connectionSettings.security', 'Security')}</span>
-                <span className={`text-xs liquid-glass-modal-text-muted`}>
-                  {sessionTimeoutEnabled
-                    ? t('modals.connectionSettings.sessionTimeoutStatus', { minutes: sessionTimeoutMinutes }) || `Auto-logout after ${sessionTimeoutMinutes} min`
-                    : t('modals.connectionSettings.sessionTimeoutOff', 'Session timeout disabled')}
+        {activeSettingsSection === 'security' && (
+        <div data-session-timeout-card className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
+          {sectionHeader(
+            <Timer className="h-5 w-5 text-black" />,
+            t('modals.connectionSettings.security', 'Security'),
+            sessionTimeoutEnabled
+              ? (t('modals.connectionSettings.sessionTimeoutStatus', { minutes: sessionTimeoutMinutes }) || `Auto-logout after ${sessionTimeoutMinutes} min`)
+              : t('modals.connectionSettings.sessionTimeoutOff', 'Session timeout disabled'),
+          )}
+
+          {/* Session Timeout Toggle */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+              <div className="text-left min-w-0">
+                <span id="session-timeout-label" className="font-medium block liquid-glass-modal-text">{t('modals.connectionSettings.sessionTimeout', 'Session Timeout')}</span>
+                <span className="text-xs liquid-glass-modal-text-muted">{t('modals.connectionSettings.sessionTimeoutHelp', 'Auto-logout after inactivity')}</span>
+              </div>
+            </div>
+            <POSGlassSwitch
+              aria-labelledby="session-timeout-label"
+              checked={sessionTimeoutEnabled}
+              onChange={handleToggleSessionTimeout}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-3 pt-3 border-t liquid-glass-modal-border">
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+              <div className="text-left min-w-0">
+                <span className="font-medium block liquid-glass-modal-text">
+                  {t('modals.connectionSettings.ghostMode', 'Ghost Mode')}
+                </span>
+                <span className="text-xs liquid-glass-modal-text-muted">
+                  {ghostModeFeatureEnabled
+                    ? t(
+                        'modals.connectionSettings.ghostModeHelp',
+                        'Use manual item code X with price 1 to arm ghost mode for the current cart only.'
+                      )
+                    : t(
+                        'settings.deviceSetup.ghostModeOff',
+                        'Ghost Mode is turned off for this register.'
+                      ) + (terminalId?.trim() ? ` (${terminalId.trim()})` : '')}
                 </span>
               </div>
             </div>
-            <ChevronDown className={`w-5 h-5 transition-transform ${showSecuritySettings ? 'rotate-180' : ''}`} />
-          </button>
+            <span
+              className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
+                ghostModeFeatureEnabled
+                  ? 'bg-yellow-400/15 text-yellow-800 dark:text-yellow-200'
+                  : 'bg-black/10 text-black/50 dark:bg-white/10 dark:text-white/50'
+              }`}
+            >
+              {ghostModeFeatureEnabled
+                ? t('modals.connectionSettings.available', 'Available')
+                : t('modals.connectionSettings.unavailable', 'Unavailable')}
+            </span>
+          </div>
 
-          {showSecuritySettings && (
-            <div className={`px-4 pb-4 space-y-4 border-t liquid-glass-modal-border pt-4`}>
-              {/* Session Timeout Toggle */}
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3 flex-1 min-w-0">
-                  <div className="text-left min-w-0">
-                    <span className={`font-medium block liquid-glass-modal-text`}>{t('modals.connectionSettings.sessionTimeout', 'Session Timeout')}</span>
-                    <span className={`text-xs liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.sessionTimeoutHelp', 'Auto-logout after inactivity')}</span>
-                  </div>
-                </div>
-                {/* Proper iOS-style switch */}
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={sessionTimeoutEnabled}
-                    onChange={(e) => handleToggleSessionTimeout(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-amber-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
-                </label>
-              </div>
+          {/* Timeout Duration */}
+          <div className="flex items-center justify-between gap-3 pt-3 border-t liquid-glass-modal-border">
+            <div className="text-left min-w-0">
+              <span id="session-timeout-duration-label" className="font-medium block liquid-glass-modal-text">{t('modals.connectionSettings.timeoutDuration', 'Timeout Duration')}</span>
+              <span className="text-xs liquid-glass-modal-text-muted">{t('modals.connectionSettings.timeoutRange', '1-480 minutes')}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                aria-labelledby="session-timeout-duration-label"
+                value={sessionTimeoutMinutes}
+                onChange={e => setSessionTimeoutMinutes(e.target.value)}
+                onBlur={handleSaveSessionTimeout}
+                min={1}
+                max={480}
+                disabled={!sessionTimeoutEnabled}
+                className={`liquid-glass-modal-input w-20 text-center ${
+                  sessionTimeoutEnabled ? '' : 'opacity-60 cursor-not-allowed'
+                }`}
+              />
+              <span className="text-sm liquid-glass-modal-text-muted">
+                {t('common.minutes', 'min')}
+              </span>
+            </div>
+          </div>
 
-              <div className="flex items-center justify-between gap-3 pt-3 border-t liquid-glass-modal-border">
-                <div className="flex items-center gap-3 flex-1 min-w-0">
-                  <div className="text-left min-w-0">
-                    <span className={`font-medium block liquid-glass-modal-text`}>
-                      {t('modals.connectionSettings.ghostMode', 'Ghost Mode')}
-                    </span>
-                    <span className={`text-xs liquid-glass-modal-text-muted`}>
-                      {ghostModeFeatureEnabled
-                        ? t(
-                            'modals.connectionSettings.ghostModeHelp',
-                            'Use manual item code X with price 1 to arm ghost mode for the current cart only.'
-                          )
-                        : t(
-                            'modals.connectionSettings.ghostModeDisabledByAdmin',
-                            'Enable Ghost Mode for this terminal in Admin Dashboard first.'
-                          ) + (terminalId?.trim() ? ` (${terminalId.trim()})` : '')}
-                    </span>
-                  </div>
-                </div>
-                <span
-                  className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
-                    ghostModeFeatureEnabled
-                      ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-200'
-                      : 'bg-black/10 text-black/50 dark:bg-white/10 dark:text-white/50'
+          {/* Quick presets */}
+          {sessionTimeoutEnabled && (
+            <div className="flex items-center gap-2 pt-2">
+              <span className="text-xs liquid-glass-modal-text-muted mr-2">{t('common.presets', 'Presets')}:</span>
+              {[5, 15, 30, 60].map((mins) => (
+                <button
+                  key={mins}
+                  onClick={() => {
+                    setSessionTimeoutMinutes(String(mins));
+                    // Auto-save after a short delay
+                    setTimeout(handleSaveSessionTimeout, 100);
+                  }}
+                  className={`px-3 py-1 text-sm rounded-lg transition-all inline-flex items-center justify-center ${
+                    sessionTimeoutMinutes === String(mins)
+                      ? 'bg-yellow-500/30 border border-yellow-400 text-yellow-300'
+                      : 'bg-white/10 border border-gray-600 text-gray-300 active:bg-white/20'
                   }`}
                 >
-                  {ghostModeFeatureEnabled
-                    ? t('modals.connectionSettings.available', 'Available')
-                    : t('modals.connectionSettings.unavailable', 'Unavailable')}
-                </span>
-              </div>
-
-              {/* Timeout Duration */}
-              <div className="flex items-center justify-between gap-3 pt-3 border-t liquid-glass-modal-border">
-                <div className="text-left min-w-0">
-                  <span className={`font-medium block liquid-glass-modal-text`}>{t('modals.connectionSettings.timeoutDuration', 'Timeout Duration')}</span>
-                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.timeoutRange', '1-480 minutes')}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    value={sessionTimeoutMinutes}
-                    onChange={e => setSessionTimeoutMinutes(e.target.value)}
-                    onBlur={handleSaveSessionTimeout}
-                    min={1}
-                    max={480}
-                    disabled={!sessionTimeoutEnabled}
-                    className={`w-20 px-3 py-2 rounded-lg border text-center transition-all ${
-                      sessionTimeoutEnabled
-                        ? 'bg-white/10 border-gray-500 text-white'
-                        : 'bg-gray-800/50 border-gray-700 text-gray-500 cursor-not-allowed'
-                    }`}
-                  />
-                  <span className={`text-sm ${sessionTimeoutEnabled ? 'liquid-glass-modal-text-muted' : 'text-gray-600'}`}>
-                    {t('common.minutes', 'min')}
-                  </span>
-                </div>
-              </div>
-
-              {/* Quick presets */}
-              {sessionTimeoutEnabled && (
-                <div className="flex items-center gap-2 pt-2">
-                  <span className="text-xs liquid-glass-modal-text-muted mr-2">{t('common.presets', 'Presets')}:</span>
-                  {[5, 15, 30, 60].map((mins) => (
-                    <button
-                      key={mins}
-                      onClick={() => {
-                        setSessionTimeoutMinutes(String(mins));
-                        // Auto-save after a short delay
-                        setTimeout(handleSaveSessionTimeout, 100);
-                      }}
-                      className={`px-3 py-1 text-sm rounded-lg transition-all ${
-                        sessionTimeoutMinutes === String(mins)
-                          ? 'bg-amber-500/30 border border-amber-400 text-amber-300'
-                          : 'bg-white/10 border border-gray-600 text-gray-300 hover:bg-white/20'
-                      }`}
-                    >
-                      {mins}m
-                    </button>
-                  ))}
-                </div>
-              )}
+                  {mins}m
+                </button>
+              ))}
             </div>
           )}
         </div>
+        )}
 
         {/* Database Management */}
-        <div id="settings-section-database" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showDatabaseSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
-          <button
-            onClick={() => setShowDatabaseSettings(!showDatabaseSettings)}
-            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
-          >
-            <div className="flex items-center gap-3">
-              <Database className="w-5 h-5 text-orange-400 drop-shadow-[0_0_8px_rgba(251,146,60,0.6)]" />
-              <div className="text-left">
-                <span className="font-medium block">{t('settings.database.management', 'Database Management')}</span>
-              </div>
-            </div>
-            <ChevronDown className={`w-5 h-5 transition-transform ${showDatabaseSettings ? 'rotate-180' : ''}`} />
-          </button>
-
-          {showDatabaseSettings && (
-            <div className={`px-4 pb-4 space-y-3 border-t liquid-glass-modal-border pt-4`}>
-              <div className="flex flex-col gap-3">
+        {activeSettingsSection === 'database' && (
+        <div id="settings-section-database" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
+          {sectionHeader(
+            <Database className="h-5 w-5 text-black" />,
+            t('settings.database.management', 'Database Management'),
+          )}
+          <div className="flex flex-col gap-4 pb-24">
                 <RecoveryPanel />
 
-                {/* Clear Sync Queue - Less destructive */}
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <div className="text-left min-w-0">
-                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue')}</span>
-                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearSyncQueueHelp', 'Clears stuck sync items without deleting data')}</span>
+                {/* Zone 2 — Safe fixes: calm green maintenance that keeps the operator's data. */}
+                <div data-database-safe-fixes className="rounded-2xl border liquid-glass-modal-border bg-white/5 dark:bg-black/10 p-4 space-y-3">
+                  <div className="flex items-start gap-3">
+                    <Wrench className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-300" />
+                    <div className="min-w-0">
+                      <div className="font-semibold liquid-glass-modal-text">{t('settings.database.repairToolsTitle', 'Safe fixes')}</div>
+                      <div className="text-xs liquid-glass-modal-text-muted">{t('settings.database.repairToolsHelp', 'Keeps your data')}</div>
                     </div>
                   </div>
-                  <button
-                    onClick={async () => {
-                      try {
-                        const result = await bridge.sync.clearAll() as any
-                        if (result?.success) {
-                          toast.success(t('settings.database.syncQueueCleared', { count: result.cleared }))
-                        } else {
-                          toast.error(result?.error || t('settings.database.syncQueueClearFailed'))
+
+                  {/* Clear Sync Queue */}
+                  <div className="flex items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
+                    <div className="text-left min-w-0">
+                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue')}</span>
+                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.clearSyncQueueHelp', 'Clears stuck sync items without deleting data')}</span>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const result = await bridge.sync.clearAll() as any
+                          if (result?.success) {
+                            toast.success(t('settings.database.syncQueueCleared', { count: result.cleared }))
+                          } else {
+                            toast.error(result?.error || t('settings.database.syncQueueClearFailed'))
+                          }
+                        } catch (e) {
+                          console.error('Failed to clear sync queue:', e)
+                          toast.error(t('settings.database.syncQueueClearFailed'))
                         }
-                      } catch (e) {
-                        console.error('Failed to clear sync queue:', e)
-                        toast.error(t('settings.database.syncQueueClearFailed'))
-                      }
-                    }}
-                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-orange-600/30 border-2 border-orange-500 hover:bg-orange-600/50 text-orange-300 shadow-[0_0_12px_rgba(251,146,60,0.5)]`}
-                  >
-                    {t('settings.database.clearSyncButton')}
-                  </button>
-                </div>
-
-                {/* Clear Old Orders - Medium destructive */}
-                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <div className="text-left min-w-0">
-                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearOldOrdersLabel', 'Clear Old Orders')}</span>
-                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearOldOrdersHelp', 'Removes orphaned orders from previous days')}</span>
-                    </div>
+                      }}
+                      className={DB_REPAIR_BTN_MD}
+                    >
+                      {t('settings.database.repairQueueButton', 'Fix queue')}
+                    </button>
                   </div>
-                  <button
-                    onClick={async () => {
-                      try {
-                        const result = await bridge.sync.clearOldOrders() as any
-                        if (result?.success) {
-                          toast.success(t('settings.database.oldOrdersCleared', { count: result.cleared }) || `Cleared ${result.cleared} old orders`)
-                        } else {
-                          toast.error(result?.error || t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
+
+                  {/* Clear Old Orders */}
+                  <div className="flex items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
+                    <div className="text-left min-w-0">
+                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.clearOldOrdersLabel', 'Clear Old Orders')}</span>
+                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.clearOldOrdersHelp', 'Removes orphaned orders from previous days')}</span>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const result = await bridge.sync.clearOldOrders() as any
+                          if (result?.success) {
+                            toast.success(t('settings.database.oldOrdersCleared', { count: result.cleared }) || `Cleared ${result.cleared} old orders`)
+                          } else {
+                            toast.error(result?.error || t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
+                          }
+                        } catch (e) {
+                          console.error('Failed to clear old orders:', e)
+                          toast.error(t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
                         }
-                      } catch (e) {
-                        console.error('Failed to clear old orders:', e)
-                        toast.error(t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
-                      }
-                    }}
-                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-yellow-600/30 border-2 border-yellow-500 hover:bg-yellow-600/50 text-yellow-300 shadow-[0_0_12px_rgba(250,204,21,0.5)]`}
-                  >
-                    {t('settings.database.clearOldOrdersButton', 'Clear')}
-                  </button>
-                </div>
-
-                {/* Clear All Orders - Higher destructive */}
-                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <div className="text-left min-w-0">
-                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearAllOrdersLabel', 'Clear All Orders')}</span>
-                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearAllOrdersHelp', 'Removes all orders including today\'s')}</span>
-                    </div>
+                      }}
+                      className={DB_REPAIR_BTN_MD}
+                    >
+                      {t('settings.database.repairOldOrdersButton', 'Clean old orders')}
+                    </button>
                   </div>
-                  <button
-                    onClick={async () => {
-                      try {
-                        const result = await bridge.sync.clearAllOrders() as any
-                        if (result?.success) {
-                          toast.success(t('settings.database.allOrdersCleared', `Cleared ${result.cleared} orders`))
-                        } else {
-                          toast.error(result?.error || t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'))
+
+                  {/* Sync Deleted Orders */}
+                  <div className="flex items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
+                    <div className="text-left min-w-0">
+                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.syncDeletedOrdersLabel', 'Sync Deleted Orders')}</span>
+                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.syncDeletedOrdersHelp', 'Removes orders deleted from the dashboard')}</span>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const result = await bridge.sync.cleanupDeletedOrders() as any
+                          if (result?.success) {
+                            toast.success(t('settings.database.deletedOrdersSynced', { count: result.deleted, checked: result.checked }) || `Synced: removed ${result.deleted} deleted orders (checked ${result.checked})`)
+                          } else {
+                            toast.error(result?.error || t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
+                          }
+                        } catch (e) {
+                          console.error('Failed to sync deleted orders:', e)
+                          toast.error(t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
                         }
-                      } catch (e) {
-                        console.error('Failed to clear all orders:', e)
-                        toast.error(t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'))
-                      }
-                    }}
-                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-orange-600/30 border-2 border-orange-500 hover:bg-orange-600/50 text-orange-300 shadow-[0_0_12px_rgba(251,146,60,0.5)]`}
-                  >
-                    {t('settings.database.clearAllOrdersButton', 'Clear')}
-                  </button>
+                      }}
+                      className={DB_REPAIR_BTN_MD}
+                    >
+                      {t('settings.database.repairDeletedOrdersButton', 'Sync deleted orders')}
+                    </button>
+                  </div>
                 </div>
 
-                {/* Sync Deleted Orders - Cleanup orphaned orders */}
-                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                {/* Zone 3 — Advanced reset tools: permanent deletions, COLLAPSED by default behind a
+                    disclosure so they are never openly mixed with safe maintenance. The same three
+                    destructive actions + their existing handlers/confirmation chain render only when an
+                    operator deliberately expands. Red is reserved for the actual destructive buttons. */}
+                <details data-database-danger-zone className="group rounded-2xl border-2 border-red-500/40 bg-red-500/5 p-4">
+                  <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-3 transition-transform active:scale-[0.99] [&::-webkit-details-marker]:hidden">
+                    <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="font-semibold text-red-600 dark:text-red-300">{t('settings.database.advancedResetTitle', 'Advanced reset tools')}</span>
+                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.advancedResetSummary', 'Deletes data')}</span>
+                    </span>
+                    <ChevronDown className="h-4 w-4 shrink-0 text-red-500 transition-transform group-open:rotate-180" />
+                  </summary>
+                  <div className="mt-3 space-y-3">
+                    <div className="text-xs liquid-glass-modal-text-muted">{t('settings.database.dangerZoneHelp', 'These actions permanently delete data and cannot be undone.')}</div>
+
+                  {/* Clear All Orders */}
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5">
                     <div className="text-left min-w-0">
-                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.syncDeletedOrdersLabel', 'Sync Deleted Orders')}</span>
-                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.syncDeletedOrdersHelp', 'Removes orders deleted from admin dashboard')}</span>
+                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.clearAllOrdersLabel', 'Clear All Orders')}</span>
+                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.clearAllOrdersHelp', 'Removes all orders including today\'s')}</span>
+                      <span className="mt-1.5 inline-flex items-center rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
                     </div>
-                  </div>
-                  <button
-                    onClick={async () => {
-                      try {
-                        const result = await bridge.sync.cleanupDeletedOrders() as any
-                        if (result?.success) {
-                          toast.success(t('settings.database.deletedOrdersSynced', { count: result.deleted, checked: result.checked }) || `Synced: removed ${result.deleted} deleted orders (checked ${result.checked})`)
-                        } else {
-                          toast.error(result?.error || t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
+                    <button
+                      onClick={async () => {
+                        try {
+                          const result = await bridge.sync.clearAllOrders() as any
+                          if (result?.success) {
+                            toast.success(t('settings.database.allOrdersCleared', { count: result.cleared, defaultValue: 'Cleared {{count}} orders' }))
+                          } else {
+                            toast.error(result?.error || t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'))
+                          }
+                        } catch (e) {
+                          console.error('Failed to clear all orders:', e)
+                          toast.error(t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'))
                         }
-                      } catch (e) {
-                        console.error('Failed to sync deleted orders:', e)
-                        toast.error(t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
-                      }
-                    }}
-                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-blue-600/30 border-2 border-blue-500 hover:bg-blue-600/50 text-blue-300 shadow-[0_0_12px_rgba(96,165,250,0.5)]`}
-                  >
-                    {t('settings.database.syncButton', 'Sync')}
-                  </button>
-                </div>
-
-                {/* Clear All Operational Data - Clears orders, shifts, drawers but keeps settings */}
-                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <div className="text-left min-w-0">
-                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearOperationalLabel', 'Clear All Operational Data')}</span>
-                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearOperationalHelp', 'Clears orders, shifts, drawers, payments. Keeps settings.')}</span>
-                    </div>
+                      }}
+                      className={DB_DANGER_BTN_MD}
+                    >
+                      {t('settings.database.dangerDeleteOrdersButton', 'Delete all orders')}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => setShowClearOperationalConfirm(true)}
-                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-amber-600/30 border-2 border-amber-500 hover:bg-amber-600/50 text-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.5)]`}
-                  >
-                    {t('settings.database.clearOperationalButton', 'Clear')}
-                  </button>
-                </div>
 
-                {/* Factory Reset - Destructive */}
-                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                  {/* Clear All Operational Data */}
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5">
                     <div className="text-left min-w-0">
-                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.label')}</span>
-                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.helpText')}</span>
+                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.clearOperationalLabel', 'Clear All Operational Data')}</span>
+                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.clearOperationalHelp', 'Clears orders, shifts, drawers, payments. Keeps settings.')}</span>
+                      <span className="mt-1.5 inline-flex items-center rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
                     </div>
+                    <button
+                      onClick={() => setShowClearOperationalConfirm(true)}
+                      className={DB_DANGER_BTN_MD}
+                    >
+                      {t('settings.database.dangerEraseDataButton', 'Erase operational data')}
+                    </button>
                   </div>
-                  <button
-                    onClick={handleClearDatabase}
-                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-red-600/30 border-2 border-red-500 hover:bg-red-600/50 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.5)]`}
-                  >
-                    {t('settings.database.clearButton')}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+
+                  {/* Factory Reset */}
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5">
+                    <div className="text-left min-w-0">
+                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.label')}</span>
+                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.helpText')}</span>
+                      <span className="mt-1.5 inline-flex items-center rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
+                    </div>
+                    <button
+                      onClick={handleClearDatabase}
+                      className={DB_DANGER_BTN_MD}
+                    >
+                      {t('settings.database.dangerFactoryResetButton', 'Factory reset')}
+                    </button>
+                  </div>
+                  </div>
+                </details>
+          </div>
         </div>
+        )}
 
         {/* Hardware Settings */}
-        <div id="settings-section-hardware" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPeripheralsSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
-          <button
-            onClick={() => setShowPeripheralsSettings(!showPeripheralsSettings)}
-            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
-          >
-            <div className="flex items-center gap-3">
-              <Cable className="w-5 h-5 text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.6)]" />
-              <div className="text-left">
-                <span className="font-medium block">{t('settings.hardware.title', 'Hardware')}</span>
-                <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.hardware.helpText', 'Configure local hardware devices for this POS')}</span>
-              </div>
-            </div>
-            <ChevronDown className={`w-5 h-5 transition-transform ${showPeripheralsSettings ? 'rotate-180' : ''}`} />
-          </button>
-
-          {showPeripheralsSettings && (
-            <div className={`px-4 pb-4 space-y-4 border-t liquid-glass-modal-border pt-4`}>
+        {activeSettingsSection === 'hardware' && (
+        <div id="settings-section-hardware" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
+          {sectionHeader(
+            <Cable className="h-5 w-5 text-black" />,
+            t('settings.peripherals.title', 'Peripherals'),
+            t('settings.peripherals.helpText', 'Configure external hardware devices'),
+          )}
+          <div className="space-y-4">
 
               {/* --- Weighing Scale --- */}
-              <div className="space-y-3">
+              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.scale.title', 'Weighing Scale')}</span>
+                    <span id="peripheral-scale-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.scale.title', 'Weighing Scale')}</span>
                     {hardwareStatus?.scale?.connected && (
                       <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
                         {t('settings.peripherals.scale.connected', 'Connected')}
                       </span>
                     )}
                   </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" checked={scaleEnabled} onChange={(e) => setScaleEnabled(e.target.checked)} className="sr-only peer" />
-                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-                  </label>
+                  <POSGlassSwitch aria-labelledby="peripheral-scale-label" checked={scaleEnabled} onChange={setScaleEnabled} />
                 </div>
                 {scaleEnabled && (
                   <div className="grid grid-cols-2 gap-3 pl-1">
@@ -1877,10 +1945,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                             }
                           } catch (e) { console.error('Scale action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
                         }}
-                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
                           hardwareStatus?.scale?.connected
-                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 hover:bg-red-500/30'
-                            : 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30'
+                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
+                            : 'bg-yellow-500/20 border border-yellow-500/50 text-yellow-900 dark:text-yellow-200 active:bg-yellow-500/30'
                         }`}
                       >
                         {hardwareStatus?.scale?.connected
@@ -1892,23 +1960,18 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 )}
               </div>
 
-              <div className="border-t liquid-glass-modal-border" />
-
               {/* --- Customer Display --- */}
-              <div className="space-y-3">
+              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.display.title', 'Customer Display')}</span>
+                    <span id="peripheral-display-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.display.title', 'Customer Display')}</span>
                     {hardwareStatus?.customerDisplay?.connected && (
                       <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
                         {t('settings.peripherals.scale.connected', 'Connected')}
                       </span>
                     )}
                   </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" checked={displayEnabled} onChange={(e) => setDisplayEnabled(e.target.checked)} className="sr-only peer" />
-                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-                  </label>
+                  <POSGlassSwitch aria-labelledby="peripheral-display-label" checked={displayEnabled} onChange={setDisplayEnabled} />
                 </div>
                 {displayEnabled && (
                   <div className="grid grid-cols-2 gap-3 pl-1">
@@ -1956,10 +2019,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                             }
                           } catch (e) { console.error('Display action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
                         }}
-                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
                           hardwareStatus?.customerDisplay?.connected
-                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 hover:bg-red-500/30'
-                            : 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30'
+                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
+                            : 'bg-yellow-500/20 border border-yellow-500/50 text-yellow-900 dark:text-yellow-200 active:bg-yellow-500/30'
                         }`}
                       >
                         {hardwareStatus?.customerDisplay?.connected
@@ -1971,23 +2034,18 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 )}
               </div>
 
-              <div className="border-t liquid-glass-modal-border" />
-
               {/* --- Serial Barcode Scanner --- */}
-              <div className="space-y-3">
+              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.scanner.title', 'Serial Barcode Scanner')}</span>
+                    <span id="peripheral-scanner-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.scanner.title', 'Serial Barcode Scanner')}</span>
                     {hardwareStatus?.serialScanner?.connected && (
                       <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
                         {t('settings.peripherals.scanner.running', 'Running')}
                       </span>
                     )}
                   </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" checked={scannerEnabled} onChange={(e) => setScannerEnabled(e.target.checked)} className="sr-only peer" />
-                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-                  </label>
+                  <POSGlassSwitch aria-labelledby="peripheral-scanner-label" checked={scannerEnabled} onChange={setScannerEnabled} />
                 </div>
                 <p className={`text-xs liquid-glass-modal-text-muted -mt-1`}>{t('settings.peripherals.scanner.keyboardNote', 'Keyboard-wedge scanners work automatically — no configuration needed')}</p>
                 {scannerEnabled && (
@@ -2016,10 +2074,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                             }
                           } catch (e) { console.error('Scanner action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
                         }}
-                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
                           hardwareStatus?.serialScanner?.connected
-                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 hover:bg-red-500/30'
-                            : 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30'
+                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
+                            : 'bg-yellow-500/20 border border-yellow-500/50 text-yellow-900 dark:text-yellow-200 active:bg-yellow-500/30'
                         }`}
                       >
                         {hardwareStatus?.serialScanner?.connected
@@ -2031,37 +2089,27 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 )}
               </div>
 
-              <div className="border-t liquid-glass-modal-border" />
-
               {/* --- Card Reader (MSR) --- */}
-              <div className="space-y-2">
+              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-2 dark:bg-black/10">
                 <div className="flex items-center justify-between">
-                  <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.cardReader.title', 'Card Reader (MSR)')}</span>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" checked={cardReaderEnabled} onChange={(e) => setCardReaderEnabled(e.target.checked)} className="sr-only peer" />
-                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-                  </label>
+                  <span id="peripheral-card-reader-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.cardReader.title', 'Card Reader (MSR)')}</span>
+                  <POSGlassSwitch aria-labelledby="peripheral-card-reader-label" checked={cardReaderEnabled} onChange={setCardReaderEnabled} />
                 </div>
                 <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.peripherals.cardReader.plugAndPlay', 'Magnetic stripe readers work via keyboard input — plug and play')}</p>
               </div>
 
-              <div className="border-t liquid-glass-modal-border" />
-
               {/* --- Loyalty / NFC Reader --- */}
-              <div className="space-y-2">
+              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-2 dark:bg-black/10">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.loyaltyReader.title', 'Loyalty / NFC Reader')}</span>
+                    <span id="peripheral-loyalty-reader-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.loyaltyReader.title', 'Loyalty / NFC Reader')}</span>
                     {hardwareStatus?.loyaltyReader?.connected && (
                       <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
                         {t('settings.peripherals.scanner.running', 'Running')}
                       </span>
                     )}
                   </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" checked={loyaltyEnabled} onChange={(e) => setLoyaltyEnabled(e.target.checked)} className="sr-only peer" />
-                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-                  </label>
+                  <POSGlassSwitch aria-labelledby="peripheral-loyalty-reader-label" checked={loyaltyEnabled} onChange={setLoyaltyEnabled} />
                 </div>
                 <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.peripherals.loyaltyReader.tapNote', 'NFC readers work via keyboard input — tap card to detect')}</p>
               </div>
@@ -2117,27 +2165,29 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                           }
                         }),
                       ])
-                      toast.success(t('settings.hardware.saved', 'Hardware settings saved'))
+                      toast.success(t('settings.peripherals.saved', 'Peripheral settings saved'))
                     } catch (e) {
                       console.error('Failed to save hardware settings:', e)
-                      toast.error(t('settings.hardware.saveFailed', 'Failed to save hardware settings'))
+                      toast.error(t('settings.peripherals.saveFailed', 'Failed to save peripheral settings'))
                     }
                   }}
-                  className={liquidGlassModalButton('primary', 'md')}
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-green-500 bg-green-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700"
                 >
-                  {t('settings.hardware.saveButton', 'Save Hardware')}
+                  {t('settings.peripherals.saveButton', 'Save peripherals')}
                 </button>
               </div>
 
-            </div>
-          )}
+          </div>
         </div>
+        )}
 
         {/* Printer Settings trigger */}
-        <div id="settings-section-printing" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
+        {activeSettingsSection === 'printing' && (
+        <>
+        <div id="settings-section-printing" className={`rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <Printer className="w-5 h-5 text-purple-400 drop-shadow-[0_0_8px_rgba(192,132,252,0.6)]" />
+              <Printer className="w-5 h-5 text-yellow-500" />
               <div className="text-left">
                 <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.printer.label')}</span>
                 <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.printer.helpText')}</span>
@@ -2157,12 +2207,15 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
 
         <PrintQueuePanel />
+        </>
+        )}
 
         {/* Payment Terminals Settings trigger */}
-        <div id="settings-section-payments" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
+        {activeSettingsSection === 'payments' && (
+        <div id="settings-section-payments" className={`rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <CreditCard className="w-5 h-5 text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+              <CreditCard className="w-5 h-5 text-yellow-500" />
               <div className="text-left">
                 <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.paymentTerminals.label', 'Payment Terminals')}</span>
                 <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.paymentTerminals.helpText', 'Configure ECR payment devices')}</span>
@@ -2176,61 +2229,49 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             </button>
           </div>
         </div>
+        )}
 
         {/* About Section */}
-        <div id="settings-section-about" className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showAboutInfo ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
-          <button
-            onClick={() => setShowAboutInfo(!showAboutInfo)}
-            className="w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text"
-          >
-            <div className="flex items-center gap-3">
-              <Info className="w-5 h-5 text-blue-400 drop-shadow-[0_0_8px_rgba(59,130,246,0.6)]" />
-              <div className="text-left">
-                <span className="font-medium block">{t('modals.connectionSettings.about', 'About')}</span>
-                <span className="text-xs liquid-glass-modal-text-muted">
-                  {aboutData ? `v${aboutData.version}` : t('modals.connectionSettings.aboutSubtitle', 'Version info')}
-                </span>
-              </div>
-            </div>
-            <ChevronDown className={`w-5 h-5 transition-transform ${showAboutInfo ? 'rotate-180' : ''}`} />
-          </button>
-
-          {showAboutInfo && (
-            <div className="px-4 pb-4 space-y-1 border-t liquid-glass-modal-border pt-4">
-              {aboutData ? (
-                <>
-                  {[
-                    { label: t('settings.about.version', 'Version'), value: `v${aboutData.version}` },
-                    { label: t('settings.about.buildDate', 'Build Date'), value: aboutData.buildTimestamp },
-                    { label: t('settings.about.gitSha', 'Git SHA'), value: aboutData.gitSha },
-                    { label: t('settings.about.platform', 'Platform'), value: `${aboutData.platform} (${aboutData.arch})` },
-                    { label: t('settings.about.rust', 'Rust'), value: aboutData.rustVersion },
-                  ].map(({ label, value }) => (
-                    <div key={label} className="flex justify-between items-center py-2 border-b border-white/5 last:border-b-0">
-                      <span className="text-sm liquid-glass-modal-text-muted">{label}</span>
-                      <span className="text-sm font-mono liquid-glass-modal-text">{value}</span>
-                    </div>
-                  ))}
-                  <div className="pt-3 flex justify-center">
-                    <button
-                      onClick={handleCopyAboutInfo}
-                      className={liquidGlassModalButton('secondary', 'md')}
-                    >
-                      <span className="inline-flex items-center gap-2">
-                        {aboutCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                        {aboutCopied ? t('settings.about.copied', 'Copied!') : t('settings.about.copyInfo', 'Copy Info')}
-                      </span>
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="py-4 text-center">
-                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500 mx-auto" />
+        {activeSettingsSection === 'about' && (
+        <div id="settings-section-about" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-3 transition-all">
+          {sectionHeader(
+            <Info className="h-5 w-5 text-black" />,
+            t('modals.connectionSettings.about'),
+            aboutData ? `v${aboutData.version}` : t('modals.connectionSettings.aboutSubtitle'),
+          )}
+          {aboutData ? (
+            <>
+              {[
+                { label: t('modals.connectionSettings.aboutVersion'), value: `v${aboutData.version}` },
+                { label: t('modals.connectionSettings.aboutBuildDate'), value: aboutData.buildTimestamp },
+                { label: t('modals.connectionSettings.aboutGitSha'), value: aboutData.gitSha },
+                { label: t('modals.connectionSettings.aboutPlatform'), value: `${aboutData.platform} (${aboutData.arch})` },
+                { label: t('modals.connectionSettings.aboutRust'), value: aboutData.rustVersion },
+              ].map(({ label, value }) => (
+                <div key={label} className="flex justify-between items-center py-2 border-b border-white/5 last:border-b-0">
+                  <span className="text-sm liquid-glass-modal-text-muted">{label}</span>
+                  <span className="text-sm font-mono liquid-glass-modal-text">{value}</span>
                 </div>
-              )}
+              ))}
+              <div className="pt-3 flex justify-center">
+                <button
+                  onClick={handleCopyAboutInfo}
+                  className={liquidGlassModalButton('secondary', 'md')}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    {aboutCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+                    {aboutCopied ? t('modals.connectionSettings.aboutCopied') : t('modals.connectionSettings.aboutCopyInfo')}
+                  </span>
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="py-4 text-center">
+              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-yellow-500 mx-auto" />
             </div>
           )}
         </div>
+        )}
           </div>
         </div>
       </div>

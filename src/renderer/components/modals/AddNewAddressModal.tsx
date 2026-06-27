@@ -521,6 +521,10 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     }
   };
 
+  const fieldClass =
+    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-none focus:ring-2 focus:ring-yellow-400/40 dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
+  const addressFieldClass = `${fieldClass} pl-10`;
+
   return (
     <LiquidGlassModal
       isOpen={isOpen}
@@ -534,9 +538,11 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
           {t('modals.addNewAddress.subtitle', { name: customer.name })}
         </p>
 
-        <div className="mb-6 p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+        <div className="mb-6 rounded-3xl border border-yellow-400/25 bg-yellow-400/12 p-4">
           <div className="flex items-center gap-3">
-            <User className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-yellow-400 text-black">
+              <User className="w-5 h-5" />
+            </div>
             <div>
               <p className="font-medium liquid-glass-modal-text">{customer.name}</p>
               <p className="text-sm liquid-glass-modal-text-muted">📞 {customer.phone}</p>
@@ -565,34 +571,32 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                 placeholder={
                   hasDeliveryPro
                     ? t('modals.addNewAddress.addressPlaceholder')
-                    : t('modals.addNewAddress.manualAddressPlaceholder', 'Enter address manually')
+                    : t('modals.addNewAddress.manualAddressPlaceholder')
                 }
-                className="w-full px-4 py-2 pl-10 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className={addressFieldClass}
                 required
               />
               {hasDeliveryPro && isLoadingAddresses && (
                 <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
-                  <div className="w-4 h-4 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin"></div>
+                  <div className="w-4 h-4 border-2 border-yellow-400/30 border-t-yellow-400 rounded-full animate-spin"></div>
                 </div>
               )}
             </div>
 
             {!hasDeliveryPro && (
               <p className="mt-2 text-xs liquid-glass-modal-text-muted">
-                {t(
-                  'modals.addNewAddress.manualAddressEntryHint',
-                  'Delivery zones are disabled for this terminal. Address search and zone validation are off, so the address will be saved manually.'
-                )}
+                {t('modals.addNewAddress.manualAddressEntryHint')}
               </p>
             )}
 
             {hasDeliveryPro && suggestions.length > 0 && (
-              <div className="absolute z-10 w-full mt-1 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border liquid-glass-modal-border rounded-xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
+              <div className="absolute z-10 w-full mt-1 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border liquid-glass-modal-border rounded-2xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {suggestions.map((suggestion, index) => (
                   <button
+                    type="button"
                     key={suggestion.place_id || index}
                     onClick={() => handleSuggestionClick(suggestion)}
-                    className="w-full px-4 py-3 text-left hover:bg-blue-500/10 transition-colors border-b border-gray-200/20 dark:border-gray-700/20 last:border-b-0"
+                    className="w-full px-4 py-3 text-left active:bg-white/10 dark:active:bg-white/5 transition-colors border-b border-gray-200/20 dark:border-gray-700/20 last:border-b-0"
                   >
                     <div className="flex items-start gap-2">
                       <MapPin className="w-4 h-4 text-gray-400 mt-1 flex-shrink-0" />
@@ -619,7 +623,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
               </div>
 
               {isValidatingDelivery && (
-                <div className="flex items-center gap-2 text-blue-500 text-sm">
+                <div className="flex items-center gap-2 text-yellow-600 dark:text-yellow-300 text-sm">
                   <Clock className="w-4 h-4 animate-spin" />
                   {t('modals.addCustomer.validatingAddress')}
                 </div>
@@ -645,7 +649,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
               )}
 
               {(validationStatus === 'out_of_zone' || validationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-lg border border-orange-500/30 bg-orange-500/10 p-3">
+                <div className="space-y-2 rounded-2xl border border-orange-500/30 bg-orange-500/10 p-3">
                   <label className="flex items-center gap-2 text-sm text-orange-200">
                     <input
                       type="checkbox"
@@ -661,7 +665,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                     onChange={(e) => setOverrideReason(e.target.value)}
                     placeholder={t('modals.addCustomer.overrideReasonPlaceholder', 'Add override reason (minimum 6 characters)')}
                     rows={2}
-                    className="w-full px-3 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                    className={`${fieldClass} resize-none`}
                   />
                 </div>
               )}
@@ -678,7 +682,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
               onChange={(e) => handleInputChange('postalCode', e.target.value)}
               onKeyPress={handleKeyPress}
               placeholder={t('modals.addNewAddress.postalPlaceholder')}
-              className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={fieldClass}
             />
           </div>
 
@@ -693,7 +697,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
               onKeyPress={handleKeyPress}
               placeholder={t('modals.addNewAddress.floorPlaceholder')}
               maxLength={100}
-              className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={fieldClass}
             />
             {(formData.floorNumber?.length ?? 0) >= 100 && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
@@ -711,22 +715,24 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
               onChange={(e) => handleInputChange('notes', e.target.value)}
               placeholder={t('modals.addNewAddress.notesPlaceholder')}
               rows={3}
-              className="w-full px-4 py-2 rounded-lg border bg-white/50 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+              className={`${fieldClass} resize-none`}
             />
           </div>
         </div>
 
         <div className="flex gap-3 mt-6">
           <button
+            type="button"
             onClick={onClose}
-            className="flex-1 px-4 py-3 bg-gray-500/10 hover:bg-gray-500/20 liquid-glass-modal-text font-medium rounded-xl border border-gray-500/20 transition-all"
+            className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl"
           >
             {t('modals.addNewAddress.cancel')}
           </button>
           <button
+            type="button"
             onClick={handleSubmit}
             disabled={isSubmitting || !formData.address.trim()}
-            className="flex-1 px-4 py-3 bg-blue-500/20 hover:bg-blue-500/30 disabled:bg-gray-500/10 disabled:cursor-not-allowed text-blue-600 dark:text-blue-400 disabled:text-gray-500 font-medium rounded-xl border border-blue-500/30 disabled:border-gray-500/20 transition-all flex items-center justify-center gap-2"
+            className="liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
           >
             <Home className="w-5 h-5" />
             {isSubmitting ? t('modals.addNewAddress.adding') : t('modals.addNewAddress.addAddress')}

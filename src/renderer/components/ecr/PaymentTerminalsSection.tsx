@@ -377,14 +377,14 @@ interface MiniStatCardProps {
   label: string
   value: number
   icon: typeof CreditCard
-  color: 'indigo' | 'green' | 'gray' | 'red'
+  color: 'amber' | 'green' | 'gray' | 'red'
 }
 
 const colorMap = {
-  indigo: {
-    bg: 'bg-indigo-500/20',
-    text: 'text-indigo-400',
-    shadow: 'drop-shadow-[0_0_6px_rgba(99,102,241,0.5)]',
+  amber: {
+    bg: 'bg-amber-500/20',
+    text: 'text-amber-400',
+    shadow: '',
   },
   green: {
     bg: 'bg-green-500/20',
@@ -406,7 +406,7 @@ const colorMap = {
 const MiniStatCard: React.FC<MiniStatCardProps> = ({ label, value, icon: Icon, color }) => {
   const colors = colorMap[color]
   return (
-    <div className="rounded-lg p-2 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border">
+    <div className="rounded-2xl p-2 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border">
       <div className="flex items-center gap-2">
         <div className={`w-7 h-7 rounded-md flex items-center justify-center ${colors.bg}`}>
           <Icon size={14} className={`${colors.text} ${colors.shadow}`} />
@@ -745,7 +745,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
       <div className="flex items-center justify-between pb-3 border-b liquid-glass-modal-border">
         <button
           onClick={onBack}
-          className="flex items-center gap-2 liquid-glass-modal-text hover:opacity-80 transition-opacity"
+          className="flex items-center gap-2 liquid-glass-modal-text active:opacity-80 transition-opacity"
         >
           <ArrowLeft size={20} />
           <span className="font-medium">{t('common.back', 'Back')}</span>
@@ -763,11 +763,14 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
             {isOnline ? t('common.online', 'Online') : t('common.offline', 'Offline')}
           </span>
 
-          {/* Refresh Button */}
+          {/* Refresh Button - 44x44 centered glass icon button with a localized accessible name
+              (was an unnamed icon-only button). No native title tooltip, no hover; active tap feedback. */}
           <button
+            type="button"
             onClick={handleRefresh}
             disabled={isRefreshing}
-            className="p-1.5 rounded-md hover:bg-white/10 transition-colors disabled:opacity-50"
+            aria-label={t('ecr.refreshStatus', 'Refresh connection status')}
+            className="inline-flex h-11 w-11 items-center justify-center rounded-xl border liquid-glass-modal-border bg-white/5 dark:bg-black/20 transition active:scale-95 active:bg-white/10 disabled:opacity-50"
           >
             <RefreshCw
               size={16}
@@ -801,7 +804,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
           icon={CreditCard}
           value={stats.total}
           label={t('ecr.stats.total', 'Total')}
-          color="indigo"
+          color="amber"
         />
         <MiniStatCard
           icon={CheckCircle}
@@ -896,7 +899,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
             setSelectedDiscoveredDevice(undefined)
             setShowConfigModal(true)
           }}
-          className={`flex-1 flex items-center justify-center gap-2 ${liquidGlassModalButton('primary', 'md')}`}
+          className="flex-1 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-green-600 bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700"
         >
           <Plus size={16} />
           {t('ecr.addManual', 'Add Terminal')}

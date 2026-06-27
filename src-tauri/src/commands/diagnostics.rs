@@ -6,7 +6,7 @@ use std::time::Duration;
 use tauri::Emitter;
 use tracing::{info, warn};
 
-use crate::{db, diagnostics, sync};
+use crate::{db, diagnostics, incident_reporting, sync};
 
 fn parse_diagnostics_export_payload(arg0: Option<Value>) -> diagnostics::DiagnosticsExportOptions {
     let mut options = diagnostics::DiagnosticsExportOptions::default();
@@ -88,7 +88,7 @@ fn parse_diagnostic_fix_driver_payload(arg0: Option<Value>) -> Result<String, St
         .ok_or_else(|| "Missing driverId".to_string())
 }
 
-async fn build_system_health_payload(
+pub(crate) async fn build_system_health_payload(
     db: &db::DbState,
     sync_state: &sync::SyncState,
 ) -> Result<Value, String> {
@@ -111,6 +111,113 @@ async fn build_system_health_payload(
     }
 
     Ok(health)
+}
+
+fn read_terminal_id_for_incident(db: &db::DbState) -> Option<String> {
+    let conn = db.conn.lock().ok()?;
+    db::get_setting(&conn, "terminal", "terminal_id")
+}
+
+pub fn start_remote_incident_reporter(
+    app: tauri::AppHandle,
+    db: Arc<db::DbState>,
+    sync_state: Arc<sync::SyncState>,
+    interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let cadence = Duration::from_secs(interval_secs.clamp(30, 60));
+    tauri::async_runtime::spawn(async move {
+        info!(
+            interval_secs = cadence.as_secs(),
+            "Remote incident reporter started"
+        );
+        loop {
+            match build_system_health_payload(db.as_ref(), sync_state.as_ref()).await {
+                Ok(health) => {
+                    let candidates = incident_reporting::classify_incidents(&health);
+                    for candidate in candidates {
+                        if !incident_reporting::should_send_candidate(db.as_ref(), &candidate, false) {
+                            continue;
+                        }
+
+                        match incident_reporting::send_candidate_report(
+                            db.as_ref(),
+                            &candidate,
+                            &health,
+                        )
+                        .await
+                        {
+                            Ok(response) => {
+                                let _ = app.emit(
+                                    "incident_reporting_update",
+                                    serde_json::json!({
+                                        "success": true,
+                                        "candidate": candidate,
+                                        "response": response,
+                                        "lastSentAt": Utc::now().to_rfc3339(),
+                                    }),
+                                );
+                                info!(
+                                    issue_code = %candidate.issue_code,
+                                    fingerprint = %candidate.fingerprint,
+                                    "Remote incident report sent"
+                                );
+                            }
+                            Err(error) => {
+                                let _ = app.emit(
+                                    "incident_reporting_update",
+                                    serde_json::json!({
+                                        "success": false,
+                                        "candidate": candidate,
+                                        "error": error,
+                                        "lastAttemptAt": Utc::now().to_rfc3339(),
+                                    }),
+                                );
+                                warn!(
+                                    issue_code = %candidate.issue_code,
+                                    error = %error,
+                                    "Remote incident report failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let candidate = incident_reporting::health_monitor_failed_candidate(
+                        read_terminal_id_for_incident(db.as_ref()),
+                        &error,
+                    );
+                    if incident_reporting::should_send_candidate(db.as_ref(), &candidate, false) {
+                        if let Err(report_error) = incident_reporting::send_candidate_report(
+                            db.as_ref(),
+                            &candidate,
+                            &serde_json::json!({
+                                "healthMonitor": "failed",
+                                "errorClass": "system_health_payload_failed"
+                            }),
+                        )
+                        .await
+                        {
+                            warn!(
+                                error = %report_error,
+                                health_error = %error,
+                                "Failed to report health monitor incident"
+                            );
+                        }
+                    }
+                    warn!(error = %error, "Remote incident reporter health read failed");
+                }
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(cadence) => {}
+                _ = cancel.cancelled() => {
+                    info!("Remote incident reporter cancelled");
+                    break;
+                }
+            }
+        }
+    });
 }
 
 pub fn start_system_health_monitor(
@@ -498,6 +605,36 @@ pub async fn diagnostics_export(
             "includeLogs": options.include_logs,
             "redactSensitive": options.redact_sensitive,
         }
+    }))
+}
+
+#[tauri::command]
+pub async fn diagnostics_send_remote_incident(
+    db: tauri::State<'_, db::DbState>,
+    sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+) -> Result<Value, String> {
+    let health = build_system_health_payload(&db, &sync_state).await?;
+    let candidate = incident_reporting::classify_incidents(&health)
+        .into_iter()
+        .find(|candidate| {
+            matches!(
+                candidate.severity,
+                incident_reporting::PosIncidentSeverity::Critical
+                    | incident_reporting::PosIncidentSeverity::High
+            )
+        })
+        .unwrap_or_else(|| incident_reporting::manual_incident_candidate(&health));
+
+    let response = incident_reporting::send_candidate_report(&db, &candidate, &health).await?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "candidate": candidate,
+        "incidentId": response.get("incidentId").and_then(Value::as_str),
+        "status": response.get("status").and_then(Value::as_str).unwrap_or("open"),
+        "deduped": response.get("deduped").and_then(Value::as_bool).unwrap_or(false),
+        "alertSent": response.get("alertSent").and_then(Value::as_bool).unwrap_or(false),
+        "lastSentAt": Utc::now().to_rfc3339(),
     }))
 }
 

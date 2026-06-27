@@ -11,7 +11,7 @@ interface PulseAnimationProps {
 export const PulseAnimation = memo<PulseAnimationProps>(({
   children,
   className = '',
-  pulseColor = 'bg-blue-400',
+  pulseColor = 'bg-amber-400',
   duration = 'duration-1000',
   enabled = true
 }) => {

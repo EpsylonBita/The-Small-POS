@@ -5,6 +5,7 @@ import { getBridge, offEvent, onEvent } from '../../lib';
 import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { usePrivilegedActionConfirmation } from '../hooks/usePrivilegedActionConfirmation';
 import { getErrorMessage } from '../utils/privileged-actions';
+import { renderModalPortal } from '../utils/render-modal-portal';
 
 interface SyncNotificationManagerProps {
   onSettingsUpdate?: (settings: any) => void;
@@ -183,7 +184,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
     <>
       {/* Notification Panel */}
       {showNotificationPanel && pendingUpdates.length > 0 && (
-        <div className="fixed top-4 right-4 bg-white shadow-lg rounded-lg p-4 border-l-4 border-blue-500 z-50 max-w-sm">
+        <div className="fixed top-4 right-4 bg-white shadow-lg rounded-2xl p-4 border-l-4 border-blue-500 z-50 max-w-sm">
           <div className="flex items-center justify-between mb-2">
             <h3 className="font-medium text-gray-900">Settings Updates ({pendingUpdates.length})</h3>
             <button
@@ -260,9 +261,9 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
       )}
 
       {/* Restart Required Modal */}
-      {restartRequired && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+      {restartRequired && renderModalPortal(
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[1200]">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full mx-4">
             <div className="flex items-center mb-4">
               <div className="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center mr-4">
                 <AlertTriangle className="w-6 h-6 text-orange-600" />
