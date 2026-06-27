@@ -5908,6 +5908,7 @@
       "install": "Install Now",
       "close": "Close",
       "retry": "Retry",
+      "checkNow": "Check for updates",
       "recheck": "Check Again",
       "ok": "OK"
     },

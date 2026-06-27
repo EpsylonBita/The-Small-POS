@@ -5,7 +5,7 @@ import { posApiGet } from '../../utils/api-helpers'
 import { resolveNavigationLabel } from '../../utils/i18nLabels'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check, Wrench, AlertTriangle, ChevronDown } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check, Wrench, AlertTriangle, ChevronDown, RefreshCw } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
@@ -56,6 +56,7 @@ interface Props {
   isOpen: boolean
   onClose: () => void
   initialSection?: 'recovery' | null
+  onCheckForUpdates?: () => void
 }
 
 type SettingsSectionId =
@@ -111,7 +112,7 @@ const getNestedSetting = (
   return source?.[`${category}.${key}`]
 }
 
-const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSection = null }) => {
+const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSection = null, onCheckForUpdates }) => {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
   const { language: currentLanguage, setLanguage } = useI18n()
@@ -2253,7 +2254,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   <span className="text-sm font-mono liquid-glass-modal-text">{value}</span>
                 </div>
               ))}
-              <div className="pt-3 flex justify-center">
+              <div className="pt-3 flex flex-wrap justify-center gap-3">
                 <button
                   onClick={handleCopyAboutInfo}
                   className={liquidGlassModalButton('secondary', 'md')}
@@ -2263,6 +2264,18 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     {aboutCopied ? t('modals.connectionSettings.aboutCopied') : t('modals.connectionSettings.aboutCopyInfo')}
                   </span>
                 </button>
+                {onCheckForUpdates && (
+                  <button
+                    type="button"
+                    onClick={onCheckForUpdates}
+                    className={liquidGlassModalButton('primary', 'md')}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <RefreshCw className="w-4 h-4" />
+                      {t('updates.actions.checkNow', 'Check for updates')}
+                    </span>
+                  </button>
+                )}
               </div>
             </>
           ) : (

@@ -137,3 +137,11 @@ test(
     );
   },
 );
+
+test('login screen leaves manual update checks in settings, not the PIN screen', () => {
+  const src = readLoginPage();
+
+  assert.doesNotMatch(src, /onCheckForUpdates/);
+  assert.doesNotMatch(src, /data-login-check-updates/);
+  assert.doesNotMatch(src, /updates\.actions\.checkNow/);
+});

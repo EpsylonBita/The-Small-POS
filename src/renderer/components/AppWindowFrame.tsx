@@ -118,6 +118,9 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
 
   const runWindowCommand = useCallback(
     (command: 'minimize' | 'maximize' | 'close') => {
+      cleanupWindowDragListeners();
+      dragSessionRef.current = null;
+
       const run = async () => {
         try {
           const appWindow = getCurrentWindow();
@@ -143,8 +146,21 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
         console.warn(`[AppWindowFrame] window.${command} failed`, error);
       });
     },
-    [bridge],
+    [bridge, cleanupWindowDragListeners],
   );
+
+  const stopWindowControlPointer = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      event.stopPropagation();
+      cleanupWindowDragListeners();
+      dragSessionRef.current = null;
+    },
+    [cleanupWindowDragListeners],
+  );
+
+  const stopWindowControlMouse = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    event.stopPropagation();
+  }, []);
 
   const startNativeWindowDrag = useCallback(() => {
     if (windowState?.isFullScreen) {
@@ -374,7 +390,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
     ? `${update.label} - ${update.detail}`
     : update?.label;
   const logoSource = isDark ? logoDark : logoLight;
-  const controlBase = `inline-flex h-[52px] min-h-[52px] w-[52px] min-w-[52px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none transition-transform duration-150 active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${
+  const controlBase = `inline-flex h-[60px] min-h-[60px] w-[64px] min-w-[64px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none transition-colors duration-75 active:bg-yellow-400/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${
     isDark ? 'text-zinc-100' : 'text-zinc-900'
   }`;
 
@@ -388,7 +404,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
       onPointerCancel={stopWindowDrag}
       onLostPointerCapture={stopWindowDrag}
       style={{ zIndex: 2147483600, pointerEvents: 'auto' }}
-      className={`fixed inset-x-0 top-0 h-14 shrink-0 touch-none select-none bg-transparent px-2 ${className}`}
+      className={`fixed inset-x-0 top-0 h-16 shrink-0 touch-none select-none bg-transparent px-2 ${className}`}
     >
       <div
         data-app-window-drag-zone
@@ -429,8 +445,11 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
       )}
 
       <div
-        className="absolute right-2 top-1/2 z-30 flex -translate-y-1/2 items-center gap-0"
+        className="absolute right-0 top-0 z-30 flex h-16 items-start gap-0"
         data-app-window-controls
+        data-app-window-no-drag
+        onPointerDown={stopWindowControlPointer}
+        onMouseDown={stopWindowControlMouse}
       >
         <button
           type="button"
@@ -466,7 +485,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
           data-app-window-no-drag
           aria-label={t('common.actions.close', 'Close')}
           onClick={() => runWindowCommand('close')}
-          className="inline-flex h-[52px] min-h-[52px] w-[52px] min-w-[52px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none text-red-500 transition-transform duration-150 active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/80"
+          className="inline-flex h-[60px] min-h-[60px] w-[64px] min-w-[64px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none text-red-500 transition-colors duration-75 active:bg-red-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/80"
         >
           <X className="block h-5 w-5" />
         </button>

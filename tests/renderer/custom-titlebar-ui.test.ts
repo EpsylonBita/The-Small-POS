@@ -61,7 +61,7 @@ test('AppWindowFrame keeps update access visible and uses touch-safe window cont
   assert.match(source, /window\.removeEventListener\('pointermove', handleGlobalMove, true\)/);
   assert.match(source, /data-app-window-drag-zone/);
   assert.match(source, /style=\{\{ zIndex: 2147483600, pointerEvents: 'auto' \}\}/);
-  assert.match(source, /className=\{`fixed inset-x-0 top-0 h-14 shrink-0 touch-none select-none bg-transparent px-2 \$\{className\}`\}/);
+  assert.match(source, /className=\{`fixed inset-x-0 top-0 h-16 shrink-0 touch-none select-none bg-transparent px-2 \$\{className\}`\}/);
   assert.doesNotMatch(source, /className=\{`relative h-10/);
   assert.match(source, /absolute inset-x-0 inset-y-0/);
   assert.match(source, /touch-none cursor-grab bg-transparent active:cursor-grabbing/);
@@ -94,6 +94,9 @@ test('AppWindowFrame keeps update access visible and uses touch-safe window cont
   assert.doesNotMatch(source, /PhysicalPosition/);
   assert.match(source, /data-app-window-no-drag/);
   assert.match(source, /closest\('\[data-app-window-no-drag\], button, a, input, select, textarea'\)/);
+  assert.match(source, /const stopWindowControlPointer = useCallback/);
+  assert.match(source, /onPointerDown=\{stopWindowControlPointer\}/);
+  assert.match(source, /onMouseDown=\{stopWindowControlMouse\}/);
   assert.match(source, /bg-transparent/);
   assert.match(source, /import logoDark from '\.\.\/assets\/logo-black\.png'/);
   assert.match(source, /import logoLight from '\.\.\/assets\/logo-white\.png'/);
@@ -129,9 +132,9 @@ test('AppWindowFrame keeps update access visible and uses touch-safe window cont
     source,
     /data-app-window-control="fullscreen"[\s\S]*?onClick=\{\(\) => runWindowCommand\('maximize'\)\}/,
   );
-  assert.match(source, /active:scale-90/);
-  assert.match(source, /inline-flex h-\[52px\] min-h-\[52px\] w-\[52px\] min-w-\[52px\] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none/);
-  assert.match(source, /className="absolute right-2 top-1\/2 z-30 flex -translate-y-1\/2 items-center gap-0"/);
+  assert.doesNotMatch(source, /active:scale-90/);
+  assert.match(source, /inline-flex h-\[60px\] min-h-\[60px\] w-\[64px\] min-w-\[64px\] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none/);
+  assert.match(source, /className="absolute right-0 top-0 z-30 flex h-16 items-start gap-0"/);
   assert.match(source, /<Minus className="block h-5 w-5 translate-y-\[2px\]" \/>/);
   assert.doesNotMatch(source, /\bSquare\b/);
   assert.match(source, /<X className="block h-5 w-5" \/>/);
@@ -166,6 +169,8 @@ test('App wires updater state into the frame on login and main POS routes', () =
   assert.match(source, /if \(!hasActionableUpdate\) \{/);
   assert.match(source, /onOpen: autoUpdater\.openUpdateDialog/);
   assert.match(source, /autoUpdater\.currentVersion\.toLowerCase\(\) !== 'unknown'/);
+  assert.match(source, /const openUpdateCheck = useCallback/);
+  assert.match(source, /event\.key\.toLowerCase\(\) === 'u'/);
   assert.match(source, /const updateDialog = \(/);
 
   const framedLayoutCount = (source.match(/<FullscreenAwareLayout update=\{frameUpdate\} windowState=\{windowState\}>/g) || []).length;
@@ -173,6 +178,7 @@ test('App wires updater state into the frame on login and main POS routes', () =
   assert.match(source, /<PageLoadMotion animationKey="login" className="h-full min-h-0">/);
   assert.match(source, /<LoginPage onLogin=\{handleLogin\} \/>/);
   assert.doesNotMatch(source, /<LoginPage onLogin=\{handleLogin\} onOpenSettings=/);
+  assert.match(source, /onCheckForUpdates=\{openUpdateCheck\}/);
   assert.match(source, /<PageLoadMotion animationKey="new-order" className="h-full min-h-0">/);
   assert.match(source, /if \(!user\) \{\s*setShowConnectionSettings\(false\);/);
   assert.match(source, /className="fixed top-12 left-\[9\.5rem\] z-40"/);

@@ -791,6 +791,9 @@ function AppContent() {
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
   const windowState = useWindowState();
+  const openUpdateCheck = useCallback(() => {
+    autoUpdater.openUpdateDialog();
+  }, [autoUpdater.openUpdateDialog]);
   const frameUpdate = useMemo<AppFrameUpdate | undefined>(() => {
     const status = getFrameUpdateStatus(autoUpdater);
     if (status === 'not-available' || status === 'checking') {
@@ -958,6 +961,18 @@ function AppContent() {
     autoUpdater.installingVersion,
     autoUpdater.ready,
   ]);
+
+  useEffect(() => {
+    const handleManualUpdateShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'u') {
+        event.preventDefault();
+        openUpdateCheck();
+      }
+    };
+
+    window.addEventListener('keydown', handleManualUpdateShortcut);
+    return () => window.removeEventListener('keydown', handleManualUpdateShortcut);
+  }, [openUpdateCheck]);
 
   // Use custom hook for app events
   const { isShuttingDown, shutdownState } = useAppEvents({
@@ -1578,6 +1593,7 @@ function AppContent() {
             <ConnectionSettingsModal
               isOpen={showConnectionSettings}
               initialSection={connectionSettingsInitialSection}
+              onCheckForUpdates={openUpdateCheck}
               onClose={closeConnectionSettings}
             />
 
