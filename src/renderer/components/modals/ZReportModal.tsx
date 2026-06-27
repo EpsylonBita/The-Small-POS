@@ -133,15 +133,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     ? 'z-report-glass-content !overflow-hidden !p-4 text-white'
     : 'z-report-glass-content !overflow-hidden !p-4 text-white';
   const modalShellClassName = isDarkTheme
-    ? 'z-report-glass-shell border-white/[0.15] text-white shadow-2xl shadow-black/30'
-    : 'z-report-glass-shell border-white/[0.18] text-white shadow-2xl shadow-black/20';
+    ? 'z-report-glass-shell border-yellow-400/25 text-white shadow-2xl shadow-black/40'
+    : 'z-report-glass-shell border-yellow-400/30 text-white shadow-2xl shadow-black/25';
   const modalInsetClassName = isDarkTheme
-    ? 'border-white/[0.12] bg-white/[0.055] shadow-sm shadow-black/10 backdrop-blur-xl'
-    : 'border-white/[0.18] bg-white/[0.07] shadow-sm shadow-black/10 backdrop-blur-xl';
+    ? 'border-yellow-400/15 bg-black/30 shadow-sm shadow-black/20 backdrop-blur-xl'
+    : 'border-yellow-400/20 bg-black/25 shadow-sm shadow-black/15 backdrop-blur-xl';
   const strongTextClass = 'text-white';
-  const mutedTextClass = 'text-slate-200/90';
-  const softTextClass = 'text-slate-300/75';
-  const glassControlClass = 'border-white/[0.15] bg-white/[0.12] text-white shadow-sm shadow-black/10 backdrop-blur-xl active:bg-white/[0.18]';
+  const mutedTextClass = 'text-white/85';
+  const softTextClass = 'text-white/60';
+  const glassControlClass = 'border-yellow-400/20 bg-black/30 text-white shadow-sm shadow-black/10 backdrop-blur-xl active:bg-white/[0.12]';
   const canExecuteZReport =
     isFeatureEnabled('zReportExecution') ||
     (!featuresLoading && (isMainTerminal || (!isMobileWaiter && !parentTerminalId)));
@@ -384,9 +384,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   );
 
   const title = useMemo(() => t('modals.zReport.title', { date: selectedDate }), [selectedDate, t]);
-  const submitButtonLabel = isPendingLocalSubmit
-    ? t('modals.zReport.completePendingLocalSubmit')
-    : t('modals.zReport.submitToAdmin');
+  const submitButtonLabel = t('modals.zReport.commitZReport');
   const resolvedBusinessDate = zReport?.date || selectedDate;
   const resolvedPeriod = useMemo(() => resolveZReportPeriod(zReport), [zReport]);
   const summarySales = zReport?.sales || { totalOrders: 0, totalSales: 0, cashSales: 0, cardSales: 0 };
@@ -420,15 +418,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const getRoleBadgeClasses = (role?: string) => {
     switch (String(role || '').toLowerCase()) {
       case 'driver':
-        return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
+        return 'border-white/[0.16] bg-white/[0.08] text-white/80';
       case 'cashier':
       case 'manager':
         return 'border-amber-300/30 bg-amber-500/15 text-amber-100';
       case 'server':
       case 'waiter':
-        return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
+        return 'border-white/[0.16] bg-white/[0.08] text-white/80';
       default:
-        return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
+        return 'border-white/[0.16] bg-white/[0.08] text-white/80';
     }
   };
 
@@ -437,7 +435,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       case 'active':
         return 'border-emerald-300/30 bg-emerald-500/15 text-emerald-100';
       case 'closed':
-        return 'border-slate-200/20 bg-white/[0.08] text-slate-100';
+        return 'border-white/[0.16] bg-white/[0.08] text-white/80';
       default:
         return 'border-amber-300/30 bg-amber-500/15 text-amber-100';
     }
@@ -497,7 +495,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     if (!drawer?.closedAt) {
       return {
         label: t('common.status.active', { defaultValue: 'Active' }),
-        className: 'border-slate-200/20 bg-white/[0.08] text-slate-100',
+        className: 'border-white/[0.16] bg-white/[0.08] text-white/80',
       };
     }
     return {
@@ -631,25 +629,56 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const closeoutPendingExpenses = summaryExpenses.pendingCount ?? 0;
   const closeoutUnsettledDrivers = zReport?.driverEarnings?.unsettledCount ?? 0;
   const closeoutHasVariance = Math.abs(closeoutDrawerVariance) >= 0.01;
+  const activeShiftCount = staffReportsSorted.filter((staff) => !staff.checkOut && staff.shiftStatus !== 'closed').length;
+  const closedShiftCount = staffReportsSorted.filter((staff) => Boolean(staff.checkOut) || staff.shiftStatus === 'closed').length;
+  const totalShiftCount = zReport?.shiftCount ?? zReport?.shifts?.total ?? staffReportsSorted.length;
+  const driverCount = zReport?.driverEarnings?.breakdown?.length ?? zReport?.shifts?.driver ?? 0;
+  const completedDeliveries = zReport?.driverEarnings?.completedDeliveries ?? zReport?.driverEarnings?.totalDeliveries ?? 0;
+  const hasActiveStaffShifts = activeShiftCount > 0;
+  const cashDrawerBlocksCloseout = !hasActiveStaffShifts && (closeoutUnreconciledDrawers > 0 || closeoutHasVariance);
   const closeoutIssueCount =
     paymentBlockers.length +
-    closeoutUnreconciledDrawers +
+    (hasActiveStaffShifts ? 1 : 0) +
+    (cashDrawerBlocksCloseout ? closeoutUnreconciledDrawers : 0) +
     closeoutPendingExpenses +
     closeoutUnsettledDrivers +
-    (closeoutHasVariance ? 1 : 0) +
+    (cashDrawerBlocksCloseout && closeoutHasVariance ? 1 : 0) +
     (showMainTerminalWarning ? 1 : 0) +
     (error ? 1 : 0);
   const closeoutReady = Boolean(zReport) && !loading && closeoutIssueCount === 0;
+  const closeoutNeedsCashierCheckout =
+    !loading &&
+    !closeoutReady &&
+    cashDrawerBlocksCloseout &&
+    !closeoutHasVariance &&
+    paymentBlockers.length === 0 &&
+    closeoutPendingExpenses === 0 &&
+    closeoutUnsettledDrivers === 0 &&
+    !showMainTerminalWarning &&
+    !error;
+  const closeoutNeedsStaffCheckout =
+    !loading &&
+    !closeoutReady &&
+    hasActiveStaffShifts &&
+    paymentBlockers.length === 0 &&
+    closeoutPendingExpenses === 0 &&
+    closeoutUnsettledDrivers === 0 &&
+    !showMainTerminalWarning &&
+    !error;
   const closeoutStatusLabel = loading
     ? t('modals.zReport.closeoutLoading')
     : closeoutReady
       ? t('modals.zReport.readyToClose')
-      : t('modals.zReport.needsAttention');
+      : closeoutNeedsStaffCheckout
+        ? t('modals.zReport.allStaffCheckoutTitle')
+        : closeoutNeedsCashierCheckout
+        ? t('modals.zReport.clarity.cashDrawerCheckoutAction', { defaultValue: 'Close cashier shift' })
+        : t('modals.zReport.needsAttention');
 
   // Round 323: a zero-variance unreconciled drawer is NOT a money discrepancy -- it just means the cashier
   // has not finished checkout/reconciliation yet. Split the cash-drawer copy so that case reads as a calm
   // "cashier checkout needed" instead of a scary variance warning. Blocking + counts are unchanged.
-  const cashDrawerNeedsAttention = closeoutUnreconciledDrawers > 0 || closeoutHasVariance;
+  const cashDrawerNeedsAttention = cashDrawerBlocksCloseout;
   const closeoutChecklistItems: Array<{
     key: string;
     label: string;
@@ -708,16 +737,41 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     {
       key: 'staff',
       label: t('modals.zReport.staffPerformance'),
-      description: showMainTerminalWarning
+      description: hasActiveStaffShifts
+        ? t('modals.zReport.allStaffCheckoutSubtitle', { count: activeShiftCount })
+        : showMainTerminalWarning
         ? t('modals.zReport.staffNeedsMainTerminal')
         : t('modals.zReport.staffReady'),
-      state: showMainTerminalWarning ? 'warning' : 'ready',
+      actionLabel: hasActiveStaffShifts
+        ? t('modals.zReport.allStaffCheckoutTitle')
+        : undefined,
+      state: hasActiveStaffShifts || showMainTerminalWarning ? 'warning' : 'ready',
     },
   ];
 
   // Round 304: the close-day hero names the ONE thing to fix first -- the first non-ready checklist
   // item, in checklist priority order (sync -> payments -> cash drawer -> expenses -> staff).
   const primaryIssue = closeoutChecklistItems.find((item) => item.state !== 'ready') ?? null;
+  const closeoutSubtitle = lockedTerminal
+    ? (showMainTerminalWarning
+      ? t('terminal.messages.zReportMainOnly', 'Z-Report can only be executed from Main POS terminal')
+      : t('common.loading', 'Loading...'))
+    : loading
+      ? t('modals.zReport.closeoutLoading')
+      : closeoutReady
+        ? t('modals.zReport.clarity.readyHint', { defaultValue: 'Everything checks out -- submit to admin.' })
+        : closeoutNeedsStaffCheckout
+          ? t('modals.zReport.allStaffCheckoutSubtitle', { count: activeShiftCount })
+          : closeoutNeedsCashierCheckout
+            ? t('modals.zReport.cashDrawerCheckoutNeeded')
+            : primaryIssue?.description ?? t('modals.zReport.reviewBeforeClose');
+  const canCommitZReport =
+    !lockedTerminal &&
+    closeoutReady &&
+    !submitting &&
+    !loading &&
+    !Boolean(resolvingBlockerKey) &&
+    paymentBlockers.length === 0;
   // Short, localized status word for each Check-tab row (icon + label + status).
   const closeoutStateLabel = (state: CloseoutChecklistState): string => {
     if (state === 'ready') return t('modals.zReport.clarity.statusReady', { defaultValue: 'Ready' });
@@ -730,6 +784,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const cashCollected = summarySales.cashSales ?? 0;
   const cardCollected = summarySales.cardSales ?? 0;
   const totalSales = summarySales.totalSales ?? 0;
+  const staffEarnedSoFar = staffReportsSorted.reduce(
+    (total, staff) => total + resolveShiftEarnedTotal(staff),
+    0,
+  );
+  const staffOrderCountSoFar = staffReportsSorted.reduce(
+    (total, staff) => total + resolveShiftActivityCount(staff),
+    0,
+  );
+  const hasStaffEarnedSoFar = staffReportsSorted.some((staff) => resolveShiftActivityCount(staff) > 0);
+  const storeEarnedSoFar = hasStaffEarnedSoFar ? staffEarnedSoFar : totalSales;
+  const storeOrderCountSoFar = hasStaffEarnedSoFar ? staffOrderCountSoFar : totalOrders;
   const expensesTotal = summaryExpenses.total ?? 0;
   const drawerOpening = summaryCashDrawer.openingTotal ?? 0;
   const drawerDrops = summaryCashDrawer.totalCashDrops ?? 0;
@@ -744,13 +809,71 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     drawerDrops -
     driverCashGiven +
     driverCashReturned;
+  const otherCollected = Math.max(0, storeEarnedSoFar - cashCollected - cardCollected);
+  const totalCashOut = expensesTotal + staffPaymentsTotal + drawerDrops + driverCashGiven;
+  const totalCashInAdjustments = driverCashReturned;
+  const netAfterExpenses = storeEarnedSoFar - expensesTotal - staffPaymentsTotal;
+  const moneyOverviewMessage = loading
+    ? t('modals.zReport.closeoutLoading')
+    : closeoutReady
+      ? t('modals.zReport.clarity.readyHint', { defaultValue: 'Everything checks out -- submit to admin.' })
+      : closeoutNeedsStaffCheckout
+        ? t('modals.zReport.allStaffCheckoutSubtitle', { count: activeShiftCount })
+        : closeoutNeedsCashierCheckout
+        ? t('modals.zReport.cashDrawerCheckoutNeeded')
+        : closeoutIssueCount > 0
+        ? t('modals.zReport.clarity.reviewHint', {
+          count: closeoutIssueCount,
+          defaultValue: 'Fix {{count}} item(s) below, then submit.',
+        })
+        : t('modals.zReport.reviewBeforeClose');
+  const moneyOverviewCards = [
+    {
+      key: 'opening',
+      label: t('modals.zReport.opening'),
+      value: formatMoney(drawerOpening),
+      tone: strongTextClass,
+      helper: t('modals.zReport.cashDrawer', { defaultValue: 'Cash Drawer' }),
+    },
+    {
+      key: 'earned',
+      label: t('modals.zReport.actualEarned'),
+      value: formatMoney(storeEarnedSoFar),
+      tone: 'text-emerald-600 dark:text-emerald-300',
+      helper: `${t('modals.zReport.orders', { defaultValue: 'Orders' })}: ${storeOrderCountSoFar} · ${t('modals.zReport.staff', { defaultValue: 'Staff' })}: ${totalShiftCount}`,
+    },
+    {
+      key: 'expected',
+      label: t('modals.zReport.expectedCash'),
+      value: formatMoney(expectedCash),
+      tone: Math.abs(closeoutDrawerVariance) >= 0.01
+        ? 'text-amber-600 dark:text-amber-300'
+        : 'text-emerald-600 dark:text-emerald-300',
+      helper: t('modals.zReport.netCashPosition', { defaultValue: 'Net Cash Position' }),
+    },
+    {
+      key: 'net',
+      label: t('modals.zReport.cashFlow', { defaultValue: 'Cash Flow' }),
+      value: formatMoney(netAfterExpenses),
+      tone: strongTextClass,
+      helper: t('modals.zReport.totalExpenses', { defaultValue: 'Total Expenses' }) + `: ${formatMoney(expensesTotal + staffPaymentsTotal)}`,
+    },
+  ];
+  const moneyFlowRows = [
+    { key: 'start', label: t('modals.zReport.opening'), value: formatMoney(drawerOpening), tone: strongTextClass },
+    { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(cashCollected)}`, tone: 'text-emerald-600 dark:text-emerald-300' },
+    { key: 'card', label: t('modals.zReport.cardSales'), value: formatMoney(cardCollected), tone: strongTextClass },
+    ...(otherCollected > 0
+      ? [{ key: 'other', label: t('common.other', { defaultValue: 'Other' }), value: formatMoney(otherCollected), tone: strongTextClass }]
+      : []),
+    { key: 'out', label: t('modals.zReport.totalExpenses'), value: totalCashOut > 0 ? `-${formatMoney(totalCashOut)}` : formatMoney(0), tone: 'text-rose-600 dark:text-rose-300' },
+    ...(totalCashInAdjustments > 0
+      ? [{ key: 'returned', label: t('modals.zReport.driverCashReturned'), value: `+${formatMoney(totalCashInAdjustments)}`, tone: 'text-emerald-600 dark:text-emerald-300' }]
+      : []),
+    { key: 'variance', label: t('modals.zReport.variance'), value: formatMoney(closeoutDrawerVariance), tone: closeoutHasVariance ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-600 dark:text-emerald-300' },
+  ];
   const drawerRows = Array.isArray(zReport?.drawers) ? zReport.drawers : [];
   const expenseRows = Array.isArray(summaryExpenses.items) ? summaryExpenses.items : [];
-  const activeShiftCount = staffReportsSorted.filter((staff) => !staff.checkOut && staff.shiftStatus !== 'closed').length;
-  const closedShiftCount = staffReportsSorted.filter((staff) => Boolean(staff.checkOut) || staff.shiftStatus === 'closed').length;
-  const totalShiftCount = zReport?.shiftCount ?? zReport?.shifts?.total ?? staffReportsSorted.length;
-  const driverCount = zReport?.driverEarnings?.breakdown?.length ?? zReport?.shifts?.driver ?? 0;
-  const completedDeliveries = zReport?.driverEarnings?.completedDeliveries ?? zReport?.driverEarnings?.totalDeliveries ?? 0;
   // Round 304: the four tabs read like guided steps -- each carries a short icon + label. The Check
   // step keeps the 'review' key and the clarity.tabReview label (its EN value is now "Check"; el/de/fr/it
   // already read "Check"/"Verify").
@@ -775,12 +898,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   );
   const filteredOrderDetails = filterOrders(allOrderDetails);
   const dashboardPanelClass = isDarkTheme
-    ? 'border-white/[0.12] bg-white/[0.045] text-white shadow-2xl shadow-black/20 backdrop-blur-2xl'
-    : 'border-white/[0.18] bg-white/[0.065] text-white shadow-2xl shadow-black/20 backdrop-blur-2xl';
+    ? 'border-yellow-400/20 bg-black/35 text-white shadow-2xl shadow-black/25 backdrop-blur-2xl'
+    : 'border-yellow-400/25 bg-black/30 text-white shadow-2xl shadow-black/20 backdrop-blur-2xl';
   const dashboardInsetClass = `${modalInsetClassName} text-white`;
   const dashboardTileClass = isDarkTheme
-    ? 'border-white/[0.12] bg-white/[0.06] text-white shadow-lg shadow-black/10 backdrop-blur-xl'
-    : 'border-white/[0.18] bg-white/[0.08] text-white shadow-lg shadow-black/10 backdrop-blur-xl';
+    ? 'border-white/[0.12] bg-white/[0.08] text-white shadow-lg shadow-black/10 backdrop-blur-xl'
+    : 'border-white/[0.16] bg-white/[0.1] text-white shadow-lg shadow-black/10 backdrop-blur-xl';
 
   const renderChecklistIcon = (state: CloseoutChecklistState) => {
     if (state === 'ready') {
@@ -790,7 +913,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       return <XCircle className="h-4 w-4 text-rose-500" />;
     }
     if (state === 'pending') {
-      return <RefreshCw className="h-4 w-4 text-slate-400" />;
+      return <RefreshCw className="h-4 w-4 text-white/60" />;
     }
     return <AlertTriangle className="h-4 w-4 text-amber-500" />;
   };
@@ -804,14 +927,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       header={(
         <header
           data-z-report-command-header
-          className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 bg-white/[0.06] px-4 py-3 text-white backdrop-blur-xl"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-yellow-400/15 bg-black/25 px-4 py-3 text-white backdrop-blur-xl"
         >
           {/* Round 322: a calm, human identity block -- "Close day" + the working day as a FRIENDLY
               localized date (e.g. "Wednesday, 25 June 2026"), never a raw ISO string. A small chip says
               whether it is today's live day or a past day. The verdict ("ready"/"needs attention") lives
               ONLY in the status card below, so the header no longer repeats it. */}
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/[0.15] bg-white/[0.12] backdrop-blur-xl">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-yellow-400/20 bg-white/[0.08] backdrop-blur-xl">
               <FileText className={`h-5 w-5 ${softTextClass}`} />
             </div>
             <div className="min-w-0">
@@ -822,7 +945,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 <span className={`break-words text-sm font-bold ${softTextClass}`}>{friendlyBusinessDate}</span>
                 <span
                   data-z-report-day-chip
-                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-black ${isLiveDay ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-white/[0.18] bg-white/[0.08] text-slate-200'}`}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-black ${isLiveDay ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-white/[0.18] bg-white/[0.08] text-white/70'}`}
                 >
                   {isLiveDay ? <CheckCircle className="h-3 w-3" /> : <CalendarDays className="h-3 w-3" />}
                   {isLiveDay
@@ -886,70 +1009,47 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             data-z-report-decision-panel
             className={`rounded-3xl border p-4 sm:p-5 ${
               lockedTerminal
-                ? 'border-white/[0.14] bg-white/[0.05]'
+                ? 'border-yellow-400/20 bg-black/25'
                 : closeoutReady
                   ? 'border-emerald-400/40 bg-emerald-500/[0.08]'
                   : 'border-amber-400/45 bg-amber-400/[0.1]'
             }`}
           >
-            {/* The verdict ("Can I close now?") + the SINGLE next action. No repeated wording: the verdict
-                states the status; the one button states the next action. When blocked, the button itself
-                names the first thing to fix in plain language ("Fix Cash drawer"). */}
+            {/* The verdict ("Can I close now?") + the single Commit Z report action. */}
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex min-w-0 items-center gap-3">
-                <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl ${lockedTerminal ? 'bg-white/[0.08] text-slate-300' : closeoutReady ? 'bg-emerald-500/20 text-emerald-500' : 'bg-amber-500/20 text-amber-500'}`}>
-                  {loading ? <RefreshCw className="h-6 w-6 animate-spin" /> : lockedTerminal ? <Lock className="h-6 w-6" /> : closeoutReady ? <CheckCircle className="h-7 w-7" /> : <AlertTriangle className="h-7 w-7" />}
-                </div>
+              <div className="flex min-w-0 items-start gap-3">
+                {loading ? (
+                  <RefreshCw className="mt-1 h-7 w-7 shrink-0 animate-spin text-white/60" />
+                ) : lockedTerminal ? (
+                  <Lock className="mt-1 h-7 w-7 shrink-0 text-white/60" />
+                ) : closeoutReady ? (
+                  <CheckCircle className="mt-1 h-8 w-8 shrink-0 text-emerald-400" />
+                ) : (
+                  <AlertTriangle className="mt-1 h-8 w-8 shrink-0 text-amber-500" />
+                )}
                 <div className="min-w-0">
                   <div className={`break-words text-2xl font-black leading-tight ${strongTextClass}`}>{closeoutStatusLabel}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                    <span data-z-report-issues-badge className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-black ${closeoutIssueCount === 0 ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : 'border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-200'}`}>
-                      {closeoutIssueCount === 0 ? <CheckCircle className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
-                      {t('modals.zReport.clarity.issues', { defaultValue: 'Issues' })}: {closeoutIssueCount}
-                    </span>
+                  <div className={`mt-1 max-w-3xl break-words text-sm font-semibold leading-5 ${mutedTextClass}`}>
+                    {closeoutSubtitle}
                   </div>
-                  {/* Locked is the only state that needs a reason line; ready/blocked say it all in the action. */}
-                  {lockedTerminal && (
-                    <div className={`mt-1 break-words text-xs font-semibold leading-5 ${mutedTextClass}`}>
-                      {showMainTerminalWarning
-                        ? t('terminal.messages.zReportMainOnly', 'Z-Report can only be executed from Main POS terminal')
-                        : t('common.loading', 'Loading...')}
-                    </div>
-                  )}
                 </div>
               </div>
 
-              {/* The single next action -- mutually exclusive: locked chip / green Close day / amber Fix X. */}
+              {/* The single Commit Z report action: grey when blocked, green when ready. */}
               <div data-z-report-primary-action className="shrink-0">
-                {lockedTerminal ? (
-                  <span className={`inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-black ${dashboardInsetClass}`}>
-                    <Lock className="h-4 w-4" />
-                    {t('modals.zReport.clarity.locked', { defaultValue: 'Locked' })}
-                  </span>
-                ) : closeoutReady ? (
-                  <button
-                    type="button"
-                    onClick={handleSubmitReport}
-                    className={`inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl border border-emerald-500/40 bg-emerald-600 px-6 text-base font-black text-white shadow-lg shadow-emerald-500/20 transition active:scale-[0.99] active:bg-emerald-500 sm:w-auto ${submitting || loading || Boolean(resolvingBlockerKey) || paymentBlockers.length > 0 ? 'cursor-not-allowed opacity-55' : ''}`}
-                    disabled={submitting || loading || Boolean(resolvingBlockerKey) || paymentBlockers.length > 0}
-                    aria-busy={submitting}
-                  >
-                    <ShieldCheck className="h-5 w-5" />
-                    {submitting ? t('modals.zReport.submitting') : submitButtonLabel}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('review')}
-                    className="inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl border border-amber-500/50 bg-amber-500/15 px-6 text-base font-black text-amber-700 transition active:scale-[0.99] active:bg-amber-500/25 dark:text-amber-200 sm:w-auto"
-                  >
-                    <ListChecks className="h-5 w-5" />
-                    {primaryIssue
-                      ? (primaryIssue.actionLabel
-                        ?? t('modals.zReport.clarity.fixAction', { issue: primaryIssue.label, defaultValue: 'Fix {{issue}}' }))
-                      : t('modals.zReport.clarity.reviewIssues', { defaultValue: 'Review issues' })}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={handleSubmitReport}
+                  className={`inline-flex min-h-[48px] w-full items-center justify-center rounded-2xl border px-6 text-base font-black transition sm:w-auto ${
+                    canCommitZReport
+                      ? 'border-emerald-500/40 bg-emerald-600 text-white shadow-lg shadow-emerald-500/20 active:scale-[0.99] active:bg-emerald-500'
+                      : 'cursor-not-allowed border-white/[0.14] bg-white/[0.08] text-white/55 opacity-70'
+                  }`}
+                  disabled={!canCommitZReport}
+                  aria-busy={submitting}
+                >
+                  {submitButtonLabel}
+                </button>
               </div>
             </div>
 
@@ -1014,8 +1114,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       activeTab === tab.key
                         ? 'bg-yellow-400 text-black shadow-lg shadow-yellow-500/20'
                         : isDarkTheme
-                          ? 'text-slate-300'
-                          : 'text-slate-200/80'
+                          ? 'text-white/70'
+                          : 'text-white/70'
                     }`}
                   >
                     <TabIcon className="h-4 w-4" />
@@ -1107,7 +1207,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               { key: 'card', label: t('modals.zReport.cardSales'), value: drawer.cardSales, tone: 'text-amber-600 dark:text-amber-300' },
                               { key: 'drops', label: t('modals.zReport.drops'), value: drawer.drops, tone: strongTextClass },
                               { key: 'given', label: t('modals.zReport.driverCashGiven'), value: drawer.driverCashGiven, tone: 'text-orange-600 dark:text-orange-300' },
-                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: 'text-slate-600 dark:text-slate-300' },
+                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: 'text-white/70' },
                               { key: 'staff', label: t('modals.zReport.staffPayments'), value: drawer.staffPayments, tone: 'text-rose-600 dark:text-rose-300' },
                               { key: 'variance', label: t('modals.zReport.variance'), value: variance, tone: Math.abs(variance) < 0.01 ? 'text-emerald-600 dark:text-emerald-300' : 'text-amber-600 dark:text-amber-300' },
                             ];
@@ -1140,7 +1240,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               </article>
                             );
                           }) : (
-                            <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noDrawers')}</div>
+                            <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-white/65">{t('modals.zReport.noDrawers')}</div>
                           )}
                         </div>
                       </div>
@@ -1157,7 +1257,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               <div className="text-right text-sm font-black text-rose-600 dark:text-rose-300">{formatMoney(expense.amount)}</div>
                             </div>
                           )) : (
-                            <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noExpenseDetails')}</div>
+                            <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-white/65">{t('modals.zReport.noExpenseDetails')}</div>
                           )}
                         </div>
                       </div>
@@ -1185,7 +1285,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 { key: 'sales', label: t('modals.zReport.sales'), value: formatMoney(resolveShiftEarnedTotal(staff)), tone: 'text-emerald-600 dark:text-emerald-300' },
                                 { key: 'cash', label: t('modals.zReport.cash'), value: formatMoney(staff.orders?.cashAmount), tone: 'text-amber-600 dark:text-amber-300' },
                                 { key: 'card', label: t('modals.zReport.card'), value: formatMoney(staff.orders?.cardAmount), tone: 'text-amber-600 dark:text-amber-300' },
-                                { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: 'text-slate-600 dark:text-slate-300' },
+                                { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: 'text-white/70' },
                               ];
                               return (
                                 <article key={staff.staffShiftId} className={`rounded-xl border p-4 ${dashboardTileClass}`}>
@@ -1215,7 +1315,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             })}
                           </div>
                         ) : (
-                          <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noStaffReports')}</div>
+                          <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-white/65">{t('modals.zReport.noStaffReports')}</div>
                         )}
                       </div>
                     </section>
@@ -1235,7 +1335,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 className={`min-h-[36px] rounded-lg px-3 text-xs font-black transition ${
                                   orderTypeFilter === option.value
                                     ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20'
-                                    : 'text-slate-200/80 active:bg-white/[0.1]'
+                                    : 'text-white/70 active:bg-white/[0.1]'
                                 }`}
                               >
                                 {option.label}
@@ -1251,7 +1351,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 className={`min-h-[36px] rounded-lg px-3 text-xs font-black transition ${
                                   paymentMethodFilter === option.value
                                     ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
-                                    : 'text-slate-200/80 active:bg-white/[0.1]'
+                                    : 'text-white/70 active:bg-white/[0.1]'
                                 }`}
                               >
                                 {option.label}
@@ -1271,7 +1371,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             <div className="text-right text-sm font-black text-emerald-600 dark:text-emerald-300">{formatMoney(order.amount)}</div>
                           </div>
                         )) : (
-                          <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-slate-300/80">{t('modals.zReport.noOrdersMatchFilter')}</div>
+                          <div className="rounded-2xl border border-dashed border-white/[0.16] bg-white/[0.04] p-6 text-center text-sm font-semibold text-white/65">{t('modals.zReport.noOrdersMatchFilter')}</div>
                         )}
                       </div>
                     </section>
@@ -1279,6 +1379,60 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
                   {activeTab === 'review' && (
                     <div className="space-y-3">
+                      <section data-z-report-review-money-overview className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
+                        <div className="flex flex-col gap-4 xl:flex-row xl:items-stretch">
+                          <div className="min-w-0 flex-1 rounded-2xl border border-yellow-400/25 bg-yellow-400/[0.08] p-4">
+                            <div className={`text-xs font-black uppercase tracking-[0.12em] ${softTextClass}`}>
+                              {t('modals.zReport.tabs.overview', { defaultValue: 'Overview' })}
+                            </div>
+                            <div className="mt-2">
+                              <div className="min-w-0">
+                                <div className={`break-words text-sm font-bold ${mutedTextClass}`}>
+                                  {t('modals.zReport.actualEarned')}
+                                </div>
+                                <div className="mt-1 break-words text-4xl font-black leading-none text-yellow-300 sm:text-5xl">
+                                  {formatMoney(storeEarnedSoFar)}
+                                </div>
+                                <div data-z-report-earned-source className={`mt-2 break-words text-xs font-black uppercase tracking-[0.08em] ${softTextClass}`}>
+                                  {t('modals.zReport.liveCurrentWindow')} · {t('modals.zReport.totalShifts')}: {totalShiftCount} · {t('common.status.active', { defaultValue: 'Active' })}: {activeShiftCount} · {t('common.status.closed', { defaultValue: 'Closed' })}: {closedShiftCount}
+                                </div>
+                              </div>
+                            </div>
+                            <div className={`mt-3 break-words text-sm font-semibold leading-6 ${mutedTextClass}`}>
+                              {moneyOverviewMessage}
+                            </div>
+                          </div>
+
+                          <div className="grid min-w-0 flex-[1.35] grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                            {moneyOverviewCards.map((item) => (
+                              <div key={item.key} className={`rounded-2xl border p-3 ${dashboardTileClass}`}>
+                                <div className={`break-words text-[11px] font-black uppercase tracking-[0.08em] ${softTextClass}`}>
+                                  {item.label}
+                                </div>
+                                <div className={`mt-1 break-words text-xl font-black ${item.tone}`}>{item.value}</div>
+                                <div className={`mt-1 break-words text-[11px] font-semibold leading-4 ${softTextClass}`}>
+                                  {item.helper}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="mt-3 rounded-2xl border border-white/[0.12] bg-black/10 p-3">
+                          <div className={`mb-2 text-xs font-black uppercase tracking-[0.12em] ${softTextClass}`}>
+                            {t('modals.zReport.cashFlow', { defaultValue: 'Cash Flow' })}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
+                            {moneyFlowRows.map((row) => (
+                              <div key={row.key} className="min-w-0 rounded-xl border border-white/[0.1] bg-white/[0.04] p-2.5">
+                                <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{row.label}</div>
+                                <div className={`mt-1 truncate text-sm font-black ${row.tone}`}>{row.value}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </section>
+
                       {/* Round 312: the at-a-glance checks live in the compact checks row above the tabs. Here
                           we drill into ONLY the checks that still need action (so a clean day stays short),
                           keep the full payment-blocker resolve panel for real blockers, and show a brief
@@ -1299,7 +1453,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                   : 'text-amber-600 dark:text-amber-300'
                             }`}
                           >
-                            {closeoutStateLabel(item.state)}
+                            {item.actionLabel ?? closeoutStateLabel(item.state)}
                           </span>
                         </div>
                       ))}

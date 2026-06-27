@@ -121,8 +121,8 @@ test('ZReportModal renders the closeout workbench with localized labels', () => 
 
   assert.match(
     modal,
-    /disabled=\{submitting \|\| loading \|\| Boolean\(resolvingBlockerKey\) \|\| paymentBlockers\.length > 0\}/,
-    'commit action must stay blocked while payment blockers are visible',
+    /disabled=\{!canCommitZReport\}/,
+    'commit action must stay blocked until canCommitZReport is true',
   );
   assert.match(
     modal,
@@ -149,6 +149,14 @@ test('ZReportModal renders the closeout workbench with localized labels', () => 
   assert.match(glassCss, /\.liquid-glass-modal-shell\.z-report-glass-shell/);
   assert.match(glassCss, /\.liquid-glass-modal-content\.z-report-glass-content/);
   assert.match(glassCss, /backdrop-filter:\s*blur\(42px\)\s*saturate\(145%\)\s*!important/);
+  const zReportGlassCss = glassCss.slice(
+    glassCss.indexOf('.liquid-glass-modal-shell.z-report-glass-shell'),
+    glassCss.indexOf('/* Ultra crisp text class', glassCss.indexOf('.liquid-glass-modal-shell.z-report-glass-shell')),
+  );
+  assert.match(zReportGlassCss, /rgba\(8, 8, 8, 0\.88\)/);
+  assert.match(zReportGlassCss, /rgba\(250, 204, 21, 0\.26\)/);
+  assert.doesNotMatch(zReportGlassCss, /rgba\(2, 6, 23/);
+  assert.doesNotMatch(zReportGlassCss, /#f8fafc/);
 
   const requiredZReportKeys = [
     'refresh',
@@ -177,6 +185,9 @@ test('ZReportModal renders the closeout workbench with localized labels', () => 
     'expensesNeedReview',
     'staffReady',
     'staffNeedsMainTerminal',
+    'allStaffCheckoutTitle',
+    'allStaffCheckoutSubtitle',
+    'commitZReport',
     'drawerVariance',
     'closeoutSummary',
     'operatingSignals',

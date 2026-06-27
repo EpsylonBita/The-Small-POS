@@ -66,12 +66,13 @@ test('Round 320: first view is ONE close-day decision panel, then the secondary 
   assert.doesNotMatch(source, /closeoutChecklistItems\.map/);
 });
 
-test('Round 322: the decision panel shows ONE verdict + issue badge; the day picker & From/Until move to a details summary', () => {
+test('Round 322: the decision panel shows ONE verdict + subtitle; the day picker & From/Until move to a details summary', () => {
   // The verdict region runs from the panel open to the day-details summary.
   const verdict = slice(source, 'data-z-report-decision-panel', 'data-z-report-day-details');
   assert.match(verdict, /\{closeoutStatusLabel\}/);
-  assert.match(verdict, /data-z-report-issues-badge/);
-  assert.match(verdict, /clarity\.issues/);
+  assert.match(verdict, /\{closeoutSubtitle\}/);
+  assert.doesNotMatch(verdict, /data-z-report-issues-badge/);
+  assert.doesNotMatch(verdict, /clarity\.issues/);
   // The verdict region no longer carries the day picker, the live chip, or a raw window line -- those are
   // demoted into the details summary, so the first view is just the verdict + one action.
   assert.doesNotMatch(verdict, /type="date"/, 'the day picker moved into the details summary');
@@ -105,41 +106,25 @@ test('Round 322: the decision panel shows ONE verdict + issue badge; the day pic
   assert.doesNotMatch(dayDetails, /\btitle=/);
 });
 
-test('Round 322: the single next action is a 3-way switch -- locked chip / green Close day / amber Fix X', () => {
+test('Round 322/355: the single next action is a plain Commit Z report button -- green ready, grey inactive', () => {
   const action = slice(source, 'data-z-report-primary-action', 'data-z-report-day-details');
 
-  // Locked terminal: a calm Locked chip -- no submit.
-  assert.match(action, /lockedTerminal \?/);
-  assert.match(action, /clarity\.locked/);
-
-  // Ready + executable: the green submit, wired EXACTLY once here, with the EXACT preserved gating.
+  // The commit action is wired once, and the button itself carries the full readiness gate.
   const submits = action.match(/onClick=\{handleSubmitReport\}/g) ?? [];
-  assert.equal(submits.length, 1, 'submit must be wired exactly once (the ready + executable branch)');
+  assert.equal(submits.length, 1, 'submit must be wired exactly once');
   assert.match(action, /onClick=\{handleSubmitReport\}[\s\S]*?bg-emerald-600/);
+  assert.match(action, /disabled=\{!canCommitZReport\}/);
   assert.match(
-    action,
-    /disabled=\{submitting \|\| loading \|\| Boolean\(resolvingBlockerKey\) \|\| paymentBlockers\.length > 0\}/,
-    'commit must stay blocked while loading/resolving/blockers exist',
+    source,
+    /const canCommitZReport =[\s\S]*?!lockedTerminal[\s\S]*?closeoutReady[\s\S]*?!submitting[\s\S]*?!loading[\s\S]*?!Boolean\(resolvingBlockerKey\)[\s\S]*?paymentBlockers\.length === 0;/,
+    'commit must stay blocked unless the report is ready and no loading/resolving/blockers exist',
   );
-  assert.match(action, /\{submitting \? t\('modals\.zReport\.submitting'\) : submitButtonLabel\}/);
-
-  // Blocked: a single amber jump to the Review tab whose label NAMES the first thing to fix in plain words
-  // ("Fix Cash drawer") via clarity.fixAction, falling back to reviewIssues when no single first issue.
-  assert.match(action, /onClick=\{\(\) => setActiveTab\('review'\)\}/);
-  // The button prefers an issue-specific actionLabel (e.g. "Checkout cashier"), falling back to the generic
-  // "Fix {{issue}}" when an issue has none, then to "Review issues" when there is no single first issue.
-  assert.match(action, /primaryIssue\s*\n?\s*\?\s*\(primaryIssue\.actionLabel\s*\n?\s*\?\? t\('modals\.zReport\.clarity\.fixAction'/);
-  assert.match(action, /issue: primaryIssue\.label/);
-  assert.match(action, /clarity\.reviewIssues/);
-  assert.match(action, /border-amber-500\/50 bg-amber-500\/15/, 'the fix action is amber, distinct from the green submit');
-
-  // The switch order guarantees the gate: lockedTerminal is checked BEFORE the ready submit branch, so the
-  // submit is reachable only when (!lockedTerminal && closeoutReady) === (canExecuteZReport && closeoutReady).
-  assert.match(
-    action,
-    /lockedTerminal \?[\s\S]*?\) : closeoutReady \?[\s\S]*?onClick=\{handleSubmitReport\}[\s\S]*?\) : \([\s\S]*?setActiveTab\('review'\)/,
-    'the action order must be locked -> ready(submit) -> blocked(fix)',
-  );
+  assert.match(action, /cursor-not-allowed border-white\/\[0\.14\] bg-white\/\[0\.08\] text-white\/55 opacity-70/);
+  assert.match(action, /\{submitButtonLabel\}/);
+  assert.doesNotMatch(action, /setActiveTab\('review'\)/);
+  assert.doesNotMatch(action, /clarity\.fixAction/);
+  assert.doesNotMatch(action, /clarity\.reviewIssues/);
+  assert.doesNotMatch(action, /<ListChecks/);
 
   // On-palette, no hover/title.
   assert.doesNotMatch(action, /\b(?:bg|text|border|from|to|ring)-(?:blue|indigo|violet|cyan|sky)-/);
@@ -149,23 +134,23 @@ test('Round 322: the single next action is a 3-way switch -- locked chip / green
 
 test('Round 320: lockedTerminal is derived from canExecuteZReport (gate unchanged, checked first)', () => {
   assert.match(source, /const lockedTerminal = !canExecuteZReport;/);
-  // The green submit sits in the closeoutReady branch that follows the lockedTerminal check, so it is
-  // reachable only when (!lockedTerminal && closeoutReady) === (canExecuteZReport && closeoutReady).
-  assert.match(source, /lockedTerminal \?[\s\S]*?: closeoutReady \?[\s\S]*?onClick=\{handleSubmitReport\}/);
+  assert.match(source, /const canCommitZReport =[\s\S]*?!lockedTerminal[\s\S]*?closeoutReady/);
+  assert.match(source, /disabled=\{!canCommitZReport\}/);
 });
 
-test('Round 322: locked shows a plain reason line; blocked/ready carry the next step in the action, not a paragraph', () => {
+test('Round 322/355: locked and blocked explanations live in the subtitle, not issue chips or fix buttons', () => {
   const panel = slice(source, 'data-z-report-decision-panel', 'data-z-report-day-details');
 
-  // Locked is the ONLY state with a reason line, using the existing main-terminal / loading messages.
-  assert.match(panel, /\{lockedTerminal && \(/);
-  assert.match(panel, /terminal\.messages\.zReportMainOnly/);
-  assert.match(panel, /common\.loading/);
+  // Locked uses the existing main-terminal / loading messages through the shared subtitle.
+  assert.match(source, /const closeoutSubtitle = lockedTerminal/);
+  assert.match(source, /terminal\.messages\.zReportMainOnly/);
+  assert.match(source, /common\.loading/);
 
-  // No repeated wording: the blocked "{{count}} to fix" sentence is gone from the verdict -- the amber
-  // button states the fix instead (clarity.fixAction). The verdict line is just the status word.
+  // No repeated issue wording and no separate fix/review action; the verdict is a title + plain subtitle.
   assert.doesNotMatch(panel, /clarity\.checksNeedAttention/);
-  assert.match(source, /issue: primaryIssue\.label, defaultValue: 'Fix \{\{issue\}\}'/);
+  assert.doesNotMatch(panel, /data-z-report-issues-badge/);
+  assert.doesNotMatch(panel, /clarity\.fixAction/);
+  assert.doesNotMatch(panel, /clarity\.reviewIssues/);
 });
 
 test('Round 320: handleSubmitReport is wired exactly once in the whole modal (the ready-only path)', () => {
@@ -210,6 +195,25 @@ test('Round 322: the header shows a friendly date + live/past-day chip, and neve
 // INTENT flag (isUsingLiveDefaultDate && !lockDate), not the date actually displayed. The chip must be derived
 // from the SAME date shown in the header (resolvedBusinessDate) compared to the terminal-local today, so a
 // returned past zReport.date can never read as "Today". Display-only -- lockDate/submit/closeout unchanged.
+test('Round 352: the Review tab headline is live store earnings from staff check-in/check-out totals', () => {
+  assert.match(source, /const staffEarnedSoFar = staffReportsSorted\.reduce/);
+  assert.match(source, /resolveShiftEarnedTotal\(staff\)/);
+  assert.match(source, /const storeEarnedSoFar = hasStaffEarnedSoFar \? staffEarnedSoFar : totalSales;/);
+  assert.match(source, /const storeOrderCountSoFar = hasStaffEarnedSoFar \? staffOrderCountSoFar : totalOrders;/);
+
+  const reviewMoney = slice(source, 'data-z-report-review-money-overview', 'paymentBlockers.length > 0');
+  assert.match(reviewMoney, /formatMoney\(storeEarnedSoFar\)/);
+  assert.match(reviewMoney, /data-z-report-earned-source/);
+  assert.match(reviewMoney, /liveCurrentWindow/);
+  assert.match(reviewMoney, /activeShiftCount/);
+  assert.match(reviewMoney, /closedShiftCount/);
+  assert.doesNotMatch(
+    reviewMoney,
+    /formatMoney\(totalSales\)/,
+    'the first-tab money headline must not fall back to raw totalSales when staff live totals exist',
+  );
+});
+
 test('Round 351: the day chip is derived from the displayed business date vs local today, not the live-default flag', () => {
   // The buggy derivation (chip == live-default intent flag) is gone. The intent flag may still drive other
   // things (liveModeLabel / auto-refresh), so the guard is scoped to the `const isLiveDay =` line specifically.
@@ -339,8 +343,49 @@ test('Round 323: cash drawer copy splits checkout-needed (zero variance) from a 
   // Blocking is preserved: an unreconciled drawer still counts toward the issue total (close stays gated).
   assert.match(source, /closeoutIssueCount =[\s\S]*?closeoutUnreconciledDrawers/);
 
-  // The decision-panel action prefers the issue-specific actionLabel, falling back to the generic fixAction.
-  assert.match(source, /primaryIssue\.actionLabel\s*\n?\s*\?\? t\('modals\.zReport\.clarity\.fixAction'/);
+  // The Review row still prefers the issue-specific actionLabel.
+  assert.match(source, /item\.actionLabel \?\? closeoutStateLabel\(item\.state\)/);
+});
+
+test('Round 353: cashier-checkout-only blocker is named directly, not repeated as generic needs-check', () => {
+  assert.match(source, /const closeoutNeedsCashierCheckout =/);
+  assert.match(source, /closeoutUnreconciledDrawers > 0/);
+  assert.match(source, /!closeoutHasVariance/);
+  assert.match(
+    source,
+    /closeoutNeedsCashierCheckout\s*\n?\s*\?\s*t\('modals\.zReport\.clarity\.cashDrawerCheckoutAction'/,
+    'the hero status should say close cashier shift for the active-drawer-only case',
+  );
+  assert.match(
+    source,
+    /closeoutNeedsCashierCheckout\s*\n?\s*\?\s*t\('modals\.zReport\.cashDrawerCheckoutNeeded'\)/,
+    'the money overview helper should explain the active cashier shift instead of generic review copy',
+  );
+  assert.match(
+    source,
+    /item\.actionLabel \?\? closeoutStateLabel\(item\.state\)/,
+    'the issue row should show the issue-specific action label when available',
+  );
+});
+
+test('Round 354: active staff disables Z-report commit with an all-staff checkout message', () => {
+  assert.match(source, /const hasActiveStaffShifts = activeShiftCount > 0;/);
+  assert.match(source, /\(hasActiveStaffShifts \? 1 : 0\)/);
+  assert.match(source, /const closeoutNeedsStaffCheckout =/);
+  assert.match(source, /hasActiveStaffShifts/);
+  assert.match(source, /t\('modals\.zReport\.allStaffCheckoutTitle'\)/);
+  assert.match(source, /t\('modals\.zReport\.allStaffCheckoutSubtitle', \{ count: activeShiftCount \}\)/);
+  assert.match(source, /const submitButtonLabel = t\('modals\.zReport\.commitZReport'\);/);
+
+  const action = slice(source, 'data-z-report-primary-action', 'data-z-report-day-details');
+  assert.match(action, /disabled=\{!canCommitZReport\}/);
+  assert.match(action, /cursor-not-allowed border-white\/\[0\.14\] bg-white\/\[0\.08\] text-white\/55 opacity-70/);
+  assert.doesNotMatch(action, /<ListChecks/);
+
+  const staffItem = slice(source, "key: 'staff'", "];");
+  assert.match(staffItem, /hasActiveStaffShifts/);
+  assert.match(staffItem, /allStaffCheckoutSubtitle/);
+  assert.match(staffItem, /allStaffCheckoutTitle/);
 });
 
 test('Round 297/320: every overflow-y-auto region hides its native scrollbar (touch scrollbar policy)', () => {
@@ -400,7 +445,7 @@ test('Round 320: new redesign copy is translation-keyed in all five POS locales 
   );
   assert.ok(used.length >= 7, `expected several clarity.* keys, found ${used.join(',')}`);
   // The redesign's header + decision-panel + details-summary copy must be among the used keys.
-  for (const required of ['assistantTitle', 'dayLive', 'dayHistorical', 'dayStepTitle', 'issues', 'fixAction', 'reviewIssues', 'locked', 'detailsSummary', 'from', 'until', 'cashDrawerCheckoutAction', 'cashDrawerReconcileAction']) {
+  for (const required of ['assistantTitle', 'dayLive', 'dayHistorical', 'dayStepTitle', 'detailsSummary', 'from', 'until', 'cashDrawerCheckoutAction', 'cashDrawerReconcileAction']) {
     assert.ok(used.includes(required), `the redesign must use clarity.${required}`);
   }
 

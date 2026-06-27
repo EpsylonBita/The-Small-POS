@@ -2547,37 +2547,37 @@
 /* Z-report uses a heavier dashboard layout, so keep text crisp while allowing
    the modal shell and panels to retain a real blurred glass surface. */
 .liquid-glass-modal-shell.z-report-glass-shell {
-  background: rgba(255, 255, 255, 0.07) !important;
+  background: rgba(10, 10, 10, 0.82) !important;
   backdrop-filter: blur(46px) saturate(145%) !important;
   -webkit-backdrop-filter: blur(46px) saturate(145%) !important;
-  border-color: rgba(255, 255, 255, 0.18);
+  border-color: rgba(250, 204, 21, 0.28);
   box-shadow:
-    0 28px 90px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+    0 28px 90px rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(250, 204, 21, 0.14);
 }
 
 .dark .liquid-glass-modal-shell.z-report-glass-shell {
-  background: rgba(2, 6, 23, 0.18) !important;
+  background: rgba(8, 8, 8, 0.88) !important;
   backdrop-filter: blur(46px) saturate(145%) !important;
   -webkit-backdrop-filter: blur(46px) saturate(145%) !important;
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: rgba(250, 204, 21, 0.26);
   box-shadow:
-    0 28px 90px rgba(0, 0, 0, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    0 28px 90px rgba(0, 0, 0, 0.48),
+    inset 0 1px 0 rgba(250, 204, 21, 0.12);
 }
 
 .liquid-glass-modal-content.z-report-glass-content {
-  background: rgba(255, 255, 255, 0.035) !important;
+  background: rgba(0, 0, 0, 0.2) !important;
   backdrop-filter: blur(42px) saturate(145%) !important;
   -webkit-backdrop-filter: blur(42px) saturate(145%) !important;
-  color: #f8fafc;
+  color: #ffffff;
 }
 
 .dark .liquid-glass-modal-content.z-report-glass-content {
-  background: rgba(2, 6, 23, 0.08) !important;
+  background: rgba(0, 0, 0, 0.22) !important;
   backdrop-filter: blur(42px) saturate(145%) !important;
   -webkit-backdrop-filter: blur(42px) saturate(145%) !important;
-  color: #f8fafc;
+  color: #ffffff;
 }
 
 /* Ultra crisp text class for important values */
