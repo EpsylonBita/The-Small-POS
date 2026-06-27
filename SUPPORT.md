@@ -32,6 +32,8 @@ The POS should continue working locally.
 
 Backend Telegram alerts are configured only in `admin-dashboard` environment
 variables. Telegram tokens must never be stored in `pos-tauri`.
+Manual **Send diagnostics to support** uploads a redacted report for support
+review but does not trigger Telegram by default.
 
 ## Export Diagnostics Bundle
 
