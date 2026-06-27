@@ -62,7 +62,10 @@ pub fn manual_incident_candidate(health: &Value) -> PosIncidentCandidate {
     }
 }
 
-pub fn health_monitor_failed_candidate(terminal_id: Option<String>, error: &str) -> PosIncidentCandidate {
+pub fn health_monitor_failed_candidate(
+    terminal_id: Option<String>,
+    error: &str,
+) -> PosIncidentCandidate {
     let terminal_id = terminal_id
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unknown-terminal".to_string());
@@ -86,18 +89,24 @@ pub fn classify_incidents(health: &Value) -> Vec<PosIncidentCandidate> {
     let terminal_id = terminal_id_from_health(health);
     let mut incidents = Vec::new();
 
-    let financial_failed = i64_path(health, &["financialQueueStatus", "totalFailed"])
-        .max(i64_path(health, &["syncStatusSummary", "financialStats", "totalFailed"]));
+    let financial_failed =
+        i64_path(health, &["financialQueueStatus", "totalFailed"]).max(i64_path(
+            health,
+            &["syncStatusSummary", "financialStats", "totalFailed"],
+        ));
     let failed_payment_items = i64_path(health, &["financialQueueStatus", "failedPaymentItems"])
         .max(i64_path(
             health,
             &["syncStatusSummary", "financialStats", "failedPaymentItems"],
         ));
     if financial_failed > 0 {
-        let error_class = string_path(health, &["syncStatusSummary", "lastQueueFailure", "classification"])
-            .or_else(|| string_path(health, &["syncStatusSummary", "lastQueueFailure", "error"]))
-            .map(|value| normalize_error_class(&value))
-            .unwrap_or_else(|| "financial_queue_failed".to_string());
+        let error_class = string_path(
+            health,
+            &["syncStatusSummary", "lastQueueFailure", "classification"],
+        )
+        .or_else(|| string_path(health, &["syncStatusSummary", "lastQueueFailure", "error"]))
+        .map(|value| normalize_error_class(&value))
+        .unwrap_or_else(|| "financial_queue_failed".to_string());
         incidents.push(PosIncidentCandidate {
             issue_code: "sync.failed_financial_queue".to_string(),
             severity: PosIncidentSeverity::Critical,
@@ -117,7 +126,11 @@ pub fn classify_incidents(health: &Value) -> Vec<PosIncidentCandidate> {
 
     let sync_errors = i64_path(health, &["syncStatusSummary", "syncErrors"]);
     let sync_error_text = string_path(health, &["syncStatusSummary", "error"]);
-    if sync_errors > 0 || sync_error_text.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+    if sync_errors > 0
+        || sync_error_text
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
         let error_class = sync_error_text
             .as_deref()
             .map(normalize_error_class)
@@ -193,7 +206,9 @@ pub fn classify_incidents(health: &Value) -> Vec<PosIncidentCandidate> {
             issue_code: "sync.remote_auth_paused".to_string(),
             severity: PosIncidentSeverity::High,
             fingerprint: format!("{terminal_id}:sync.remote_auth_paused:{auth_class}"),
-            summary: "The POS paused remote sync because terminal authentication needs support review.".to_string(),
+            summary:
+                "The POS paused remote sync because terminal authentication needs support review."
+                    .to_string(),
             evidence: json!({
                 "remoteAuthPaused": true,
                 "authClass": auth_class,
@@ -341,7 +356,11 @@ fn record_send_success(db: &db::DbState, fingerprint: &str, response: &Value) {
         "alertSent": response.get("alertSent").and_then(Value::as_bool).unwrap_or(false),
     });
     write_setting(db, &format!("incident_last_sent.{key_hash}"), &now);
-    write_setting(db, &format!("incident_last_status.{key_hash}"), &status.to_string());
+    write_setting(
+        db,
+        &format!("incident_last_status.{key_hash}"),
+        &status.to_string(),
+    );
     write_setting(db, "incident_last_sent_global", &status.to_string());
 }
 
@@ -352,7 +371,11 @@ fn record_send_failure(db: &db::DbState, fingerprint: &str, error: &str) {
         "failedAt": Utc::now().to_rfc3339(),
         "errorClass": normalize_error_class(error),
     });
-    write_setting(db, &format!("incident_last_status.{key_hash}"), &status.to_string());
+    write_setting(
+        db,
+        &format!("incident_last_status.{key_hash}"),
+        &status.to_string(),
+    );
     write_setting(db, "incident_last_sent_global", &status.to_string());
 }
 
@@ -362,7 +385,11 @@ fn store_status(db: &db::DbState, fingerprint: &str, status: &str) {
         "state": status,
         "updatedAt": Utc::now().to_rfc3339(),
     });
-    write_setting(db, &format!("incident_last_status.{key_hash}"), &payload.to_string());
+    write_setting(
+        db,
+        &format!("incident_last_status.{key_hash}"),
+        &payload.to_string(),
+    );
 }
 
 fn is_suppressed(db: &db::DbState, fingerprint: &str, minutes: i64) -> bool {
@@ -486,7 +513,10 @@ fn backlog_total(health: &Value) -> i64 {
         for entity in map.values() {
             if let Some(status_counts) = entity.as_object() {
                 for (status, count) in status_counts {
-                    if matches!(status.as_str(), "pending" | "in_progress" | "queued_remote" | "deferred") {
+                    if matches!(
+                        status.as_str(),
+                        "pending" | "in_progress" | "queued_remote" | "deferred"
+                    ) {
                         total += count.as_i64().unwrap_or(0);
                     }
                 }
@@ -498,7 +528,8 @@ fn backlog_total(health: &Value) -> i64 {
 }
 
 fn printer_failed_job_count(health: &Value) -> i64 {
-    let Some(jobs) = value_path(health, &["printerStatus", "recentJobs"]).and_then(Value::as_array) else {
+    let Some(jobs) = value_path(health, &["printerStatus", "recentJobs"]).and_then(Value::as_array)
+    else {
         return 0;
     };
 
@@ -533,15 +564,23 @@ mod tests {
             .expect("financial incident");
 
         assert_eq!(incident.severity, PosIncidentSeverity::Critical);
-        assert!(incident.fingerprint.starts_with("term-1:sync.failed_financial_queue:"));
+        assert!(incident
+            .fingerprint
+            .starts_with("term-1:sync.failed_financial_queue:"));
         assert!(!incident.fingerprint.contains("person@example.com"));
         assert_eq!(incident.evidence["totalFailed"], json!(3));
     }
 
     #[test]
     fn classifier_uses_stable_normalized_fingerprint() {
-        let a = health_monitor_failed_candidate(Some("t1".to_string()), "HTTP 401 token expired for order 123");
-        let b = health_monitor_failed_candidate(Some("t1".to_string()), "HTTP 999 token expired for order 456");
+        let a = health_monitor_failed_candidate(
+            Some("t1".to_string()),
+            "HTTP 401 token expired for order 123",
+        );
+        let b = health_monitor_failed_candidate(
+            Some("t1".to_string()),
+            "HTTP 999 token expired for order 456",
+        );
 
         assert_eq!(a.fingerprint, b.fingerprint);
         assert_eq!(

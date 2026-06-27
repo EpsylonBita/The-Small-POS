@@ -136,7 +136,11 @@ pub fn start_remote_incident_reporter(
                 Ok(health) => {
                     let candidates = incident_reporting::classify_incidents(&health);
                     for candidate in candidates {
-                        if !incident_reporting::should_send_candidate(db.as_ref(), &candidate, false) {
+                        if !incident_reporting::should_send_candidate(
+                            db.as_ref(),
+                            &candidate,
+                            false,
+                        ) {
                             continue;
                         }
 

@@ -952,9 +952,9 @@ fn scrub_sensitive_string(value: &str) -> String {
             "[REDACTED_EMAIL]"
         } else {
             let digit_count = word.chars().filter(|c| c.is_ascii_digit()).count();
-            let phone_shaped = word.chars().all(|c| {
-                c.is_ascii_digit() || matches!(c, '+' | '-' | '(' | ')' | '.' | '/')
-            });
+            let phone_shaped = word
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '(' | ')' | '.' | '/'));
             if phone_shaped && digit_count >= 8 {
                 "[REDACTED_PHONE]"
             } else {

@@ -356,10 +356,7 @@ pub async fn window_get_position(window: tauri::Window) -> Result<Value, String>
 }
 
 #[tauri::command]
-pub async fn window_set_position(
-    window: tauri::Window,
-    arg0: Option<Value>,
-) -> Result<(), String> {
+pub async fn window_set_position(window: tauri::Window, arg0: Option<Value>) -> Result<(), String> {
     let (x, y) = parse_window_position_payload(arg0)?;
     window
         .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
