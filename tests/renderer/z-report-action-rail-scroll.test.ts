@@ -12,8 +12,8 @@ import path from 'node:path';
  *   - a large ready / needs-action / locked verdict with one issue-count badge,
  *   - exactly ONE primary action, a 3-way mutually-exclusive switch:
  *       locked (this terminal cannot close) -> a calm Locked chip + plain reason (no submit),
- *       ready (+ executable)                -> the green submit, with the EXACT preserved gating,
- *       blocked                             -> one amber "Review issues" jump to the Review tab.
+ *       submittable                         -> the green submit, with the native hard-blocker gate,
+ *       needs review                        -> amber verdict + the same submit action when no hard blocker exists.
  * The header is calm ("Close day" + status + close). Refresh / Print / CSV and the Money/Staff/Orders/Review
  * ledgers live behind the secondary detail tabs (progressive disclosure). These are source assertions only;
  * they never exercise day-close / submit behaviour.
@@ -106,18 +106,23 @@ test('Round 322: the decision panel shows ONE verdict + subtitle; the day picker
   assert.doesNotMatch(dayDetails, /\btitle=/);
 });
 
-test('Round 322/355: the single next action is a plain Commit Z report button -- green ready, grey inactive', () => {
+test('Round 322/355/356: the single next action is a plain Commit Z report button -- green when submittable, grey for hard blockers', () => {
   const action = slice(source, 'data-z-report-primary-action', 'data-z-report-day-details');
 
-  // The commit action is wired once, and the button itself carries the full readiness gate.
+  // The commit action is wired once, and the button itself carries the native hard-blocker gate.
   const submits = action.match(/onClick=\{handleSubmitReport\}/g) ?? [];
   assert.equal(submits.length, 1, 'submit must be wired exactly once');
   assert.match(action, /onClick=\{handleSubmitReport\}[\s\S]*?bg-emerald-600/);
   assert.match(action, /disabled=\{!canCommitZReport\}/);
   assert.match(
     source,
-    /const canCommitZReport =[\s\S]*?!lockedTerminal[\s\S]*?closeoutReady[\s\S]*?!submitting[\s\S]*?!loading[\s\S]*?!Boolean\(resolvingBlockerKey\)[\s\S]*?paymentBlockers\.length === 0;/,
-    'commit must stay blocked unless the report is ready and no loading/resolving/blockers exist',
+    /const closeoutHasHardSubmitBlocker =[\s\S]*?!Boolean\(zReport\)[\s\S]*?lockedTerminal[\s\S]*?loading[\s\S]*?Boolean\(error\)[\s\S]*?hasActiveStaffShifts[\s\S]*?paymentBlockers\.length > 0;/,
+    'hard submit blockers must match the native preconditions: report loaded, executable terminal, no error/loading, no active staff, no payment blockers',
+  );
+  assert.match(
+    source,
+    /const canCommitZReport =[\s\S]*?!closeoutHasHardSubmitBlocker[\s\S]*?!submitting[\s\S]*?!Boolean\(resolvingBlockerKey\);/,
+    'commit must stay blocked only by hard submit blockers, submit-in-flight, or blocker resolution',
   );
   assert.match(action, /cursor-not-allowed border-white\/\[0\.14\] bg-white\/\[0\.08\] text-white\/55 opacity-70/);
   assert.match(action, /\{submitButtonLabel\}/);
@@ -132,9 +137,10 @@ test('Round 322/355: the single next action is a plain Commit Z report button --
   assert.doesNotMatch(action, /\btitle=/);
 });
 
-test('Round 320: lockedTerminal is derived from canExecuteZReport (gate unchanged, checked first)', () => {
+test('Round 320/356: lockedTerminal is derived from canExecuteZReport and is part of the hard submit gate', () => {
   assert.match(source, /const lockedTerminal = !canExecuteZReport;/);
-  assert.match(source, /const canCommitZReport =[\s\S]*?!lockedTerminal[\s\S]*?closeoutReady/);
+  assert.match(source, /const closeoutHasHardSubmitBlocker =[\s\S]*?lockedTerminal/);
+  assert.match(source, /const canCommitZReport =[\s\S]*?!closeoutHasHardSubmitBlocker/);
   assert.match(source, /disabled=\{!canCommitZReport\}/);
 });
 
@@ -340,8 +346,10 @@ test('Round 323: cash drawer copy splits checkout-needed (zero variance) from a 
   assert.match(item, /state: cashDrawerNeedsAttention \? 'warning' : 'ready'/);
   assert.doesNotMatch(item, /'error'/, 'an unreconciled / variance drawer must not render as a red error');
 
-  // Blocking is preserved: an unreconciled drawer still counts toward the issue total (close stays gated).
+  // Warning visibility is preserved: an unreconciled drawer still counts toward the issue total.
   assert.match(source, /closeoutIssueCount =[\s\S]*?closeoutUnreconciledDrawers/);
+  const canCommit = slice(source, 'const canCommitZReport =', '  // Short, localized status word');
+  assert.doesNotMatch(canCommit, /cashDrawerNeedsAttention|closeoutReady|closeoutIssueCount|closeoutUnreconciledDrawers|closeoutHasVariance/);
 
   // The Review row still prefers the issue-specific actionLabel.
   assert.match(source, /item\.actionLabel \?\? closeoutStateLabel\(item\.state\)/);

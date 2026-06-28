@@ -146,8 +146,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     isFeatureEnabled('zReportExecution') ||
     (!featuresLoading && (isMainTerminal || (!isMobileWaiter && !parentTerminalId)));
   const showMainTerminalWarning = !featuresLoading && !canExecuteZReport;
-  // Round 320: the decision panel's 3-way action switch checks lockedTerminal FIRST, so the green submit
-  // branch is reachable only when `canExecuteZReport && closeoutReady` -- identical to the prior gate.
+  // Round 320: terminal capability is kept separate from report warnings so the submit gate can match
+  // the native closeout preconditions exactly.
   const lockedTerminal = !canExecuteZReport;
   const isPendingLocalSubmit = lockDate;
   const [activeTab, setActiveTab] = useState<'review' | 'money' | 'staff' | 'orders'>('review');
@@ -646,6 +646,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     (showMainTerminalWarning ? 1 : 0) +
     (error ? 1 : 0);
   const closeoutReady = Boolean(zReport) && !loading && closeoutIssueCount === 0;
+  const closeoutHasHardSubmitBlocker =
+    !Boolean(zReport) ||
+    lockedTerminal ||
+    loading ||
+    Boolean(error) ||
+    hasActiveStaffShifts ||
+    paymentBlockers.length > 0;
   const closeoutNeedsCashierCheckout =
     !loading &&
     !closeoutReady &&
@@ -766,12 +773,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             ? t('modals.zReport.cashDrawerCheckoutNeeded')
             : primaryIssue?.description ?? t('modals.zReport.reviewBeforeClose');
   const canCommitZReport =
-    !lockedTerminal &&
-    closeoutReady &&
+    !closeoutHasHardSubmitBlocker &&
     !submitting &&
-    !loading &&
-    !Boolean(resolvingBlockerKey) &&
-    paymentBlockers.length === 0;
+    !Boolean(resolvingBlockerKey);
   // Short, localized status word for each Check-tab row (icon + label + status).
   const closeoutStateLabel = (state: CloseoutChecklistState): string => {
     if (state === 'ready') return t('modals.zReport.clarity.statusReady', { defaultValue: 'Ready' });
@@ -999,11 +1003,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             locked verdict with a single issue-count badge; and exactly ONE primary action. The action is a
             3-way mutually-exclusive switch:
               - locked (this terminal cannot close)  -> a calm Locked chip + a plain reason line (no submit),
-              - ready (+ executable)                 -> the green submit, with the EXACT preserved gating,
-              - blocked                              -> one amber "Review issues" jump to the Review tab.
-            Because `lockedTerminal = !canExecuteZReport` is checked first, the green submit branch is reached
-            only when `canExecuteZReport && closeoutReady` -- identical to the prior gate. Money / staff /
-            order ledgers live behind the secondary detail tabs below. Handlers + aria-labels unchanged. === */}
+              - submittable                          -> the green submit, using the native hard-blocker gate,
+              - needs review                         -> amber verdict + the same submit action when no hard blocker exists.
+            Money / staff / order ledgers live behind the secondary detail tabs below. Handlers +
+            aria-labels unchanged. === */}
         <div data-z-report-close-assistant className="flex shrink-0 flex-col gap-2.5">
           <div
             data-z-report-decision-panel
