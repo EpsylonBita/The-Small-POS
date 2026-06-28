@@ -1162,6 +1162,47 @@ fn should_persist_receipt_number_for_branch(conn: &Connection, branch_id: &str) 
     }
 }
 
+const NO_ACTIVE_CASHIER_ORDER_CREATE_ERROR: &str =
+    "Cannot create orders until a cashier opens the day.";
+
+fn require_active_cashier_for_order_create(
+    conn: &Connection,
+    branch_id: &str,
+    terminal_id: &str,
+) -> Result<(String, String), String> {
+    let branch_id = branch_id.trim();
+    let terminal_id = terminal_id.trim();
+    if branch_id.is_empty() || terminal_id.is_empty() {
+        warn!(
+            branch_id = %branch_id,
+            terminal_id = %terminal_id,
+            "Order creation blocked: missing branch or terminal context for cashier gate"
+        );
+        return Err(
+            "Cannot create orders because this terminal is not assigned to a branch.".to_string(),
+        );
+    }
+
+    if let Some(assignment) =
+        order_ownership::resolve_active_cashier_assignment(conn, branch_id, terminal_id)?
+    {
+        return Ok(assignment);
+    }
+
+    if let Some(assignment) =
+        order_ownership::resolve_active_cashier_assignment_for_branch(conn, branch_id)?
+    {
+        return Ok(assignment);
+    }
+
+    warn!(
+        branch_id = %branch_id,
+        terminal_id = %terminal_id,
+        "Order creation blocked: no active cashier or manager shift"
+    );
+    Err(NO_ACTIVE_CASHIER_ORDER_CREATE_ERROR.to_string())
+}
+
 /// Create an order locally: insert into `orders` table and enqueue for sync.
 pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     // Validate menu items BEFORE acquiring the connection lock to avoid
@@ -1496,6 +1537,9 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             }
             Some(value.to_string())
         });
+
+    let _active_cashier_assignment =
+        require_active_cashier_for_order_create(&conn, &branch_id, &terminal_id)?;
 
     let (resolved_staff_shift_id, resolved_staff_id) = order_ownership::resolve_order_owner(
         &conn,
@@ -18395,6 +18439,28 @@ mod tests {
         }
     }
 
+    fn seed_active_cashier(db: &DbState, branch_id: &str, terminal_id: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                status, sync_status, created_at, updated_at
+            ) VALUES (
+                ?1, ?2, 'Cashier', ?3, ?4, 'cashier',
+                datetime('now'), 100.0, 10000,
+                'active', 'pending', datetime('now'), datetime('now')
+            )",
+            params![
+                format!("cashier-shift-{branch_id}-{terminal_id}"),
+                format!("cashier-staff-{branch_id}-{terminal_id}"),
+                branch_id,
+                terminal_id,
+            ],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn normalize_order_items_customizations_for_sync_converts_arrays_to_objects() {
         let items = serde_json::json!([{
@@ -19110,7 +19176,10 @@ mod tests {
     #[test]
     fn test_create_order_enqueues_order_receipt_print_job() {
         let db = test_db();
+        seed_active_cashier(&db, "branch-create-print", "terminal-create-print");
         let payload = serde_json::json!({
+            "branchId": "branch-create-print",
+            "terminalId": "terminal-create-print",
             "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
             "totalAmount": 2.5,
             "subtotal": 2.5,
@@ -19141,9 +19210,11 @@ mod tests {
     #[test]
     fn test_create_order_persists_organization_id_for_fiscal_enqueue() {
         let db = test_db();
+        seed_active_cashier(&db, "branch-create-fiscal", "terminal-create-fiscal");
         let payload = serde_json::json!({
             "organizationId": "org-create-fiscal",
             "branchId": "branch-create-fiscal",
+            "terminalId": "terminal-create-fiscal",
             "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
             "totalAmount": 2.5,
             "subtotal": 2.5,
@@ -19174,9 +19245,11 @@ mod tests {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
         crate::fiscal::active_cache::update("branch-create-receipt", true);
+        seed_active_cashier(&db, "branch-create-receipt", "terminal-create-receipt");
         let payload = serde_json::json!({
             "organizationId": "org-create-receipt",
             "branchId": "branch-create-receipt",
+            "terminalId": "terminal-create-receipt",
             "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
             "totalAmount": 2.5,
             "subtotal": 2.5,
@@ -19214,9 +19287,15 @@ mod tests {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
         crate::fiscal::active_cache::update("branch-create-no-fiscal-receipt", false);
+        seed_active_cashier(
+            &db,
+            "branch-create-no-fiscal-receipt",
+            "terminal-create-no-fiscal-receipt",
+        );
         let payload = serde_json::json!({
             "organizationId": "org-create-no-fiscal-receipt",
             "branchId": "branch-create-no-fiscal-receipt",
+            "terminalId": "terminal-create-no-fiscal-receipt",
             "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
             "totalAmount": 2.5,
             "subtotal": 2.5,
@@ -19247,6 +19326,11 @@ mod tests {
     fn test_create_order_omits_receipt_number_when_cached_integrations_have_no_fiscal_plugin() {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
+        seed_active_cashier(
+            &db,
+            "branch-create-cached-no-fiscal-receipt",
+            "terminal-create-cached-no-fiscal-receipt",
+        );
         {
             let conn = db.conn.lock().unwrap();
             db::set_setting(
@@ -19282,6 +19366,7 @@ mod tests {
         let payload = serde_json::json!({
             "organizationId": "org-create-cached-no-fiscal-receipt",
             "branchId": "branch-create-cached-no-fiscal-receipt",
+            "terminalId": "terminal-create-cached-no-fiscal-receipt",
             "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
             "totalAmount": 2.5,
             "subtotal": 2.5,
@@ -19312,6 +19397,11 @@ mod tests {
     fn test_create_order_persists_receipt_number_when_cached_mydata_is_acquired() {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
+        seed_active_cashier(
+            &db,
+            "branch-create-cached-mydata-receipt",
+            "terminal-create-cached-mydata-receipt",
+        );
         {
             let conn = db.conn.lock().unwrap();
             db::set_setting(
@@ -19341,6 +19431,7 @@ mod tests {
         let payload = serde_json::json!({
             "organizationId": "org-create-cached-mydata-receipt",
             "branchId": "branch-create-cached-mydata-receipt",
+            "terminalId": "terminal-create-cached-mydata-receipt",
             "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
             "totalAmount": 2.5,
             "subtotal": 2.5,
@@ -19370,9 +19461,15 @@ mod tests {
     fn test_create_order_omits_receipt_number_when_fiscal_entitlement_unknown() {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
+        seed_active_cashier(
+            &db,
+            "branch-create-unknown-fiscal-receipt",
+            "terminal-create-unknown-fiscal-receipt",
+        );
         let payload = serde_json::json!({
             "organizationId": "org-create-unknown-fiscal-receipt",
             "branchId": "branch-create-unknown-fiscal-receipt",
+            "terminalId": "terminal-create-unknown-fiscal-receipt",
             "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
             "totalAmount": 2.5,
             "subtotal": 2.5,
@@ -19466,8 +19563,9 @@ mod tests {
     }
 
     #[test]
-    fn test_create_delivery_order_keeps_neutral_ownership_without_driver_assignment() {
+    fn test_create_delivery_order_uses_active_cashier_without_driver_assignment() {
         let db = test_db();
+        seed_active_cashier(&db, "branch-create", "terminal-create");
         let conn = db.conn.lock().unwrap();
         // W4e Step 0: dual-populate (20.0 → 2000).
         conn.execute(
@@ -19516,8 +19614,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(staff_shift_id, None);
-        assert_eq!(staff_id, None);
+        assert_eq!(
+            staff_shift_id.as_deref(),
+            Some("cashier-shift-branch-create-terminal-create")
+        );
+        assert_eq!(
+            staff_id.as_deref(),
+            Some("cashier-staff-branch-create-terminal-create")
+        );
         assert_eq!(driver_id, None);
 
         let receipt_jobs: i64 = conn
@@ -19543,6 +19647,36 @@ mod tests {
 
         assert_eq!(receipt_jobs, 0);
         assert_eq!(slip_jobs, 1);
+    }
+
+    #[test]
+    fn test_create_order_requires_active_cashier_shift() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "branchId": "branch-no-cashier",
+            "terminalId": "terminal-no-cashier",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "pickup"
+        });
+
+        let error = create_order(&db, &payload).expect_err("cashier gate should reject");
+
+        assert_eq!(error, NO_ACTIVE_CASHIER_ORDER_CREATE_ERROR);
+        let conn = db.conn.lock().unwrap();
+        let order_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap();
+        let queue_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert_eq!(order_count, 0);
+        assert_eq!(queue_count, 0);
     }
 
     #[test]

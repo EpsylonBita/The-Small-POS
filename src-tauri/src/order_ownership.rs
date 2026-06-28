@@ -195,8 +195,6 @@ pub fn resolve_order_owner(
                 return Ok((Some(driver_shift_id), Some(driver_id_value.to_string())));
             }
         }
-
-        return Ok((None, None));
     }
 
     if let (Some(branch_id_value), Some(terminal_id_value)) = (
@@ -208,6 +206,18 @@ pub fn resolve_order_owner(
         {
             return Ok((Some(cashier_shift_id), Some(cashier_staff_id)));
         }
+    }
+
+    if let Some(branch_id_value) = effective_branch_id.as_deref() {
+        if let Some((cashier_shift_id, cashier_staff_id)) =
+            resolve_active_cashier_assignment_for_branch(conn, branch_id_value)?
+        {
+            return Ok((Some(cashier_shift_id), Some(cashier_staff_id)));
+        }
+    }
+
+    if normalized_order_type == "delivery" {
+        return Ok((None, None));
     }
 
     let fallback_staff_id = if normalized_order_type == "delivery" {
