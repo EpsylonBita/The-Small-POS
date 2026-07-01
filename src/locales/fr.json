@@ -1311,6 +1311,14 @@
       "thankYou": "Merci pour votre générosité !"
     }
   },
+  "paymentPrintPrompt": {
+    "title": "Imprimer le reçu ?",
+    "message": "Voulez-vous imprimer le reçu de ce paiement ?",
+    "print": "Imprimer le reçu",
+    "skip": "Ne pas imprimer",
+    "amount": "Montant",
+    "order": "Commande"
+  },
   "shift": {
     "title": "Service",
     "subtitle": "Gérer les opérations de service",
@@ -2024,6 +2032,10 @@
       "label": "Paramètres d'impression",
       "helpText": "Configurer l'imprimante thermique de reçus",
       "configureButton": "Configurer l'imprimante",
+      "askBeforePrint": "Demander avant d’imprimer",
+      "askBeforePrintHelp": "Afficher une confirmation après le paiement avant d’imprimer le reçu",
+      "receiptPromptSaved": "Réglage de confirmation d’impression enregistré",
+      "receiptPromptSaveFailed": "Échec de l’enregistrement du réglage de confirmation d’impression",
       "quickSetup": "Configuration rapide",
       "expertSettings": "Paramètres experts",
       "verificationFirstHint": "Utilisez d'abord la configuration rapide. Elle vérifie un chemin de transport et d'encodage fonctionnel avant de compter sur une imprimante en service réel.",
@@ -2818,6 +2830,19 @@
       "staleAge": "Backend telemetry is older than the current local queue state.",
       "staleMissing": "The queue still has actionable work, but telemetry freshness is unavailable."
     },
+    "healthModal": {
+      "syncDetails": "Détails de synchronisation",
+      "record": "Enregistrement",
+      "error": "Erreur",
+      "nextRetry": "Nouvelle tentative",
+      "syncProcessor": "Processeur de synchronisation",
+      "table": {
+        "orders": "Commandes",
+        "payments": "Paiements",
+        "paymentAdjustments": "Ajustements de paiement",
+        "zReports": "Rapports Z"
+      }
+    },
     "blocker": {
       "title": "Current blocker",
       "entity": "Entity",
@@ -3107,7 +3132,10 @@
       "payWithCash": "Finaliser la commande en espèces",
       "payWithCard": "Finaliser la commande par carte",
       "cashReceived": "Espèces reçues",
+      "quickAmounts": "Montants rapides",
       "change": "Rendu",
+      "amountShort": "Montant manquant",
+      "suggestedChange": "Rendu suggéré",
       "back": "Retour",
       "completePayment": "Finaliser le paiement",
       "processing": "Traitement en cours...",
@@ -4535,6 +4563,8 @@
     "bulkPickupDisabled": "Impossible de sélectionner en lot des types de commande différents",
     "noDeliveryOrdersSelected": "Sélectionnez des commandes en livraison pour attribuer un livreur",
     "noCancelledOrdersSelected": "Aucune commande annulée sélectionnée",
+    "returnToOrdersFailed": "Impossible de restaurer la commande {{orderNumber}}",
+    "returnedToOrders": "{{count}} commandes restaurées",
     "printFailed": "Receipt print failed",
     "fiscalPrintFailed": "Cash register print failed",
     "orderCreateFailed": "Failed to create order",
@@ -4553,6 +4583,7 @@
     "view": "Voir",
     "clear": "Effacer",
     "return": "Retour aux commandes",
+    "restore": "Restaurer",
     "reassign": "Réattribuer le livreur"
   },
   "orderCard": {

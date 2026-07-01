@@ -1311,6 +1311,14 @@
       "thankYou": "Thank you for your generosity!"
     }
   },
+  "paymentPrintPrompt": {
+    "title": "Print receipt?",
+    "message": "Do you want to print the receipt for this payment?",
+    "print": "Print receipt",
+    "skip": "Do not print",
+    "amount": "Amount",
+    "order": "Order"
+  },
   "shift": {
     "title": "Shift",
     "subtitle": "Manage shift operations",
@@ -2024,6 +2032,10 @@
       "label": "Printer Settings",
       "helpText": "Configure thermal receipt printer",
       "configureButton": "Configure Printer",
+      "askBeforePrint": "Ask before printing",
+      "askBeforePrintHelp": "Show a confirmation after payment before printing the receipt",
+      "receiptPromptSaved": "Receipt print prompt setting saved",
+      "receiptPromptSaveFailed": "Failed to save receipt print prompt setting",
       "quickSetup": "Quick Setup",
       "expertSettings": "Expert Settings",
       "verificationFirstHint": "Use Quick Setup first. It verifies a working transport and encoding path before you rely on a printer in live service.",
@@ -2861,6 +2873,19 @@
       "staleAge": "Backend telemetry is older than the current local queue state.",
       "staleMissing": "The queue still has actionable work, but telemetry freshness is unavailable."
     },
+    "healthModal": {
+      "syncDetails": "Sync details",
+      "record": "Record",
+      "error": "Error",
+      "nextRetry": "Next retry",
+      "syncProcessor": "Sync processor",
+      "table": {
+        "orders": "Orders",
+        "payments": "Payments",
+        "paymentAdjustments": "Payment adjustments",
+        "zReports": "Z-reports"
+      }
+    },
     "blocker": {
       "title": "Current blocker",
       "recoveryTitle": "Recovery in progress",
@@ -3107,7 +3132,10 @@
       "payWithCash": "Complete order with cash",
       "payWithCard": "Complete order with card",
       "cashReceived": "Cash Received",
+      "quickAmounts": "Quick Amounts",
       "change": "Change",
+      "amountShort": "Amount Short",
+      "suggestedChange": "Suggested change",
       "back": "Back",
       "completePayment": "Complete Payment",
       "processing": "Processing...",
@@ -4535,6 +4563,8 @@
     "bulkPickupDisabled": "Cannot select in bulk different order types",
     "noDeliveryOrdersSelected": "Select delivery orders to assign a driver",
     "noCancelledOrdersSelected": "No cancelled orders selected",
+    "returnToOrdersFailed": "Failed to restore order {{orderNumber}}",
+    "returnedToOrders": "Restored {{count}} order(s)",
     "printFailed": "Receipt print failed",
     "fiscalPrintFailed": "Cash register print failed",
     "orderCreateFailed": "Failed to create order",
@@ -4553,6 +4583,7 @@
     "view": "View",
     "clear": "Clear",
     "return": "Return to Orders",
+    "restore": "Restore",
     "reassign": "Reassign Driver"
   },
   "orderCard": {

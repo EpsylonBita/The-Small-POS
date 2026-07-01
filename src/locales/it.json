@@ -1311,6 +1311,14 @@
       "thankYou": "Grazie per la generosità!"
     }
   },
+  "paymentPrintPrompt": {
+    "title": "Stampare lo scontrino?",
+    "message": "Vuoi stampare lo scontrino per questo pagamento?",
+    "print": "Stampa scontrino",
+    "skip": "Non stampare",
+    "amount": "Importo",
+    "order": "Ordine"
+  },
   "shift": {
     "title": "Turno",
     "subtitle": "Gestisci le operazioni del turno",
@@ -2024,6 +2032,10 @@
       "label": "Impostazioni stampante",
       "helpText": "Configura la stampante termica per gli scontrini",
       "configureButton": "Configura stampante",
+      "askBeforePrint": "Chiedi prima di stampare",
+      "askBeforePrintHelp": "Mostra una conferma dopo il pagamento, prima di stampare lo scontrino",
+      "receiptPromptSaved": "Impostazione di conferma stampa salvata",
+      "receiptPromptSaveFailed": "Impossibile salvare l'impostazione di conferma stampa",
       "quickSetup": "Configurazione rapida",
       "expertSettings": "Impostazioni avanzate",
       "verificationFirstHint": "Usa prima la configurazione rapida. Verifica un percorso di trasporto e codifica funzionante prima di affidarti alla stampante nel servizio live.",
@@ -2818,6 +2830,19 @@
       "staleAge": "Backend telemetry is older than the current local queue state.",
       "staleMissing": "The queue still has actionable work, but telemetry freshness is unavailable."
     },
+    "healthModal": {
+      "syncDetails": "Dettagli sincronizzazione",
+      "record": "Record",
+      "error": "Errore",
+      "nextRetry": "Prossimo tentativo",
+      "syncProcessor": "Processore di sincronizzazione",
+      "table": {
+        "orders": "Ordini",
+        "payments": "Pagamenti",
+        "paymentAdjustments": "Rettifiche pagamento",
+        "zReports": "Report Z"
+      }
+    },
     "blocker": {
       "title": "Current blocker",
       "entity": "Entity",
@@ -3107,7 +3132,10 @@
       "payWithCash": "Completa ordine in contanti",
       "payWithCard": "Completa ordine con carta",
       "cashReceived": "Contanti ricevuti",
+      "quickAmounts": "Importi rapidi",
       "change": "Resto",
+      "amountShort": "Importo mancante",
+      "suggestedChange": "Resto suggerito",
       "back": "Indietro",
       "completePayment": "Completa pagamento",
       "processing": "Elaborazione...",
@@ -4535,6 +4563,8 @@
     "bulkPickupDisabled": "Impossibile selezionare in blocco tipi di ordine diversi",
     "noDeliveryOrdersSelected": "Seleziona ordini di consegna per assegnare un fattorino",
     "noCancelledOrdersSelected": "Nessun ordine annullato selezionato",
+    "returnToOrdersFailed": "Impossibile ripristinare l'ordine {{orderNumber}}",
+    "returnedToOrders": "{{count}} ordini ripristinati",
     "printFailed": "Receipt print failed",
     "fiscalPrintFailed": "Cash register print failed",
     "orderCreateFailed": "Failed to create order",
@@ -4553,6 +4583,7 @@
     "view": "Visualizza",
     "clear": "Cancella",
     "return": "Torna agli ordini",
+    "restore": "Ripristina",
     "reassign": "Riassegna fattorino"
   },
   "orderCard": {

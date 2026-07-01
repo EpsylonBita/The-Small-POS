@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { CreditCard, Banknote, AlertTriangle, Split, BedDouble } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../../hooks/useFeatures';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
@@ -68,6 +68,21 @@ interface PaymentModalProps {
 
 type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input';
 
+type CashChangeBreakdownItem = {
+  value: number;
+  count: number;
+  type: 'bill' | 'coin';
+};
+
+const CASH_CHANGE_DENOMINATIONS = [50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05];
+const QUICK_CASH_ROUNDING_STEPS = [1, 5, 10, 20, 50, 100];
+
+const roundMoney = (value: number): number =>
+  Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
+
+const hasMoneyAmount = (amounts: number[], candidate: number): boolean =>
+  amounts.some(amount => Math.abs(amount - candidate) < 0.01);
+
 export const PaymentModal: React.FC<PaymentModalProps> = ({
   isOpen,
   onClose,
@@ -122,10 +137,59 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const showDeliveryFee = orderType === 'delivery';
   const subtotalBeforeDiscount = Math.max(0, orderTotal + discountAmount - (showDeliveryFee ? deliveryFee : 0));
 
+  const roundedOrderTotal = roundMoney(orderTotal);
+
   // Calculate change
   const cashAmount = parseMoneyInputValue(cashReceived);
-  const changeAmount = cashAmount - orderTotal;
-  const hasEnoughCash = cashAmount >= orderTotal;
+  const changeAmount = roundMoney(cashAmount - roundedOrderTotal);
+  const hasEnoughCash = cashAmount >= roundedOrderTotal;
+  const amountShort = roundMoney(Math.max(0, roundedOrderTotal - cashAmount));
+
+  const quickCashAmounts = useMemo(() => {
+    const amounts: number[] = [];
+
+    if (roundedOrderTotal > 0) {
+      amounts.push(roundedOrderTotal);
+    }
+
+    for (const step of QUICK_CASH_ROUNDING_STEPS) {
+      const rounded = roundMoney(Math.ceil(roundedOrderTotal / step) * step);
+      if (rounded >= roundedOrderTotal && !hasMoneyAmount(amounts, rounded)) {
+        amounts.push(rounded);
+      }
+
+      if (amounts.length >= 5) {
+        break;
+      }
+    }
+
+    return amounts.sort((a, b) => a - b).slice(0, 5);
+  }, [roundedOrderTotal]);
+
+  const changeBreakdown = useMemo<CashChangeBreakdownItem[]>(() => {
+    if (!hasEnoughCash || changeAmount <= 0) {
+      return [];
+    }
+
+    const breakdown: CashChangeBreakdownItem[] = [];
+    let remaining = roundMoney(changeAmount);
+
+    for (const value of CASH_CHANGE_DENOMINATIONS) {
+      const count = Math.floor((remaining + 0.001) / value);
+      if (count <= 0) {
+        continue;
+      }
+
+      breakdown.push({
+        value,
+        count,
+        type: value >= 5 ? 'bill' : 'coin',
+      });
+      remaining = roundMoney(remaining - count * value);
+    }
+
+    return breakdown;
+  }, [changeAmount, hasEnoughCash]);
 
   // Reset step when modal opens
   useEffect(() => {
@@ -261,6 +325,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       return;
     }
     handleSimplePayment('cash');
+  };
+
+  const handleQuickCashSelect = (amount: number) => {
+    setCashReceived(formatMoneyInputWithCents(amount.toFixed(2)));
+    cashInputRef.current?.focus();
   };
 
   const handleSkipMinimumWarning = () => {
@@ -573,6 +642,35 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         {/* Step: Cash Input (only for pickup/in-store) */}
         {currentStep === 'cash_input' && (
           <div className="space-y-6">
+            {quickCashAmounts.length > 0 && (
+              <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+                <p className="text-sm font-semibold liquid-glass-modal-text-muted">
+                  {t('modals.payment.quickAmounts', 'Quick Amounts')}
+                </p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {quickCashAmounts.map((amount) => {
+                    const isSelected = hasMoneyAmount([cashAmount], amount);
+
+                    return (
+                      <button
+                        key={amount}
+                        type="button"
+                        onClick={() => handleQuickCashSelect(amount)}
+                        disabled={isProcessingPayment}
+                        className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-bold transition-all ${
+                          isSelected
+                            ? 'border-green-400 bg-green-500/25 text-green-100'
+                            : 'border-white/10 bg-white/5 liquid-glass-modal-text active:bg-white/10'
+                        } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.98]'}`}
+                      >
+                        {formatCurrency(amount)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <div className="text-center">
               <p className="text-sm liquid-glass-modal-text-muted mb-2">
                 {t('modals.payment.enterCashReceived', 'Cash Received')}
@@ -616,14 +714,38 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <span className={`font-semibold ${
                     hasEnoughCash ? 'text-green-400' : 'text-red-400'
                   }`}>
-                    {t('modals.payment.change', 'Change')}
+                    {hasEnoughCash
+                      ? t('modals.payment.change', 'Change')
+                      : t('modals.payment.amountShort', 'Amount Short')}
                   </span>
                   <span className={`text-2xl font-bold ${
                     hasEnoughCash ? 'text-green-400' : 'text-red-400'
                   }`}>
-                    {hasEnoughCash ? formatCurrency(changeAmount) : t('modals.payment.insufficient', 'Insufficient')}
+                    {hasEnoughCash ? formatCurrency(changeAmount) : formatCurrency(amountShort)}
                   </span>
                 </div>
+                {hasEnoughCash && changeAmount > 0 && changeBreakdown.length > 0 && (
+                  <div className="mt-3 border-t border-white/10 pt-3">
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-normal liquid-glass-modal-text-muted">
+                      {t('modals.payment.suggestedChange', 'Suggested change')}
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {changeBreakdown.map((item) => {
+                        const Icon = item.type === 'bill' ? Banknote : Coins;
+
+                        return (
+                          <span
+                            key={item.value}
+                            className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs font-semibold liquid-glass-modal-text"
+                          >
+                            <Icon className={item.type === 'bill' ? 'h-3 w-3 text-green-400' : 'h-3 w-3 text-yellow-400'} />
+                            {item.count} x {formatCurrency(item.value)}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

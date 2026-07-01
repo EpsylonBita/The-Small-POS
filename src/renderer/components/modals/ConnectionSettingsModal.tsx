@@ -149,6 +149,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [touchSensitivity, setTouchSensitivity] = useState('medium')
   const [audioEnabled, setAudioEnabled] = useState(true)
   const [receiptAutoPrint, setReceiptAutoPrint] = useState(true)
+  const [receiptPrintPromptEnabled, setReceiptPrintPromptEnabled] = useState(false)
   const [displayBrightness, setDisplayBrightness] = useState('80')
   const [pinResetRequired, setPinResetRequired] = useState(false)
   const [runtimeTerminalId, setRuntimeTerminalId] = useState('')
@@ -300,6 +301,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         ))
         setReceiptAutoPrint(parseBooleanSetting(
           getNestedSetting(settingsMap, 'ui', 'receipt_auto_print') ?? getNestedSetting(settingsMap, 'terminal', 'receipt_auto_print')
+        ))
+        setReceiptPrintPromptEnabled(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'receipt', 'ask_before_print') ??
+          getNestedSetting(settingsMap, 'ui', 'receipt_ask_before_print') ??
+          getNestedSetting(settingsMap, 'terminal', 'receipt_ask_before_print')
         ))
         setPinResetRequired(parseBooleanSetting(
           getNestedSetting(settingsMap, 'terminal', 'pin_reset_required')
@@ -584,6 +590,24 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     } catch (error) {
       console.error('[ConnectionSettings] Failed to save terminal preferences:', error)
       toast.error(t('settings.terminal.saveFailed', 'Failed to save terminal preferences'))
+    }
+  }
+
+  const handleReceiptPrintPromptToggle = async (enabled: boolean) => {
+    const previous = receiptPrintPromptEnabled
+    setReceiptPrintPromptEnabled(enabled)
+    try {
+      await bridge.settings.updateLocal({
+        settingType: 'receipt',
+        settings: {
+          ask_before_print: enabled,
+        }
+      })
+      toast.success(t('settings.printer.receiptPromptSaved', 'Receipt print prompt setting saved'))
+    } catch (error) {
+      setReceiptPrintPromptEnabled(previous)
+      console.error('[ConnectionSettings] Failed to save receipt print prompt setting:', error)
+      toast.error(t('settings.printer.receiptPromptSaveFailed', 'Failed to save receipt print prompt setting'))
     }
   }
 
@@ -2204,6 +2228,27 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             >
               {t('settings.printer.configureButton')}
             </button>
+          </div>
+        </div>
+
+        <div className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Printer className="w-5 h-5 text-yellow-500" />
+              <div className="text-left">
+                <div id="printer-receipt-print-prompt-label" className="font-medium liquid-glass-modal-text">
+                  {t('settings.printer.askBeforePrint', 'Ask before printing')}
+                </div>
+                <div className="text-xs liquid-glass-modal-text-muted">
+                  {t('settings.printer.askBeforePrintHelp', 'Show a confirmation after payment before printing the receipt')}
+                </div>
+              </div>
+            </div>
+            <POSGlassSwitch
+              aria-labelledby="printer-receipt-print-prompt-label"
+              checked={receiptPrintPromptEnabled}
+              onChange={handleReceiptPrintPromptToggle}
+            />
           </div>
         </div>
 

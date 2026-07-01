@@ -1311,6 +1311,14 @@
       "thankYou": "Vielen Dank für Ihre Großzügigkeit!"
     }
   },
+  "paymentPrintPrompt": {
+    "title": "Beleg drucken?",
+    "message": "Soll der Beleg für diese Zahlung gedruckt werden?",
+    "print": "Beleg drucken",
+    "skip": "Nicht drucken",
+    "amount": "Betrag",
+    "order": "Bestellung"
+  },
   "shift": {
     "title": "Schicht",
     "subtitle": "Schichtbetrieb verwalten",
@@ -2024,6 +2032,10 @@
       "label": "Druckereinstellungen",
       "helpText": "Thermodrucker für Kassenbons konfigurieren",
       "configureButton": "Drucker konfigurieren",
+      "askBeforePrint": "Vor dem Drucken fragen",
+      "askBeforePrintHelp": "Nach der Zahlung eine Bestätigung anzeigen, bevor der Beleg gedruckt wird",
+      "receiptPromptSaved": "Einstellung für die Belegdruck-Abfrage gespeichert",
+      "receiptPromptSaveFailed": "Einstellung für die Belegdruck-Abfrage konnte nicht gespeichert werden",
       "quickSetup": "Schnelleinrichtung",
       "expertSettings": "Experteneinstellungen",
       "verificationFirstHint": "Verwenden Sie zuerst die Schnelleinrichtung. Sie verifiziert einen funktionierenden Übertragungs- und Kodierungspfad, bevor Sie sich im Live-Betrieb auf den Drucker verlassen.",
@@ -2818,6 +2830,19 @@
       "staleAge": "Die Backend-Telemetrie ist älter als der aktuelle lokale Warteschlangenzustand.",
       "staleMissing": "Die Warteschlange hat noch relevante Arbeit, aber die Telemetrieaktualität ist nicht verfügbar."
     },
+    "healthModal": {
+      "syncDetails": "Sync-Details",
+      "record": "Datensatz",
+      "error": "Fehler",
+      "nextRetry": "Nächster Versuch",
+      "syncProcessor": "Sync-Prozessor",
+      "table": {
+        "orders": "Bestellungen",
+        "payments": "Zahlungen",
+        "paymentAdjustments": "Zahlungsanpassungen",
+        "zReports": "Z-Berichte"
+      }
+    },
     "blocker": {
       "title": "Aktueller Blocker",
       "entity": "Eintrag",
@@ -3107,7 +3132,10 @@
       "payWithCash": "Bestellung bar abschließen",
       "payWithCard": "Bestellung mit Karte abschließen",
       "cashReceived": "Erhaltenes Bargeld",
+      "quickAmounts": "Schnellbeträge",
       "change": "Rückgeld",
+      "amountShort": "Fehlbetrag",
+      "suggestedChange": "Vorgeschlagenes Rückgeld",
       "back": "Zurück",
       "completePayment": "Zahlung abschließen",
       "processing": "Verarbeitung...",
@@ -4535,6 +4563,8 @@
     "bulkPickupDisabled": "Verschiedene Bestellarten können nicht zusammen ausgewählt werden",
     "noDeliveryOrdersSelected": "Wählen Sie Lieferbestellungen, um einen Fahrer zuzuweisen",
     "noCancelledOrdersSelected": "Keine stornierten Bestellungen ausgewählt",
+    "returnToOrdersFailed": "Bestellung {{orderNumber}} konnte nicht wiederhergestellt werden",
+    "returnedToOrders": "{{count}} Bestellungen wiederhergestellt",
     "printFailed": "Belegdruck fehlgeschlagen",
     "fiscalPrintFailed": "Kassendruck fehlgeschlagen",
     "orderCreateFailed": "Bestellung konnte nicht erstellt werden",
@@ -4553,6 +4583,7 @@
     "view": "Anzeigen",
     "clear": "Leeren",
     "return": "Zurück zu Bestellungen",
+    "restore": "Wiederherstellen",
     "reassign": "Fahrer neu zuweisen"
   },
   "orderCard": {

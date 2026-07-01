@@ -110,12 +110,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
     fn unknown_when_not_recorded() {
         reset_for_tests();
         assert_eq!(verdict("branch-x"), CacheVerdict::Unknown);
     }
 
     #[test]
+    #[serial_test::serial]
     fn active_after_update_true() {
         reset_for_tests();
         update("branch-a", true);
@@ -123,6 +125,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn inactive_after_update_false() {
         reset_for_tests();
         update("branch-b", false);
@@ -130,6 +133,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn isolated_per_branch() {
         reset_for_tests();
         update("branch-a", true);

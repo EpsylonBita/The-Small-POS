@@ -15,6 +15,7 @@ import { useOrderStore } from '../hooks/useOrderStore';
 import { useShift } from '../contexts/shift-context';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
+import { usePaymentPrintPrompt, type PaymentPrintPromptContext } from '../hooks/usePaymentPrintPrompt';
 import toast from 'react-hot-toast';
 import { customerService } from '../services';
 import { NewOrderPageSkeleton } from '../components/skeletons/NewOrderPageSkeleton';
@@ -191,6 +192,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   const { conflicts, createOrder, silentRefresh } = useOrderStore();
   const { staff, activeShift, isShiftActive } = useShift();
   const { getSetting } = useTerminalSettings();
+  const { askForPaymentPrint, shouldAskPaymentPrint, paymentPrintPromptModal } = usePaymentPrintPrompt();
   const { branchId, organizationId, terminalId } = useResolvedPosIdentity('branch+organization');
   const { isFeatureEnabled, isMobileWaiter, loading: featuresLoading } = useFeatures();
   const canCreateOrders = isFeatureEnabled('orderCreation');
@@ -408,10 +410,32 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     setShowMenuModal(true);
   };
 
-  const finalizeCreatedOrderPayment = useCallback(async (orderId: string, isGhostOrder: boolean) => {
-    // Ghost orders: print receipt directly (Rust auto-print skips ghosts)
-    if (isGhostOrder) {
+  const finalizeCreatedOrderPayment = useCallback(async (
+    orderId: string,
+    isGhostOrder: boolean,
+    options: PaymentPrintPromptContext & {
+      askBeforePrint?: boolean;
+      autoPrintSuppressed?: boolean;
+    } = {},
+  ) => {
+    const {
+      askBeforePrint = false,
+      autoPrintSuppressed = false,
+      ...promptContext
+    } = options;
+
+    if (askBeforePrint) {
+      const shouldPrint = await askForPaymentPrint({ orderId, ...promptContext });
+      if (!shouldPrint) return;
+    }
+
+    // Ghost orders and prompt-controlled orders are not printed by Rust auto-print.
+    if (isGhostOrder || autoPrintSuppressed) {
       await bridge.payments.printReceipt(orderId);
+      if (isGhostOrder) return;
+    }
+
+    if (isGhostOrder) {
       return;
     }
 
@@ -428,7 +452,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     if (fiscalResult?.skipped) {
       return;
     }
-  }, [bridge]);
+  }, [askForPaymentPrint, bridge]);
 
   const handleOrderComplete = useCallback(async (orderData: any): Promise<boolean> => {
     setIsProcessingOrder(true);
@@ -565,6 +589,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
 
       const existingOrderId = orderData.paymentData?.existingOrderId;
       if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card')) {
+        const askBeforeFallbackPrint = await shouldAskPaymentPrint();
         const paymentResult: any = await bridge.payments.recordPayment({
           orderId: existingOrderId,
           method: paymentMethod,
@@ -579,7 +604,11 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           throw new Error(paymentResult.error || 'Failed to record payment');
         }
         await silentRefresh().catch(() => {});
-        void finalizeCreatedOrderPayment(existingOrderId, isGhostOrder).catch((printError: any) => {
+        void finalizeCreatedOrderPayment(existingOrderId, isGhostOrder, {
+          askBeforePrint: askBeforeFallbackPrint,
+          autoPrintSuppressed: askBeforeFallbackPrint,
+          amount: totalAmount,
+        }).catch((printError: any) => {
           const stage = printError?.stage;
           if (isGhostOrder || stage === 'receipt') {
             console.error('[NewOrderPage] Fallback receipt print error:', printError);
@@ -613,6 +642,10 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         ...tableOrderCreateFields
       } = tableOrderFields;
       const resolvedOrderType = (tableOrderType || currentOrderType) as 'pickup' | 'delivery' | 'dine-in';
+      const askBeforeReceiptPrint =
+        !isSplitPayment && (Boolean(initialPayment) || isGhostOrder)
+          ? await shouldAskPaymentPrint()
+          : false;
 
       const orderToCreate = {
         customer_id: resolvePersistedCustomerId(currentCustomer?.id),
@@ -634,6 +667,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         room_id: isRoomChargePayment ? roomId : null,
         roomId: isRoomChargePayment ? roomId : null,
         initialPayment,
+        skipAutoPrint: askBeforeReceiptPrint,
+        skip_auto_print: askBeforeReceiptPrint,
         is_ghost: isGhostOrder,
         ghost_source: ghostSource,
         ghost_metadata: ghostMetadata,
@@ -734,7 +769,12 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         await silentRefresh().catch(() => {});
       }
 
-      void finalizeCreatedOrderPayment(result.orderId, isGhostOrder).catch((printError: any) => {
+      void finalizeCreatedOrderPayment(result.orderId, isGhostOrder, {
+        askBeforePrint: askBeforeReceiptPrint,
+        autoPrintSuppressed: askBeforeReceiptPrint,
+        amount: totalAmount,
+        orderNumber: result.orderNumber || null,
+      }).catch((printError: any) => {
         const stage = printError?.stage;
         if (isGhostOrder || stage === 'receipt') {
           console.error('[NewOrderPage] Ghost receipt print error:', printError);
@@ -763,6 +803,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     isShiftActive,
     organizationId,
     selectedOrderType,
+    shouldAskPaymentPrint,
     silentRefresh,
     staff?.branchId,
     staff?.staffId,
@@ -1183,6 +1224,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           onSplitComplete={handleSplitComplete}
         />
       )}
+      {paymentPrintPromptModal}
     </motion.div>
   );
 };

@@ -31,6 +31,7 @@ import { toLocalDateString } from '../utils/date';
 import { formatTableDisplayNumber } from '../utils/table-display';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
+import { usePaymentPrintPrompt, type PaymentPrintPromptContext } from '../hooks/usePaymentPrintPrompt';
 import { AlertTriangle } from 'lucide-react';
 import TableOrderIcon from './icons/TableOrderIcon';
 import PickupOrderIcon from './icons/PickupOrderIcon';
@@ -163,6 +164,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const bridge = getBridge();
   const { t } = useI18n();
   const { isFeatureEnabled } = useFeatures();
+  const { askForPaymentPrint, shouldAskPaymentPrint, paymentPrintPromptModal } = usePaymentPrintPrompt();
   const canCreateOrders = isFeatureEnabled('orderCreation');
 
   // Modal states
@@ -501,10 +503,32 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     resetFlow();
   }, [resetFlow]);
 
-  const finalizeCreatedOrderPayment = useCallback(async (orderId: string, isGhostOrder: boolean) => {
-    // Ghost orders: print receipt directly (Rust auto-print skips ghosts)
-    if (isGhostOrder) {
+  const finalizeCreatedOrderPayment = useCallback(async (
+    orderId: string,
+    isGhostOrder: boolean,
+    options: PaymentPrintPromptContext & {
+      askBeforePrint?: boolean;
+      autoPrintSuppressed?: boolean;
+    } = {},
+  ) => {
+    const {
+      askBeforePrint = false,
+      autoPrintSuppressed = false,
+      ...promptContext
+    } = options;
+
+    if (askBeforePrint) {
+      const shouldPrint = await askForPaymentPrint({ orderId, ...promptContext });
+      if (!shouldPrint) return;
+    }
+
+    // Ghost orders and prompt-controlled orders are not printed by Rust auto-print.
+    if (isGhostOrder || autoPrintSuppressed) {
       await bridge.payments.printReceipt(orderId);
+      if (isGhostOrder) return;
+    }
+
+    if (isGhostOrder) {
       return;
     }
 
@@ -521,7 +545,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     if (fiscalResult?.skipped) {
       return;
     }
-  }, [bridge]);
+  }, [askForPaymentPrint, bridge]);
 
   const handleSplitClose = useCallback(() => {
     setSplitPaymentData(null);
@@ -915,6 +939,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       const existingOrderId = orderData.paymentData?.existingOrderId;
       if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card')) {
+        const askBeforeFallbackPrint = await shouldAskPaymentPrint();
         const paymentResult: any = await bridge.payments.recordPayment({
           orderId: existingOrderId,
           method: paymentMethod,
@@ -929,7 +954,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           throw new Error(paymentResult.error || 'Failed to record payment');
         }
         await silentRefresh().catch(() => {});
-        void finalizeCreatedOrderPayment(existingOrderId, isGhostOrder)
+        void finalizeCreatedOrderPayment(existingOrderId, isGhostOrder, {
+          askBeforePrint: askBeforeFallbackPrint,
+          autoPrintSuppressed: askBeforeFallbackPrint,
+          amount: total_amount,
+        })
           .catch((printError: any) => {
             const stage = printError?.stage;
             if (isGhostOrder || stage === 'receipt') {
@@ -948,6 +977,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       const clientRequestId =
         globalThis.crypto?.randomUUID?.() ??
         `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const askBeforeReceiptPrint =
+        !isSplitPayment && (Boolean(initialPayment) || isGhostOrder)
+          ? await shouldAskPaymentPrint()
+          : false;
 
       const orderToCreate = {
         // API required fields
@@ -975,6 +1008,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         room_id: isRoomChargePayment ? roomId : null,
         roomId: isRoomChargePayment ? roomId : null,
         initialPayment,
+        skipAutoPrint: askBeforeReceiptPrint,
+        skip_auto_print: askBeforeReceiptPrint,
         is_ghost: isGhostOrder,
         ghost_source: ghostSource,
         ghost_metadata: ghostMetadata,
@@ -1140,7 +1175,12 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
         // Cash register / fiscal print (fire-and-forget, non-blocking)
         if (result.orderId) {
-          finalizeCreatedOrderPayment(result.orderId, isGhostOrder)
+          finalizeCreatedOrderPayment(result.orderId, isGhostOrder, {
+            askBeforePrint: askBeforeReceiptPrint,
+            autoPrintSuppressed: askBeforeReceiptPrint,
+            amount: total_amount,
+            orderNumber: result.orderNumber || null,
+          })
             .catch((printError: any) => {
               const stage = printError?.stage;
               if (isGhostOrder || stage === 'receipt') {
@@ -1180,7 +1220,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment]);
+  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint]);
 
   // Order-type chooser ergonomics aligned with the main OrderDashboard modal (Round 346): modal width + grid
   // scale to the number of visible cards (pickup always present; delivery/tables optional), and each card
@@ -1448,6 +1488,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           onSplitComplete={handleSplitComplete}
         />
       )}
+      {paymentPrintPromptModal}
     </div>
   );
 });

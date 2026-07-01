@@ -84,6 +84,7 @@ import { PrintPreviewModal } from "./modals/PrintPreviewModal";
 import { FloatingActionButton } from "./ui/FloatingActionButton";
 import { useTheme } from "../contexts/theme-context";
 import { useI18n } from "../contexts/i18n-context";
+import { usePaymentPrintPrompt, type PaymentPrintPromptContext } from "../hooks/usePaymentPrintPrompt";
 import { MODULE_IDS, useAcquiredModules } from "../hooks/useAcquiredModules";
 import { useTables } from "../hooks/useTables";
 import { useRooms } from "../hooks/useRooms";
@@ -396,6 +397,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
   ({ className = "", orderFilter }) => {
     const bridge = getBridge();
     const { t } = useI18n();
+    const { askForPaymentPrint, shouldAskPaymentPrint, paymentPrintPromptModal } =
+      usePaymentPrintPrompt();
     const { resolvedTheme } = useTheme();
     const { getSetting, refresh: refreshTerminalSettings } =
       useTerminalSettings();
@@ -3046,13 +3049,35 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const finalizeCreatedOrderPayment = async (
       orderId: string,
       isGhostOrder: boolean,
+      options: PaymentPrintPromptContext & {
+        askBeforePrint?: boolean;
+        autoPrintSuppressed?: boolean;
+      } = {},
     ) => {
-      if (isGhostOrder) {
+      const {
+        askBeforePrint = false,
+        autoPrintSuppressed = false,
+        ...promptContext
+      } = options;
+
+      if (askBeforePrint) {
+        const shouldPrint = await askForPaymentPrint({
+          orderId,
+          ...promptContext,
+        });
+        if (!shouldPrint) return;
+      }
+
+      if (isGhostOrder || autoPrintSuppressed) {
         const printResult: any = await bridge.payments.printReceipt(orderId);
         console.log(
-          "[OrderDashboard] Ghost receipt print result:",
+          "[OrderDashboard] Receipt print result:",
           printResult,
         );
+        if (isGhostOrder) return;
+      }
+
+      if (isGhostOrder) {
         return;
       }
 
@@ -3483,6 +3508,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         const existingOrderId = orderData.paymentData?.existingOrderId;
         if (existingOrderId && (paymentMethod === "cash" || paymentMethod === "card")) {
+          const askBeforeFallbackPrint = await shouldAskPaymentPrint();
           const paymentResult: any = await bridge.payments.recordPayment({
             orderId: existingOrderId,
             method: paymentMethod,
@@ -3503,7 +3529,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           await silentRefresh().catch((err) =>
             console.debug("[OrderDashboard] Silent refresh after fallback payment failed:", err),
           );
-          finalizeCreatedOrderPayment(existingOrderId, isGhostOrder).catch(
+          finalizeCreatedOrderPayment(existingOrderId, isGhostOrder, {
+            askBeforePrint: askBeforeFallbackPrint,
+            autoPrintSuppressed: askBeforeFallbackPrint,
+            amount: total,
+          }).catch(
             (printError: any) => {
               if (isGhostOrder) {
                 console.error(
@@ -3574,6 +3604,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderData.customer?.id,
           existingCustomer?.id,
         );
+        const askBeforeReceiptPrint =
+          !isSplitPayment && !isTableOrder && (Boolean(initialPayment) || isGhostOrder)
+            ? await shouldAskPaymentPrint()
+            : false;
 
         // Create order object
         const orderToCreate = {
@@ -3614,6 +3648,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           roomId: isRoomChargePayment ? roomId : null,
           ...tableOrderCreateFields,
           initialPayment,
+          skipAutoPrint: askBeforeReceiptPrint,
+          skip_auto_print: askBeforeReceiptPrint,
           // Full delivery address fields for proper sync to Supabase
           delivery_address: deliveryAddress,
           delivery_city: deliveryCity,
@@ -3885,7 +3921,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 );
               });
             }
-            finalizeCreatedOrderPayment(result.orderId, isGhostOrder).catch(
+            finalizeCreatedOrderPayment(result.orderId, isGhostOrder, {
+              askBeforePrint: askBeforeReceiptPrint,
+              autoPrintSuppressed: askBeforeReceiptPrint,
+              amount: total,
+              orderNumber: result.orderNumber || null,
+            }).catch(
               (printError: any) => {
                 if (isGhostOrder) {
                   console.error(
@@ -4840,7 +4881,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             // If only pickup orders, clear selection
             clearBulkSelection();
           }
-        } else if (action === "return") {
+        } else if (action === "return" || action === "restore") {
           // Reactivate cancelled orders back to active (pending)
           const cancelledOrders = selectedOrderObjects.filter(
             (order) => isCancelledOrderStatus(order.status),
@@ -4854,7 +4895,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               if (!success) {
                 toast.error(
                   t("orderDashboard.returnToOrdersFailed", {
-                    orderNumber: order.orderNumber,
+                    orderNumber: formatCompactOrderNumberForDisplay(
+                      getVisibleOrderNumber(order),
+                    ),
                   }),
                 );
                 return;
@@ -7203,6 +7246,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           previewHtml={receiptPreviewHtml || ""}
           isPrinting={receiptPreviewPrinting}
         />
+        {paymentPrintPromptModal}
       </div>
     );
   },

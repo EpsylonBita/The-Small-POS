@@ -1,7 +1,7 @@
 import React, { useMemo, useCallback } from "react";
 import { useTheme } from '../contexts/theme-context';
 import { useI18n } from '../contexts/i18n-context';
-import { User, CheckCircle, Pencil, X, Map as MapIcon, Eye } from 'lucide-react';
+import { User, CheckCircle, Pencil, X, Map as MapIcon, Eye, RotateCcw } from 'lucide-react';
 import type { TabId } from './OrderTabsBar';
 
 interface BulkActionsBarProps {
@@ -56,8 +56,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
         ];
       case 'canceled':
         return [
-          { id: 'return', label: t('bulkActions.return'), variant: 'primary' },
-          { id: 'map', label: t('bulkActions.map'), variant: 'map' },
+          { id: 'restore', label: t('bulkActions.restore'), variant: 'success' },
         ];
       default:
         return [];
@@ -162,7 +161,11 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
         {/* Right section - Actions based on selection type */}
         <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
           {/* Conditional actions by selectionType */}
-          {selectionType === 'delivery' && (
+          {activeTab === 'canceled' && (
+            <button className={getButtonStyles('success')} onClick={(e) => { e.preventDefault(); onBulkAction('restore'); }}><RotateCcw className="w-4 h-4" />{t('bulkActions.restore')}</button>
+          )}
+
+          {activeTab !== 'canceled' && selectionType === 'delivery' && (
             <>
               <button className={getButtonStyles('primary')} onClick={(e) => { e.preventDefault(); onBulkAction('assign'); }}><User className="w-4 h-4" />{t('bulkActions.driver')}</button>
               {/* The "Set as Pickup" (Παραλαβή) shortcut used to live here.
@@ -182,7 +185,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
             </>
           )}
 
-          {selectionType === 'pickup' && (
+          {activeTab !== 'canceled' && selectionType === 'pickup' && (
             <>
               <button className={`${getButtonStyles('success')}`} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}><CheckCircle className="w-4 h-4" />{t('bulkActions.delivered')}</button>
               <button className={getButtonStyles('warning')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}><Pencil className="w-4 h-4" />{t('bulkActions.edit')}</button>

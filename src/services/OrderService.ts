@@ -888,6 +888,8 @@ export class OrderService {
           (orderData as any).coupon_discount_amount ?? (orderData as any).couponDiscountAmount ?? 0,
         deliveryFee: (orderData as any).deliveryFee ?? (orderData as any).delivery_fee ?? 0,
         is_ghost: (orderData as any).is_ghost ?? (orderData as any).isGhost ?? false,
+        skipAutoPrint: orderDataAny.skipAutoPrint ?? orderDataAny.skip_auto_print ?? false,
+        skip_auto_print: orderDataAny.skip_auto_print ?? orderDataAny.skipAutoPrint ?? false,
         ghost_source: (orderData as any).ghost_source ?? (orderData as any).ghostSource ?? null,
         ghost_metadata:
           (orderData as any).ghost_metadata ?? (orderData as any).ghostMetadata ?? null,

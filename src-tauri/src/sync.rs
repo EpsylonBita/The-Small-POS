@@ -1454,6 +1454,9 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         .unwrap_or_else(|| "pending".to_string());
     let payment_method =
         str_field(payload, "paymentMethod").or_else(|| str_field(payload, "payment_method"));
+    let requested_skip_auto_print = bool_field(payload, "skipAutoPrint")
+        .or_else(|| bool_field(payload, "skip_auto_print"))
+        .unwrap_or(false);
     let persisted_payment_status = if initial_payment_payload.is_some() {
         "pending".to_string()
     } else {
@@ -1871,11 +1874,14 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     let is_pending_table_order = order_type.eq_ignore_ascii_case("dine-in")
         && persisted_payment_status.eq_ignore_ascii_case("pending")
         && initial_payment_payload.is_none();
-    let skip_auto_print =
-        is_ghost || payment_method.as_deref() == Some("pending") || is_pending_table_order;
+    let skip_auto_print = requested_skip_auto_print
+        || is_ghost
+        || payment_method.as_deref() == Some("pending")
+        || is_pending_table_order;
     info!(
         order_id = %order_id,
         payment_method = ?payment_method,
+        requested_skip_auto_print = %requested_skip_auto_print,
         is_ghost = %is_ghost,
         is_pending_table_order = %is_pending_table_order,
         skip_auto_print = %skip_auto_print,
@@ -18412,6 +18418,22 @@ fn num_field(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(Value::as_f64)
 }
 
+fn bool_field(v: &Value, key: &str) -> Option<bool> {
+    match v.get(key)? {
+        Value::Bool(flag) => Some(*flag),
+        Value::Number(number) => number.as_i64().map(|value| value != 0),
+        Value::String(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -19241,6 +19263,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_create_order_persists_receipt_number_for_fiscal_enqueue() {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
@@ -19283,6 +19306,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_create_order_omits_receipt_number_when_fiscal_inactive() {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
@@ -19323,6 +19347,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_create_order_omits_receipt_number_when_cached_integrations_have_no_fiscal_plugin() {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
@@ -19394,6 +19419,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_create_order_persists_receipt_number_when_cached_mydata_is_acquired() {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();
@@ -19458,6 +19484,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_create_order_omits_receipt_number_when_fiscal_entitlement_unknown() {
         let db = test_db();
         crate::fiscal::active_cache::reset_for_tests();

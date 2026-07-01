@@ -58,6 +58,7 @@ import {
 import type {
   QueueCapacityWarning,
   QueueStatus,
+  SyncQueueItem,
 } from '../../../../shared/pos/sync-queue-types';
 import { getSyncQueueBridge } from '../services/SyncQueueBridge';
 import type { SubscriptionConnectionStatus } from '../services/RealtimeManager';
@@ -152,6 +153,15 @@ interface SimpleHealthSummary {
   advanced: DiagnosticsSystemHealth | null;
 }
 
+interface VisibleSyncFailure {
+  id: string;
+  title: string;
+  recordId: string | null;
+  status: string;
+  error: string;
+  nextRetryAt: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -180,6 +190,83 @@ const countPrinterFailures = (health: DiagnosticsSystemHealth | null): number =>
       String(job.status || '').toLowerCase().includes('fail'),
     ).length ?? 0
   );
+};
+
+const parseObjectPayload = (raw?: string | null): Record<string, unknown> => {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const stringFromUnknown = (value: unknown): string | null => {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+};
+
+const formatSyncErrorForDisplay = (raw?: string | null): string | null => {
+  const text = raw?.trim();
+  if (!text) return null;
+
+  const jsonStart = text.indexOf('{');
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(text.slice(jsonStart));
+      const details =
+        stringFromUnknown(parsed?.details) ||
+        stringFromUnknown(parsed?.error) ||
+        stringFromUnknown(parsed?.message);
+      if (details) {
+        const prefix = text.slice(0, jsonStart).trim().replace(/:\s*$/, '');
+        return prefix ? `${prefix}: ${details}` : details;
+      }
+    } catch {
+      // Keep the raw queue error when the server body is not JSON.
+    }
+  }
+
+  return text;
+};
+
+const humanizeQueueName = (value?: string | null): string => {
+  const normalized = value?.trim();
+  if (!normalized) return 'Sync item';
+  return normalized
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+};
+
+const buildVisibleParityFailure = (
+  item: SyncQueueItem,
+  tableLabel: string,
+): VisibleSyncFailure | null => {
+  const error = formatSyncErrorForDisplay(item.errorMessage);
+  const status = String(item.status || '').trim();
+  if (!error && !['failed', 'conflict', 'processing'].includes(status)) {
+    return null;
+  }
+
+  const payload = parseObjectPayload(item.data);
+  const recordId =
+    stringFromUnknown(payload.orderNumber) ||
+    stringFromUnknown(payload.order_number) ||
+    stringFromUnknown(payload.orderId) ||
+    stringFromUnknown(payload.order_id) ||
+    item.recordId ||
+    null;
+
+  return {
+    id: item.id,
+    title: `${tableLabel} ${item.operation}`.trim(),
+    recordId,
+    status: status || 'unknown',
+    error: error || 'The queue item is blocked without a detailed error.',
+    nextRetryAt: item.nextRetryAt,
+  };
 };
 
 const buildSimpleHealthSummary = ({
@@ -1488,6 +1575,53 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     () => resolveSyncErrorMessage(syncStatus.error, t),
     [syncStatus.error, t],
   );
+  const visibleSyncFailures = useMemo<VisibleSyncFailure[]>(() => {
+    const tableLabels: Record<string, string> = {
+      orders: t('sync.healthModal.table.orders', { defaultValue: 'Orders' }),
+      payments: t('sync.healthModal.table.payments', { defaultValue: 'Payments' }),
+      payment_adjustments: t('sync.healthModal.table.paymentAdjustments', {
+        defaultValue: 'Payment adjustments',
+      }),
+      z_reports: t('sync.healthModal.table.zReports', { defaultValue: 'Z-reports' }),
+    };
+
+    const failures: VisibleSyncFailure[] = [];
+    for (const item of recoveryParityItems) {
+      const tableLabel = tableLabels[item.tableName] ?? humanizeQueueName(item.tableName);
+      const failure = buildVisibleParityFailure(item, tableLabel);
+      if (failure) {
+        failures.push(failure);
+      }
+    }
+
+    for (const blocker of syncBlockerDetails) {
+      const error = formatSyncErrorForDisplay(blocker.lastError);
+      if (!error) continue;
+      failures.push({
+        id: `legacy-${blocker.queueId}`,
+        title: ENTITY_TYPE_KEYS[blocker.entityType]
+          ? t(ENTITY_TYPE_KEYS[blocker.entityType], { defaultValue: blocker.entityType })
+          : humanizeQueueName(blocker.entityType),
+        recordId: blocker.orderNumber || blocker.orderId || blocker.entityId || null,
+        status: blocker.queueStatus || 'failed',
+        error,
+        nextRetryAt: null,
+      });
+    }
+
+    if (failures.length === 0 && syncErrorDisplay) {
+      failures.push({
+        id: 'sync-status-error',
+        title: t('sync.healthModal.syncProcessor', { defaultValue: 'Sync processor' }),
+        recordId: null,
+        status: 'failed',
+        error: syncErrorDisplay,
+        nextRetryAt: null,
+      });
+    }
+
+    return failures.slice(0, 4);
+  }, [recoveryParityItems, syncBlockerDetails, syncErrorDisplay, t]);
 
   const healthSupportContext = useMemo(
     () =>
@@ -2546,6 +2680,40 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <p className="mt-4 text-base leading-7 text-white/85">
                     {summary.problemExplanation}
                   </p>
+                  {visibleSyncFailures.length > 0 && (
+                    <div className="mt-4 space-y-3 rounded-2xl border border-red-400/25 bg-red-500/10 p-3">
+                      <div className="text-xs font-black uppercase tracking-wide text-red-100/80">
+                        {t('sync.healthModal.syncDetails', { defaultValue: 'Sync details' })}
+                      </div>
+                      {visibleSyncFailures.map((failure) => (
+                        <div key={failure.id} className="rounded-xl border border-white/10 bg-black/25 p-3">
+                          <div className="flex flex-wrap items-center gap-2 text-sm font-black text-white">
+                            <span>{failure.title}</span>
+                            <span className="rounded-full border border-red-300/30 bg-red-400/15 px-2 py-0.5 text-xs uppercase tracking-wide text-red-100">
+                              {statusLabels[failure.status] ?? failure.status}
+                            </span>
+                          </div>
+                          {failure.recordId && (
+                            <div className="mt-2 break-words text-xs font-semibold text-white/65">
+                              {t('sync.healthModal.record', { defaultValue: 'Record' })}: {failure.recordId}
+                            </div>
+                          )}
+                          <div className="mt-2 break-words text-sm leading-6 text-white/85">
+                            <span className="font-black text-red-100">
+                              {t('sync.healthModal.error', { defaultValue: 'Error' })}:
+                            </span>{' '}
+                            {failure.error}
+                          </div>
+                          {failure.nextRetryAt && (
+                            <div className="mt-2 text-xs font-semibold text-white/60">
+                              {t('sync.healthModal.nextRetry', { defaultValue: 'Next retry' })}:{' '}
+                              {new Date(failure.nextRetryAt).toLocaleString()}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {incidentReport?.success && (
                     <div className="mt-4 rounded-2xl border border-yellow-400/30 bg-yellow-400/10 p-3 text-sm font-semibold text-yellow-50">
                       Support has received the diagnostic report.
