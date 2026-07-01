@@ -3,7 +3,7 @@ import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble } from 'lu
 import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../../hooks/useFeatures';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
-import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { formatMoneyInputFromNumber, formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
@@ -328,7 +328,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   };
 
   const handleQuickCashSelect = (amount: number) => {
-    setCashReceived(formatMoneyInputWithCents(amount.toFixed(2)));
+    setCashReceived(formatMoneyInputFromNumber(amount));
     cashInputRef.current?.focus();
   };
 

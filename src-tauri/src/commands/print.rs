@@ -640,18 +640,11 @@ pub async fn payment_print_receipt(
         .path()
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
-    let app_clone = app.clone();
-    let data_dir_clone = data_dir.clone();
-    let order_id_for_log = order_id.clone();
-    let job_result = tokio::task::spawn_blocking(move || {
-        let db_state = app_clone.state::<db::DbState>();
-        print::process_pending_jobs(db_state.inner(), &data_dir_clone)
-    })
-    .await
-    .map_err(|join_err| format!("spawn_blocking join: {join_err}"))?;
-    if let Err(e) = job_result {
-        warn!(order_id = %order_id_for_log, error = %e, "Immediate print processing failed, worker will retry");
-    }
+    print::spawn_pending_job_processing(
+        app.clone(),
+        data_dir,
+        format!("payment receipt for order {order_id}"),
+    );
 
     Ok(enqueue_result)
 }
@@ -682,18 +675,11 @@ pub async fn kitchen_print_ticket(
         .path()
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
-    let app_clone = app.clone();
-    let data_dir_clone = data_dir.clone();
-    let order_id_for_log = order_id.clone();
-    let job_result = tokio::task::spawn_blocking(move || {
-        let db_state = app_clone.state::<db::DbState>();
-        print::process_pending_jobs(db_state.inner(), &data_dir_clone)
-    })
-    .await
-    .map_err(|join_err| format!("spawn_blocking join: {join_err}"))?;
-    if let Err(e) = job_result {
-        warn!(order_id = %order_id_for_log, error = %e, "Immediate kitchen ticket processing failed, worker will retry");
-    }
+    print::spawn_pending_job_processing(
+        app.clone(),
+        data_dir,
+        format!("kitchen ticket for order {order_id}"),
+    );
 
     Ok(enqueue_result)
 }

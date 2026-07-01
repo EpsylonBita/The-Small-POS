@@ -5,6 +5,12 @@
 - Hardware output is generated directly as ESC/POS bytes from structured data. The legacy HTML-to-text stripping path is removed from queue printing.
 - HTML artifacts are still written to `receipts/` for preview/audit/debug.
 
+## Print Queue Safety (2026-07-02)
+- Print queue processing is single-flight inside the POS process. Overlapping immediate print requests no longer run concurrent queue processors.
+- Payment, kitchen, and split-receipt IPC commands return after the job is durably queued; hardware dispatch is kicked in the background so a stuck printer driver cannot freeze checkout.
+- Stale jobs left in `printing` for more than 30 seconds are moved to `failed` with `stale_printing_unknown` instead of being automatically requeued. The physical result is unknown at that point, so manual retry is required to avoid duplicate or gibberish output.
+- Detected Star printer profiles default to `safe_text` unless `receipt.command_profile` or the profile explicitly overrides it.
+
 ## Classic Raster Receipt Fixes (2026-03-21)
 - `order_receipt` now falls back to the order snapshot when `order_payments` has no completed rows:
   - `payment_status=paid` with `payment_method=cash|card` renders a real payment line using `total_amount`

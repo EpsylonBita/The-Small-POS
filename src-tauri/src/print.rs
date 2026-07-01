@@ -41,6 +41,8 @@ const AUTO_PRINT_DELIVERY_ONLY: &[&str] = &["delivery_slip"];
 const PRINT_QUEUE_SETTINGS_CATEGORY: &str = "printing";
 const PRINT_QUEUE_PAUSED_GLOBAL_KEY: &str = "queue_paused";
 const PRINT_QUEUE_PAUSED_PROFILE_PREFIX: &str = "queue_paused_profile::";
+static PRINT_PROCESSOR_LOCK: Mutex<()> = Mutex::new(());
+const STALE_PRINTING_JOB_ERROR: &str = "Print attempt did not finish; it may already have reached the printer. Automatic retry stopped to prevent duplicate or gibberish output. Check the printer, then retry manually if needed.";
 
 fn is_receipt_like_entity_type(entity_type: &str) -> bool {
     matches!(
@@ -1456,7 +1458,13 @@ pub fn resolve_layout_config(
     let command_profile = configured_command_profile
         .as_deref()
         .map(|value| CommandProfile::from_value(Some(value)))
-        .unwrap_or(CommandProfile::FullStyle);
+        .unwrap_or_else(|| {
+            if detected_brand == crate::printers::PrinterBrand::Star {
+                CommandProfile::SafeText
+            } else {
+                CommandProfile::FullStyle
+            }
+        });
 
     let requested_font_type = profile
         .get("fontType")
@@ -4358,8 +4366,11 @@ fn dispatch_to_printer(
 
 /// Recover stale `printing` jobs that were left behind by a crash or error.
 ///
-/// Any job in `printing` status for more than 30 seconds is presumed stale and
-/// reset to `pending` so the worker can re-attempt it.
+/// Any job in `printing` status for more than 30 seconds has an unknown
+/// physical state: the printer may already have received raw bytes even if the
+/// app never reached the success marker. Fail closed by moving it to `failed`
+/// and requiring a manual retry instead of automatically sending the same raw
+/// payload again.
 pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     if is_print_queue_paused_with_conn(&conn, None) {
@@ -4394,9 +4405,16 @@ pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
         affected += conn
             .execute(
                 "UPDATE print_jobs
-                 SET status = 'pending', updated_at = ?1
-                 WHERE id = ?2 AND status = 'printing'",
-                params![now, job_id],
+                 SET status = 'failed',
+                     retry_count = retry_count + 1,
+                     next_retry_at = NULL,
+                     last_error = ?1,
+                     warning_code = 'stale_printing_unknown',
+                     warning_message = ?1,
+                     last_attempt_at = COALESCE(last_attempt_at, updated_at),
+                     updated_at = ?2
+                 WHERE id = ?3 AND status = 'printing'",
+                params![STALE_PRINTING_JOB_ERROR, now, job_id],
             )
             .map_err(|e| format!("recover stale printing jobs: {e}"))?;
     }
@@ -4404,7 +4422,7 @@ pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
     if affected > 0 {
         warn!(
             count = affected,
-            "Recovered stale print jobs from 'printing' back to 'pending'"
+            "Marked stale print jobs failed to prevent automatic duplicate printing"
         );
     }
 
@@ -4433,6 +4451,18 @@ pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
 /// This is called by the background worker loop.  It processes one batch of
 /// pending jobs each tick.  Returns the number of jobs processed.
 pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, String> {
+    let _processor_guard = match PRINT_PROCESSOR_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            info!("Print processor already running; skipping overlapping tick");
+            return Ok(0);
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            warn!("Print processor lock was poisoned; continuing after prior panic");
+            poisoned.into_inner()
+        }
+    };
+
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     if is_print_queue_paused_with_conn(&conn, None) {
         return Ok(0);
@@ -4631,6 +4661,51 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
 
 /// Threshold of consecutive failures before emitting an alert event.
 const PRINT_WORKER_FAILURE_ALERT_THRESHOLD: u32 = 10;
+
+/// Kick the print processor without making the caller wait for hardware I/O.
+///
+/// Payment and kitchen IPC commands should return once the job is durably
+/// queued. The spawned processor still attempts immediate dispatch, but a
+/// stuck printer driver cannot freeze the checkout action.
+pub fn spawn_pending_job_processing(app: tauri::AppHandle, data_dir: PathBuf, context: String) {
+    tauri::async_runtime::spawn(async move {
+        let app_for_blocking = app.clone();
+        let data_dir_for_blocking = data_dir.clone();
+        let context_for_log = context.clone();
+        let join_result = tokio::task::spawn_blocking(move || {
+            use tauri::Manager;
+            let db_state = app_for_blocking.state::<db::DbState>();
+            process_pending_jobs(db_state.inner(), &data_dir_for_blocking)
+        })
+        .await;
+
+        match join_result {
+            Ok(Ok(processed)) => {
+                if processed > 0 {
+                    info!(
+                        context = %context_for_log,
+                        processed,
+                        "Immediate print processing completed"
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                warn!(
+                    context = %context_for_log,
+                    error = %error,
+                    "Immediate print processing failed, worker will retry eligible jobs"
+                );
+            }
+            Err(join_err) => {
+                warn!(
+                    context = %context_for_log,
+                    panicked = join_err.is_panic(),
+                    "Immediate print processing task failed: {join_err}"
+                );
+            }
+        }
+    });
+}
 
 /// Start the background print worker loop.
 ///
@@ -6244,7 +6319,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_layout_config_defaults_to_full_style_for_star() {
+    fn test_resolve_layout_config_defaults_to_safe_text_for_star() {
         let db = test_db();
         let profile = serde_json::json!({
             "paperWidthMm": 80,
@@ -6254,7 +6329,7 @@ mod tests {
         let layout =
             resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
 
-        assert_eq!(layout.command_profile, CommandProfile::FullStyle);
+        assert_eq!(layout.command_profile, CommandProfile::SafeText);
     }
 
     #[test]
@@ -6863,13 +6938,19 @@ mod tests {
         let jobs = list_print_jobs(&db, Some("printing")).unwrap();
         assert_eq!(jobs.as_array().unwrap().len(), 1);
 
-        // Recovery should reset it back to 'pending'
+        // Recovery should fail closed instead of auto-retrying unknown-state output.
         let recovered = recover_stale_printing_jobs(&db).unwrap();
         assert_eq!(recovered, 1);
 
-        // Now it should be 'pending' again
-        let pending = list_print_jobs(&db, Some("pending")).unwrap();
-        assert_eq!(pending.as_array().unwrap().len(), 1);
+        // Now it should be 'failed' and require an operator-triggered retry.
+        let failed = list_print_jobs(&db, Some("failed")).unwrap();
+        assert_eq!(failed.as_array().unwrap().len(), 1);
+        let job = &failed.as_array().unwrap()[0];
+        assert_eq!(job["warningCode"], "stale_printing_unknown");
+        assert!(job["lastError"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Automatic retry stopped"));
         let printing = list_print_jobs(&db, Some("printing")).unwrap();
         assert_eq!(printing.as_array().unwrap().len(), 0);
     }
@@ -6899,7 +6980,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stuck_printing_job_blocks_reenqueue_then_recovery_unblocks() {
+    fn test_stuck_printing_job_blocks_reenqueue_then_recovery_requires_new_job() {
         let db = test_db();
 
         // Enqueue and simulate a stuck 'printing' job
@@ -6920,12 +7001,15 @@ mod tests {
         // Recover the stale job
         recover_stale_printing_jobs(&db).unwrap();
 
-        // After recovery it's 'pending', so re-enqueue still sees the existing pending job
-        let dup2 = enqueue_print_job(&db, "order_receipt", "ord-block", None).unwrap();
-        assert_eq!(dup2["duplicate"], true);
-        // But the job is now 'pending' and will actually be processed
+        // After recovery it's failed, so an explicit new enqueue can create a
+        // new job without automatically re-sending the unknown-state one.
+        let replacement = enqueue_print_job(&db, "order_receipt", "ord-block", None).unwrap();
+        assert_eq!(replacement["success"], true);
+        assert!(replacement.get("duplicate").is_none());
         let pending = list_print_jobs(&db, Some("pending")).unwrap();
         assert_eq!(pending.as_array().unwrap().len(), 1);
+        let failed = list_print_jobs(&db, Some("failed")).unwrap();
+        assert_eq!(failed.as_array().unwrap().len(), 1);
     }
 
     #[test]

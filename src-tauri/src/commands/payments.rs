@@ -384,23 +384,11 @@ pub async fn payment_print_split_receipt(
         .path()
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
-    // Wave 11 Item 8 deferred follow-up: `process_pending_jobs` does
-    // blocking SQLite + TCP I/O. Calling it inline parked the Tokio
-    // runtime worker; offload to `spawn_blocking` with a cloned
-    // AppHandle so the inner closure can re-acquire `DbState` without
-    // borrowing the outer `tauri::State`'s lifetime.
-    let app_clone = app.clone();
-    let data_dir_clone = data_dir.clone();
-    let payment_id_for_log = payment_id.clone();
-    let job_result = tokio::task::spawn_blocking(move || {
-        let db_state = app_clone.state::<db::DbState>();
-        crate::print::process_pending_jobs(db_state.inner(), &data_dir_clone)
-    })
-    .await
-    .map_err(|join_err| format!("spawn_blocking join: {join_err}"))?;
-    if let Err(e) = job_result {
-        tracing::warn!(payment_id = %payment_id_for_log, error = %e, "Immediate split receipt print failed, worker will retry");
-    }
+    crate::print::spawn_pending_job_processing(
+        app.clone(),
+        data_dir,
+        format!("split receipt for payment {payment_id}"),
+    );
 
     Ok(enqueue_result)
 }

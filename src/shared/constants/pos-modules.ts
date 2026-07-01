@@ -36,7 +36,10 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
   // Implemented modules
   'menu',
   'users',        // Customer management (staff is handled in branch configuration)
-  'reports',
+  // 'reports' removed 2026-07-01 (THE-331): module retired in the catalog
+  // (is_deprecated=true, pos_enabled=false) — desktop shift Z-reports are a
+  // core sidebar action, not this module. ReportsPage stays in the tree as
+  // dormant code should the module ever be rebuilt.
   'analytics',    // Business analytics dashboard
   'orders',       // Order management
 

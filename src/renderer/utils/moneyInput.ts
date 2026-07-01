@@ -35,6 +35,21 @@ export function formatMoneyInputWithCents(value: string): string {
   return `${integerPart || '0'},${fractionPart}`;
 }
 
+/**
+ * Formats a numeric amount into the comma-decimal money-input format
+ * (`12,50`) that formatMoneyInputWithCents produces for typed input. Use
+ * this for programmatic prefill (e.g. quick-cash buttons) — passing
+ * `String(amount)` through formatMoneyInputWithCents would treat bare
+ * integers as cents ("5" -> "0,05").
+ */
+export function formatMoneyInputFromNumber(amount: number): string {
+  if (!Number.isFinite(amount)) {
+    return '';
+  }
+  const cents = Math.max(0, Math.round(amount * 100));
+  return `${Math.trunc(cents / 100)},${String(cents % 100).padStart(2, '0')}`;
+}
+
 export function parseMoneyInputValue(value: string): number {
   const normalized = value.replace(',', '.').trim();
   const parsed = Number.parseFloat(normalized);
