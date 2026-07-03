@@ -33,11 +33,35 @@ export interface Product {
   wholesalePrice: number | null;
   memberPrice: number | null;
   minWholesaleQuantity: number | null;
+  // Fiscal fields — per-product Greek VAT category; lines without one fall
+  // back to the org default at order time.
+  vatCategoryCode: string | null;
+  priceIncludesVat: boolean | null;
+  taxExemptionReason: string | null;
+  // Retail domain fields — generic for any kind of retail store.
+  unitOfMeasure: string;
+  soldByMeasure: boolean;
+  pluCode: string | null;
+  ageRestriction: number | null;
+  depositAmount: number | null;
+  brand: string | null;
   // Supplier fields
   preferredSupplierId: string | null;
   preferredSupplierName: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Weight/price decoded from a scale/embedded-value barcode label. */
+export interface EmbeddedScaleValue {
+  value_type: 'weight' | 'price';
+  weight: number | null;
+  price: number | null;
+}
+
+export interface BarcodeScanResult {
+  product: Product;
+  embedded: EmbeddedScaleValue | null;
 }
 
 export interface ProductSupplier {
@@ -125,6 +149,17 @@ function transformProductFromAPI(data: any): Product {
     wholesalePrice: data.wholesale_price ? parseFloat(data.wholesale_price) : null,
     memberPrice: data.member_price ? parseFloat(data.member_price) : null,
     minWholesaleQuantity: data.min_wholesale_quantity ?? null,
+    // Fiscal fields
+    vatCategoryCode: data.vat_category_code ?? null,
+    priceIncludesVat: data.price_includes_vat ?? null,
+    taxExemptionReason: data.tax_exemption_reason ?? null,
+    // Retail domain fields
+    unitOfMeasure: data.unit_of_measure || 'piece',
+    soldByMeasure: data.sold_by_measure ?? false,
+    pluCode: data.plu_code ?? null,
+    ageRestriction: data.age_restriction ?? null,
+    depositAmount: data.deposit_amount != null ? parseFloat(data.deposit_amount) : null,
+    brand: data.brand ?? null,
     // Supplier fields
     preferredSupplierId: data.preferred_supplier_id || null,
     preferredSupplierName,
@@ -437,11 +472,41 @@ class ProductCatalogService {
   }
 
   private async fetchProductByBarcodeFromApi(barcode: string): Promise<Product | null> {
+    const scan = await this.fetchBarcodeScanResultFromApi(barcode);
+    return scan ? scan.product : null;
+  }
+
+  /**
+   * Barcode lookup that also surfaces scale/embedded-value data. When the org
+   * has configured scale-barcode rules and the scanned code is a scale label,
+   * `embedded` carries the parsed weight (→ cart quantity) or price (→ fixed
+   * line total). Plain scans return embedded: null.
+   */
+  async fetchBarcodeScanResult(barcode: string): Promise<BarcodeScanResult | null> {
+    if (!this.organizationId) {
+      return null;
+    }
+    try {
+      if (this.useApiPrimary) {
+        const apiResult = await this.fetchBarcodeScanResultFromApi(barcode);
+        if (apiResult !== null) {
+          return apiResult;
+        }
+      }
+      const product = await this.fetchProductByBarcodeFromSupabase(barcode);
+      return product ? { product, embedded: null } : null;
+    } catch (error) {
+      console.error('Failed to fetch barcode scan result:', error);
+      return null;
+    }
+  }
+
+  private async fetchBarcodeScanResultFromApi(barcode: string): Promise<BarcodeScanResult | null> {
     try {
       const cleanedBarcode = barcode.replace(/[\s\-]/g, '').trim();
       const endpoint = `/api/pos/products/lookup?barcode=${encodeURIComponent(cleanedBarcode)}`;
       const result = isBrowser()
-        ? await posApiGet<{ success: boolean; found: boolean; product?: any }>(endpoint)
+        ? await posApiGet<{ success: boolean; found: boolean; product?: any; embedded?: EmbeddedScaleValue | null }>(endpoint)
         : await getBridge().adminApi.fetchFromAdmin(endpoint, { method: 'GET' });
 
       if (!result.success || !result.data?.success) {
@@ -452,7 +517,10 @@ class ProductCatalogService {
         return null;
       }
 
-      return transformProductFromAPI(result.data.product);
+      return {
+        product: transformProductFromAPI(result.data.product),
+        embedded: result.data.embedded ?? null,
+      };
     } catch (error) {
       console.error('ProductCatalogService: API barcode lookup error:', error);
       return null;

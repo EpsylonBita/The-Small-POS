@@ -86,7 +86,13 @@ export const normalizePosOrderItem = (item: Record<string, any>) => {
   const rawMenuItemId = getRawPosOrderMenuItemId(item);
   const isManual = isManualPosOrderItem(item);
   const normalizedMenuItemId = isManual ? null : rawMenuItemId;
-  const quantity = Math.max(1, Math.round(normalizeFiniteNumber(item.quantity, 1)));
+  // Weighed/measured retail goods carry fractional quantities (0.35 kg), so
+  // round to the DB precision (NUMERIC(10,3)) instead of forcing integers.
+  // Menu items keep sending integers and are unaffected.
+  const quantity = Math.max(
+    0.001,
+    Math.round(normalizeFiniteNumber(item.quantity, 1) * 1000) / 1000,
+  );
   const unitPrice = normalizeFiniteNumber(
     item.unit_price ?? item.unitPrice ?? item.basePrice ?? item.price,
     0,

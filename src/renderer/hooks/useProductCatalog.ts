@@ -16,6 +16,7 @@ import {
   ProductCategory,
   ProductFilters,
   ProductStats,
+  BarcodeScanResult,
 } from '../services/ProductCatalogService';
 
 const EVENT_REFRESH_THROTTLE_MS = 5000;
@@ -38,6 +39,7 @@ interface UseProductCatalogReturn {
   // Actions
   refetch: () => Promise<void>;
   searchByBarcode: (barcode: string) => Promise<Product | null>;
+  scanBarcode: (barcode: string) => Promise<BarcodeScanResult | null>;
   updateQuantity: (productId: string, quantity: number) => Promise<boolean>;
 
   // Filters
@@ -180,6 +182,21 @@ export function useProductCatalog({
     }
   }, []);
 
+  // Scan lookup that also carries scale/embedded-value data (weight/price).
+  const scanBarcode = useCallback(async (barcode: string): Promise<BarcodeScanResult | null> => {
+    try {
+      const scan = await productCatalogService.fetchBarcodeScanResult(barcode);
+      if (!scan) {
+        toast.error('Product not found');
+      }
+      return scan;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to search product';
+      toast.error(message);
+      return null;
+    }
+  }, []);
+
   // Update quantity
   const updateQuantity = useCallback(async (productId: string, quantity: number): Promise<boolean> => {
     try {
@@ -206,6 +223,7 @@ export function useProductCatalog({
     error,
     refetch: fetchData,
     searchByBarcode,
+    scanBarcode,
     updateQuantity,
     setFilters,
   };

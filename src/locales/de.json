@@ -1690,15 +1690,42 @@
         "modules": "Aktive Module"
       },
       "sections": {
-        "admin": { "label": "Start", "detail": "Schnellstatus" },
-        "connection": { "label": "Verbindung", "detail": "Dieses POS verbinden" },
-        "terminal": { "label": "Bildschirm & Ton", "detail": "Anzeige, Ton und Sprache" },
-        "security": { "label": "PIN & Sperre", "detail": "Mitarbeiter-PIN und automatische Sperre" },
-        "database": { "label": "Daten", "detail": "Synchronisierung und lokale Daten" },
-        "hardware": { "label": "Geräte", "detail": "Waage, Scanner und Hardware" },
-        "printing": { "label": "Drucker", "detail": "Beleg-Einrichtung" },
-        "payments": { "label": "Kartengeräte", "detail": "Kartenzahlungsgeräte" },
-        "about": { "label": "Info", "detail": "App-Version" }
+        "admin": {
+          "label": "Start",
+          "detail": "Schnellstatus"
+        },
+        "connection": {
+          "label": "Verbindung",
+          "detail": "Dieses POS verbinden"
+        },
+        "terminal": {
+          "label": "Bildschirm & Ton",
+          "detail": "Anzeige, Ton und Sprache"
+        },
+        "security": {
+          "label": "PIN & Sperre",
+          "detail": "Mitarbeiter-PIN und automatische Sperre"
+        },
+        "database": {
+          "label": "Daten",
+          "detail": "Synchronisierung und lokale Daten"
+        },
+        "hardware": {
+          "label": "Geräte",
+          "detail": "Waage, Scanner und Hardware"
+        },
+        "printing": {
+          "label": "Drucker",
+          "detail": "Beleg-Einrichtung"
+        },
+        "payments": {
+          "label": "Kartengeräte",
+          "detail": "Kartenzahlungsgeräte"
+        },
+        "about": {
+          "label": "Info",
+          "detail": "App-Version"
+        }
       },
       "groups": {
         "daily": "Tägliche Einrichtung",
@@ -3024,9 +3051,9 @@
     },
     "printPreview": {
       "zoomOut": "Verkleinern",
-      "zoomIn": "Vergr\u00f6\u00dfern",
+      "zoomIn": "Vergrößern",
       "receiptFrame": "Belegvorschau",
-      "previewUnavailable": "Vorschau nicht verf\u00fcgbar",
+      "previewUnavailable": "Vorschau nicht verfügbar",
       "defaultPrinter": "Standard-Belegdrucker"
     },
     "orderTypeSelection": {
@@ -3273,9 +3300,9 @@
     },
     "simplePricing": {
       "orderTypePricing": "Preise nach Bestellart",
-      "pickupPrice": "Abholpreis (\u20ac)",
-      "deliveryPrice": "Lieferpreis (\u20ac)",
-      "pricingHelp": "Lege unterschiedliche Preise f\u00fcr Abholung und Lieferung fest.",
+      "pickupPrice": "Abholpreis (€)",
+      "deliveryPrice": "Lieferpreis (€)",
+      "pricingHelp": "Lege unterschiedliche Preise für Abholung und Lieferung fest.",
       "savePricing": "Preise speichern",
       "title": "Preis festlegen"
     },
@@ -5293,7 +5320,11 @@
     "subtotal": "Zwischensumme",
     "discount": "Rabatt",
     "scannerReady": "Scanner bereit",
-    "scannerDetected": "Barcode-Scanner erkannt"
+    "scannerDetected": "Barcode-Scanner erkannt",
+    "ageRestrictionPrompt": "Alterskontrolle: Bestätigen Sie, dass der Kunde {{age}}+ ist, bevor Sie \"{{name}}\" verkaufen. Fortfahren?",
+    "measuredQuantity": "Menge",
+    "depositTotal": "Pfand",
+    "depositLineName": "Pfand — {{name}}"
   },
   "staffSchedule": {
     "loading": "Personalplan wird geladen...",

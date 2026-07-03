@@ -65,6 +65,9 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'split-payment-discount-persistence.test.ts'),
   path.join(testsRoot, 'renderer', 'split-payment-currency.test.ts'),
   path.join(testsRoot, 'renderer', 'checkout-failure-contract.test.ts'),
+  // THE-324: retail checkout money/order-item seam — fee-exclusive total
+  // contract with OrderFlow and offer-reward lines mapped to real UUIDs.
+  path.join(testsRoot, 'renderer', 'retail-checkout-money-contract.test.ts'),
   path.join(testsRoot, 'renderer', 'delivery-zones-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'staff-schedule-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'module-context-sync.test.ts'),

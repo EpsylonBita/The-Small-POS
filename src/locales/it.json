@@ -1690,15 +1690,42 @@
         "modules": "Moduli attivi"
       },
       "sections": {
-        "admin": { "label": "Avvio", "detail": "Stato rapido" },
-        "connection": { "label": "Connessione", "detail": "Collega questo POS" },
-        "terminal": { "label": "Schermo e audio", "detail": "Display, audio e lingua" },
-        "security": { "label": "PIN e blocco", "detail": "PIN del personale e blocco automatico" },
-        "database": { "label": "Dati", "detail": "Sincronizzazione e dati locali" },
-        "hardware": { "label": "Dispositivi", "detail": "Bilancia, scanner e hardware" },
-        "printing": { "label": "Stampante", "detail": "Configurazione scontrino" },
-        "payments": { "label": "Terminali di pagamento", "detail": "Dispositivi di pagamento con carta" },
-        "about": { "label": "Info", "detail": "Versione app" }
+        "admin": {
+          "label": "Avvio",
+          "detail": "Stato rapido"
+        },
+        "connection": {
+          "label": "Connessione",
+          "detail": "Collega questo POS"
+        },
+        "terminal": {
+          "label": "Schermo e audio",
+          "detail": "Display, audio e lingua"
+        },
+        "security": {
+          "label": "PIN e blocco",
+          "detail": "PIN del personale e blocco automatico"
+        },
+        "database": {
+          "label": "Dati",
+          "detail": "Sincronizzazione e dati locali"
+        },
+        "hardware": {
+          "label": "Dispositivi",
+          "detail": "Bilancia, scanner e hardware"
+        },
+        "printing": {
+          "label": "Stampante",
+          "detail": "Configurazione scontrino"
+        },
+        "payments": {
+          "label": "Terminali di pagamento",
+          "detail": "Dispositivi di pagamento con carta"
+        },
+        "about": {
+          "label": "Info",
+          "detail": "Versione app"
+        }
       },
       "groups": {
         "daily": "Configurazione quotidiana",
@@ -3273,8 +3300,8 @@
     },
     "simplePricing": {
       "orderTypePricing": "Prezzi per tipo ordine",
-      "pickupPrice": "Prezzo ritiro (\u20ac)",
-      "deliveryPrice": "Prezzo consegna (\u20ac)",
+      "pickupPrice": "Prezzo ritiro (€)",
+      "deliveryPrice": "Prezzo consegna (€)",
       "pricingHelp": "Imposta prezzi diversi per ritiro e consegna.",
       "savePricing": "Salva prezzi",
       "title": "Imposta prezzi"
@@ -5293,7 +5320,11 @@
     "subtotal": "Subtotale",
     "discount": "Sconto",
     "scannerReady": "Lettore pronto",
-    "scannerDetected": "Lettore codici a barre rilevato"
+    "scannerDetected": "Lettore codici a barre rilevato",
+    "ageRestrictionPrompt": "Controllo età: verifica che il cliente abbia {{age}}+ prima di vendere \"{{name}}\". Continuare?",
+    "measuredQuantity": "Quantità",
+    "depositTotal": "Cauzioni",
+    "depositLineName": "Cauzione — {{name}}"
   },
   "staffSchedule": {
     "loading": "Caricamento turni personale...",

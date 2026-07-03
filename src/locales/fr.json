@@ -1690,15 +1690,42 @@
         "modules": "Modules actifs"
       },
       "sections": {
-        "admin": { "label": "Démarrage", "detail": "État rapide" },
-        "connection": { "label": "Connexion", "detail": "Connecter ce POS" },
-        "terminal": { "label": "Écran et son", "detail": "Affichage, son et langue" },
-        "security": { "label": "PIN et verrouillage", "detail": "PIN du personnel et verrouillage auto" },
-        "database": { "label": "Données", "detail": "Synchronisation et données locales" },
-        "hardware": { "label": "Périphériques", "detail": "Balance, scanner et matériel" },
-        "printing": { "label": "Imprimante", "detail": "Configuration du reçu" },
-        "payments": { "label": "Terminaux de carte", "detail": "Terminaux de paiement par carte" },
-        "about": { "label": "Infos", "detail": "Version de l'app" }
+        "admin": {
+          "label": "Démarrage",
+          "detail": "État rapide"
+        },
+        "connection": {
+          "label": "Connexion",
+          "detail": "Connecter ce POS"
+        },
+        "terminal": {
+          "label": "Écran et son",
+          "detail": "Affichage, son et langue"
+        },
+        "security": {
+          "label": "PIN et verrouillage",
+          "detail": "PIN du personnel et verrouillage auto"
+        },
+        "database": {
+          "label": "Données",
+          "detail": "Synchronisation et données locales"
+        },
+        "hardware": {
+          "label": "Périphériques",
+          "detail": "Balance, scanner et matériel"
+        },
+        "printing": {
+          "label": "Imprimante",
+          "detail": "Configuration du reçu"
+        },
+        "payments": {
+          "label": "Terminaux de carte",
+          "detail": "Terminaux de paiement par carte"
+        },
+        "about": {
+          "label": "Infos",
+          "detail": "Version de l'app"
+        }
       },
       "groups": {
         "daily": "Configuration quotidienne",
@@ -3023,11 +3050,11 @@
       "deliveryDescription": "Livrer la commande à l'adresse du client"
     },
     "printPreview": {
-      "zoomOut": "R\u00e9duire",
+      "zoomOut": "Réduire",
       "zoomIn": "Agrandir",
-      "receiptFrame": "Aper\u00e7u du re\u00e7u",
-      "previewUnavailable": "Aper\u00e7u indisponible",
-      "defaultPrinter": "Imprimante de re\u00e7us par d\u00e9faut"
+      "receiptFrame": "Aperçu du reçu",
+      "previewUnavailable": "Aperçu indisponible",
+      "defaultPrinter": "Imprimante de reçus par défaut"
     },
     "orderTypeSelection": {
       "title": "Choisir le type de commande",
@@ -3273,9 +3300,9 @@
     },
     "simplePricing": {
       "orderTypePricing": "Prix par type de commande",
-      "pickupPrice": "Prix retrait (\u20ac)",
-      "deliveryPrice": "Prix livraison (\u20ac)",
-      "pricingHelp": "D\u00e9finissez des prix diff\u00e9rents pour le retrait et la livraison.",
+      "pickupPrice": "Prix retrait (€)",
+      "deliveryPrice": "Prix livraison (€)",
+      "pricingHelp": "Définissez des prix différents pour le retrait et la livraison.",
       "savePricing": "Enregistrer les prix",
       "title": "Définir les prix"
     },
@@ -5293,7 +5320,11 @@
     "subtotal": "Sous-total",
     "discount": "Remise",
     "scannerReady": "Scanner prêt",
-    "scannerDetected": "Lecteur de codes-barres détecté"
+    "scannerDetected": "Lecteur de codes-barres détecté",
+    "ageRestrictionPrompt": "Contrôle d’âge : vérifiez que le client a {{age}}+ avant de vendre « {{name}} ». Continuer ?",
+    "measuredQuantity": "Quantité",
+    "depositTotal": "Consignes",
+    "depositLineName": "Consigne — {{name}}"
   },
   "staffSchedule": {
     "loading": "Chargement du planning du personnel...",

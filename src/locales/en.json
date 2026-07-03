@@ -1690,15 +1690,42 @@
         "modules": "Active modules"
       },
       "sections": {
-        "admin": { "label": "Start", "detail": "Quick status" },
-        "connection": { "label": "Connection", "detail": "Link this POS" },
-        "terminal": { "label": "Screen & Sound", "detail": "Display, sound and language" },
-        "security": { "label": "PIN & Lock", "detail": "Staff PIN and auto lock" },
-        "database": { "label": "Data", "detail": "Sync and local data" },
-        "hardware": { "label": "Devices", "detail": "Scale, scanner and hardware" },
-        "printing": { "label": "Printer", "detail": "Receipt setup" },
-        "payments": { "label": "Card Machines", "detail": "Card payment devices" },
-        "about": { "label": "Info", "detail": "App version" }
+        "admin": {
+          "label": "Start",
+          "detail": "Quick status"
+        },
+        "connection": {
+          "label": "Connection",
+          "detail": "Link this POS"
+        },
+        "terminal": {
+          "label": "Screen & Sound",
+          "detail": "Display, sound and language"
+        },
+        "security": {
+          "label": "PIN & Lock",
+          "detail": "Staff PIN and auto lock"
+        },
+        "database": {
+          "label": "Data",
+          "detail": "Sync and local data"
+        },
+        "hardware": {
+          "label": "Devices",
+          "detail": "Scale, scanner and hardware"
+        },
+        "printing": {
+          "label": "Printer",
+          "detail": "Receipt setup"
+        },
+        "payments": {
+          "label": "Card Machines",
+          "detail": "Card payment devices"
+        },
+        "about": {
+          "label": "Info",
+          "detail": "App version"
+        }
       },
       "groups": {
         "daily": "Daily setup",
@@ -3273,8 +3300,8 @@
     },
     "simplePricing": {
       "orderTypePricing": "Order Type Pricing",
-      "pickupPrice": "Pickup price (\u20ac)",
-      "deliveryPrice": "Delivery price (\u20ac)",
+      "pickupPrice": "Pickup price (€)",
+      "deliveryPrice": "Delivery price (€)",
       "pricingHelp": "Set different prices for pickup and delivery orders.",
       "savePricing": "Save pricing",
       "title": "Set Pricing"
@@ -5293,7 +5320,11 @@
     "subtotal": "Subtotal",
     "discount": "Discount",
     "scannerReady": "Scanner ready",
-    "scannerDetected": "Barcode scanner detected"
+    "scannerDetected": "Barcode scanner detected",
+    "ageRestrictionPrompt": "Age check: verify the customer is {{age}}+ before selling \"{{name}}\". Continue?",
+    "measuredQuantity": "Quantity",
+    "depositTotal": "Deposits",
+    "depositLineName": "Deposit — {{name}}"
   },
   "staffSchedule": {
     "loading": "Loading staff schedule...",

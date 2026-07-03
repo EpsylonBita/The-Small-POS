@@ -20,7 +20,7 @@ import {
   PaymentModal,
   type RoomChargeContext,
 } from './PaymentModal';
-import type { Product, ProductFilters } from '../../services/ProductCatalogService';
+import type { Product, ProductFilters, BarcodeScanResult } from '../../services/ProductCatalogService';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
@@ -65,8 +65,23 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue;
 }
 
+// Monotonic per-session line ids are enough: lineId only disambiguates cart
+// lines inside the renderer and never leaves it.
+let cartLineIdCounter = 0;
+const nextCartLineId = (productId: string): string => {
+  cartLineIdCounter += 1;
+  return `${productId}::${cartLineIdCounter}`;
+};
+
 interface CartItem extends Product {
+  /** Cart-local line identity. Two scale scans of the same product must stay
+      distinct lines, so product.id cannot key the cart. Never sent to the
+      server — the order payload keeps the real product UUID fields. */
+  lineId: string;
   cartQuantity: number;
+  /** Scale-scanned lines (embedded weight/price barcodes) keep their own line
+      and never merge with plain adds. */
+  scaleScanned?: boolean;
   is_offer_reward?: boolean;
   auto_added_by_offer?: boolean;
   offer_id?: string;
@@ -131,6 +146,9 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [barcodeInput, setBarcodeInput] = useState('');
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  // Raw text drafts for the sold-by-measure quantity inputs, keyed by lineId.
+  // Keystrokes only edit the draft; the parsed value commits on blur/Enter.
+  const [measuredQuantityDrafts, setMeasuredQuantityDrafts] = useState<Record<string, string>>({});
   const [offerEvaluation, setOfferEvaluation] = useState<CatalogOfferEvaluationResult | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [discountPercentage, setDiscountPercentage] = useState<number>(0);
@@ -203,7 +221,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     products,
     categories,
     isLoading,
-    searchByBarcode,
+    scanBarcode,
   } = useProductCatalog({
     branchId: branchId || '',
     organizationId: organizationId || '',
@@ -366,27 +384,81 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     setLocalDeliveryZoneInfo(null)
   }, [isOpen])
 
+  // Age-restricted goods (tobacco, alcohol, …) need a blocking staff
+  // confirmation before they reach the cart. The minimum age is per product,
+  // not per jurisdiction.
+  const passesAgeCheck = useCallback((product: Product): boolean => {
+    if (!product.ageRestriction || product.ageRestriction <= 0) {
+      return true;
+    }
+    return window.confirm(
+      t('productCatalog.ageRestrictionPrompt', {
+        age: product.ageRestriction,
+        name: product.name,
+        defaultValue: 'Age check: verify the customer is {{age}}+ before selling "{{name}}". Continue?',
+      })
+    );
+  }, [t]);
+
   // Add to cart function (defined before barcode handlers)
   const addToCart = useCallback((product: Product) => {
+    if (!passesAgeCheck(product)) {
+      return;
+    }
+    const lineId = nextCartLineId(product.id);
     setCartItems(prev => {
-      const existing = prev.find(item => item.id === product.id && item.is_offer_reward !== true);
+      // Merge only into a plain line for the same product at its default
+      // price: scale-scanned and price-overridden lines always stay distinct.
+      const existing = prev.find(item =>
+        item.id === product.id
+        && item.is_offer_reward !== true
+        && item.scaleScanned !== true
+        && item.originalUnitPrice === undefined
+      );
       if (existing) {
         return prev.map(item =>
-          item.id === product.id && item.is_offer_reward !== true
+          item.lineId === existing.lineId
             ? { ...item, cartQuantity: item.cartQuantity + 1 }
             : item
         );
       }
-      return [...prev, { ...product, cartQuantity: 1 }];
+      return [...prev, { ...product, lineId, cartQuantity: 1 }];
     });
-  }, []);
+  }, [passesAgeCheck]);
+
+  // Add a scanned product, applying scale/embedded-value data: a weight label
+  // sets the line quantity (price stays per-unit); a price label fixes the
+  // line total (quantity 1, price = embedded total). Non-scale scans behave
+  // like a normal add.
+  const addScannedToCart = useCallback((scan: BarcodeScanResult) => {
+    const { product, embedded } = scan;
+    if (!embedded) {
+      addToCart(product);
+      return;
+    }
+    if (!passesAgeCheck(product)) {
+      return;
+    }
+    const lineId = nextCartLineId(product.id);
+    setCartItems(prev => {
+      if (embedded.value_type === 'weight' && embedded.weight && embedded.weight > 0) {
+        const qty = Math.round(embedded.weight * 1000) / 1000;
+        return [...prev, { ...product, lineId, scaleScanned: true, cartQuantity: qty }];
+      }
+      if (embedded.value_type === 'price' && embedded.price && embedded.price >= 0) {
+        // The scale printed the final line price; ring one line at that price.
+        return [...prev, { ...product, lineId, scaleScanned: true, price: embedded.price, originalUnitPrice: product.price, cartQuantity: 1 }];
+      }
+      return [...prev, { ...product, lineId, scaleScanned: true, cartQuantity: 1 }];
+    });
+  }, [addToCart, passesAgeCheck]);
 
   // Handle barcode scan from input field
   const handleBarcodeScan = async (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && barcodeInput.trim()) {
-      const product = await searchByBarcode(barcodeInput.trim());
-      if (product) {
-        addToCart(product);
+      const scan = await scanBarcode(barcodeInput.trim());
+      if (scan) {
+        addScannedToCart(scan);
       }
       setBarcodeInput('');
     }
@@ -397,21 +469,21 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     if (!isOpen) return; // Only process when modal is open
 
     console.log('[ProductCatalogModal] Received barcode scan:', barcode);
-    const product = await searchByBarcode(barcode);
-    if (product) {
-      addToCart(product);
+    const scan = await scanBarcode(barcode);
+    if (scan) {
+      addScannedToCart(scan);
       // Also update the input field to show what was scanned
       setBarcodeInput(barcode);
       setTimeout(() => setBarcodeInput(''), 1000); // Clear after 1 second
     }
-  }, [isOpen, searchByBarcode, addToCart]);
+  }, [isOpen, scanBarcode, addScannedToCart]);
 
   // Subscribe to global barcode scanner events
-  useOnBarcodeScan(handleGlobalBarcodeScan, [isOpen, searchByBarcode, addToCart]);
+  useOnBarcodeScan(handleGlobalBarcodeScan, [isOpen, scanBarcode, addScannedToCart]);
 
-  const updateCartQuantity = (productId: string, delta: number) => {
+  const updateCartQuantity = (lineId: string, delta: number) => {
     setCartItems(prev => prev
-      .map(item => item.id === productId && item.is_offer_reward !== true
+      .map(item => item.lineId === lineId && item.is_offer_reward !== true
         ? { ...item, cartQuantity: Math.max(0, item.cartQuantity + delta) }
         : item
       )
@@ -419,8 +491,38 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     );
   };
 
-  const removeFromCart = (productId: string) => {
-    setCartItems(prev => prev.filter(item => item.id !== productId && item.is_offer_reward !== true));
+  const clearMeasuredQuantityDraft = (lineId: string) => {
+    setMeasuredQuantityDrafts(prev => {
+      if (!(lineId in prev)) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[lineId];
+      return next;
+    });
+  };
+
+  // Weighed/measured goods (sold_by_measure) take a typed decimal quantity
+  // (e.g. 0.35 kg) instead of +/- stepping. Commit runs on blur/Enter only:
+  // transient keystrokes like '0' or '1.' must never delete the line or snap
+  // the value mid-edit. An unparsable/non-positive draft reverts to the
+  // line's current quantity.
+  const commitMeasuredQuantity = (lineId: string, rawValue: string) => {
+    clearMeasuredQuantityDraft(lineId);
+    const parsed = parseFloat(rawValue.replace(',', '.'));
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return;
+    }
+    setCartItems(prev => prev.map(item =>
+      item.lineId === lineId && item.is_offer_reward !== true
+        ? { ...item, cartQuantity: Math.round(parsed * 1000) / 1000 }
+        : item
+    ));
+  };
+
+  const removeFromCart = (lineId: string) => {
+    clearMeasuredQuantityDraft(lineId);
+    setCartItems(prev => prev.filter(item => item.lineId !== lineId && item.is_offer_reward !== true));
   };
 
   const paidCartItems = useMemo(
@@ -434,9 +536,19 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
           return [];
         }
 
+        // Measured/weighed goods do not participate in catalog offers. The
+        // server schema (pos/offers/_shared.ts) requires an integer
+        // quantity >= 1: one fractional line would 400 the whole evaluation
+        // (clearing ALL offers), and inflating a sub-1 quantity would
+        // discount from the wrong base. Drop such lines from the payload.
+        const quantity = item.cartQuantity || 0;
+        if (!Number.isInteger(quantity) || quantity < 1) {
+          return [];
+        }
+
         return [{
           item_id: item.id,
-          quantity: Math.max(1, item.cartQuantity || 1),
+          quantity,
           unit_price: Math.max(0, item.price || 0),
           category_id: item.categoryId ?? null,
         }];
@@ -453,6 +565,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     signature: string,
   ): CartItem & OfferRewardLineMetadata => ({
     id: `offer-reward-${signature}`,
+    // Signatures are unique per reward occurrence, so they double as lineId.
+    lineId: `offer-reward-${signature}`,
     organizationId: organizationId || '',
     branchId: branchId || '',
     sku: '',
@@ -470,6 +584,15 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     wholesalePrice: null,
     memberPrice: null,
     minWholesaleQuantity: null,
+    vatCategoryCode: null,
+    priceIncludesVat: null,
+    taxExemptionReason: null,
+    unitOfMeasure: 'piece',
+    soldByMeasure: false,
+    pluCode: null,
+    ageRestriction: null,
+    depositAmount: null,
+    brand: null,
     preferredSupplierId: null,
     preferredSupplierName: null,
     createdAt: new Date(0).toISOString(),
@@ -569,7 +692,15 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         ? (deliveryFeeStatus === 'resolved' ? resolveDeliveryFee(effectiveDeliveryZoneInfo) : 0)
         : Math.max(0, manualDeliveryFee);
   const subtotalAfterDiscount = Math.max(subtotal - offerDiscountAmount - discountAmount, 0);
-  const total = subtotalAfterDiscount + deliveryFee;
+  // Returnable-container deposits (bottles, crates, cylinders) are a
+  // pass-through charge, not a discountable good: summed from cart lines,
+  // added post-discount like a fee, and itemised as their own lines at
+  // checkout. Reward lines never carry a deposit.
+  const depositTotal = cartItems.reduce(
+    (sum, item) => sum + (isOfferRewardLine(item) ? 0 : (item.depositAmount ?? 0) * item.cartQuantity),
+    0,
+  );
+  const total = subtotalAfterDiscount + deliveryFee + depositTotal;
   const matchedOfferNames: string[] = Array.from(
     new Set(
       (offerEvaluation?.matched_offers ?? [])
@@ -612,18 +743,53 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   };
 
   const handlePaymentComplete = async (paymentData: any): Promise<boolean> => {
-    const completionResult = await onOrderComplete?.({
-      items: cartItems.map(item => ({
-        id: item.id,
-        menu_item_id: item.id,
-        product_id: item.id,
+    const productLines = cartItems.map(item => {
+      // Offer-reward lines carry a synthetic 'offer-reward-*' id; the granted
+      // product's real UUID lives in reward_item_id and must be what reaches
+      // menu_item_id, or hasValidSyncedPosMenuItemId rejects the whole order.
+      const itemId = item.is_offer_reward && item.reward_item_id ? item.reward_item_id : item.id;
+      return {
+        id: itemId,
+        menu_item_id: itemId,
+        product_id: itemId,
         product_name: item.name,
         name: item.name,
         quantity: item.cartQuantity,
         price: item.price,
+        // Per-product Greek VAT category — the fiscal pipeline falls back to
+        // the org default when null, so 6%/13% goods must carry their code.
+        vat_category_code: item.vatCategoryCode ?? null,
+        price_includes_vat: item.priceIncludesVat ?? null,
+        tax_exemption_reason: item.taxExemptionReason ?? null,
         customizations: null
-      })),
-      total,
+      };
+    });
+    // Returnable-container deposit lines — one manual line per deposit-bearing
+    // product, itemised on the receipt. is_manual + null menu_item_id so they
+    // pass the synced-item gate and the sanitizer, and inherit the product's
+    // VAT category. Generic for any retail store's deposit scheme.
+    const depositLines = cartItems
+      .filter(item => !isOfferRewardLine(item) && (item.depositAmount ?? 0) > 0)
+      .map(item => ({
+        id: 'manual',
+        menu_item_id: null,
+        product_id: null,
+        is_manual: true,
+        product_name: t('productCatalog.depositLineName', { name: item.name, defaultValue: 'Deposit — {{name}}' }),
+        name: t('productCatalog.depositLineName', { name: item.name, defaultValue: 'Deposit — {{name}}' }),
+        quantity: item.cartQuantity,
+        price: item.depositAmount ?? 0,
+        vat_category_code: item.vatCategoryCode ?? null,
+        price_includes_vat: item.priceIncludesVat ?? null,
+        tax_exemption_reason: item.taxExemptionReason ?? null,
+        customizations: null,
+      }));
+    const completionResult = await onOrderComplete?.({
+      items: [...productLines, ...depositLines],
+      // OrderFlow expects the fee-exclusive discounted subtotal (it adds
+      // deliveryFee itself). Deposits are a post-discount pass-through, so
+      // they ride here alongside the discounted product subtotal.
+      total: subtotalAfterDiscount + depositTotal,
       customer: selectedCustomer,
       address: selectedAddress,
       orderType,
@@ -643,6 +809,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
 
     setShowPaymentModal(false);
     setCartItems([]);
+    setMeasuredQuantityDrafts({});
     setOfferEvaluation(null);
     setDiscountPercentage(0);
     setManualDeliveryFee(0);
@@ -798,7 +965,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 </div>
               ) : (
                 cartItems.map(item => (
-                  <div key={item.id} className="p-3 rounded-2xl bg-white/10">
+                  <div key={item.lineId} className="p-3 rounded-2xl bg-white/10">
                     <div className="flex justify-between items-start mb-2">
                       <div className="flex-1 min-w-0">
                         <span className="text-white font-medium truncate block">{item.name}</span>
@@ -816,7 +983,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                       </div>
                       {!item.is_offer_reward && (
                         <button
-                          onClick={() => removeFromCart(item.id)}
+                          onClick={() => removeFromCart(item.lineId)}
                           aria-label={t('common.remove', 'Remove')}
                           className="text-red-400 active:text-red-300 ml-2 transition-transform duration-150 active:scale-95"
                         >
@@ -825,9 +992,34 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                       )}
                     </div>
                     <div className="flex items-center justify-between">
+                      {item.soldByMeasure && !item.is_offer_reward ? (
+                        /* Weighed/measured goods: typed decimal quantity in the
+                           product's own unit (kg, L, m …) instead of stepping.
+                           Edits a raw text draft; commits on blur/Enter. */
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={measuredQuantityDrafts[item.lineId] ?? String(item.cartQuantity)}
+                            onChange={(e) => {
+                              const draft = e.target.value;
+                              setMeasuredQuantityDrafts(prev => ({ ...prev, [item.lineId]: draft }));
+                            }}
+                            onBlur={(e) => commitMeasuredQuantity(item.lineId, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.currentTarget.blur();
+                              }
+                            }}
+                            aria-label={t('productCatalog.measuredQuantity', 'Quantity')}
+                            className="w-20 px-2 py-1 rounded bg-white/10 text-white text-center focus:outline-none focus:ring-1 focus:ring-white/40"
+                          />
+                          <span className="text-white/60 text-sm">{item.unitOfMeasure}</span>
+                        </div>
+                      ) : (
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => updateCartQuantity(item.id, -1)}
+                          onClick={() => updateCartQuantity(item.lineId, -1)}
                           disabled={item.is_offer_reward}
                           className="w-7 h-7 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100"
                         >
@@ -835,13 +1027,14 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                         </button>
                         <span className="text-white w-8 text-center">{item.cartQuantity}</span>
                         <button
-                          onClick={() => updateCartQuantity(item.id, 1)}
+                          onClick={() => updateCartQuantity(item.lineId, 1)}
                           disabled={item.is_offer_reward}
                           className="w-7 h-7 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100"
                         >
                           <Plus className="w-4 h-4 text-white" />
                         </button>
                       </div>
+                      )}
                       {item.is_offer_reward ? (
                         <span className="rounded-full bg-emerald-500/10 px-2 py-1 text-sm font-medium text-emerald-300">
                           {t('menu.cart.freeLabel', 'Free')}
@@ -894,6 +1087,12 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 <div className="flex justify-between text-red-400 mb-1">
                   <span>{t('productCatalog.discountLabel', 'Discount')}</span>
                   <span>-€{discountAmount.toFixed(2)}</span>
+                </div>
+              )}
+              {depositTotal > 0 && (
+                <div className="flex justify-between text-gray-400 mb-1">
+                  <span>{t('productCatalog.depositTotal', 'Deposits')}</span>
+                  <span>€{depositTotal.toFixed(2)}</span>
                 </div>
               )}
               {orderType === 'delivery' && (
