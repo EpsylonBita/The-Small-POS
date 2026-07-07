@@ -72,6 +72,7 @@ interface Order {
   sync_status?: string;
   supabase_id?: string;
   client_order_id?: string;
+  client_request_id?: string;
   cancellation_reason?: string;
   cancelled_at?: string;
   source?: 'local' | 'remote';
@@ -191,7 +192,8 @@ const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
     estimated_ready_time: raw.estimated_ready_time ?? raw.estimatedTime,
     sync_status: asString(raw.sync_status) || asString(raw.syncStatus),
     supabase_id: asString(raw.supabase_id) || asString(raw.supabaseId),
-    client_order_id: asString(raw.client_order_id),
+    client_order_id: asString(raw.client_order_id) || asString(raw.clientOrderId),
+    client_request_id: asString(raw.client_request_id) || asString(raw.clientRequestId),
     cancellation_reason: asString(raw.cancellation_reason) || asString(raw.cancellationReason),
     cancelled_at: asString(raw.cancelled_at) || asString(raw.cancelledAt),
     source,
@@ -203,6 +205,7 @@ const toIdentitySet = (order: Order): Set<string> => {
     order.id,
     order.supabase_id,
     order.client_order_id,
+    order.client_request_id,
     order.order_number,
   ]
     .filter((v): v is string => !!v)
@@ -252,6 +255,77 @@ const mergeHybridOrders = (localOrders: Order[], remoteOrders: Order[]): Order[]
   localOrders.forEach(upsert);
   remoteOrders.forEach(upsert);
   return merged;
+};
+
+const extractOrderArray = (raw: any): any[] => {
+  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw?.orders)) return raw.orders;
+  if (Array.isArray(raw?.data)) return raw.data;
+  if (Array.isArray(raw?.data?.orders)) return raw.data.orders;
+  return [];
+};
+
+const recoverRemoteOrdersIntoLocalLedger = async (
+  bridge: any,
+  localOrders: Order[],
+  remoteOrdersRaw: any[],
+): Promise<Order[]> => {
+  if (!bridge?.orders?.saveFromRemote || !bridge?.orders?.getAll || remoteOrdersRaw.length === 0) {
+    return localOrders;
+  }
+
+  try {
+    const localKeys = new Set<string>();
+    localOrders.forEach((order) => {
+      toIdentitySet(order).forEach((key) => localKeys.add(key));
+    });
+
+    let recovered = 0;
+    for (const remoteRaw of remoteOrdersRaw) {
+      const remoteOrder = normalizeOrder(remoteRaw, 'remote');
+      if (!remoteOrder) continue;
+
+      const remoteKeys = toIdentitySet(remoteOrder);
+      const remoteId = asString(remoteRaw?.id) || remoteOrder.id;
+      const hasRemoteIdentityLocally = remoteId
+        ? localKeys.has(remoteId.trim().toLowerCase())
+        : false;
+      const hasAnyLocalMatch = [...remoteKeys].some((key) => localKeys.has(key));
+
+      if (hasRemoteIdentityLocally) {
+        continue;
+      }
+      if (!hasAnyLocalMatch && recovered >= 50) {
+        continue;
+      }
+
+      const response = await bridge.orders.saveFromRemote({
+        orderData: remoteRaw,
+        suppressAutoPrint: true,
+        recoverySource: 'orders_page_admin_recovery',
+      });
+      if (response?.success && !response?.ignored) {
+        recovered += 1;
+        remoteKeys.forEach((key) => localKeys.add(key));
+        const localOrderId = asString(response?.orderId) || asString(response?.data?.orderId);
+        if (localOrderId) {
+          localKeys.add(localOrderId.trim().toLowerCase());
+        }
+      }
+    }
+
+    if (recovered === 0) {
+      return localOrders;
+    }
+
+    const refreshedRaw = await bridge.orders.getAll();
+    return extractOrderArray(refreshedRaw)
+      .map((entry: any) => normalizeOrder(entry, 'local'))
+      .filter((entry: Order | null): entry is Order => !!entry);
+  } catch (error) {
+    console.warn('[OrdersPage] Remote order recovery failed, using local/remote merge only', error);
+    return localOrders;
+  }
 };
 
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
@@ -362,7 +436,7 @@ const OrdersPage: React.FC = () => {
       if (dateTo) remoteOptions.date_to = dateTo;
 
       const localRaw = await bridge.orders.getAll();
-      const localOrders = (Array.isArray(localRaw) ? localRaw : [])
+      let localOrders = extractOrderArray(localRaw)
         .map((entry: any) => normalizeOrder(entry, 'local'))
         .filter((entry: Order | null): entry is Order => !!entry);
 
@@ -376,7 +450,13 @@ const OrdersPage: React.FC = () => {
       try {
         const remoteResult = await bridge.sync.fetchOrders(remoteOptions);
         if (remoteResult?.success) {
-          const remoteOrders = (Array.isArray(remoteResult.orders) ? remoteResult.orders : [])
+          const remoteOrdersRaw = extractOrderArray(remoteResult);
+          localOrders = await recoverRemoteOrdersIntoLocalLedger(
+            bridge,
+            localOrders,
+            remoteOrdersRaw,
+          );
+          const remoteOrders = remoteOrdersRaw
             .map((entry: any) => normalizeOrder(entry, 'remote'))
             .filter((entry: Order | null): entry is Order => !!entry);
           mergedOrders = mergeHybridOrders(localOrders, remoteOrders);

@@ -594,6 +594,193 @@ fn resolve_order_id_with_remote(
     .map_err(|_| "Order not found".to_string())
 }
 
+fn push_unique_identity(candidates: &mut Vec<String>, value: Option<String>) {
+    let Some(value) = normalize_optional_text(value) else {
+        return;
+    };
+    if !candidates.iter().any(|candidate| candidate == &value) {
+        candidates.push(value);
+    }
+}
+
+fn value_bool_any(source: &Value, keys: &[&str]) -> Option<bool> {
+    for key in keys {
+        let Some(value) = source.get(*key) else {
+            continue;
+        };
+        if let Some(flag) = value.as_bool() {
+            return Some(flag);
+        }
+        if let Some(flag) = value.as_i64() {
+            return Some(flag != 0);
+        }
+        if let Some(raw) = value.as_str() {
+            let normalized = raw.trim().to_ascii_lowercase();
+            if matches!(normalized.as_str(), "true" | "1" | "yes" | "on") {
+                return Some(true);
+            }
+            if matches!(normalized.as_str(), "false" | "0" | "no" | "off") {
+                return Some(false);
+            }
+        }
+    }
+    None
+}
+
+fn remote_order_client_identity_candidates(order_data: &Value) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for keys in [
+        &["client_order_id", "clientOrderId"][..],
+        &["client_request_id", "clientRequestId"][..],
+        &["local_order_id", "localOrderId"][..],
+    ] {
+        push_unique_identity(&mut candidates, value_str(order_data, keys));
+    }
+    candidates
+}
+
+fn remote_order_number_identity_candidates(order_data: &Value) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for keys in [
+        &["order_number", "orderNumber"][..],
+        &["display_order_number", "displayOrderNumber"][..],
+    ] {
+        push_unique_identity(&mut candidates, value_str(order_data, keys));
+    }
+    candidates
+}
+
+fn resolve_existing_local_order_for_remote(
+    conn: &rusqlite::Connection,
+    remote_id: &str,
+    order_data: &Value,
+) -> Result<Option<String>, String> {
+    if let Some(local_id) = conn
+        .query_row(
+            "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
+            rusqlite::params![remote_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("resolve remote order by remote id: {e}"))?
+    {
+        return Ok(Some(local_id));
+    }
+
+    for client_id in remote_order_client_identity_candidates(order_data) {
+        if let Some(local_id) = conn
+            .query_row(
+                "SELECT id
+                 FROM orders
+                 WHERE id = ?1 OR client_request_id = ?1
+                 LIMIT 1",
+                rusqlite::params![client_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| format!("resolve remote order by client identity: {e}"))?
+        {
+            return Ok(Some(local_id));
+        }
+    }
+
+    for order_number in remote_order_number_identity_candidates(order_data) {
+        if let Some(local_id) = conn
+            .query_row(
+                "SELECT id
+                 FROM orders
+                 WHERE order_number = ?1 OR display_order_number = ?1
+                 LIMIT 1",
+                rusqlite::params![order_number],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| format!("resolve remote order by order number: {e}"))?
+        {
+            return Ok(Some(local_id));
+        }
+    }
+
+    Ok(None)
+}
+
+fn attach_remote_order_identity_to_local(
+    conn: &rusqlite::Connection,
+    local_id: &str,
+    remote_id: &str,
+    order_data: &Value,
+    synced_at: &str,
+) -> Result<(), String> {
+    let client_identity = remote_order_client_identity_candidates(order_data)
+        .into_iter()
+        .next();
+    let terminal_id = value_str(order_data, &["terminal_id", "terminalId"]);
+    let owner_terminal_id = value_str(order_data, &["owner_terminal_id", "ownerTerminalId"]);
+    let source_terminal_id = value_str(order_data, &["source_terminal_id", "sourceTerminalId"]);
+    let branch_id = value_str(order_data, &["branch_id", "branchId"]);
+
+    let updated = conn
+        .execute(
+        "UPDATE orders
+         SET supabase_id = CASE
+                 WHEN NULLIF(TRIM(COALESCE(supabase_id, '')), '') IS NULL THEN ?1
+                 ELSE supabase_id
+             END,
+             client_request_id = CASE
+                 WHEN ?2 IS NOT NULL
+                  AND NULLIF(TRIM(COALESCE(client_request_id, '')), '') IS NULL THEN ?2
+                 ELSE client_request_id
+             END,
+             terminal_id = CASE
+                 WHEN ?3 IS NOT NULL
+                  AND NULLIF(TRIM(COALESCE(terminal_id, '')), '') IS NULL THEN ?3
+                 ELSE terminal_id
+             END,
+             owner_terminal_id = CASE
+                 WHEN ?4 IS NOT NULL
+                  AND NULLIF(TRIM(COALESCE(owner_terminal_id, '')), '') IS NULL THEN ?4
+                 ELSE owner_terminal_id
+             END,
+             source_terminal_id = CASE
+                 WHEN ?5 IS NOT NULL
+                  AND NULLIF(TRIM(COALESCE(source_terminal_id, '')), '') IS NULL THEN ?5
+                 ELSE source_terminal_id
+             END,
+             branch_id = CASE
+                 WHEN ?6 IS NOT NULL
+                  AND NULLIF(TRIM(COALESCE(branch_id, '')), '') IS NULL THEN ?6
+                 ELSE branch_id
+             END,
+             sync_status = CASE
+                 WHEN lower(COALESCE(sync_status, '')) IN ('pending', 'processing', 'failed', 'conflict') THEN sync_status
+                 ELSE 'synced'
+             END,
+             last_synced_at = ?7
+         WHERE id = ?8
+           AND (
+                NULLIF(TRIM(COALESCE(supabase_id, '')), '') IS NULL
+                OR supabase_id = ?1
+           )",
+        rusqlite::params![
+            remote_id,
+            client_identity,
+            terminal_id,
+            owner_terminal_id,
+            source_terminal_id,
+            branch_id,
+            synced_at,
+            local_id,
+        ],
+        )
+        .map_err(|e| format!("attach remote order identity: {e}"))?;
+
+    if updated == 0 {
+        return Err("attach remote order identity: conflicting local supabase_id".to_string());
+    }
+
+    Ok(())
+}
+
 fn build_order_status_patch_body(
     remote_order_id: &str,
     status: &str,
@@ -2867,7 +3054,31 @@ pub async fn order_save_from_remote(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
-    let order_data = payload.get("orderData").cloned().unwrap_or(payload);
+    let order_data = payload
+        .get("orderData")
+        .cloned()
+        .unwrap_or_else(|| payload.clone());
+    let suppress_auto_print = value_bool_any(
+        &payload,
+        &[
+            "suppressAutoPrint",
+            "suppress_auto_print",
+            "skipAutoPrint",
+            "skip_auto_print",
+        ],
+    )
+    .or_else(|| {
+        value_bool_any(
+            &order_data,
+            &[
+                "suppressAutoPrint",
+                "suppress_auto_print",
+                "skipAutoPrint",
+                "skip_auto_print",
+            ],
+        )
+    })
+    .unwrap_or(false);
     let remote_id = value_str(&order_data, &["id", "supabase_id", "supabaseId"])
         .ok_or("Missing remote order id")?;
 
@@ -2888,14 +3099,14 @@ pub async fn order_save_from_remote(
 
     let existing_local_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
-            rusqlite::params![remote_id.clone()],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
+        resolve_existing_local_order_for_remote(&conn, &remote_id, &order_data)?
     };
     if let Some(local_id) = existing_local_id {
+        let now = Utc::now().to_rfc3339();
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            attach_remote_order_identity_to_local(&conn, &local_id, &remote_id, &order_data, &now)?;
+        }
         return Ok(serde_json::json!({
             "success": true,
             "orderId": local_id,
@@ -2968,6 +3179,9 @@ pub async fn order_save_from_remote(
         .or_else(|| storage::get_credential("terminal_id"));
     let owner_terminal_id = value_str(&order_data, &["owner_terminal_id", "ownerTerminalId"]);
     let source_terminal_id = value_str(&order_data, &["source_terminal_id", "sourceTerminalId"]);
+    let client_request_id = remote_order_client_identity_candidates(&order_data)
+        .into_iter()
+        .next();
     let plugin = value_str(
         &order_data,
         &["plugin", "platform", "order_plugin", "orderPlatform"],
@@ -3039,7 +3253,7 @@ pub async fn order_save_from_remote(
                 discount_amount, discount_amount_cents,
                 tip_amount, tip_amount_cents,
                 version, terminal_id, owner_terminal_id, source_terminal_id,
-                branch_id, plugin, external_plugin_order_id,
+                branch_id, client_request_id, plugin, external_plugin_order_id,
                 tax_rate,
                 delivery_fee, delivery_fee_cents,
                 is_ghost, ghost_source, ghost_metadata
@@ -3059,10 +3273,10 @@ pub async fn order_save_from_remote(
                 ?38, ?39,
                 ?40, ?41,
                 1, ?42, ?43, ?44,
-                ?45, ?46, ?47,
-                ?48,
-                ?49, ?50,
-                ?51, ?52, ?53
+                ?45, ?46, ?47, ?48,
+                ?49,
+                ?50, ?51,
+                ?52, ?53, ?54
             )",
             rusqlite::params![
                 local_id,
@@ -3110,6 +3324,7 @@ pub async fn order_save_from_remote(
                 owner_terminal_id,
                 source_terminal_id,
                 branch_id,
+                client_request_id,
                 plugin,
                 external_plugin_order_id,
                 tax_rate,
@@ -3129,7 +3344,8 @@ pub async fn order_save_from_remote(
 
     // Skip auto-print for ghost orders and pending/split payment orders (receipt
     // will be printed after split payments are individually recorded).
-    let skip_auto_print = is_ghost || payment_method.as_deref() == Some("pending");
+    let skip_auto_print =
+        suppress_auto_print || is_ghost || payment_method.as_deref() == Some("pending");
     if !skip_auto_print && crate::print::is_print_action_enabled(&db, "after_order") {
         for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
             if let Err(error) = print::enqueue_print_job(&db, entity_type, &local_id, None) {
@@ -4166,6 +4382,157 @@ mod dto_tests {
             body.get("cancelledAt").and_then(Value::as_str),
             Some("2026-06-09T10:30:00Z")
         );
+    }
+
+    fn setup_remote_identity_test_orders() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE orders (
+                id TEXT PRIMARY KEY,
+                supabase_id TEXT,
+                client_request_id TEXT,
+                order_number TEXT,
+                display_order_number TEXT,
+                sync_status TEXT,
+                terminal_id TEXT,
+                owner_terminal_id TEXT,
+                source_terminal_id TEXT,
+                branch_id TEXT,
+                last_synced_at TEXT
+            );",
+        )
+        .expect("create orders table");
+        conn
+    }
+
+    #[test]
+    fn remote_save_identity_matches_existing_local_client_request_id() {
+        let conn = setup_remote_identity_test_orders();
+        conn.execute(
+            "INSERT INTO orders (
+                id, client_request_id, order_number, display_order_number, sync_status
+             ) VALUES (
+                'local-order-29', 'client-order-29', 'ORD-07072026-00029', '00029', 'pending'
+             )",
+            [],
+        )
+        .expect("insert local order");
+
+        let remote_order = serde_json::json!({
+            "id": "remote-order-29",
+            "client_order_id": "client-order-29",
+            "order_number": "ORD-20260707-22:18",
+            "terminal_id": "terminal-d80762ac",
+            "owner_terminal_id": "d9243042-1745-424e-b37b-0ecb88717a75",
+            "source_terminal_id": "terminal-d80762ac",
+            "branch_id": "d28cef2e-bbf2-496a-b922-45b497525715"
+        });
+
+        let local_id =
+            resolve_existing_local_order_for_remote(&conn, "remote-order-29", &remote_order)
+                .expect("resolve remote order")
+                .expect("local order match");
+        assert_eq!(local_id, "local-order-29");
+
+        attach_remote_order_identity_to_local(
+            &conn,
+            &local_id,
+            "remote-order-29",
+            &remote_order,
+            "2026-07-07T19:19:00Z",
+        )
+        .expect("attach remote identity");
+
+        let row: (String, String, String, String, String, String, String, i64) = conn
+            .query_row(
+                "SELECT
+                    COALESCE(supabase_id, ''),
+                    COALESCE(client_request_id, ''),
+                    COALESCE(order_number, ''),
+                    COALESCE(display_order_number, ''),
+                    COALESCE(owner_terminal_id, ''),
+                    COALESCE(source_terminal_id, ''),
+                    COALESCE(sync_status, ''),
+                    (SELECT COUNT(*) FROM orders)
+                 FROM orders
+                 WHERE id = 'local-order-29'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .expect("load attached order");
+
+        assert_eq!(row.0, "remote-order-29");
+        assert_eq!(row.1, "client-order-29");
+        assert_eq!(row.2, "ORD-07072026-00029");
+        assert_eq!(row.3, "00029");
+        assert_eq!(row.4, "d9243042-1745-424e-b37b-0ecb88717a75");
+        assert_eq!(row.5, "terminal-d80762ac");
+        assert_eq!(row.6, "pending");
+        assert_eq!(row.7, 1);
+    }
+
+    #[test]
+    fn remote_save_identity_matches_existing_local_order_number() {
+        let conn = setup_remote_identity_test_orders();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, display_order_number, sync_status
+             ) VALUES (
+                'local-order-30', 'ORD-07072026-00030', '00030', 'synced'
+             )",
+            [],
+        )
+        .expect("insert local order");
+
+        let remote_order = serde_json::json!({
+            "id": "remote-order-30",
+            "order_number": "ORD-07072026-00030"
+        });
+
+        let local_id =
+            resolve_existing_local_order_for_remote(&conn, "remote-order-30", &remote_order)
+                .expect("resolve remote order")
+                .expect("local order match");
+        assert_eq!(local_id, "local-order-30");
+
+        attach_remote_order_identity_to_local(
+            &conn,
+            &local_id,
+            "remote-order-30",
+            &remote_order,
+            "2026-07-07T19:20:00Z",
+        )
+        .expect("attach remote identity");
+
+        let row: (String, String, String, String) = conn
+            .query_row(
+                "SELECT
+                    COALESCE(supabase_id, ''),
+                    COALESCE(order_number, ''),
+                    COALESCE(display_order_number, ''),
+                    COALESCE(sync_status, '')
+                 FROM orders
+                 WHERE id = 'local-order-30'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load attached order");
+
+        assert_eq!(row.0, "remote-order-30");
+        assert_eq!(row.1, "ORD-07072026-00030");
+        assert_eq!(row.2, "00030");
+        assert_eq!(row.3, "synced");
     }
 
     #[test]
