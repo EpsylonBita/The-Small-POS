@@ -58,6 +58,17 @@ const createMainT = async (locale: string) => {
   return instance.getFixedT(locale);
 };
 
+test('TableCheckManager item edits preserve source line ids and customizations', () => {
+  assert.match(modalSource, /const sourceOrderItemId =\s*item\.order_item_id/);
+  assert.match(modalSource, /order_item_id: sourceOrderItemId/);
+  assert.match(modalSource, /source_order_item_id: sourceOrderItemId/);
+  assert.match(
+    modalSource,
+    /customizations:\s*item\.customizations\s*\?\?\s*item\.selectedIngredients\s*\?\?\s*item\.modifiers\s*\?\?\s*item\.ingredients\s*\?\?\s*null/,
+  );
+  assert.match(modalSource, /id: String\(item\.id \|\| item\.order_item_id \|\| item\.orderItemId/);
+});
+
 // --- Behavioral: localized table label + currency -------------------------
 
 test('TableCheckManager title renders the shared "#TB04" convention, not raw "B04"', async () => {

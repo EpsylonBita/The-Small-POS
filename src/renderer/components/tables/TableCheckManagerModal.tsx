@@ -78,6 +78,10 @@ interface TableSessionBalance {
 
 interface TableSessionOrderItem {
   id: string;
+  order_item_id?: string | null;
+  orderItemId?: string | null;
+  source_order_item_id?: string | null;
+  sourceOrderItemId?: string | null;
   menu_item_id?: string | null;
   menuItemId?: string | null;
   name?: string | null;
@@ -98,6 +102,10 @@ interface TableSessionOrderItem {
   special_instructions?: string | null;
   specialInstructions?: string | null;
   notes?: string | null;
+  customizations?: unknown;
+  selectedIngredients?: unknown;
+  modifiers?: unknown;
+  ingredients?: unknown;
 }
 
 interface TableSessionAllocation {
@@ -341,8 +349,21 @@ const localOrderItems = (order: Order, itemFallback = 'Item'): TableSessionOrder
     const quantity = Number(item.quantity || 1) || 1;
     const unitPrice = Number(item.unit_price ?? item.unitPrice ?? item.price ?? 0) || 0;
     const totalPrice = Number(item.total_price ?? item.totalPrice ?? unitPrice * quantity) || 0;
+    const sourceOrderItemId =
+      item.order_item_id ??
+      item.orderItemId ??
+      item.source_order_item_id ??
+      item.sourceOrderItemId ??
+      item.original_order_item_id ??
+      item.originalOrderItemId ??
+      item.id ??
+      null;
     return {
       id: String(item.id || item.order_item_id || item.menu_item_id || `local-item-${index}`),
+      order_item_id: sourceOrderItemId,
+      orderItemId: sourceOrderItemId,
+      source_order_item_id: sourceOrderItemId,
+      sourceOrderItemId: sourceOrderItemId,
       menu_item_id: item.menu_item_id || item.menuItemId || null,
       menuItemId: item.menuItemId || item.menu_item_id || null,
       name: item.name || item.menu_item_name || item.menuItemName || itemFallback,
@@ -357,6 +378,12 @@ const localOrderItems = (order: Order, itemFallback = 'Item'): TableSessionOrder
       discountAmount: item.discountAmount ?? item.discount_amount,
       special_instructions: item.special_instructions || item.specialInstructions || null,
       notes: item.notes || null,
+      customizations:
+        item.customizations ??
+        item.selectedIngredients ??
+        item.modifiers ??
+        item.ingredients ??
+        null,
     };
   });
 };
@@ -615,9 +642,19 @@ const toEditableOrderItem = (item: TableSessionOrderItem, itemFallback = 'Item')
   const quantity = itemQuantity(item);
   const unitPrice = itemUnitPrice(item);
   const totalPrice = Number((unitPrice * quantity).toFixed(2));
+  const sourceOrderItemId =
+    item.order_item_id ??
+    item.orderItemId ??
+    item.source_order_item_id ??
+    item.sourceOrderItemId ??
+    item.id;
   return {
     ...item,
     id: item.id,
+    order_item_id: sourceOrderItemId,
+    orderItemId: sourceOrderItemId,
+    source_order_item_id: sourceOrderItemId,
+    sourceOrderItemId: sourceOrderItemId,
     menu_item_id: item.menu_item_id ?? item.menuItemId ?? item.id,
     menuItemId: item.menuItemId ?? item.menu_item_id ?? item.id,
     name: itemDisplayName(item, itemFallback),
@@ -631,11 +668,21 @@ const toEditableOrderItem = (item: TableSessionOrderItem, itemFallback = 'Item')
     special_instructions: item.special_instructions ?? item.specialInstructions ?? null,
     specialInstructions: item.specialInstructions ?? item.special_instructions ?? null,
     notes: item.notes ?? null,
+    customizations:
+      item.customizations ??
+      item.selectedIngredients ??
+      item.modifiers ??
+      item.ingredients ??
+      null,
   };
 };
 
 const tableItemFromEditable = (item: Record<string, unknown>): TableSessionOrderItem => ({
-  id: String(item.id || item.menu_item_id || item.menuItemId || crypto.randomUUID()),
+  id: String(item.id || item.order_item_id || item.orderItemId || item.menu_item_id || item.menuItemId || crypto.randomUUID()),
+  order_item_id: typeof item.order_item_id === 'string' ? item.order_item_id : null,
+  orderItemId: typeof item.orderItemId === 'string' ? item.orderItemId : null,
+  source_order_item_id: typeof item.source_order_item_id === 'string' ? item.source_order_item_id : null,
+  sourceOrderItemId: typeof item.sourceOrderItemId === 'string' ? item.sourceOrderItemId : null,
   menu_item_id: typeof item.menu_item_id === 'string' ? item.menu_item_id : null,
   menuItemId: typeof item.menuItemId === 'string' ? item.menuItemId : null,
   name: typeof item.name === 'string' ? item.name : null,
@@ -650,6 +697,12 @@ const tableItemFromEditable = (item: Record<string, unknown>): TableSessionOrder
   discountAmount: item.discountAmount as number | string | null | undefined,
   special_instructions: typeof item.special_instructions === 'string' ? item.special_instructions : null,
   notes: typeof item.notes === 'string' ? item.notes : null,
+  customizations:
+    item.customizations ??
+    item.selectedIngredients ??
+    item.modifiers ??
+    item.ingredients ??
+    null,
 });
 
 interface TileProps {

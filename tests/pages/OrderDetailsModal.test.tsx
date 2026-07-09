@@ -162,6 +162,22 @@ test('OrderDetailsModal keeps item totals and history labels visually clean', ()
   assert.doesNotMatch(source, /rounded-full border border-emerald-300\/70 bg-emerald-50 px-3 py-1/);
 });
 
+test('OrderDetailsModal does not present edit top-ups as split payments', () => {
+  const source = readFileSync(orderDetailsModalPath, 'utf8');
+
+  assert.match(source, /const completedPaymentMethods = new Set/);
+  assert.match(source, /completedPaymentMethods\.size > 1[\s\S]*return 'split'/);
+  assert.match(source, /completedPaymentMethods\.size === 1[\s\S]*Array\.from\(completedPaymentMethods\)\[0\]/);
+  assert.doesNotMatch(
+    source,
+    /paymentStatus === 'partially_paid' && completedPayments\.length > 0[\s\S]{0,80}return 'split'/,
+  );
+  assert.doesNotMatch(
+    source,
+    /completedPayments\.length > 1[\s\S]{0,80}return 'split'/,
+  );
+});
+
 // Touch POS scrollbar policy: the inner item list used a styled native `custom-scrollbar`; it now
 // uses the same hidden rail as the modal body. Every scroll region keeps its scroll but hides the
 // native scrollbar.

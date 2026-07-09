@@ -4031,6 +4031,36 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 item.menuItemId ||
                 `item-${index}`,
             ),
+            order_item_id:
+              item.order_item_id ??
+              item.orderItemId ??
+              item.source_order_item_id ??
+              item.sourceOrderItemId ??
+              item.original_order_item_id ??
+              item.originalOrderItemId ??
+              null,
+            orderItemId:
+              item.orderItemId ??
+              item.order_item_id ??
+              item.sourceOrderItemId ??
+              item.source_order_item_id ??
+              item.originalOrderItemId ??
+              item.original_order_item_id ??
+              null,
+            source_order_item_id:
+              item.source_order_item_id ??
+              item.order_item_id ??
+              item.orderItemId ??
+              item.original_order_item_id ??
+              item.originalOrderItemId ??
+              null,
+            sourceOrderItemId:
+              item.sourceOrderItemId ??
+              item.orderItemId ??
+              item.order_item_id ??
+              item.originalOrderItemId ??
+              item.original_order_item_id ??
+              null,
             menu_item_id: item.menu_item_id ?? item.menuItemId ?? null,
             menuItemId: item.menuItemId ?? item.menu_item_id ?? null,
             is_manual: item.is_manual === true,

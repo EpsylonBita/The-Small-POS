@@ -708,13 +708,19 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   );
   const paymentMethodPresentation = (() => {
     const normalizedMethod = String(paymentMethod || '').toLowerCase();
+    const completedPaymentMethods = new Set(
+      completedPayments
+        .map((payment: any) => String(payment?.method || payment?.payment_method || '').toLowerCase().trim())
+        .filter(Boolean),
+    );
+
+    if (completedPaymentMethods.size > 1) {
+      return 'split';
+    }
+    if (completedPaymentMethods.size === 1) {
+      return Array.from(completedPaymentMethods)[0];
+    }
     if (normalizedMethod === 'split' || normalizedMethod === 'mixed') {
-      return 'split';
-    }
-    if (paymentStatus === 'partially_paid' && completedPayments.length > 0) {
-      return 'split';
-    }
-    if (completedPayments.length > 1) {
       return 'split';
     }
     return normalizedMethod;

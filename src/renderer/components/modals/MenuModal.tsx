@@ -1030,8 +1030,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               item.selectedIngredients ??
               item.modifiers ??
               item.ingredients;
+            const sourceOrderItemId =
+              item.order_item_id ??
+              item.orderItemId ??
+              item.source_order_item_id ??
+              item.sourceOrderItemId ??
+              item.original_order_item_id ??
+              item.originalOrderItemId ??
+              item.id ??
+              normalizedItem.id;
             return {
               id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+              order_item_id: sourceOrderItemId,
+              orderItemId: sourceOrderItemId,
+              source_order_item_id: sourceOrderItemId,
+              sourceOrderItemId: sourceOrderItemId,
               menuItemId,
               name: normalizedItem.name || catalogMenuItem?.name || 'Unknown Item',
               price: normalizedItem.unit_price || normalizedItem.price || 0,
@@ -1074,8 +1087,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   item.modifiers ??
                   item.ingredients;
                 const transformedCustomizations = transformCustomizations(rawCustomizations, ingredientLookup);
+                const sourceOrderItemId =
+                  item.order_item_id ??
+                  item.orderItemId ??
+                  item.source_order_item_id ??
+                  item.sourceOrderItemId ??
+                  item.original_order_item_id ??
+                  item.originalOrderItemId ??
+                  item.id ??
+                  normalizedItem.id;
                 return {
                   id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+                  order_item_id: sourceOrderItemId,
+                  orderItemId: sourceOrderItemId,
+                  source_order_item_id: sourceOrderItemId,
+                  sourceOrderItemId: sourceOrderItemId,
                   menuItemId,
                   name: normalizedItem.name || catalogMenuItem?.name || 'Unknown Item',
                   price: normalizedItem.unit_price || normalizedItem.price || 0,
@@ -1917,6 +1943,24 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       ...item,
       // Then override with cart-specific properties
       id: uniqueId, // Truly unique ID for cart item (overrides item.id)
+      order_item_id:
+        editingCartItem?.order_item_id ??
+        editingCartItem?.orderItemId ??
+        editingCartItem?.source_order_item_id ??
+        editingCartItem?.sourceOrderItemId,
+      orderItemId:
+        editingCartItem?.orderItemId ??
+        editingCartItem?.order_item_id ??
+        editingCartItem?.sourceOrderItemId ??
+        editingCartItem?.source_order_item_id,
+      source_order_item_id:
+        editingCartItem?.source_order_item_id ??
+        editingCartItem?.order_item_id ??
+        editingCartItem?.orderItemId,
+      sourceOrderItemId:
+        editingCartItem?.sourceOrderItemId ??
+        editingCartItem?.orderItemId ??
+        editingCartItem?.order_item_id,
       menuItemId: item.id, // Store original menu item ID for editing
       name: item.name || 'Unknown Item',
       price: pricePerItem, // Price per unit (base + customizations) - used for display

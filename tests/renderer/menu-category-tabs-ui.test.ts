@@ -209,4 +209,7 @@ test('menu modal edit mode formats order numbers and flattens kiosk customizatio
   assert.match(modalSource, /item\.modifiers/);
   assert.match(modalSource, /item\.ingredients/);
   assert.match(modalSource, /resolveCustomizationIngredient\(c, ingredientLookup\)/);
+  assert.match(modalSource, /const sourceOrderItemId =/);
+  assert.match(modalSource, /source_order_item_id: sourceOrderItemId/);
+  assert.match(modalSource, /editingCartItem\?\.source_order_item_id/);
 });

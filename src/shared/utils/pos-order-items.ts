@@ -195,7 +195,12 @@ export const normalizePosOrderItem = (item: Record<string, any>) => {
     originalUnitPrice: originalUnitPrice,
     is_price_overridden: isPriceOverridden,
     isPriceOverridden: isPriceOverridden,
-    customizations: item.customizations ?? item.selectedIngredients ?? null,
+    customizations:
+      item.customizations ??
+      item.selectedIngredients ??
+      item.modifiers ??
+      item.ingredients ??
+      null,
     notes,
     instructions,
     special_instructions: specialInstructions,

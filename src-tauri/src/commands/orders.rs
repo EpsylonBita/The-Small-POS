@@ -1162,6 +1162,189 @@ fn compute_order_items_total(items: &[serde_json::Value]) -> f64 {
         .sum::<f64>()
 }
 
+fn item_text_value<'a>(item: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| item.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn meaningful_customizations(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(entries) => !entries.is_empty(),
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            !trimmed.is_empty() && !matches!(trimmed, "null" | "[]" | "{}")
+        }
+        _ => true,
+    }
+}
+
+fn item_omits_customizations(item: &serde_json::Value) -> bool {
+    match item.get("customizations") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(text)) => text.trim().is_empty(),
+        Some(_) => false,
+    }
+}
+
+fn order_item_line_identity(item: &serde_json::Value) -> Vec<String> {
+    let mut identities: Vec<String> = [
+        "order_item_id",
+        "orderItemId",
+        "source_order_item_id",
+        "sourceOrderItemId",
+        "original_order_item_id",
+        "originalOrderItemId",
+    ]
+    .iter()
+    .filter_map(|key| item_text_value(item, &[*key]))
+    .map(|value| value.to_ascii_lowercase())
+    .collect();
+
+    if let Some(item_id) = item_text_value(item, &["id"]) {
+        let id_is_menu_item_id = item_text_value(item, &["menu_item_id", "menuItemId"])
+            .map(|menu_item_id| menu_item_id.eq_ignore_ascii_case(item_id))
+            .unwrap_or(false);
+        if !id_is_menu_item_id {
+            identities.push(item_id.to_ascii_lowercase());
+        }
+    }
+
+    identities
+}
+
+fn order_item_identity_matches(existing: &serde_json::Value, incoming: &serde_json::Value) -> bool {
+    let incoming_ids = order_item_line_identity(incoming);
+    if incoming_ids.is_empty() {
+        return false;
+    }
+
+    let existing_ids = order_item_line_identity(existing);
+    existing_ids.iter().any(|existing_id| {
+        incoming_ids
+            .iter()
+            .any(|incoming_id| incoming_id == existing_id)
+    })
+}
+
+fn close_money_values(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => (left - right).abs() < 0.0001,
+        _ => false,
+    }
+}
+
+fn order_item_match_score(existing: &serde_json::Value, incoming: &serde_json::Value) -> i32 {
+    if order_item_identity_matches(existing, incoming) {
+        return 100;
+    }
+
+    let mut score = 0;
+    let existing_menu_item_id = item_text_value(existing, &["menu_item_id", "menuItemId"]);
+    let incoming_menu_item_id = item_text_value(incoming, &["menu_item_id", "menuItemId"]);
+    if existing_menu_item_id.is_some()
+        && incoming_menu_item_id.is_some()
+        && existing_menu_item_id == incoming_menu_item_id
+    {
+        score += 20;
+    }
+
+    let existing_name = item_text_value(existing, &["menu_item_name", "menuItemName", "name"])
+        .map(str::to_ascii_lowercase);
+    let incoming_name = item_text_value(incoming, &["menu_item_name", "menuItemName", "name"])
+        .map(str::to_ascii_lowercase);
+    if existing_name.is_some() && incoming_name.is_some() && existing_name == incoming_name {
+        score += 8;
+    }
+
+    if close_money_values(
+        value_f64(existing, &["unit_price", "unitPrice", "price"]),
+        value_f64(incoming, &["unit_price", "unitPrice", "price"]),
+    ) {
+        score += 4;
+    }
+    if close_money_values(
+        value_f64(existing, &["quantity"]),
+        value_f64(incoming, &["quantity"]),
+    ) {
+        score += 2;
+    }
+    if close_money_values(
+        value_f64(existing, &["total_price", "totalPrice"]),
+        value_f64(incoming, &["total_price", "totalPrice"]),
+    ) {
+        score += 2;
+    }
+
+    score
+}
+
+fn merge_existing_order_item_customizations(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    incoming_items: &[serde_json::Value],
+) -> Result<Vec<serde_json::Value>, String> {
+    let current_items_json: String = conn
+        .query_row(
+            "SELECT COALESCE(items, '[]') FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load current order items: {e}"))?;
+    let current_items: Vec<serde_json::Value> =
+        serde_json::from_str(&current_items_json).unwrap_or_default();
+
+    let mut used_existing = vec![false; current_items.len()];
+    let mut merged = Vec::with_capacity(incoming_items.len());
+
+    for incoming in incoming_items {
+        if !item_omits_customizations(incoming) {
+            merged.push(incoming.clone());
+            continue;
+        }
+
+        let incoming_has_line_identity = !order_item_line_identity(incoming).is_empty();
+        let mut best_match: Option<(usize, i32)> = None;
+        for (index, existing) in current_items.iter().enumerate() {
+            if used_existing[index] {
+                continue;
+            }
+            let Some(existing_customizations) = existing.get("customizations") else {
+                continue;
+            };
+            if !meaningful_customizations(existing_customizations) {
+                continue;
+            }
+
+            let score = order_item_match_score(existing, incoming);
+            if score == 100 || (!incoming_has_line_identity && score >= 34) {
+                if best_match.map_or(true, |(_, best_score)| score > best_score) {
+                    best_match = Some((index, score));
+                }
+            }
+        }
+
+        let mut next_item = incoming.clone();
+        if let Some((index, _)) = best_match {
+            used_existing[index] = true;
+            if let Some(existing_customizations) = current_items[index].get("customizations") {
+                if let Some(object) = next_item.as_object_mut() {
+                    object.insert(
+                        "customizations".to_string(),
+                        existing_customizations.clone(),
+                    );
+                }
+            }
+        }
+        merged.push(next_item);
+    }
+
+    Ok(merged)
+}
+
 fn derive_next_order_totals(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -2529,17 +2712,6 @@ pub async fn order_update_items(
     let order_id_raw = payload.order_id;
     let items = payload.items;
     let notes = payload.order_notes;
-    let total = items
-        .iter()
-        .map(|item| {
-            let qty = value_f64(item, &["quantity"]).unwrap_or(1.0);
-            if let Some(tp) = value_f64(item, &["total_price", "totalPrice"]) {
-                tp
-            } else {
-                value_f64(item, &["unit_price", "unitPrice", "price"]).unwrap_or(0.0) * qty
-            }
-        })
-        .sum::<f64>();
     let now = Utc::now().to_rfc3339();
 
     let actual_order_id = {
@@ -2554,8 +2726,11 @@ pub async fn order_update_items(
 
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let merged_items =
+            merge_existing_order_item_customizations(&conn, &actual_order_id, &items)?;
+        let total = compute_order_items_total(&merged_items);
         let items_json =
-            serde_json::to_string(&items).map_err(|e| format!("serialize items: {e}"))?;
+            serde_json::to_string(&merged_items).map_err(|e| format!("serialize items: {e}"))?;
         // W4c dual-write: the post-edit total_amount must propagate to
         // total_amount_cents too — otherwise downstream COALESCE reads
         // get the pre-edit cents value instead of the new real.
@@ -2579,7 +2754,7 @@ pub async fn order_update_items(
         }
         let sync_payload = serde_json::json!({
             "orderId": actual_order_id,
-            "items": items,
+            "items": merged_items,
             "orderNotes": notes
         });
         let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
@@ -2694,8 +2869,17 @@ pub async fn orders_apply_edit_settlement(
     };
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let (next_total, next_subtotal) =
-        resolve_edit_settlement_totals(&conn, &actual_order_id, &payload)?;
+    let merged_items =
+        merge_existing_order_item_customizations(&conn, &actual_order_id, &payload.items)?;
+    let (derived_total, derived_subtotal) =
+        derive_next_order_totals(&conn, &actual_order_id, &merged_items)?;
+    let (next_total, next_subtotal) = match payload.financials.as_ref() {
+        Some(financials) => (
+            financials.total_amount.unwrap_or(derived_total).max(0.0),
+            financials.subtotal.unwrap_or(derived_subtotal).max(0.0),
+        ),
+        None => (derived_total, derived_subtotal),
+    };
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
@@ -2715,7 +2899,7 @@ pub async fn orders_apply_edit_settlement(
         update_order_items_in_connection(
             &conn,
             &actual_order_id,
-            &payload.items,
+            &merged_items,
             payload.order_notes.as_deref(),
             next_total,
             next_subtotal,
@@ -2821,7 +3005,7 @@ pub async fn orders_apply_edit_settlement(
         enqueue_order_edit_sync(
             &conn,
             &actual_order_id,
-            &payload.items,
+            &merged_items,
             payload.order_notes.as_deref(),
             next_total,
             next_subtotal,
@@ -4628,6 +4812,164 @@ mod dto_tests {
         assert_eq!(parsed.name_on_ringer.as_deref(), Some("Doorbell"));
         assert!((parsed.delivery_fee - 4.5).abs() < 0.001);
         assert!((parsed.total_amount - 19.5).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod item_customization_merge_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+
+    fn conn_with_order_items(items: serde_json::Value) -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE orders (
+                id TEXT PRIMARY KEY,
+                items TEXT
+            );",
+        )
+        .expect("create orders table");
+        conn.execute(
+            "INSERT INTO orders (id, items) VALUES (?1, ?2)",
+            params!["order-1", items.to_string()],
+        )
+        .expect("insert order");
+        conn
+    }
+
+    #[test]
+    fn restores_existing_customizations_when_existing_line_omits_them() {
+        let original_customizations = serde_json::json!([
+            {
+                "ingredient": { "id": "ing-honey", "name": "Honey" },
+                "quantity": 2
+            }
+        ]);
+        let conn = conn_with_order_items(serde_json::json!([
+            {
+                "id": "line-crepe",
+                "menu_item_id": "item-crepe",
+                "name": "Crepe",
+                "quantity": 1,
+                "unit_price": 5.0,
+                "total_price": 6.0,
+                "customizations": original_customizations
+            },
+            {
+                "id": "line-water",
+                "menu_item_id": "item-water",
+                "name": "Water",
+                "quantity": 1,
+                "unit_price": 1.0,
+                "total_price": 1.0
+            }
+        ]));
+        let incoming = vec![
+            serde_json::json!({
+                "id": "edit-line-crepe",
+                "source_order_item_id": "line-crepe",
+                "menu_item_id": "item-crepe",
+                "name": "Crepe",
+                "quantity": 1,
+                "unit_price": 5.0,
+                "total_price": 6.0,
+                "customizations": null
+            }),
+            serde_json::json!({
+                "id": "new-coke",
+                "menu_item_id": "item-coke",
+                "name": "Coca-Cola",
+                "quantity": 1,
+                "unit_price": 1.5,
+                "total_price": 1.5,
+                "customizations": null
+            }),
+        ];
+
+        let merged = merge_existing_order_item_customizations(&conn, "order-1", &incoming)
+            .expect("merge should succeed");
+
+        assert_eq!(
+            merged[0].get("customizations"),
+            Some(&original_customizations)
+        );
+        assert_eq!(
+            merged[1].get("customizations"),
+            Some(&serde_json::Value::Null)
+        );
+    }
+
+    #[test]
+    fn restores_existing_customizations_when_id_is_only_menu_item_id() {
+        let original_customizations = serde_json::json!([
+            {
+                "ingredient": { "id": "ing-lemon", "name": "Lemon" },
+                "quantity": 1
+            }
+        ]);
+        let conn = conn_with_order_items(serde_json::json!([
+            {
+                "id": "line-tea",
+                "menu_item_id": "item-tea",
+                "name": "Tea",
+                "quantity": 1,
+                "unit_price": 3.0,
+                "total_price": 3.5,
+                "customizations": original_customizations
+            }
+        ]));
+        let incoming = vec![serde_json::json!({
+            "id": "item-tea",
+            "menu_item_id": "item-tea",
+            "name": "Tea",
+            "quantity": 1,
+            "unit_price": 3.0,
+            "total_price": 3.5,
+            "customizations": null
+        })];
+
+        let merged = merge_existing_order_item_customizations(&conn, "order-1", &incoming)
+            .expect("merge should succeed");
+
+        assert_eq!(
+            merged[0].get("customizations"),
+            Some(&original_customizations)
+        );
+    }
+
+    #[test]
+    fn keeps_explicit_empty_customizations_as_user_intent() {
+        let conn = conn_with_order_items(serde_json::json!([
+            {
+                "id": "line-crepe",
+                "menu_item_id": "item-crepe",
+                "name": "Crepe",
+                "quantity": 1,
+                "unit_price": 5.0,
+                "total_price": 6.0,
+                "customizations": {
+                    "ing-honey": { "name": "Honey" }
+                }
+            }
+        ]));
+        let incoming = vec![serde_json::json!({
+            "id": "edit-line-crepe",
+            "source_order_item_id": "line-crepe",
+            "menu_item_id": "item-crepe",
+            "name": "Crepe",
+            "quantity": 1,
+            "unit_price": 5.0,
+            "total_price": 5.0,
+            "customizations": []
+        })];
+
+        let merged = merge_existing_order_item_customizations(&conn, "order-1", &incoming)
+            .expect("merge should succeed");
+
+        assert_eq!(
+            merged[0].get("customizations"),
+            Some(&serde_json::json!([]))
+        );
     }
 }
 

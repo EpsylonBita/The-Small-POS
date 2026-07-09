@@ -407,6 +407,32 @@ test('normalizePosOrderItems canonicalizes manual open-price lines', () => {
   assert.equal(hasValidSyncedPosMenuItemId(manualItem), true);
 });
 
+test('normalizePosOrderItems preserves alternate customization shapes', () => {
+  const modifierCustomization = [{ ingredient_id: 'extra-cheese', quantity: 1 }];
+  const ingredientCustomization = [{ ingredientId: 'no-onion', action: 'without' }];
+  const [modifierItem, ingredientItem] = normalizePosOrderItems([
+    {
+      id: 'line-with-modifier',
+      menuItemId: 'menu-item-1',
+      name: 'Toast',
+      quantity: 1,
+      price: 4,
+      modifiers: modifierCustomization,
+    },
+    {
+      id: 'line-with-ingredient',
+      menuItemId: 'menu-item-2',
+      name: 'Burger',
+      quantity: 1,
+      price: 8,
+      ingredients: ingredientCustomization,
+    },
+  ]);
+
+  assert.deepEqual(modifierItem.customizations, modifierCustomization);
+  assert.deepEqual(ingredientItem.customizations, ingredientCustomization);
+});
+
 test('normalizePosOrderItems keeps invalid non-manual ids detectable', () => {
   const [invalidItem] = normalizePosOrderItems([
     {
