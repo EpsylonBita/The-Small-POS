@@ -33,6 +33,24 @@ const CMD_STATUS_INST: u8 = 0x01;
 const CMD_PRINT_LINE_CLASS: u8 = 0x06;
 const CMD_PRINT_LINE_INST: u8 = 0xD1;
 
+// Negative-completion / abort APDU command bytes (PT → ECR).
+//   84 xx — negative completion; xx is the ZVT error code.
+//   06 1E — Abort (transaction cancelled by the terminal / cardholder).
+const CMD_NEGATIVE_COMPLETION: u8 = 0x84;
+const CMD_ABORT_RESULT_CLASS: u8 = 0x06;
+const CMD_ABORT_RESULT_INST: u8 = 0x1E;
+
+// Transaction-completion APDU command bytes (PT → ECR).
+//   06 0F — Completion (the transaction reached its end).
+//   04 0F — Status-Information; carries the outcome. Per ZVT the first data
+//           element is BMP 27 (result-code); 0x00 == successful.
+const CMD_COMPLETION_CLASS: u8 = 0x06;
+const CMD_COMPLETION_INST: u8 = 0x0F;
+const CMD_STATUS_INFO_CLASS: u8 = 0x04;
+const CMD_STATUS_INFO_INST: u8 = 0x0F;
+const BMP_RESULT_CODE: u8 = 0x27;
+const ZVT_RESULT_OK: u8 = 0x00;
+
 const DEFAULT_TIMEOUT_MS: u64 = 60000; // 60s for card transactions
 
 // ---------------------------------------------------------------------------
@@ -48,6 +66,9 @@ pub struct ZvtProtocol {
     print_on_pos: bool,
     initialized: bool,
     receipt_lines: Vec<String>,
+    /// Last 04 0F Status-Information frame seen during wait_for_completion —
+    /// carries the transaction result code used to classify approve/decline.
+    last_status_info: Option<Vec<u8>>,
     transaction_timeout_ms: u64,
 }
 
@@ -70,6 +91,7 @@ impl ZvtProtocol {
             print_on_pos,
             initialized: false,
             receipt_lines: Vec::new(),
+            last_status_info: None,
             transaction_timeout_ms: timeout,
         }
     }
@@ -209,6 +231,65 @@ impl ZvtProtocol {
         apdu.len() >= 2 && apdu[0] == ACK_POSITIVE && apdu[1] == 0x00
     }
 
+    /// Classify a received frame as a terminal error / abort — but ONLY on the
+    /// CRC-validated APDU's command bytes, never a whole-buffer byte scan.
+    ///
+    /// Gap review 2026-07-10 P0: the previous check flagged an error whenever
+    /// ANY byte in the frame equalled 0x84. ZVT is the German-market protocol,
+    /// and intermediate frames (04 FF status, 06 D1 print lines) legitimately
+    /// contain byte 0x84 in three ways: BCD-encoded amounts (e.g. €12.84
+    /// encodes 0x84), the CRC-16 bytes appended to every frame, and CP437/CP850
+    /// print text ('ä' = 0x84). Those false errors returned mid-transaction, so
+    /// the POS recorded a failure while the terminal went on to approve and
+    /// charge the card. Classifying on the command bytes of the CRC-validated
+    /// APDU eliminates the false positives while still catching real declines.
+    fn completion_error(raw: &[u8]) -> Option<String> {
+        let apdu = Self::extract_framed_apdu(raw)?;
+        match (apdu.first().copied(), apdu.get(1).copied()) {
+            (Some(CMD_NEGATIVE_COMPLETION), code) => {
+                Some(format!("Terminal error: 0x{:02X}", code.unwrap_or(0xFF)))
+            }
+            (Some(CMD_ABORT_RESULT_CLASS), Some(CMD_ABORT_RESULT_INST)) => {
+                Some("Transaction aborted by terminal".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// True when the frame is a 06 0F Completion — the PT signalling that the
+    /// transaction reached its end.
+    ///
+    /// Gap review 2026-07-10 P0 (round 2): 80 00 is only the command-level ACK
+    /// (consumed by send_apdu). A spec-conformant terminal ends a card
+    /// transaction with 06 0F Completion, which the old loop ACKed as an
+    /// "intermediate" and then spun until the 60s timeout — reporting failure
+    /// on an approved, charged card. wait_for_completion now exits on this too.
+    fn is_completion(raw: &[u8]) -> bool {
+        matches!(
+            Self::extract_framed_apdu(raw).and_then(|a| Some((*a.first()?, *a.get(1)?))),
+            Some((CMD_COMPLETION_CLASS, CMD_COMPLETION_INST))
+        )
+    }
+
+    /// Whether a captured 04 0F Status-Information frame reports approval.
+    ///
+    /// Per ZVT the first data element of Status-Information is BMP 27
+    /// (result-code); 0x00 == successful. We check that exact spec position
+    /// (APDU = [04 0F len 27 <result> …]) rather than scanning the buffer, so a
+    /// stray 0x27 elsewhere can never be mistaken for an approval. Anything we
+    /// cannot positively verify as approved is treated as NOT approved — a
+    /// false decline is recoverable (retry/void); a false approval loses money.
+    ///
+    /// NOTE: end-to-end ZVT approve/decline classification is validated by the
+    /// separate real-terminal ECR certification gate, not by these unit tests.
+    fn status_info_indicates_approval(raw: &[u8]) -> bool {
+        let Some(apdu) = Self::extract_framed_apdu(raw) else {
+            return false;
+        };
+        // apdu[0..2] = 04 0F, apdu[2] = length, apdu[3] = BMP tag, apdu[4] = value
+        apdu.len() >= 5 && apdu[3] == BMP_RESULT_CODE && apdu[4] == ZVT_RESULT_OK
+    }
+
     /// Collect receipt print lines from intermediate responses.
     fn collect_receipt_lines(&mut self, raw: &[u8]) {
         // Look for print line command (06 D1) in the response
@@ -254,18 +335,25 @@ impl ZvtProtocol {
             // Collect any print lines
             self.collect_receipt_lines(&raw);
 
-            // Check for positive completion
-            if Self::is_positive_completion(&raw) {
-                return Ok(raw);
+            // Check for a real negative completion / abort FIRST — classified
+            // on the APDU command bytes only, never a whole-buffer 0x84 scan.
+            if let Some(error) = Self::completion_error(&raw) {
+                return Err(error);
             }
 
-            // Check for error / negative completion (84 xx)
-            if raw.windows(1).any(|w| w[0] == 0x84) {
-                let error_code = raw.get(raw.iter().position(|&b| b == 0x84).unwrap() + 1);
-                return Err(format!(
-                    "Terminal error: 0x{:02X}",
-                    error_code.unwrap_or(&0xFF)
-                ));
+            // Capture the Status-Information (04 0F) — it carries the outcome
+            // (result code) that process_transaction uses to classify the sale.
+            if matches!(
+                Self::extract_framed_apdu(&raw).and_then(|a| Some((*a.first()?, *a.get(1)?))),
+                Some((CMD_STATUS_INFO_CLASS, CMD_STATUS_INFO_INST))
+            ) {
+                self.last_status_info = Some(raw.clone());
+            }
+
+            // Terminal state reached: an 80 00 ACK-completion (non-sale flows)
+            // or a 06 0F transaction Completion.
+            if Self::is_positive_completion(&raw) || Self::is_completion(&raw) {
+                return Ok(raw);
             }
 
             // Otherwise it's an intermediate message — send ACK and continue
@@ -386,6 +474,7 @@ impl EcrProtocol for ZvtProtocol {
     ) -> Result<TransactionResponse, String> {
         let started = Utc::now().to_rfc3339();
         self.receipt_lines.clear();
+        self.last_status_info = None;
 
         let (class, inst) = match request.transaction_type {
             TransactionType::Sale => (CMD_AUTHORIZATION_CLASS, CMD_AUTHORIZATION_INST),
@@ -408,8 +497,11 @@ impl EcrProtocol for ZvtProtocol {
         // Wait for transaction completion (card tap/insert/swipe)
         let completion = self.wait_for_completion(self.transaction_timeout_ms)?;
 
+        // Prefer the Status-Information frame for card data — 06 0F Completion
+        // carries no BMPs; the card metadata lives in the preceding 04 0F.
+        let data_frame = self.last_status_info.clone().unwrap_or(completion.clone());
         let (auth_code, card_type, card_last_four, terminal_ref) =
-            self.parse_transaction_data(&completion);
+            self.parse_transaction_data(&data_frame);
 
         let receipt_lines = if self.receipt_lines.is_empty() {
             None
@@ -417,17 +509,18 @@ impl EcrProtocol for ZvtProtocol {
             Some(self.receipt_lines.clone())
         };
 
-        // Wave 2 C13: classify the transaction outcome from the actual
-        // completion bytes instead of hard-coding Approved. `wait_for_completion`
-        // currently only returns Ok(raw) when `is_positive_completion(raw)` was
-        // already satisfied inside the loop, so in the common case this is
-        // redundant — but the defensive recheck closes the case where
-        // `wait_for_completion` (or a future refactor of it) ever returns
-        // an Ok that does NOT contain the 0x80 0x00 positive-completion
-        // marker. A declined card that reaches this branch used to be
-        // reported as Approved, which is the single highest-dollar-impact
-        // bug in the review (cashier hands over goods on a declined card).
-        let status = if Self::is_positive_completion(&completion) {
+        // Classify the outcome from POSITIVE evidence only (gap review P0,
+        // round 2). Approve only when a 04 0F Status-Information reported ZVT
+        // result-code 0x00. A bare 80 00 ACK-completion (non-sale flows) keeps
+        // its legacy meaning. Everything else — a 06 0F completion with no
+        // verified success status, an abort, a NAK — is a decline. A false
+        // decline is recoverable; a false approval loses money.
+        let status = if self
+            .last_status_info
+            .as_deref()
+            .map(Self::status_info_indicates_approval)
+            .unwrap_or_else(|| Self::is_positive_completion(&completion))
+        {
             TransactionStatus::Approved
         } else {
             TransactionStatus::Declined
@@ -619,5 +712,143 @@ mod tests {
         assert!(!ZvtProtocol::is_positive_completion(&[0x80, 0x00, 0x00]));
         assert!(!ZvtProtocol::is_positive_completion(&corrupt_crc));
         assert!(!ZvtProtocol::is_positive_completion(&[]));
+    }
+
+    fn test_proto() -> ZvtProtocol {
+        ZvtProtocol::new(
+            Box::new(crate::ecr::transport::BluetoothTransport::new("", 0)),
+            &serde_json::json!({}),
+        )
+    }
+
+    // Gap review 2026-07-10 P0: a genuine negative completion (84 xx as the
+    // APDU command bytes) is still detected as an error.
+    #[test]
+    fn test_completion_error_detects_real_negative_completion() {
+        let proto = test_proto();
+        let frame = proto.frame_apdu(&[CMD_NEGATIVE_COMPLETION, 0x05, 0x00]);
+        let err = ZvtProtocol::completion_error(&frame).expect("84 xx must be an error");
+        assert!(
+            err.contains("0x05"),
+            "error code must be carried through: {err}"
+        );
+    }
+
+    // Gap review P0: a 06 1E abort (command bytes) is detected as an abort.
+    #[test]
+    fn test_completion_error_detects_abort() {
+        let proto = test_proto();
+        let frame = proto.frame_apdu(&[CMD_ABORT_RESULT_CLASS, CMD_ABORT_RESULT_INST, 0x00]);
+        let err = ZvtProtocol::completion_error(&frame).expect("06 1E must be an abort");
+        assert!(err.to_lowercase().contains("abort"), "got: {err}");
+    }
+
+    // Gap review P0 — the core regression: an intermediate status frame whose
+    // DATA contains byte 0x84 (a BCD amount of €x.84, or the CRC bytes, or the
+    // German 'ä' in a print line) must NOT be misread as a terminal error.
+    #[test]
+    fn test_completion_error_ignores_0x84_inside_intermediate_frame_data() {
+        let proto = test_proto();
+
+        // 04 FF intermediate status carrying a BCD amount €12.84 (…0x12 0x84).
+        let bcd_amount = proto.frame_apdu(&[0x04, 0xFF, 0x06, 0x00, 0x00, 0x00, 0x00, 0x12, 0x84]);
+        assert!(
+            ZvtProtocol::completion_error(&bcd_amount).is_none(),
+            "a BCD amount containing 0x84 must not be read as a terminal error",
+        );
+
+        // 06 D1 print line with 'ä' (CP437 0x84) in the text.
+        let print_line = proto.frame_apdu(&[
+            CMD_PRINT_LINE_CLASS,
+            CMD_PRINT_LINE_INST,
+            0x03,
+            b'K',
+            0x84,
+            b'e',
+        ]);
+        assert!(
+            ZvtProtocol::completion_error(&print_line).is_none(),
+            "a print line containing 'ä' (0x84) must not be read as a terminal error",
+        );
+
+        // A positive completion whose CRC bytes happen to include 0x84 must
+        // still not be classified as an error by completion_error.
+        let approved = proto.frame_apdu(&[ACK_POSITIVE, 0x00, 0x00]);
+        assert!(ZvtProtocol::completion_error(&approved).is_none());
+    }
+
+    #[test]
+    fn test_completion_error_ignores_unframed_or_partial_input() {
+        // A partial/garbage buffer that fails CRC framing is treated as an
+        // intermediate (None), letting the loop ACK and wait — not a failure.
+        assert!(ZvtProtocol::completion_error(&[0x84, 0x05]).is_none());
+        assert!(ZvtProtocol::completion_error(&[]).is_none());
+    }
+
+    // Gap review 2026-07-10 P0 (round 2): a spec-conformant terminal ends the
+    // transaction with 06 0F Completion, which must be recognized so approvals
+    // don't spin to the 60s timeout and get recorded as failures.
+    #[test]
+    fn test_is_completion_recognizes_06_0f() {
+        let proto = test_proto();
+        assert!(ZvtProtocol::is_completion(&proto.frame_apdu(&[
+            CMD_COMPLETION_CLASS,
+            CMD_COMPLETION_INST,
+            0x00,
+        ])));
+        // 80 00 ACK is NOT a transaction completion (it's a command ACK).
+        assert!(!ZvtProtocol::is_completion(&proto.frame_apdu(&[
+            ACK_POSITIVE,
+            0x00,
+            0x00
+        ])));
+        // 04 FF intermediate status is not a completion.
+        assert!(!ZvtProtocol::is_completion(
+            &proto.frame_apdu(&[0x04, 0xFF, 0x00])
+        ));
+    }
+
+    // Approve ONLY on a Status-Information (04 0F) whose result-code (BMP 27,
+    // at the spec position) is 0x00.
+    #[test]
+    fn test_status_info_approval_requires_result_code_zero_at_spec_position() {
+        let proto = test_proto();
+        // 04 0F, len, BMP 27 = 0x00 (success), then a filler BMP byte.
+        let ok = proto.frame_apdu(&[
+            CMD_STATUS_INFO_CLASS,
+            CMD_STATUS_INFO_INST,
+            0x03,
+            BMP_RESULT_CODE,
+            0x00,
+            0x05,
+        ]);
+        assert!(ZvtProtocol::status_info_indicates_approval(&ok));
+
+        // Result-code 0x6C (card declined) must NOT approve.
+        let declined = proto.frame_apdu(&[
+            CMD_STATUS_INFO_CLASS,
+            CMD_STATUS_INFO_INST,
+            0x02,
+            BMP_RESULT_CODE,
+            0x6C,
+        ]);
+        assert!(!ZvtProtocol::status_info_indicates_approval(&declined));
+
+        // A 0x27 0x00 NOT at the result-code position (some later BMP) must not
+        // be mistaken for approval — guards against buffer-scan false approvals.
+        let misplaced = proto.frame_apdu(&[
+            CMD_STATUS_INFO_CLASS,
+            CMD_STATUS_INFO_INST,
+            0x04,
+            0x0B,
+            0x01,
+            BMP_RESULT_CODE,
+            0x00,
+        ]);
+        assert!(!ZvtProtocol::status_info_indicates_approval(&misplaced));
+
+        // A bare 06 0F completion (no status info) is not, by itself, approval.
+        let completion = proto.frame_apdu(&[CMD_COMPLETION_CLASS, CMD_COMPLETION_INST, 0x00]);
+        assert!(!ZvtProtocol::status_info_indicates_approval(&completion));
     }
 }

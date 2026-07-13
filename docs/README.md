@@ -15,6 +15,7 @@ This folder and top-level markdown files document the current native-only `pos-t
 - `offline-store-schema-and-migrations.md`: current Tauri SQLite schema, queue ownership, API mapping, conflict expectations, and installed-terminal migration risks.
 - `offline-sync-telemetry-qa.md`: manual QA checklist for offline replay telemetry, reconnect behavior, and secret-safe diagnostics evidence.
 - `receipt-printing-2026.md`: receipt template system, queue payload snapshots, width/charset behavior, and print fallbacks.
+- `gap-review-2026-07-10.md`: open defect ledger from the 2026-07-10 full-surface review — 93 adversarially-verified findings (6 P0, 28 P1, 40 P2, 19 P3) plus 6 refuted, each with per-finding file/line, evidence, and suggested fix.
 
 ## Security/Native Migration Set
 

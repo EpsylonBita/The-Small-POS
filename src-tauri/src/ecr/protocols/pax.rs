@@ -156,6 +156,22 @@ impl PaxProtocol {
     fn format_amount(cents: i64) -> String {
         format!("{}", cents.unsigned_abs())
     }
+
+    /// Classify a PAX POSLink T00 response code as approved or declined.
+    ///
+    /// Gap review 2026-07-10 P0: the success code is exactly "000000" (some
+    /// device families abbreviate it "00"). The previous logic ALSO approved
+    /// any code with the prefix "00" via `code.starts_with("00")` — but
+    /// decline/error codes such as "000100" (DECLINE) share that prefix, so
+    /// real declines were recorded as approvals and the customer's order was
+    /// marked paid without a charge. Only the exact success codes approve;
+    /// everything else (including any other "00…" code) is a decline.
+    fn classify_response_code(code: Option<&str>) -> TransactionStatus {
+        match code {
+            Some("000000") | Some("00") => TransactionStatus::Approved,
+            _ => TransactionStatus::Declined,
+        }
+    }
 }
 
 impl EcrProtocol for PaxProtocol {
@@ -223,11 +239,7 @@ impl EcrProtocol for PaxProtocol {
 
         // Parse response fields
         // Expected: ResponseCode, AuthCode, HostRefNum, CardType, CardLastFour, EntryMode, ...
-        let status = match fields.first().map(|s| s.as_str()) {
-            Some("000000") | Some("00") => TransactionStatus::Approved,
-            Some(code) if code.starts_with("00") => TransactionStatus::Approved,
-            _ => TransactionStatus::Declined,
-        };
+        let status = Self::classify_response_code(fields.first().map(|s| s.as_str()));
 
         let completed = Utc::now().to_rfc3339();
         Ok(TransactionResponse {
@@ -451,5 +463,47 @@ mod tests {
     #[test]
     fn test_parse_empty_response_errors() {
         assert!(PaxProtocol::parse_response(&[]).is_err());
+    }
+
+    // Gap review 2026-07-10 P0: only the exact PAX success code approves.
+    #[test]
+    fn test_classify_response_code_approves_only_exact_success() {
+        assert_eq!(
+            PaxProtocol::classify_response_code(Some("000000")),
+            TransactionStatus::Approved
+        );
+        assert_eq!(
+            PaxProtocol::classify_response_code(Some("00")),
+            TransactionStatus::Approved
+        );
+    }
+
+    #[test]
+    fn test_classify_response_code_declines_00_prefixed_error_codes() {
+        // These all begin with "00" and were WRONGLY approved by the old
+        // `starts_with("00")` arm. Each is a decline/error in the PAX code space.
+        for code in ["000100", "000200", "001000", "000001", "0099", "00A1"] {
+            assert_eq!(
+                PaxProtocol::classify_response_code(Some(code)),
+                TransactionStatus::Declined,
+                "code {code} shares the 00 prefix but is NOT a success — must decline",
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_response_code_declines_non_success() {
+        assert_eq!(
+            PaxProtocol::classify_response_code(Some("100000")),
+            TransactionStatus::Declined
+        );
+        assert_eq!(
+            PaxProtocol::classify_response_code(Some("")),
+            TransactionStatus::Declined
+        );
+        assert_eq!(
+            PaxProtocol::classify_response_code(None),
+            TransactionStatus::Declined
+        );
     }
 }

@@ -42,11 +42,28 @@ pub fn sync_queue_peek(
     sync_queue::peek(&conn)
 }
 
-/// Remove all items from the sync queue.
+/// Remove all items from the sync queue (the canonical parity outbox).
+///
+/// Gap review 2026-07-10 P0: this wipes every pending/failed offline order,
+/// payment, and adjustment awaiting push to the Admin API. Like the sibling
+/// full-wipe commands it must require SystemControl and snapshot first — the
+/// webview is the trust boundary.
 #[tauri::command]
-pub fn sync_queue_clear(db: State<'_, DbState>) -> Result<(), String> {
+pub fn sync_queue_clear(
+    db: State<'_, DbState>,
+    auth_state: State<'_, crate::auth::AuthState>,
+) -> Result<(), crate::auth::GuardedCommandError> {
+    crate::auth::authorize_privileged_action(
+        crate::auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+    )?;
     let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::clear(&conn)
+    sync_queue::clear(&conn).map_err(Into::into)
 }
 
 /// Get the current number of items in the sync queue.

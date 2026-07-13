@@ -311,23 +311,41 @@ pub async fn database_get_stats(db: tauri::State<'_, db::DbState>) -> Result<Val
 }
 
 #[tauri::command]
-pub async fn database_reset(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
+pub async fn database_reset(
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<Value, crate::auth::GuardedCommandError> {
+    // Gap review 2026-07-10 P0: this wipes the entire parity_sync_queue plus
+    // all orders/payments — the same destruction class as settings_factory_reset
+    // (which requires SystemControl). The webview is the trust boundary; gate it.
+    crate::auth::authorize_privileged_action(
+        crate::auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
     crate::recovery::snapshot_before_destructive_action(
         &db,
         crate::recovery::RecoveryPointKind::PreClearOperationalData,
     )?;
-    crate::clear_operational_data_inner(&db)
+    crate::clear_operational_data_inner(&db).map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn database_clear_operational_data(
     db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<Value, crate::auth::GuardedCommandError> {
+    // Gap review 2026-07-10 P0: see database_reset — same wipe, same gate.
+    crate::auth::authorize_privileged_action(
+        crate::auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
     crate::recovery::snapshot_before_destructive_action(
         &db,
         crate::recovery::RecoveryPointKind::PreClearOperationalData,
     )?;
-    crate::clear_operational_data_inner(&db)
+    crate::clear_operational_data_inner(&db).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -673,6 +691,59 @@ pub async fn diagnostics_open_export_dir(
         "success": true,
         "path": export_parent.to_string_lossy(),
     }))
+}
+
+/// Gap review 2026-07-10 P0: static audit that every renderer-callable
+/// full-wipe command carries the SystemControl privileged-action gate. These
+/// commands DELETE the entire sync_queue / parity_sync_queue / orders from the
+/// webview trust boundary; an ungated one silently discards unsynced financial
+/// rows. A full Tauri command harness is not available in unit tests, so this
+/// pins the gate at the source level (like the module-gating static audits).
+#[cfg(test)]
+mod destructive_command_auth_audit {
+    fn command_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("command `{signature}` not found — did it get renamed?"));
+        // Slice to the next `#[tauri::command]` (or EOF) — enough to cover the body.
+        let rest = &source[start..];
+        let end = rest[1..]
+            .find("#[tauri::command]")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    fn assert_gated(source: &str, signature: &str) {
+        let body = command_body(source, signature);
+        assert!(
+            body.contains("authorize_privileged_action")
+                && body.contains("PrivilegedActionScope::SystemControl"),
+            "destructive command `{signature}` must call \
+             authorize_privileged_action(SystemControl, ...) before wiping data",
+        );
+    }
+
+    #[test]
+    fn all_full_wipe_commands_require_system_control() {
+        let diagnostics = include_str!("diagnostics.rs");
+        assert_gated(diagnostics, "pub async fn database_reset(");
+        assert_gated(diagnostics, "pub async fn database_clear_operational_data(");
+
+        let sync = include_str!("sync.rs");
+        assert_gated(sync, "pub async fn sync_clear_all(");
+        assert_gated(sync, "pub async fn sync_clear_all_orders(");
+        // Round 2: the sibling side doors the adversarial review surfaced.
+        assert_gated(sync, "pub async fn sync_clear_old_orders(");
+        assert_gated(sync, "pub async fn sync_clear_failed(");
+
+        let orders = include_str!("orders.rs");
+        assert_gated(orders, "pub async fn orders_clear_all(");
+
+        // Round 2: the canonical parity outbox wipe (a sync, not async, command).
+        let sync_queue = include_str!("sync_queue.rs");
+        assert_gated(sync_queue, "pub fn sync_queue_clear(");
+    }
 }
 
 #[cfg(test)]

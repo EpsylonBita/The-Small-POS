@@ -36,6 +36,60 @@ pub(crate) fn order_financial_timestamp_expr(order_alias: &str) -> String {
     )
 }
 
+/// SQL predicate matching the closeout gate's "open table tab" exemption
+/// shape: a dine-in/table order with payment_status 'pending' and a table
+/// link. This is the shipped gate semantics (payment_integrity) — the day may
+/// close while such a tab is running. Do not tighten this shape: the gate's
+/// own outer filters already exclude cancelled/refunded orders.
+///
+/// For revenue exclusion and deletion protection use
+/// [`open_unsettled_table_tab_expr`], which additionally requires the order
+/// to be genuinely unsettled.
+pub(crate) fn open_table_tab_expr(order_alias: &str) -> String {
+    format!(
+        "(
+            LOWER(TRIM(COALESCE({order_alias}.order_type, ''))) IN ('dine-in', 'dine_in', 'table')
+            AND LOWER(TRIM(COALESCE({order_alias}.payment_status, ''))) = 'pending'
+            AND (
+                TRIM(COALESCE({order_alias}.table_number, '')) <> ''
+                OR TRIM(COALESCE({order_alias}.table_id, '')) <> ''
+                OR TRIM(COALESCE({order_alias}.table_session_id, '')) <> ''
+            )
+        )"
+    )
+}
+
+/// Strict variant of [`open_table_tab_expr`]: a LIVE, genuinely-never-settled
+/// table tab (gap review 2026-07-10 P0-03).
+///
+/// Adds two conditions the gate shape must not carry:
+/// - a live order status — a cancelled/refunded tab is dead history and must
+///   remain deletable at rollover, or it accumulates forever;
+/// - no settled payment activity — a fully-refunded order can recompute back
+///   to payment_status 'pending', but its money WAS collected and returned,
+///   so Z gross must still include it (the refund line subtracts it) and the
+///   rollover must still clear it.
+///
+/// Used by the Z-report revenue aggregates (exclude uncollected tab money),
+/// the end-of-day rollover selector, and the clear-old-orders maintenance
+/// path (never delete a live tab). The tab is reported and cleared on the
+/// business day it is eventually settled, where its payment timestamp
+/// places it.
+pub(crate) fn open_unsettled_table_tab_expr(order_alias: &str) -> String {
+    let gate_shape = open_table_tab_expr(order_alias);
+    format!(
+        "(
+            {gate_shape}
+            AND LOWER(TRIM(COALESCE({order_alias}.status, ''))) NOT IN ('cancelled', 'canceled', 'refunded')
+            AND NOT EXISTS (
+                SELECT 1 FROM order_payments op_tab
+                WHERE op_tab.order_id = {order_alias}.id
+                  AND op_tab.status IN ('completed', 'refunded')
+            )
+        )"
+    )
+}
+
 pub(crate) fn resolve_order_financial_effective_at(
     conn: &Connection,
     order_id: &str,

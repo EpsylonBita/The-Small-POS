@@ -1174,8 +1174,19 @@ pub async fn sync_requeue_orphaned_financial(
 pub async fn sync_clear_all_orders(
     db: tauri::State<'_, db::DbState>,
     sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    // Gap review 2026-07-10 P0: drops all orders plus their unsynced queue rows.
+    crate::auth::authorize_privileged_action(
+        crate::auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+    )?;
     let cleared = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let _ = conn.execute(
@@ -1282,8 +1293,21 @@ async fn sync_fetch_with_options(
 pub async fn sync_clear_all(
     db: tauri::State<'_, db::DbState>,
     sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    // Gap review 2026-07-10 P0: `DELETE FROM sync_queue` drops the entire
+    // offline financial outbox (unsynced orders/payments/adjustments). Gate it
+    // like the other destructive resets and snapshot first for recovery.
+    crate::auth::authorize_privileged_action(
+        crate::auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+    )?;
     let cleared = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM sync_queue", [])
@@ -1297,8 +1321,21 @@ pub async fn sync_clear_all(
 pub async fn sync_clear_failed(
     db: tauri::State<'_, db::DbState>,
     sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    // Gap review 2026-07-10 P0 (round 2): failed rows are retryable financial
+    // outbox items (an order that failed to upload during an API outage). Gate
+    // and snapshot before deleting, like the other destructive wipes.
+    crate::auth::authorize_privileged_action(
+        crate::auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+    )?;
     let cleared = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM sync_queue WHERE status = 'failed'", [])
@@ -1312,26 +1349,63 @@ pub async fn sync_clear_failed(
 pub async fn sync_clear_old_orders(
     db: tauri::State<'_, db::DbState>,
     sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    // Gap review 2026-07-10 P0 (round 2): bulk-deletes pre-today orders,
+    // including unsynced ones. Gate and snapshot like the other wipes. (The
+    // open-tab carve-out in clear_old_orders_before is a separate protection.)
+    crate::auth::authorize_privileged_action(
+        crate::auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+    )?;
     let today = Local::now().format("%Y-%m-%d").to_string();
     let cleared = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        // Clean orphaned sync_queue entries for old orders
-        let _ = conn.execute(
-            "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id IN (
-                SELECT id FROM orders WHERE substr(created_at, 1, 10) < ?1
-            )",
-            rusqlite::params![today],
-        );
-        conn.execute(
-            "DELETE FROM orders WHERE substr(created_at, 1, 10) < ?1",
-            rusqlite::params![today],
-        )
-        .map_err(|e| e.to_string())?
+        clear_old_orders_before(&conn, &today)?
     };
     emit_sync_status_snapshot(&app, &db, &sync_state).await;
     Ok(serde_json::json!({ "success": true, "cleared": cleared }))
+}
+
+/// Delete pre-`today` orders (and their orphaned legacy sync_queue rows).
+///
+/// Gap review P0-03: a live table tab legitimately spans business days — the
+/// end-of-day rollover preserves it, so this maintenance path must too, or
+/// "Clear Old Orders" in Settings destroys a running tab the morning after
+/// it was opened.
+pub(crate) fn clear_old_orders_before(
+    conn: &rusqlite::Connection,
+    today: &str,
+) -> Result<usize, String> {
+    let open_table_tab = crate::business_day::open_unsettled_table_tab_expr("o");
+    let _ = conn.execute(
+        &format!(
+            "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id IN (
+                SELECT o.id FROM orders o
+                WHERE substr(o.created_at, 1, 10) < ?1
+                  AND NOT {open_table_tab}
+            )"
+        ),
+        rusqlite::params![today],
+    );
+    conn.execute(
+        &format!(
+            "DELETE FROM orders
+             WHERE id IN (
+                SELECT o.id FROM orders o
+                WHERE substr(o.created_at, 1, 10) < ?1
+                  AND NOT {open_table_tab}
+             )"
+        ),
+        rusqlite::params![today],
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1573,6 +1647,46 @@ mod dto_tests {
     use super::*;
     use crate::db;
     use rusqlite::params;
+
+    // Gap review P0-03 (review round 2): the 'Clear Old Orders' maintenance
+    // path must not delete a live table tab that legitimately spans business
+    // days — the end-of-day rollover preserves it, so this side door must too.
+    #[test]
+    fn clear_old_orders_preserves_live_overnight_table_tab() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open db");
+        db::run_migrations_for_test(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, table_number, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-overnight-tab', '#tab', '[]', 55.0, 5500, 'active', 'dine-in',
+                'pending', '7', 'pending', '2026-02-15T21:00:00Z', '2026-02-15T21:00:00Z'
+             )",
+            [],
+        )
+        .expect("insert live overnight tab");
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-old-settled', '#old', '[]', 30.0, 3000, 'completed', 'takeaway',
+                'paid', 'synced', '2026-02-15T20:00:00Z', '2026-02-15T20:00:00Z'
+             )",
+            [],
+        )
+        .expect("insert old settled order");
+
+        let cleared = clear_old_orders_before(&conn, "2026-02-16").expect("clear");
+
+        assert_eq!(cleared, 1, "only the settled pre-today order is cleared");
+        let remaining_id: String = conn
+            .query_row("SELECT id FROM orders", [], |row| row.get(0))
+            .expect("one order remains");
+        assert_eq!(remaining_id, "ord-overnight-tab");
+    }
 
     #[test]
     fn parse_remove_invalid_orders_supports_array_payload() {

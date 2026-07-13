@@ -1703,6 +1703,10 @@ fn load_non_driver_order_totals(
         .check_in_time
         .as_deref()
         .unwrap_or(business_day::EPOCH_RFC3339);
+    // Gap review P0-03: per-staff totals must agree with the day-level
+    // aggregates — a live never-settled tab's money was not collected on
+    // this shift and must not appear in the staff section either.
+    let staff_open_tab = business_day::open_unsettled_table_tab_expr("o");
     // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let order_scope_sql = format!(
         "SELECT COUNT(*), COALESCE(SUM(order_total_cents), 0)
@@ -1715,6 +1719,7 @@ fn load_non_driver_order_totals(
               AND (?3 IS NULL OR {financial_expr} <= ?3)
               AND COALESCE(o.is_ghost, 0) = 0
               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+              AND NOT {staff_open_tab}
               {}
               AND NOT EXISTS (
                     SELECT 1 FROM driver_earnings de WHERE de.order_id = o.id
@@ -2451,26 +2456,30 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // but later returned. If the schema convention for `total_amount`
     // ever changes (e.g. starts storing pre-discount), this reconstruction
     // formula MUST change too.
+    // Gap review P0-03: exclude live never-settled table tabs from shift gross —
+    // same rule as the date-based aggregates, or the single-shift Z reports
+    // uncollected tab money as revenue.
+    let single_shift_open_tab = business_day::open_unsettled_table_tab_expr("orders");
+    let single_shift_order_agg_sql = format!(
+        "SELECT COUNT(*) as cnt,
+                COALESCE(SUM(total_amount + COALESCE(discount_amount, 0)), 0) as gross,
+                COALESCE(SUM(discount_amount), 0) as discounts,
+                COALESCE(SUM(tip_amount), 0) as tips
+         FROM orders
+         WHERE staff_shift_id = ?1
+           AND COALESCE(is_ghost, 0) = 0
+           AND status NOT IN ('cancelled', 'canceled')
+           AND NOT {single_shift_open_tab}"
+    );
     let order_agg = conn
-        .query_row(
-            "SELECT COUNT(*) as cnt,
-                    COALESCE(SUM(total_amount + COALESCE(discount_amount, 0)), 0) as gross,
-                    COALESCE(SUM(discount_amount), 0) as discounts,
-                    COALESCE(SUM(tip_amount), 0) as tips
-             FROM orders
-             WHERE staff_shift_id = ?1
-               AND COALESCE(is_ghost, 0) = 0
-               AND status NOT IN ('cancelled', 'canceled')",
-            params![shift_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, f64>(3)?,
-                ))
-            },
-        )
+        .query_row(&single_shift_order_agg_sql, params![shift_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
     let (total_orders, gross_sales, discounts_total, tips_total) = order_agg;
@@ -2734,26 +2743,31 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // a non-cancelled status. The per-order refund subtotal is
     // pre-aggregated in a subquery so the LEFT JOIN does not
     // multiply `total_amount` by the number of adjustments per order.
+    // Gap review P0-03: exclude live never-settled table tabs, mirroring the
+    // shift gross aggregate above.
+    let shift_ot_open_tab = business_day::open_unsettled_table_tab_expr("o");
+    let shift_ot_sql = format!(
+        // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+        "SELECT COALESCE(o.order_type, 'dine-in'),
+                COUNT(*),
+                COALESCE(SUM(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER))), 0)
+                    - COALESCE(SUM(COALESCE(r.refund_sum_cents, 0)), 0) AS net_total_cents
+         FROM orders o
+         LEFT JOIN (
+             SELECT order_id,
+                    SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))) AS refund_sum_cents
+             FROM payment_adjustments
+             WHERE adjustment_type = 'refund'
+             GROUP BY order_id
+         ) r ON r.order_id = o.id
+         WHERE o.staff_shift_id = ?1
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled')
+           AND NOT {shift_ot_open_tab}
+         GROUP BY COALESCE(o.order_type, 'dine-in')"
+    );
     let mut ot_stmt = conn
-        .prepare(
-            // W4b-iii: cents-with-real-fallback shim (removed in 4e).
-            "SELECT COALESCE(o.order_type, 'dine-in'),
-                    COUNT(*),
-                    COALESCE(SUM(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER))), 0)
-                        - COALESCE(SUM(COALESCE(r.refund_sum_cents, 0)), 0) AS net_total_cents
-             FROM orders o
-             LEFT JOIN (
-                 SELECT order_id,
-                        SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))) AS refund_sum_cents
-                 FROM payment_adjustments
-                 WHERE adjustment_type = 'refund'
-                 GROUP BY order_id
-             ) r ON r.order_id = o.id
-             WHERE o.staff_shift_id = ?1
-               AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled')
-             GROUP BY COALESCE(o.order_type, 'dine-in')",
-        )
+        .prepare(&shift_ot_sql)
         .map_err(|e| format!("prepare order_type query: {e}"))?;
 
     let mut dine_in_orders = 0_i64;
@@ -3468,6 +3482,10 @@ fn build_z_report_for_date(
     // --- Aggregate orders across all shifts in the period ---
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    // Gap review P0-03: open tabs are exempt from the closeout gate, so they can
+    // still exist here — but their money was never collected, so they must not
+    // be reported as revenue. They are counted on the day they are settled.
+    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
     let order_agg_sql = format!(
         // W4b-iii: cents-with-real-fallback shim (removed in 4e).
         "SELECT COUNT(*) as cnt,
@@ -3480,7 +3498,8 @@ fn build_z_report_for_date(
            AND (?2 IS NULL OR {financial_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
-           AND o.status NOT IN ('cancelled', 'canceled')"
+           AND o.status NOT IN ('cancelled', 'canceled')
+           AND NOT {open_table_tab}"
     );
     let order_agg = conn
         .query_row(
@@ -3722,6 +3741,9 @@ fn build_z_report_for_date(
     // --- Order type breakdown across all shifts in the period ---
     let order_type_scope_expr = business_day::order_financial_timestamp_expr("o");
     let order_type_scope_predicate = lower_bound_mode.sql_predicate(&order_type_scope_expr, "?1");
+    // Gap review P0-03: keep the per-type breakdown consistent with the main
+    // order aggregate — uncollected open tabs are not part of this day's sales.
+    let order_type_open_tab = business_day::open_unsettled_table_tab_expr("o");
     // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let order_type_scope_sql = format!(
         "SELECT COALESCE(o.order_type, 'dine-in'), COUNT(*),
@@ -3732,6 +3754,7 @@ fn build_z_report_for_date(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled')
+           AND NOT {order_type_open_tab}
          GROUP BY COALESCE(o.order_type, 'dine-in')"
     );
     let mut ot_stmt = conn
@@ -4461,10 +4484,18 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     }
 
     let financial_expr = business_day::order_financial_timestamp_expr("o");
+    // Gap review P0-03: an unpaid order's financial timestamp falls back to its
+    // created_at, so a bare cutoff filter selected still-open table tabs for
+    // deletion — destroying a live order (and orphaning its table session) at
+    // day close. The closeout gate deliberately lets the day close with a tab
+    // open; the tab belongs to the business day it is eventually settled on.
+    // The strict variant keeps cancelled/refunded/settled tabs deletable.
+    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
     let target_order_ids_sql = format!(
         "SELECT o.id
          FROM orders o
-         WHERE datetime({financial_expr}) <= datetime(?1)"
+         WHERE datetime({financial_expr}) <= datetime(?1)
+           AND NOT {open_table_tab}"
     );
 
     let target_order_ids: Vec<String> = conn
@@ -6625,6 +6656,199 @@ mod tests {
         assert_eq!(
             remaining_active_shifts, 1,
             "next-day active shift must remain"
+        );
+    }
+
+    /// An open dine-in tab: unpaid (payment_status 'pending'), linked to a
+    /// table, created inside the business day being closed. The closeout gate
+    /// (payment_integrity) deliberately exempts this shape so a tavern can
+    /// close the day with a tab still running.
+    fn seed_open_table_tab_order(db: &DbState, created_at: &str) {
+        seed_table_tab_order_with(db, created_at, "active", None);
+    }
+
+    /// Variant seeder for the open-tab protection tests: `status` controls
+    /// whether the tab is live ('active') or dead ('cancelled'), and
+    /// `staff_shift_id` attaches it to a shift for the per-shift aggregates.
+    fn seed_table_tab_order_with(
+        db: &DbState,
+        created_at: &str,
+        status: &str,
+        staff_shift_id: Option<&str>,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, table_number, staff_shift_id,
+                discount_amount, discount_amount_cents,
+                tip_amount, tip_amount_cents,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-open-tab', '#tab', '[]', 55.0, 5500, ?2, 'dine-in',
+                'pending', '7', ?3, 0.0, 0, 0.0, 0, 'pending', ?1, ?1
+             )",
+            params![created_at, status, staff_shift_id],
+        )
+        .expect("insert table tab order");
+    }
+
+    // Gap review 2026-07-10 P0-03: the rollover's order selector filtered only on
+    // the financial timestamp — for an unpaid order that falls back to created_at —
+    // so an open tab from 19:00 was hard-deleted by the 23:59 rollover and its
+    // (uncollected) total was counted as revenue by the Z aggregate.
+    #[test]
+    fn test_apply_local_day_rollover_preserves_open_unpaid_table_tab() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_open_table_tab_order(&db, "2026-02-16T19:00:00Z");
+
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("cleanup should succeed");
+
+        assert_eq!(
+            result["orders"], 3,
+            "only the settled orders are cleared; the open tab is not part of the closed day"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1, "the open tab must survive the rollover");
+        let remaining_id: String = conn
+            .query_row("SELECT id FROM orders LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining_id, "ord-open-tab");
+    }
+
+    #[test]
+    fn test_generate_z_report_for_date_excludes_open_unpaid_table_tab_from_sales() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        // Attach the tab to the closed shift so the per-staff section is
+        // exercised too (review round 2: staff rows must agree with gross).
+        seed_table_tab_order_with(&db, "2026-02-16T12:00:00Z", "active", Some("shift-zr-1"));
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let report = &result["report"];
+
+        // seed_closed_shift's settled orders: 25 + 35 + 40 = 100. The 55.00 open
+        // tab was never collected, so it must appear in neither count nor gross.
+        assert_eq!(
+            report["totalOrders"], 3,
+            "open unpaid tab must not count as an order of the closed day"
+        );
+        assert_eq!(
+            report["grossSales"], 100.0,
+            "uncollected tab money must not be reported as revenue"
+        );
+
+        // The per-staff section must reconcile with the headline gross.
+        let staff_reports = report["reportJson"]["staffReports"]
+            .as_array()
+            .expect("staffReports array");
+        assert_eq!(
+            staff_reports[0]["orders"]["totalAmount"], 100.0,
+            "staff order totals must exclude the uncollected tab"
+        );
+        assert_eq!(staff_reports[0]["orders"]["count"], 3);
+    }
+
+    // Review round 2: the single-shift Z path aggregates orders by
+    // staff_shift_id directly and was missed by the first fix pass.
+    #[test]
+    fn test_generate_z_report_excludes_open_unpaid_table_tab_from_shift_gross() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        seed_table_tab_order_with(&db, "2026-02-16T12:00:00Z", "active", Some("shift-zr-1"));
+
+        let payload = serde_json::json!({ "shiftId": shift_id });
+        let result = generate_z_report(&db, &payload).expect("generate");
+        let report = &result["report"];
+
+        assert_eq!(
+            report["grossSales"], 100.0,
+            "single-shift gross must exclude the uncollected tab"
+        );
+        assert_eq!(report["totalOrders"], 3);
+    }
+
+    // Review round 2: a CANCELLED unpaid table order is dead history, not a
+    // live tab — it must remain deletable or it accumulates forever.
+    #[test]
+    fn test_apply_local_day_rollover_clears_cancelled_unpaid_table_order() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_table_tab_order_with(&db, "2026-02-16T19:00:00Z", "cancelled", None);
+
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("cleanup should succeed");
+
+        assert_eq!(
+            result["orders"], 4,
+            "the cancelled tab is not a live order and must be cleared with the day"
+        );
+        let conn = db.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "no immortal cancelled tabs may survive");
+    }
+
+    // Review round 2: a fully-refunded order can recompute back to
+    // payment_status 'pending', but its money WAS collected and returned —
+    // gross must still include it (the refund line subtracts it) and the
+    // rollover must still clear it.
+    #[test]
+    fn test_settled_order_with_pending_payment_status_is_still_reported_and_rolled_over() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                    payment_status, table_number,
+                    discount_amount, discount_amount_cents,
+                    tip_amount, tip_amount_cents,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-refunded-tab', '#rtab', '[]', 55.0, 5500, 'completed', 'dine-in',
+                    'pending', '7', 0.0, 0, 0.0, 0, 'pending', ?1, ?1
+                 )",
+                params!["2026-02-16T12:00:00Z"],
+            )
+            .expect("insert refund-shaped order");
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at)
+                 VALUES ('pay-rtab', 'ord-refunded-tab', 'card', 55.0, 5500, 'completed', 'shift-zr-1', 'EUR', ?1, ?1)",
+                params!["2026-02-16T12:05:00Z"],
+            )
+            .expect("insert settled payment");
+        }
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let report = &result["report"];
+        assert_eq!(
+            report["grossSales"], 155.0,
+            "an order with settled payment activity is collected money and must stay in gross"
+        );
+        assert_eq!(report["totalOrders"], 4);
+
+        let cleanup = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("cleanup should succeed");
+        assert_eq!(
+            cleanup["orders"], 4,
+            "a settled order is closed-day history and must be cleared"
         );
     }
 

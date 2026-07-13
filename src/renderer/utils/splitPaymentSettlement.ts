@@ -91,6 +91,65 @@ export async function settleTerminalPortion(
   return { financials: current, paymentId, transactionId, discountPersistFailed };
 }
 
+export interface InFlightGuard {
+  /** Returns false when ANY charge is already in flight (one physical terminal). */
+  acquire(id: string): boolean;
+  release(id: string): void;
+}
+
+/**
+ * Synchronous in-flight guard for terminal card charges (gap review P0-01).
+ * React state cannot serve as this guard: a state write only lands on the next
+ * render, so a double-tap re-enters the handler before `status: 'processing'`
+ * is visible and launches a second real charge — which the Rust device mutex
+ * QUEUES rather than rejects. Acquire must happen before the first await and
+ * release in finally.
+ */
+export const createInFlightGuard = (): InFlightGuard => {
+  const inFlight = new Set<string>();
+  return {
+    acquire(id: string) {
+      if (inFlight.size > 0) return false;
+      inFlight.add(id);
+      return true;
+    },
+    release(id: string) {
+      inFlight.delete(id);
+    },
+  };
+};
+
+export interface TerminalCardPortionInput {
+  method: 'cash' | 'card';
+  status: 'draft' | 'processing' | 'paid';
+  paymentOrigin?: 'manual' | 'terminal';
+  terminalDeviceId?: string;
+}
+
+/**
+ * Normalize a draft portion for a terminal card charge (gap review P0-02).
+ * The charge handler captures its portion BEFORE the method toggle lands in
+ * state, so recording from that stale capture persists method 'cash' with a
+ * cashReceived amount for an approved card payment. Everything downstream of
+ * terminal resolution — state update, settlement, recording, completion —
+ * must operate on this normalized object, never the raw capture.
+ */
+export const toTerminalCardPortion = <P extends TerminalCardPortionInput>(
+  portion: P,
+  terminalDeviceId: string,
+): Omit<P, 'method' | 'status' | 'paymentOrigin' | 'terminalDeviceId'> & {
+  method: 'card';
+  status: 'processing';
+  paymentOrigin: 'terminal';
+  terminalDeviceId: string;
+} => ({
+  ...portion,
+  method: 'card',
+  status: 'processing',
+  paymentOrigin: 'terminal',
+  terminalDeviceId,
+});
+
 /**
  * Settles draft portions one at a time, persisting each portion's discount
  * only after that portion's payment is recorded. A mid-loop record failure

@@ -63,6 +63,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'staff-shift-role-labels.test.ts'),
   path.join(testsRoot, 'renderer', 'edit-settlement-flow.test.ts'),
   path.join(testsRoot, 'renderer', 'split-payment-discount-persistence.test.ts'),
+  path.join(testsRoot, 'renderer', 'split-payment-terminal-card-integrity.test.ts'),
   path.join(testsRoot, 'renderer', 'split-payment-currency.test.ts'),
   path.join(testsRoot, 'renderer', 'checkout-failure-contract.test.ts'),
   // THE-324: retail checkout money/order-item seam — fee-exclusive total

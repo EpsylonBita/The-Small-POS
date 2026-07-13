@@ -1765,15 +1765,22 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     <button
                       onClick={async () => {
                         try {
-                          const result = await bridge.sync.clearAll() as any
+                          // Gap review P0: clear-sync-queue now requires SystemControl —
+                          // run it through the admin-PIN elevation flow (factory-reset pattern).
+                          const result = await runWithPrivilegedConfirmation({
+                            scope: 'system_control',
+                            action: () => bridge.sync.clearAll(),
+                            title: t('settings.database.clearSyncQueuePinTitle', 'Confirm clear sync queue'),
+                            subtitle: t('settings.database.clearSyncQueuePinSubtitle', 'Enter the admin PIN to clear stuck sync items.'),
+                          }) as any
                           if (result?.success) {
                             toast.success(t('settings.database.syncQueueCleared', { count: result.cleared }))
                           } else {
-                            toast.error(result?.error || t('settings.database.syncQueueClearFailed'))
+                            throw new Error(result?.error || 'Unknown error')
                           }
                         } catch (e) {
                           console.error('Failed to clear sync queue:', e)
-                          toast.error(t('settings.database.syncQueueClearFailed'))
+                          toast.error(getErrorMessage(e, t('settings.database.syncQueueClearFailed')))
                         }
                       }}
                       className={DB_REPAIR_BTN_MD}
@@ -1861,15 +1868,21 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     <button
                       onClick={async () => {
                         try {
-                          const result = await bridge.sync.clearAllOrders() as any
+                          // Gap review P0: clear-all-orders now requires SystemControl.
+                          const result = await runWithPrivilegedConfirmation({
+                            scope: 'system_control',
+                            action: () => bridge.sync.clearAllOrders(),
+                            title: t('settings.database.clearAllOrdersPinTitle', 'Confirm delete all orders'),
+                            subtitle: t('settings.database.clearAllOrdersPinSubtitle', 'Enter the admin PIN to permanently delete all orders.'),
+                          }) as any
                           if (result?.success) {
                             toast.success(t('settings.database.allOrdersCleared', { count: result.cleared, defaultValue: 'Cleared {{count}} orders' }))
                           } else {
-                            toast.error(result?.error || t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'))
+                            throw new Error(result?.error || 'Unknown error')
                           }
                         } catch (e) {
                           console.error('Failed to clear all orders:', e)
-                          toast.error(t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'))
+                          toast.error(getErrorMessage(e, t('settings.database.allOrdersClearFailed', 'Failed to clear all orders')))
                         }
                       }}
                       className={DB_DANGER_BTN_MD}
@@ -2357,16 +2370,22 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       onConfirm={async () => {
         setIsClearingOperational(true)
         try {
-          const result = await bridge.database.clearOperationalData()
+          // Gap review P0: clear-operational-data now requires SystemControl.
+          const result = await runWithPrivilegedConfirmation({
+            scope: 'system_control',
+            action: () => bridge.database.clearOperationalData(),
+            title: t('settings.database.clearOperationalPinTitle', 'Confirm clear operational data'),
+            subtitle: t('settings.database.clearOperationalPinSubtitle', 'Enter the admin PIN to permanently delete all operational data.'),
+          })
           if (result?.success) {
             toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
             setShowClearOperationalConfirm(false)
           } else {
-            toast.error(result?.error || t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+            throw new Error(result?.error || 'Unknown error')
           }
         } catch (e) {
           console.error('Failed to clear operational data:', e)
-          toast.error(t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+          toast.error(getErrorMessage(e, t('settings.database.operationalClearFailed', 'Failed to clear operational data')))
         } finally {
           setIsClearingOperational(false)
         }

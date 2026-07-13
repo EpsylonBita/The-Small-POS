@@ -315,6 +315,10 @@ pub fn load_branch_window_payment_blockers(
 ) -> Result<Vec<UnsettledPaymentBlocker>, String> {
     let operator = if lower_bound_inclusive { ">=" } else { ">" };
     let order_financial_expr = business_day::order_financial_timestamp_expr("o");
+    // Open tabs are exempt from blocking closeout; the same shared predicate
+    // excludes them from Z revenue and protects them from rollover deletion
+    // (see business_day::open_table_tab_expr).
+    let open_table_tab_expr = business_day::open_table_tab_expr("o");
     let sql = format!(
         "{} FROM orders o
          WHERE {order_financial_expr} {operator} ?1
@@ -322,15 +326,7 @@ pub fn load_branch_window_payment_blockers(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-           AND NOT (
-             LOWER(TRIM(COALESCE(o.order_type, ''))) IN ('dine-in', 'dine_in', 'table')
-             AND LOWER(TRIM(COALESCE(o.payment_status, ''))) = 'pending'
-             AND (
-               TRIM(COALESCE(o.table_number, '')) <> ''
-               OR TRIM(COALESCE(o.table_id, '')) <> ''
-               OR TRIM(COALESCE(o.table_session_id, '')) <> ''
-             )
-           )
+           AND NOT {open_table_tab_expr}
          ORDER BY COALESCE(o.updated_at, o.created_at) ASC, o.id ASC",
         order_blocker_row_select()
     );

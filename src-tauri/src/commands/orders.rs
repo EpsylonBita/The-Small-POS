@@ -3799,12 +3799,25 @@ pub async fn order_create_with_initial_payment(
 #[tauri::command]
 pub async fn orders_clear_all(
     db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let count = conn
-        .execute("DELETE FROM orders", [])
-        .map_err(|e| e.to_string())?;
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    // Gap review 2026-07-10 P0: `DELETE FROM orders` from the webview with no
+    // authorization. Gate it like the sibling reset commands and snapshot first.
+    crate::auth::authorize_privileged_action(
+        crate::auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+    )?;
+    let count = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM orders", [])
+            .map_err(|e| e.to_string())?
+    };
     let _ = app.emit("orders_cleared", serde_json::json!({ "count": count }));
     Ok(serde_json::json!({
         "success": true,
