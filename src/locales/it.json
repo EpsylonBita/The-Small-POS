@@ -2357,6 +2357,7 @@
       "receiptActions": {
         "sectionTitle": "[NEEDS TRANSLATION] Automatic Receipt Actions",
         "afterOrder": "[NEEDS TRANSLATION] After order placed",
+        "afterEdit": "Dopo la modifica dell'ordine",
         "paymentReceipt": "[NEEDS TRANSLATION] After payment / checkout",
         "splitReceipt": "[NEEDS TRANSLATION] After split payment",
         "shiftClose": "[NEEDS TRANSLATION] After shift close",

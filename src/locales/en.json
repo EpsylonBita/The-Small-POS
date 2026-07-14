@@ -2357,6 +2357,7 @@
       "receiptActions": {
         "sectionTitle": "Automatic Receipt Actions",
         "afterOrder": "After order placed",
+        "afterEdit": "After order edited",
         "paymentReceipt": "After payment / checkout",
         "splitReceipt": "After split payment",
         "shiftClose": "After shift close",

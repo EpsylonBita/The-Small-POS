@@ -326,18 +326,20 @@ const StatusIndicator: React.FC<{ state: PrinterState }> = ({ state }) => {
 }
 
 const RECEIPT_ACTION_KEYS = [
-  'after_order', 'payment_receipt', 'split_receipt', 'shift_close',
+  'after_order', 'after_edit', 'payment_receipt', 'split_receipt', 'shift_close',
   'driver_assigned', 'z_report', 'kitchen_ticket', 'on_complete', 'on_cancel',
 ] as const
 type ReceiptActionKey = typeof RECEIPT_ACTION_KEYS[number]
 const RECEIPT_ACTION_DEFAULTS: Record<ReceiptActionKey, boolean> = {
-  after_order: true, payment_receipt: true, split_receipt: true, shift_close: true,
+  after_order: true, after_edit: true, payment_receipt: true, split_receipt: true, shift_close: true,
   driver_assigned: true, z_report: true, kitchen_ticket: true,
   on_complete: false, on_cancel: false,
 }
 const camelCase = (s: string) => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
 const getReceiptActionIcon = (key: ReceiptActionKey) => {
   switch (key) {
+    case 'after_edit':
+      return Pencil
     case 'payment_receipt':
       return CreditCard
     case 'split_receipt':
@@ -1629,7 +1631,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
       {renderSectionHeader('receiptActions', 'settings.printer.receiptActions.sectionTitle', 'Automatic Receipt Actions')}
       {openSections.receiptActions && (
         <div className="space-y-3 pl-1 pr-1">
-          {renderReceiptActionGrid(RECEIPT_ACTION_KEYS.slice(0, 7))}
+          {renderReceiptActionGrid(RECEIPT_ACTION_KEYS.slice(0, 8))}
           <div className="flex items-center gap-2 py-1">
             <div className="flex-1 border-t border-white/10" />
             <span className="text-[10px] uppercase tracking-wider text-white/30">
@@ -1637,7 +1639,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
             </span>
             <div className="flex-1 border-t border-white/10" />
           </div>
-          {renderReceiptActionGrid(RECEIPT_ACTION_KEYS.slice(7))}
+          {renderReceiptActionGrid(RECEIPT_ACTION_KEYS.slice(8))}
         </div>
       )}
     </div>

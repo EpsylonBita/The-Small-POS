@@ -129,6 +129,8 @@ pub fn auto_print_entity_types_for_order_type(order_type: &str) -> &'static [&'s
 /// Reads from local_settings("receipt_actions", key).
 /// Acquires and releases the DB lock internally — safe to call without holding the lock.
 /// Existing triggers default to true when absent; new triggers default to false.
+/// `after_edit` is a deliberate exception: an edited order must reprint its
+/// updated receipt unless the operator explicitly disables it.
 pub fn is_print_action_enabled(db: &DbState, key: &str) -> bool {
     let conn = match db.conn.lock() {
         Ok(c) => c,
@@ -140,6 +142,7 @@ pub fn is_print_action_enabled(db: &DbState, key: &str) -> bool {
         None => matches!(
             key,
             "after_order"
+                | "after_edit"
                 | "payment_receipt"
                 | "split_receipt"
                 | "shift_close"
@@ -148,6 +151,39 @@ pub fn is_print_action_enabled(db: &DbState, key: &str) -> bool {
                 | "kitchen_ticket"
         ),
         Some(v) => matches!(v.trim(), "true" | "1" | "yes" | "on"),
+    }
+}
+
+/// Enqueue the automatic reprint for an edited order.
+///
+/// Mirrors the order-create auto-print: same entity types per order type,
+/// gated on the `after_edit` receipt action (default on); ghost orders never
+/// print. Receipt content renders at DISPATCH time from the DB, so the job
+/// enqueued here — or an already-pending job for the same order that the
+/// duplicate guard keeps — always prints the edited items and the full
+/// payment breakdown (e.g. the original cash payment plus a card-settled
+/// edit delta as separate lines, refunds as adjustment lines).
+pub fn enqueue_after_edit_auto_print(
+    db: &DbState,
+    order_id: &str,
+    order_type: &str,
+    is_ghost: bool,
+) {
+    if is_ghost {
+        return;
+    }
+    if !is_print_action_enabled(db, "after_edit") {
+        return;
+    }
+    for entity_type in auto_print_entity_types_for_order_type(order_type) {
+        if let Err(error) = enqueue_print_job(db, entity_type, order_id, None) {
+            tracing::warn!(
+                order_id = %order_id,
+                entity_type = %entity_type,
+                error = %error,
+                "Failed to enqueue after-edit reprint job"
+            );
+        }
     }
 }
 
@@ -7234,6 +7270,7 @@ mod tests {
         let db = test_db();
         for key in &[
             "after_order",
+            "after_edit",
             "payment_receipt",
             "split_receipt",
             "shift_close",
@@ -7248,6 +7285,92 @@ mod tests {
         }
         assert!(!is_print_action_enabled(&db, "on_complete"));
         assert!(!is_print_action_enabled(&db, "on_cancel"));
+    }
+
+    #[test]
+    fn test_after_edit_reprint_enqueues_by_order_type() {
+        let db = test_db();
+        enqueue_after_edit_auto_print(&db, "ord-edit-1", "pickup", false);
+        enqueue_after_edit_auto_print(&db, "ord-edit-2", "delivery", false);
+        let conn = db.conn.lock().unwrap();
+        let receipt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs
+                 WHERE entity_id = 'ord-edit-1' AND entity_type = 'order_receipt' AND status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let slip: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs
+                 WHERE entity_id = 'ord-edit-2' AND entity_type = 'delivery_slip' AND status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt, 1,
+            "pickup edit must enqueue an order_receipt reprint"
+        );
+        assert_eq!(
+            slip, 1,
+            "delivery edit must enqueue a delivery_slip reprint"
+        );
+    }
+
+    #[test]
+    fn test_after_edit_reprint_respects_disable_and_ghost() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["receipt_actions", "after_edit", "false"],
+            )
+            .unwrap();
+        }
+        enqueue_after_edit_auto_print(&db, "ord-edit-3", "pickup", false);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["receipt_actions", "after_edit", "true"],
+            )
+            .unwrap();
+        }
+        enqueue_after_edit_auto_print(&db, "ord-edit-4", "pickup", true); // ghost order
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE entity_id IN ('ord-edit-3','ord-edit-4')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "disabled action and ghost orders must not enqueue reprints"
+        );
+    }
+
+    #[test]
+    fn test_after_edit_reprint_keeps_single_pending_job() {
+        let db = test_db();
+        enqueue_after_edit_auto_print(&db, "ord-edit-5", "pickup", false);
+        enqueue_after_edit_auto_print(&db, "ord-edit-5", "pickup", false);
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs
+                 WHERE entity_id = 'ord-edit-5' AND entity_type = 'order_receipt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // The still-pending job renders at dispatch time, so it already
+        // prints the edited state — one job is exactly right.
+        assert_eq!(count, 1, "duplicate pending reprint must be coalesced");
     }
 
     #[test]

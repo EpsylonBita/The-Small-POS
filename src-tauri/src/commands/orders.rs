@@ -3041,7 +3041,23 @@ pub async fn orders_apply_edit_settlement(
     drop(conn);
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
+        let order_type = order_json
+            .get("orderType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pickup")
+            .to_string();
+        let is_ghost = order_json
+            .get("is_ghost")
+            .or_else(|| order_json.get("isGhost"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let _ = app.emit("order_realtime_update", order_json);
+        // Auto-reprint the edited order: the receipt document renders at
+        // dispatch time, so it reflects the just-committed items AND the
+        // full payment breakdown — including an edit-settlement delta
+        // recorded in this same transaction with a different method than
+        // the original (e.g. cash order, card-settled edit delta).
+        print::enqueue_after_edit_auto_print(&db, &actual_order_id, &order_type, is_ghost);
     }
 
     Ok(response)
