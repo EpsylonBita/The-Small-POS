@@ -1494,6 +1494,7 @@ pub fn probe_printer_serial(port_name: &str, baud_rate: u32) -> Result<(), Strin
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn print_raw_for_profile(
     profile: &Value,
     data: &[u8],

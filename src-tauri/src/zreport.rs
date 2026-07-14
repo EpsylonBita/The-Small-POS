@@ -387,11 +387,7 @@ pub(crate) fn ensure_pending_z_report_context_for_branch(
     Ok(Some(serde_json::json!(context)))
 }
 
-fn resolve_effective_z_report_window(
-    conn: &Connection,
-    branch_id: &str,
-    payload: &Value,
-) -> EffectiveZReportWindow {
+fn resolve_current_z_report_window(conn: &Connection, branch_id: &str) -> EffectiveZReportWindow {
     let lower_bound_mode = resolve_lower_bound_mode(conn);
 
     if let Some(context) = load_pending_z_report_context(conn, branch_id) {
@@ -406,12 +402,30 @@ fn resolve_effective_z_report_window(
     let period_start_at = resolve_period_start_at(conn, branch_id, None);
     let fallback_now = Utc::now().to_rfc3339();
     EffectiveZReportWindow {
-        report_date: str_field(payload, "date")
-            .unwrap_or_else(|| active_window_report_date(&period_start_at, &fallback_now)),
+        report_date: active_window_report_date(&period_start_at, &fallback_now),
         period_start_at,
         cutoff_at: None,
         lower_bound_mode,
     }
+}
+
+fn resolve_effective_z_report_window(
+    conn: &Connection,
+    branch_id: &str,
+    payload: &Value,
+) -> EffectiveZReportWindow {
+    let mut window = resolve_current_z_report_window(conn, branch_id);
+
+    // A frozen closeout context always owns its business date. Otherwise the
+    // date picker may select a historical report for preview, while the
+    // period bounds continue to describe the current live window.
+    if window.cutoff_at.is_none() {
+        if let Some(requested_date) = str_field(payload, "date") {
+            window.report_date = requested_date;
+        }
+    }
+
+    window
 }
 
 fn canonicalize_report_json_report_date(report_json: &mut Value, report_date: &str) {
@@ -925,6 +939,15 @@ fn load_existing_local_z_report_response(
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let current_window = resolve_current_z_report_window(&conn, branch_id.as_str());
+
+    // A business date is not a report identity: a store may close more than
+    // once on the same date. Never let the historical date lookup replace a
+    // live/frozen window with an earlier report from that date.
+    if current_window.cutoff_at.is_some() || current_window.report_date == report_date {
+        return Ok(None);
+    }
+
     load_latest_local_z_report_for_report_date(&conn, branch_id.as_str(), report_date.as_str())
         .map(|report| report.map(existing_response_from_local_z_report))
 }
@@ -4033,10 +4056,6 @@ pub fn preview_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value,
 }
 
 pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value, String> {
-    if let Some(existing) = load_existing_local_z_report_response(db, payload)? {
-        return Ok(existing);
-    }
-
     let built = build_z_report_for_date(db, payload, false)?;
     if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
@@ -4288,6 +4307,20 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 // Submit Z-report + finalize end-of-day (Gap 8)
 // ---------------------------------------------------------------------------
 
+fn payload_for_z_report_window(
+    payload: &Value,
+    branch_id: &str,
+    window: &EffectiveZReportWindow,
+) -> Value {
+    let mut normalized = payload.as_object().cloned().unwrap_or_default();
+    normalized.insert("branchId".to_string(), Value::String(branch_id.to_string()));
+    normalized.insert(
+        "date".to_string(),
+        Value::String(window.report_date.clone()),
+    );
+    Value::Object(normalized)
+}
+
 pub(crate) fn prepare_z_report_submission(
     db: &DbState,
     payload: &Value,
@@ -4302,7 +4335,10 @@ pub(crate) fn prepare_z_report_submission(
             branch_id.as_str(),
             &Utc::now().to_rfc3339(),
         )?;
-        resolve_effective_z_report_window(&conn, &branch_id, payload)
+        // Submission always closes the current live/frozen window. A date
+        // picker is useful for historical preview, but must never choose the
+        // report identity or rollover bounds for a commit.
+        resolve_current_z_report_window(&conn, &branch_id)
     };
     let cutoff_param = window.cutoff_at.as_deref();
 
@@ -4351,11 +4387,12 @@ pub(crate) fn prepare_z_report_submission(
         .is_some();
     let has_branch_date =
         str_field(payload, "branchId").is_some() || str_field(payload, "date").is_some();
+    let window_payload = payload_for_z_report_window(payload, &branch_id, &window);
 
     let generated = if has_shift_id && !has_branch_date {
         generate_z_report(db, payload)?
     } else {
-        generate_z_report_for_date(db, payload)?
+        generate_z_report_for_date(db, &window_payload)?
     };
 
     let z_report_id = extract_z_report_id(&generated);
@@ -5493,6 +5530,77 @@ mod tests {
         ).expect("insert payment 5");
     }
 
+    fn seed_window_cashier_shift(
+        db: &DbState,
+        shift_id: &str,
+        staff_name: &str,
+        check_in_time: &str,
+        check_out_time: Option<&str>,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        let status = if check_out_time.is_some() {
+            "closed"
+        } else {
+            "active"
+        };
+        let closing_amount = check_out_time.map(|_| 10.0_f64);
+        let closing_amount_cents = check_out_time.map(|_| 1000_i64);
+        let updated_at = check_out_time.unwrap_or(check_in_time);
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                ?1, ?1, ?2, 'branch-1', 'term-1', 'cashier',
+                10.0, 1000, ?3, ?4, 10.0, 1000, 0.0, 0,
+                ?5, ?6, ?7, 2, 'pending', ?5, ?8
+             )",
+            params![
+                shift_id,
+                staff_name,
+                closing_amount,
+                closing_amount_cents,
+                check_in_time,
+                check_out_time,
+                status,
+                updated_at,
+            ],
+        )
+        .expect("insert window cashier shift");
+
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents,
+                variance_amount, variance_amount_cents,
+                reconciled, opened_at, closed_at, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?2, 'branch-1', 'term-1',
+                10.0, 1000, ?3, ?4, 10.0, 1000, 0.0, 0,
+                ?5, ?6, ?7, ?6, ?8
+             )",
+            params![
+                format!("drawer-{shift_id}"),
+                shift_id,
+                closing_amount,
+                closing_amount_cents,
+                i64::from(check_out_time.is_some()),
+                check_in_time,
+                check_out_time,
+                updated_at,
+            ],
+        )
+        .expect("insert window cashier drawer");
+    }
+
     fn seed_late_day_order(db: &DbState, created_at: &str) {
         let conn = db.conn.lock().unwrap();
         // W4e Step 0: dual-populate (80.0 → 8000).
@@ -6110,7 +6218,7 @@ mod tests {
                 &conn,
                 "system",
                 "last_z_report_timestamp",
-                "2026-02-16T23:59:59Z",
+                "2026-02-17T08:00:00Z",
             )
             .expect("advance active period");
         }
@@ -6130,6 +6238,165 @@ mod tests {
         let report_json: Value =
             serde_json::from_str(report_json_str).expect("parse stored reportJson");
         assert_eq!(report_json["shifts"]["total"], 2);
+    }
+
+    #[test]
+    fn test_preview_same_business_date_uses_live_window_after_prior_z_report() {
+        let db = test_db();
+        seed_closed_shift(&db);
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+        let prior = generate_z_report_for_date(&db, &payload).expect("generate prior report");
+        let prior_id = prior["report"]["id"]
+            .as_str()
+            .expect("prior report id")
+            .to_string();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-02-16T19:00:00Z",
+            )
+            .expect("advance to second same-date window");
+        }
+        seed_window_cashier_shift(
+            &db,
+            "shift-zr-live-2",
+            "Evening Cashier",
+            "2026-02-16T20:00:00Z",
+            None,
+        );
+
+        let result = preview_z_report_for_date(&db, &payload)
+            .expect("same-date preview should use current live window");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["preview"], true);
+        assert_eq!(result["existing"], false);
+        assert_ne!(result["report"]["id"], prior_id);
+        assert_eq!(result["report"]["reportJson"]["shifts"]["total"], 1);
+        assert_eq!(
+            result["report"]["reportJson"]["staffReports"][0]["staffShiftId"],
+            "shift-zr-live-2"
+        );
+        assert_eq!(
+            result["report"]["reportJson"]["staffReports"][0]["shiftStatus"],
+            "active"
+        );
+        assert_eq!(
+            result["report"]["reportJson"]["cashDrawer"]["totalVariance"],
+            0.0
+        );
+    }
+
+    #[test]
+    fn test_submit_same_business_date_creates_new_window_report() {
+        let db = test_db();
+        seed_closed_shift(&db);
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+        let prior = generate_z_report_for_date(&db, &payload).expect("generate prior report");
+        let prior_id = prior["report"]["id"]
+            .as_str()
+            .expect("prior report id")
+            .to_string();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-02-16T19:00:00Z",
+            )
+            .expect("advance to second same-date window");
+        }
+        seed_window_cashier_shift(
+            &db,
+            "shift-zr-closed-2",
+            "Evening Cashier",
+            "2026-02-16T20:00:00Z",
+            Some("2026-02-16T22:00:00Z"),
+        );
+
+        let result = submit_z_report(&db, &payload)
+            .expect("second same-date closeout should create its own report");
+        let new_id = result["zReportId"]
+            .as_str()
+            .expect("new same-date report id");
+
+        assert_ne!(new_id, prior_id);
+        assert_eq!(result["data"]["existing"], false);
+        assert_eq!(
+            result["data"]["report"]["reportJson"]["periodStart"],
+            "2026-02-16T19:00:00Z"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let same_date_reports: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM z_reports WHERE report_date = '2026-02-16'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(same_date_reports, 2);
+    }
+
+    #[test]
+    fn test_prepare_submission_ignores_historical_picker_date_for_live_window() {
+        let db = test_db();
+        seed_closed_shift(&db);
+
+        let historical_payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+        let prior = generate_z_report_for_date(&db, &historical_payload)
+            .expect("generate historical report");
+        let prior_id = prior["report"]["id"]
+            .as_str()
+            .expect("historical report id")
+            .to_string();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-02-17T08:00:00Z",
+            )
+            .expect("advance live business window");
+        }
+        seed_window_cashier_shift(
+            &db,
+            "shift-zr-next-day",
+            "Next Day Cashier",
+            "2026-02-17T09:00:00Z",
+            Some("2026-02-17T10:00:00Z"),
+        );
+
+        let prepared = prepare_z_report_submission(&db, &historical_payload)
+            .expect("submission should target the live business window");
+        let prepared_id = prepared.z_report_id.as_deref().expect("live report id");
+
+        assert_ne!(prepared_id, prior_id);
+        assert_eq!(prepared.report_date, "2026-02-17");
+        assert_eq!(prepared.generated["report"]["reportDate"], "2026-02-17");
+        assert_eq!(
+            prepared.generated["report"]["reportJson"]["periodStart"],
+            "2026-02-17T08:00:00Z"
+        );
     }
 
     #[test]

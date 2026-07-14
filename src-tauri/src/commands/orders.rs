@@ -1320,10 +1320,10 @@ fn merge_existing_order_item_customizations(
             }
 
             let score = order_item_match_score(existing, incoming);
-            if score == 100 || (!incoming_has_line_identity && score >= 34) {
-                if best_match.map_or(true, |(_, best_score)| score > best_score) {
-                    best_match = Some((index, score));
-                }
+            if (score == 100 || (!incoming_has_line_identity && score >= 34))
+                && best_match.map_or(true, |(_, best_score)| score > best_score)
+            {
+                best_match = Some((index, score));
             }
         }
 

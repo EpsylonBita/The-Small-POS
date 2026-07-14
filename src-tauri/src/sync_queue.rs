@@ -3051,8 +3051,7 @@ fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<u
                 ))
             })
             .map_err(|e| format!("sync_queue superseded order cleanup query: {e}"))?;
-        let rows = mapped.filter_map(|row| row.ok()).collect();
-        rows
+        mapped.filter_map(|row| row.ok()).collect()
     };
 
     let mut removed = 0usize;
