@@ -1932,6 +1932,9 @@
       "title": "Ουρά Εκτύπωσης",
       "helpText": "Οι εργασίες που έχουν ήδη σταλεί στον εκτυπωτή LAN δεν μπορούν να ανακληθούν από τη συσκευή. Αυτά τα χειριστήρια σταματούν ή επαναλαμβάνουν μόνο εργασίες που παραμένουν τοπικά στην ουρά αυτού του POS.",
       "pausedProfiles": "Ενεργές παύσεις για ρυθμισμένους εκτυπωτές",
+      "stuckWarning": "[NEEDS TRANSLATION] {{count}} print job(s) need attention — check the queue below.",
+      "workerAlert": "[NEEDS TRANSLATION] Printing is failing — check the print queue.",
+      "pausedAtStartup": "[NEEDS TRANSLATION] The print queue is paused — jobs are queuing but not printing. Resume it in Settings > Print Queue.",
       "refresh": "Ανανέωση",
       "resume": "Συνέχιση ουράς",
       "pause": "Παύση ουράς",
@@ -4664,6 +4667,8 @@
     "printing": "Εκτύπωση...",
     "printSuccess": "Η απόδειξη εκτυπώθηκε επιτυχώς",
     "printFailed": "Αποτυχία εκτύπωσης απόδειξης",
+    "printAlreadyQueued": "[NEEDS TRANSLATION] This receipt is already queued or printing — not reprinted.",
+    "printSkipped": "[NEEDS TRANSLATION] Receipt printing is turned off for this action.",
     "guestCustomer": "Επισκέπτης",
     "loadingItems": "Φόρτωση προϊόντων...",
     "loadItemsFailed": "Αποτυχία φόρτωσης προϊόντων",
@@ -4685,7 +4690,8 @@
   },
   "kioskAutoPrint": {
     "sourceFallback": "Kiosk",
-    "newOrderToast": "Νέα παραγγελία kiosk #{{orderNumber}} από {{sourceLabel}}."
+    "newOrderToast": "Νέα παραγγελία kiosk #{{orderNumber}} από {{sourceLabel}}.",
+    "printFailedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue."
   },
   "shiftManager": {
     "noActiveShift": "Δεν υπάρχει ενεργή βάρδια για κλείσιμο",

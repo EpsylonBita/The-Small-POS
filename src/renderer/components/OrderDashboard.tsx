@@ -972,6 +972,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [currentEditSupabaseId, setCurrentEditSupabaseId] = useState<
       string | undefined
     >(undefined);
+    // The order type the edited order's line prices currently reflect.
+    // For a plain edit this equals the order's stored type; for the
+    // pickup->delivery conversion flow it is the PRE-conversion type
+    // (the conversion stamps order_type before the modal reopens, so the
+    // stored row can no longer tell MenuModal whether items need a retier).
+    const [currentEditSourceOrderType, setCurrentEditSourceOrderType] =
+      useState<string | undefined>(undefined);
 
     // State for new order flow
     const [showOrderTypeModal, setShowOrderTypeModal] = useState(false);
@@ -2304,6 +2311,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setCurrentEditSupabaseId(targetOrder.supabase_id || targetOrder.id);
         setCurrentEditOrderNumber(targetOrder.order_number || targetOrder.orderNumber);
         setEditingOrderType("dine-in");
+        setCurrentEditSourceOrderType(resolveEditableOrderType(targetOrder));
         setShowEditMenuModal(true);
         return;
       }
@@ -4008,6 +4016,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setCurrentEditOrderId(undefined);
       setCurrentEditOrderNumber(undefined);
       setCurrentEditSupabaseId(undefined);
+      setCurrentEditSourceOrderType(undefined);
     }, []);
 
     const normalizeEditOrderItems = useCallback(
@@ -5319,6 +5328,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           setEditingOrderType(
             targetOrderType || resolveEditableOrderType(orderToEdit),
           );
+          // The stored row still reflects its current type here (no
+          // conversion has run), so the source type is simply that.
+          setCurrentEditSourceOrderType(resolveEditableOrderType(orderToEdit));
         }
       }
 
@@ -5368,6 +5380,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderBeingEdited.order_number || orderBeingEdited.orderNumber,
         );
         setEditingOrderType("delivery");
+        // Items are still priced at the PRE-conversion tier; the conversion
+        // stamps order_type='delivery' before the modal reopens, so this is
+        // the only place that still knows the tier the prices reflect.
+        setCurrentEditSourceOrderType(currentType);
         setPickupToDeliveryContext({
           orderId: orderBeingEdited.id,
           orderNumber:
@@ -7232,6 +7248,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           editOrderId={currentEditOrderId}
           editSupabaseId={currentEditSupabaseId}
           editOrderNumber={currentEditOrderNumber}
+          editSourceOrderType={currentEditSourceOrderType}
           initialCartItems={[]}
           onEditComplete={handleEditMenuComplete}
         />

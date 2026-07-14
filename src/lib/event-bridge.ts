@@ -108,6 +108,9 @@ const EVENT_MAP: Record<string, string> = {
 
   // --- Printer status events ---
   'printer_status_changed': 'printer:status-changed',
+  // Backend emits this hyphenated name from start_print_worker after repeated
+  // dispatch failures; identity-mapped so onEvent('print-worker-alert') delivers it.
+  'print-worker-alert': 'print-worker-alert',
 
   // --- Terminal config events ---
   'terminal_config_updated': 'terminal-config-updated',

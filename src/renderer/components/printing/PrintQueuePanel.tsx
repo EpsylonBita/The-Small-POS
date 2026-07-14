@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { PauseCircle, PlayCircle, RefreshCw, Printer, XCircle, RotateCcw } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
@@ -117,30 +117,60 @@ const PrintQueuePanel: React.FC = () => {
     [t],
   );
 
-  const loadQueue = useCallback(async () => {
-    setLoading(true);
-    try {
-      const result = (await bridge.printer.listJobs()) as PrintQueueResponse;
-      if (!result?.success) {
-        throw new Error(
-          result?.error || t('settings.printQueue.loadFailed', 'Failed to load print queue'),
+  const inFlightRef = useRef(false);
+  const loadSeqRef = useRef(0);
+
+  const loadQueue = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const silent = opts?.silent === true;
+      // A silent background poll yields to any in-flight load so it never flickers
+      // the spinner or spams a toast.
+      if (silent && inFlightRef.current) return;
+      inFlightRef.current = true;
+      // Monotonic token: an earlier load whose response resolves out of order (e.g.
+      // a background poll started just before a cancel/pause mutation) must not
+      // clobber the fresher state a later load already applied.
+      const seq = ++loadSeqRef.current;
+      if (!silent) setLoading(true);
+      try {
+        const result = (await bridge.printer.listJobs()) as PrintQueueResponse;
+        // Drop a stale response if a newer load has started since this one.
+        if (seq !== loadSeqRef.current) return;
+        if (!result?.success) {
+          throw new Error(
+            result?.error || t('settings.printQueue.loadFailed', 'Failed to load print queue'),
+          );
+        }
+        setJobs(Array.isArray(result.jobs) ? result.jobs : []);
+        setQueuePaused(result.queuePaused === true);
+        setPausedPrinterProfileIds(
+          Array.isArray(result.pausedPrinterProfileIds) ? result.pausedPrinterProfileIds : [],
         );
+      } catch (error) {
+        console.error('[PrintQueuePanel] Failed to load print queue:', error);
+        if (!silent && seq === loadSeqRef.current) {
+          toast.error(t('settings.printQueue.loadFailed', 'Failed to load print queue'));
+        }
+      } finally {
+        inFlightRef.current = false;
+        if (!silent) setLoading(false);
       }
-      setJobs(Array.isArray(result.jobs) ? result.jobs : []);
-      setQueuePaused(result.queuePaused === true);
-      setPausedPrinterProfileIds(
-        Array.isArray(result.pausedPrinterProfileIds) ? result.pausedPrinterProfileIds : [],
-      );
-    } catch (error) {
-      console.error('[PrintQueuePanel] Failed to load print queue:', error);
-      toast.error(t('settings.printQueue.loadFailed', 'Failed to load print queue'));
-    } finally {
-      setLoading(false);
-    }
-  }, [bridge.printer, t]);
+    },
+    [bridge.printer, t],
+  );
 
   useEffect(() => {
     void loadQueue();
+  }, [loadQueue]);
+
+  // Live refresh: poll while the panel is mounted so a stuck queue becomes visible
+  // without the operator having to hit Refresh. Silent, so the spinner and the
+  // header buttons (gated on `loading`) don't flicker every tick.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void loadQueue({ silent: true });
+    }, 4000);
+    return () => window.clearInterval(id);
   }, [loadQueue]);
 
   const togglePause = useCallback(async () => {
@@ -204,6 +234,11 @@ const PrintQueuePanel: React.FC = () => {
     }
   };
 
+  // Count/render the same visible window so the stuck-jobs banner never points to
+  // failed rows that aren't shown (and thus have no reachable Retry/Cancel control).
+  const visibleJobs = jobs.slice(-20).reverse();
+  const failedCount = visibleJobs.filter((job) => job.status === 'failed').length;
+
   return (
     <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -223,6 +258,14 @@ const PrintQueuePanel: React.FC = () => {
           {pausedPrinterProfileIds.length > 0 && (
             <p className="mt-2 text-[11px] text-amber-200/90">
               {t('settings.printQueue.pausedProfiles', 'Profile pauses active for configured printers')}
+            </p>
+          )}
+          {failedCount > 0 && (
+            <p className="mt-2 text-[11px] text-rose-200/90">
+              {t('settings.printQueue.stuckWarning', {
+                count: failedCount,
+                defaultValue: '{{count}} print job(s) need attention — check the queue below.',
+              })}
             </p>
           )}
         </div>
@@ -277,7 +320,7 @@ const PrintQueuePanel: React.FC = () => {
               )}
             </div>
           ) : (
-            jobs.slice(-20).reverse().map((job) => {
+            visibleJobs.map((job) => {
               const isActive = ACTIVE_JOB_STATUSES.has(job.status);
               const canRetry = job.status === 'failed';
               const issueLabel = getJobIssueLabel(job);

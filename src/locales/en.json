@@ -1932,6 +1932,9 @@
       "title": "Print Queue",
       "helpText": "Jobs already sent to the LAN printer cannot be recalled from the device. These controls only stop or retry jobs still queued locally on this POS.",
       "pausedProfiles": "Profile pauses active for configured printers",
+      "stuckWarning": "{{count}} print job(s) need attention — check the queue below.",
+      "workerAlert": "Printing is failing — check the print queue.",
+      "pausedAtStartup": "The print queue is paused — jobs are queuing but not printing. Resume it in Settings > Print Queue.",
       "refresh": "Refresh",
       "resume": "Resume queue",
       "pause": "Pause queue",
@@ -4664,6 +4667,8 @@
     "printing": "Printing...",
     "printSuccess": "Receipt printed successfully",
     "printFailed": "Failed to print receipt",
+    "printAlreadyQueued": "This receipt is already queued or printing — not reprinted.",
+    "printSkipped": "Receipt printing is turned off for this action.",
     "guestCustomer": "Guest",
     "loadingItems": "Loading items...",
     "loadItemsFailed": "Failed to load items",
@@ -4685,7 +4690,8 @@
   },
   "kioskAutoPrint": {
     "sourceFallback": "Kiosk",
-    "newOrderToast": "New kiosk order #{{orderNumber}} received from {{sourceLabel}}."
+    "newOrderToast": "New kiosk order #{{orderNumber}} received from {{sourceLabel}}.",
+    "printFailedToast": "Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue."
   },
   "shiftManager": {
     "noActiveShift": "No active shift to close",

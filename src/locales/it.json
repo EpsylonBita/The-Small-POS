@@ -1932,6 +1932,9 @@
       "title": "Coda di stampa",
       "helpText": "I lavori già inviati alla stampante LAN non possono essere richiamati dal dispositivo. Questi controlli fermano o ritentano solo i lavori ancora in coda localmente su questo POS.",
       "pausedProfiles": "Pause attive per le stampanti configurate",
+      "stuckWarning": "[NEEDS TRANSLATION] {{count}} print job(s) need attention — check the queue below.",
+      "workerAlert": "[NEEDS TRANSLATION] Printing is failing — check the print queue.",
+      "pausedAtStartup": "[NEEDS TRANSLATION] The print queue is paused — jobs are queuing but not printing. Resume it in Settings > Print Queue.",
       "refresh": "Aggiorna",
       "resume": "Riprendi coda",
       "pause": "Metti in pausa la coda",
@@ -4664,6 +4667,8 @@
     "printing": "Stampa...",
     "printSuccess": "Scontrino stampato con successo",
     "printFailed": "Impossibile stampare lo scontrino",
+    "printAlreadyQueued": "[NEEDS TRANSLATION] This receipt is already queued or printing — not reprinted.",
+    "printSkipped": "[NEEDS TRANSLATION] Receipt printing is turned off for this action.",
     "guestCustomer": "Ospite",
     "loadingItems": "Caricamento articoli...",
     "loadItemsFailed": "Impossibile caricare gli articoli",
@@ -4685,7 +4690,8 @@
   },
   "kioskAutoPrint": {
     "sourceFallback": "Chiosco",
-    "newOrderToast": "Nuovo ordine chiosco #{{orderNumber}} ricevuto da {{sourceLabel}}."
+    "newOrderToast": "Nuovo ordine chiosco #{{orderNumber}} ricevuto da {{sourceLabel}}.",
+    "printFailedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue."
   },
   "shiftManager": {
     "noActiveShift": "Nessun turno attivo da chiudere",

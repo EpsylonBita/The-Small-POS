@@ -23,7 +23,7 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { renderModalPortal } from '../../utils/render-modal-portal';
 import toast from 'react-hot-toast';
 import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
-import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
+import { resolveCartLineUnitPrice, reconcileHydratedUnitPrice } from '../../utils/edit-order-pricing';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import type { MenuCombo } from '@shared/types/combo';
@@ -362,6 +362,14 @@ interface MenuModalProps {
   editOrderId?: string;
   editSupabaseId?: string;
   editOrderNumber?: string;
+  /**
+   * The order type the items were LAST PRICED under. Callers that convert
+   * the order before opening the edit session (pickup -> delivery stamps
+   * order_type ahead of the reopen) must pass the PRE-conversion type here
+   * so hydration knows the lines still need retiering; when omitted, the
+   * stored order row's type is used.
+   */
+  editSourceOrderType?: string;
   initialCartItems?: any[];
   onEditComplete?: (orderData: {
     orderId: string;
@@ -387,6 +395,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   editOrderId,
   editSupabaseId,
   editOrderNumber,
+  editSourceOrderType,
   initialCartItems = [],
   onEditComplete
 }) => {
@@ -582,6 +591,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // update while still allowing repricing when cart items arrive AFTER an
   // orderType change (common in the edit-open flow).
   const repricedForOrderTypeRef = React.useRef<string | null>(null);
+  // The order type the order was STORED under, captured while hydrating the
+  // edit session (from the local order row). Used to seed the ref above so a
+  // plain edit (type unchanged) never reprices hydrated lines, while a
+  // genuine "Change Order Type" edit still does.
+  const editSourceOrderTypeRef = React.useRef<string | null>(null);
   const shouldApplyGhostMode = ghostModeFeatureEnabled && ghostModeArmed;
   const shouldBypassPaymentWithGhostMode = shouldApplyGhostMode;
 
@@ -782,6 +796,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       const localOrderResponse: any = await bridge.orders.getById(orderId);
       const localOrder = localOrderResponse?.data ?? localOrderResponse;
       console.log('[MenuModal] Local order result:', localOrder?.id, 'items:', localOrder?.items?.length);
+      // Capture the type the order was stored under (even when items end up
+      // coming from the Supabase fallback) so hydration can tell a plain edit
+      // apart from a genuine order-type change.
+      const storedOrderType = localOrder?.orderType ?? localOrder?.order_type;
+      editSourceOrderTypeRef.current = typeof storedOrderType === 'string' && storedOrderType ? storedOrderType : null;
       if (localOrder?.items && Array.isArray(localOrder.items) && localOrder.items.length > 0) {
         console.log('[MenuModal] Loaded items from local DB:', localOrder.items.length);
         return localOrder.items;
@@ -989,6 +1008,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // IMPORTANT: Clear cart items first to prevent duplicates when switching between orders
         // This handles the case where the modal is already open and we're loading a different order
         setCartItems([]);
+        editSourceOrderTypeRef.current = null;
 
         let ingredientLookup: IngredientLookup = new Map();
         let menuItemLookup: MenuItemLookup = new Map();
@@ -1018,6 +1038,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           });
         }
 
+        // Stale-run guard: the operator may have switched to a different
+        // order (or closed the modal) while the catalog was loading — a
+        // newer loadItems run owns the session now and this run must not
+        // seed refs or write its order's items into the cart.
+        if (lastEditOrderIdRef.current !== editOrderId) return;
+
         // If we have initialCartItems, use them
         if (initialCartItems && initialCartItems.length > 0) {
           const transformedItems = initialCartItems.map((item, index) => {
@@ -1039,6 +1065,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               item.originalOrderItemId ??
               item.id ??
               normalizedItem.id;
+            const storedUnitPrice = normalizedItem.unit_price || normalizedItem.price || 0;
+            const itemQuantity = normalizedItem.quantity || 1;
+            const storedTotalPrice = normalizedItem.total_price || normalizedItem.totalPrice || 0;
+            // Kiosk-created rows store unit_price base-only with an
+            // ingredient-inclusive total_price; reconcile so cart math never
+            // under-prices the line when it recomputes from unitPrice.
+            const unitPrice = reconcileHydratedUnitPrice(storedUnitPrice, storedTotalPrice, itemQuantity);
+            // normalizePosOrderItem materializes original_unit_price as an
+            // echo of unit_price when the row never carried one; treating
+            // that echo as a genuine operator-recorded original would flag
+            // every reconciled line as price-overridden at save time.
+            const storedOriginalUnitPrice = Number(
+              normalizedItem.original_unit_price || normalizedItem.originalUnitPrice || 0,
+            );
             return {
               id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
               order_item_id: sourceOrderItemId,
@@ -1047,19 +1087,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               sourceOrderItemId: sourceOrderItemId,
               menuItemId,
               name: normalizedItem.name || catalogMenuItem?.name || 'Unknown Item',
-              price: normalizedItem.unit_price || normalizedItem.price || 0,
-              quantity: normalizedItem.quantity || 1,
+              price: unitPrice,
+              quantity: itemQuantity,
               customizations: transformCustomizations(rawCustomizations, ingredientLookup),
               notes: normalizedItem.notes || '',
-              totalPrice: normalizedItem.total_price || normalizedItem.totalPrice || ((normalizedItem.unit_price || normalizedItem.price || 0) * (normalizedItem.quantity || 1)),
-              basePrice: normalizedItem.unit_price || normalizedItem.price || 0,
-              unitPrice: normalizedItem.unit_price || normalizedItem.price || 0,
+              totalPrice: storedTotalPrice || unitPrice * itemQuantity,
+              basePrice: unitPrice,
+              unitPrice,
               originalUnitPrice:
-                normalizedItem.original_unit_price ||
-                normalizedItem.originalUnitPrice ||
-                normalizedItem.unit_price ||
-                normalizedItem.price ||
-                0,
+                storedOriginalUnitPrice && Math.abs(storedOriginalUnitPrice - storedUnitPrice) > 0.0001
+                  ? storedOriginalUnitPrice
+                  : unitPrice,
               isPriceOverridden:
                 normalizedItem.is_price_overridden === true ||
                 normalizedItem.isPriceOverridden === true,
@@ -1068,6 +1106,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               category_id: normalizedItem.category_id || normalizedItem.categoryId || catalogMenuItem?.categoryId || null,
             };
           });
+          // Items supplied by the caller are already priced for the current
+          // order type — pre-arm the reprice guard so hydration never
+          // flattens customized lines to the bare tier price.
+          repricedForOrderTypeRef.current = orderType;
           setCartItems(transformedItems);
         }
         // Otherwise fetch from backend if we have an orderId
@@ -1075,6 +1117,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           setIsLoadingItems(true);
           try {
             const fetchedItems = await fetchOrderItems(editOrderId, editSupabaseId);
+            // Stale-run guard (see above): bail before seeding refs or
+            // rendering another order's items into this session's cart.
+            if (lastEditOrderIdRef.current !== editOrderId) return;
             if (fetchedItems.length > 0) {
               const transformedItems = fetchedItems.map((item, index) => {
                 const normalizedItem = normalizePosOrderItem(item);
@@ -1096,6 +1141,22 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   item.originalOrderItemId ??
                   item.id ??
                   normalizedItem.id;
+                const storedUnitPrice = normalizedItem.unit_price || normalizedItem.price || 0;
+                const itemQuantity = normalizedItem.quantity || 1;
+                const storedTotalPrice = normalizedItem.total_price || normalizedItem.totalPrice || 0;
+                // Kiosk-created rows store unit_price base-only with an
+                // ingredient-inclusive total_price; reconcile so cart math
+                // never under-prices the line when it recomputes from
+                // unitPrice.
+                const unitPrice = reconcileHydratedUnitPrice(storedUnitPrice, storedTotalPrice, itemQuantity);
+                // normalizePosOrderItem materializes original_unit_price as
+                // an echo of unit_price when the row never carried one;
+                // treating that echo as a genuine operator-recorded original
+                // would flag every reconciled line as price-overridden at
+                // save time.
+                const storedOriginalUnitPrice = Number(
+                  normalizedItem.original_unit_price || normalizedItem.originalUnitPrice || 0,
+                );
                 return {
                   id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
                   order_item_id: sourceOrderItemId,
@@ -1104,19 +1165,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   sourceOrderItemId: sourceOrderItemId,
                   menuItemId,
                   name: normalizedItem.name || catalogMenuItem?.name || 'Unknown Item',
-                  price: normalizedItem.unit_price || normalizedItem.price || 0,
-                  quantity: normalizedItem.quantity || 1,
+                  price: unitPrice,
+                  quantity: itemQuantity,
                   customizations: transformedCustomizations,
                   notes: normalizedItem.notes || '',
-                  totalPrice: normalizedItem.total_price || normalizedItem.totalPrice || ((normalizedItem.unit_price || normalizedItem.price || 0) * (normalizedItem.quantity || 1)),
-                  basePrice: normalizedItem.unit_price || normalizedItem.price || 0,
-                  unitPrice: normalizedItem.unit_price || normalizedItem.price || 0,
+                  totalPrice: storedTotalPrice || unitPrice * itemQuantity,
+                  basePrice: unitPrice,
+                  unitPrice,
                   originalUnitPrice:
-                    normalizedItem.original_unit_price ||
-                    normalizedItem.originalUnitPrice ||
-                    normalizedItem.unit_price ||
-                    normalizedItem.price ||
-                    0,
+                    storedOriginalUnitPrice && Math.abs(storedOriginalUnitPrice - storedUnitPrice) > 0.0001
+                      ? storedOriginalUnitPrice
+                      : unitPrice,
                   isPriceOverridden:
                     normalizedItem.is_price_overridden === true ||
                     normalizedItem.isPriceOverridden === true,
@@ -1125,6 +1184,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   category_id: normalizedItem.category_id || normalizedItem.categoryId || catalogMenuItem?.categoryId || null,
                 };
               });
+              // Pre-arm the reprice guard: a plain edit (source type equals
+              // the session type, or the source type is unknown) must keep
+              // the hydrated prices untouched. Only a genuine order-type
+              // change leaves the ref cleared so the reprice effect runs.
+              // The caller-supplied editSourceOrderType wins over the stored
+              // row's type: the pickup->delivery conversion stamps the row
+              // 'delivery' BEFORE reopening this modal, so only the caller
+              // knows the tier the line prices actually reflect.
+              const sourceOrderType = editSourceOrderType ?? editSourceOrderTypeRef.current;
+              repricedForOrderTypeRef.current = sourceOrderType && sourceOrderType !== orderType ? null : orderType;
               setCartItems(transformedItems);
             }
           } catch (error) {
@@ -1149,18 +1218,26 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editMode, editOrderId, editSupabaseId]);
 
-  // Reprice existing cart items when the order-type tier changes.
+  // Reprice existing cart items when the order-type tier CHANGES.
   //
-  // Fires only in edit mode (i.e. when the operator reached this modal via
-  // the EditOptionsModal "Change Order Type" flow) so the normal "start
-  // a new order" path is unaffected. Line items whose price was explicitly
-  // overridden by the operator (e.g. applied a custom discount at the
-  // item level) are skipped so we don't overwrite their intent. Manual
-  // line items (no underlying menuItemId) can't be repriced because they
-  // have no tier data to look up — left as-is.
+  // Fires only in edit mode, and only when the session's order type differs
+  // from the type the cart lines were last priced for. Hydration seeds
+  // repricedForOrderTypeRef with the order's STORED type, so a plain
+  // "Edit Order" open (type unchanged) never reprices — the loaded prices,
+  // including each line's ingredient/customization component, are kept
+  // as-is. Only the EditOptionsModal "Change Order Type" flow (or an
+  // in-session type switch) leaves the ref out of sync and triggers this.
   //
-  // The shared `resolveMenuItemPrice` util is the single source of truth
-  // for tier resolution, matching what MenuItemGrid displays on the grid.
+  // Line items whose price was explicitly overridden by the operator are
+  // skipped so we don't overwrite their intent. Manual line items (no
+  // underlying menuItemId) can't be repriced because they have no tier
+  // data to look up — left as-is.
+  //
+  // The shared `resolveCartLineUnitPrice` util is the single source of
+  // truth for the reprice math: menu-item tier base (matching what
+  // MenuItemGrid displays) PLUS the line's ingredient tier prices. The old
+  // bare `resolveMenuItemPrice` write here flattened every customized line
+  // to the subcategory base price, zeroing ingredient prices on edit.
   useEffect(() => {
     if (!isOpen || !editMode) return;
     if (!orderType) return;
@@ -1173,10 +1250,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
     let cancelled = false;
     const reprice = async () => {
-      const updates: Array<{ id: string; unitPrice: number }> = [];
+      const updates: Array<{ id: string; unitPrice: number; basePrice: number }> = [];
       for (const item of cartItems) {
         if (item.isPriceOverridden) continue;
         if (item.is_manual) continue;
+        // Free offer-reward lines stay free across a retier — repricing
+        // them to catalog tiers would charge for the promised free item.
+        if (isOfferRewardLine(item)) continue;
         const menuItemId = item.menuItemId;
         if (!menuItemId) continue;
         try {
@@ -1185,9 +1265,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           // expect.
           const menuItem = await menuService.getMenuItemById(String(menuItemId));
           if (!menuItem) continue;
-          const newUnitPrice = resolveMenuItemPrice(menuItem, orderType);
-          if (newUnitPrice !== item.unitPrice) {
-            updates.push({ id: String(item.id), unitPrice: newUnitPrice });
+          const { basePrice: newBasePrice, unitPrice: newUnitPrice } =
+            resolveCartLineUnitPrice(menuItem, item.customizations, orderType);
+          if (Math.abs(newUnitPrice - (item.unitPrice ?? item.price ?? 0)) > 0.005) {
+            updates.push({ id: String(item.id), unitPrice: newUnitPrice, basePrice: newBasePrice });
           }
         } catch (err) {
           console.warn(
@@ -1203,17 +1284,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // short-circuit the re-entry on the next pass.
       repricedForOrderTypeRef.current = orderType;
       if (updates.length === 0) return;
-      const priceById = new Map(updates.map((u) => [u.id, u.unitPrice]));
+      const priceById = new Map(updates.map((u) => [u.id, u]));
       setCartItems((prev) =>
         prev.map((item) => {
-          const newUnitPrice = priceById.get(String(item.id));
-          if (newUnitPrice === undefined) return item;
+          const update = priceById.get(String(item.id));
+          if (update === undefined) return item;
           return {
             ...item,
-            price: newUnitPrice,
-            basePrice: newUnitPrice,
-            unitPrice: newUnitPrice,
-            totalPrice: newUnitPrice * (item.quantity || 1),
+            price: update.unitPrice,
+            basePrice: update.basePrice,
+            unitPrice: update.unitPrice,
+            totalPrice: update.unitPrice * (item.quantity || 1),
           };
         }),
       );

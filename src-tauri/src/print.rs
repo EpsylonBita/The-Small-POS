@@ -44,6 +44,19 @@ const PRINT_QUEUE_PAUSED_PROFILE_PREFIX: &str = "queue_paused_profile::";
 static PRINT_PROCESSOR_LOCK: Mutex<()> = Mutex::new(());
 const STALE_PRINTING_JOB_ERROR: &str = "Print attempt did not finish; it may already have reached the printer. Automatic retry stopped to prevent duplicate or gibberish output. Check the printer, then retry manually if needed.";
 
+/// Hard wall-clock cap on a single hardware dispatch. Kept below the 30s stale
+/// threshold (see `recover_stale_printing_jobs`) so a timed-out job is failed
+/// closed here with a clear message rather than later re-surfacing as a stale
+/// `printing` row. The unbounded Windows spooler transport is the reason this
+/// exists — see `run_dispatch_with_timeout`.
+const DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Error recorded when a hardware dispatch exceeds `DISPATCH_TIMEOUT`. The
+/// wording is deliberately matched by `is_non_retryable_print_error` so a
+/// timed-out job fails closed (no automatic re-send that could duplicate a
+/// receipt that may already have printed).
+const DISPATCH_TIMEOUT_ERROR: &str = "Printer did not respond within the dispatch timeout; the receipt may or may not have printed. Automatic retry stopped to prevent duplicate output. Check the printer, then retry manually if needed.";
+
 fn is_receipt_like_entity_type(entity_type: &str) -> bool {
     matches!(
         entity_type,
@@ -592,6 +605,112 @@ fn is_non_retryable_print_error(error_msg: &str) -> bool {
     normalized.contains("no hardware printer profile resolved")
         || normalized.contains("not found")
         || normalized.contains("unknown entity_type")
+        // A dispatch timeout or a network write-deadline leaves the print in an
+        // unknown physical state, so we fail closed (manual retry only) instead of
+        // auto-resending a possible duplicate — same stance as a stale `printing` row.
+        || normalized.contains("did not respond within the dispatch timeout")
+        || normalized.contains("within the write deadline")
+}
+
+/// Lock the shared DB connection, recovering from mutex poisoning.
+///
+/// A poisoned mutex only means a *previous* thread panicked while holding the
+/// guard; the underlying SQLite `Connection` is intact. The print worker
+/// recovers the guard (mirroring the poison handling on `PRINT_PROCESSOR_LOCK`
+/// in `process_pending_jobs`) instead of permanently bricking the queue on the
+/// first panic-under-guard anywhere in the process.
+fn lock_conn_recovering(db: &DbState) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+    db.conn
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Select up to `limit` pending print jobs that are ready to run (past any retry
+/// backoff), **excluding paused printer profiles in SQL**.
+///
+/// The exclusion must happen inside the query, before `LIMIT`: applying it in
+/// Rust after a `LIMIT 10` lets a paused printer's backlog of >= 10 older
+/// pending rows fill the whole window, so every healthy printer's newer jobs
+/// are silently starved and never printed. Jobs with a NULL profile are always
+/// eligible.
+fn select_ready_pending_jobs(
+    conn: &rusqlite::Connection,
+    now_str: &str,
+    paused_profiles: &std::collections::HashSet<String>,
+    limit: usize,
+) -> Result<Vec<(String, String, String, Option<String>, Option<String>)>, String> {
+    let mut sql = String::from(
+        "SELECT id, entity_type, entity_id, entity_payload_json, printer_profile_id FROM print_jobs
+         WHERE status = 'pending'
+           AND (next_retry_at IS NULL OR julianday(next_retry_at) <= julianday(?1))",
+    );
+
+    let paused: Vec<&String> = paused_profiles.iter().collect();
+    if !paused.is_empty() {
+        // ?1 is now_str; paused ids bind starting at ?2.
+        let placeholders = (0..paused.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(
+            " AND (printer_profile_id IS NULL OR printer_profile_id NOT IN ({placeholders}))"
+        ));
+    }
+    sql.push_str(&format!(" ORDER BY created_at ASC LIMIT {limit}"));
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+
+    // Positional binds: ?1 = now_str, ?2.. = paused profile ids.
+    let mut binds: Vec<String> = Vec::with_capacity(1 + paused.len());
+    binds.push(now_str.to_string());
+    for profile in &paused {
+        binds.push((*profile).clone());
+    }
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Run a blocking hardware-dispatch closure under a hard wall-clock timeout.
+///
+/// `print_raw_to_windows` (the default Windows spooler transport) has no timeout
+/// of its own, and dispatch runs synchronously inside `PRINT_PROCESSOR_LOCK`
+/// while the worker loop awaits the tick — so a jammed spooler would freeze the
+/// entire print queue until the app restarts. This isolates the blocking call
+/// on its own thread and abandons the wait after `timeout`. On timeout the
+/// orphaned thread is left to unwind whenever the transport finally returns (or
+/// at process exit) and the caller fails the job closed, so a receipt that may
+/// already have printed is never silently re-sent.
+fn run_dispatch_with_timeout<T, F>(timeout: std::time::Duration, f: F) -> Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // If the receiver already timed out and was dropped, this send is a
+        // harmless no-op.
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(value) => Ok(value),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(DISPATCH_TIMEOUT_ERROR.to_string()),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("Print dispatch thread ended without a result".to_string())
+        }
+    }
 }
 
 fn setting_text(conn: &rusqlite::Connection, category: &str, key: &str) -> Option<String> {
@@ -4353,7 +4472,21 @@ fn dispatch_to_printer(
                 "delivery_slip" => "POS Delivery Slip",
                 _ => "POS Receipt",
             };
-            let _dispatch = printers::print_raw_for_profile(&profile, &rendered.bytes, doc_name)?;
+            // Watchdog: the Windows spooler transport (`print_raw_to_windows`) has no
+            // timeout of its own, and this runs inside PRINT_PROCESSOR_LOCK while the
+            // worker awaits the tick — so a jammed spooler would freeze the whole queue
+            // until restart. Bound the send; a timeout fails the job closed (unknown
+            // state, no auto-resend) and lets the queue keep serving other jobs.
+            let target = printers::resolve_printer_target(&profile)?;
+            let bytes = std::mem::take(&mut rendered.bytes);
+            let doc = doc_name.to_string();
+            let dispatch_outcome = run_dispatch_with_timeout(DISPATCH_TIMEOUT, move || {
+                printers::print_raw_for_target(&target, &bytes, &doc)
+            });
+            let _dispatch = match dispatch_outcome {
+                Ok(inner) => inner?,
+                Err(timeout_err) => return Err(timeout_err),
+            };
             Ok((profile, rendered.warnings))
         }
         other => Err(format!("Unsupported driver_type: {other}")),
@@ -4372,7 +4505,7 @@ fn dispatch_to_printer(
 /// and requiring a manual retry instead of automatically sending the same raw
 /// payload again.
 pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = lock_conn_recovering(db);
     if is_print_queue_paused_with_conn(&conn, None) {
         return Ok(0);
     }
@@ -4463,7 +4596,7 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
         }
     };
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = lock_conn_recovering(db);
     if is_print_queue_paused_with_conn(&conn, None) {
         return Ok(0);
     }
@@ -4473,41 +4606,14 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
     // Recover any stale 'printing' jobs from previous crashes/errors
     drop(conn);
     let _ = recover_stale_printing_jobs(db);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = lock_conn_recovering(db);
 
-    // Fetch pending jobs that are ready (no next_retry_at or it's in the past)
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, entity_type, entity_id, entity_payload_json, printer_profile_id FROM print_jobs
-             WHERE status = 'pending'
-               AND (next_retry_at IS NULL OR julianday(next_retry_at) <= julianday(?1))
-             ORDER BY created_at ASC
-             LIMIT 10",
-        )
-        .map_err(|e| e.to_string())?;
+    // Fetch ready pending jobs, excluding paused printer profiles IN SQL — before
+    // LIMIT. Filtering paused profiles in Rust *after* a `LIMIT 10` lets a paused
+    // printer's backlog of >= 10 older pending rows fill the whole window, silently
+    // starving every other healthy printer. NULL-profile jobs stay eligible.
+    let jobs = select_ready_pending_jobs(&conn, &now_str, &paused_profiles, 10)?;
 
-    type PrintJob = (String, String, String, Option<String>, Option<String>);
-    let jobs: Vec<PrintJob> = stmt
-        .query_map(params![now_str], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .filter(|(_, _, _, _, profile_id)| {
-            profile_id
-                .as_deref()
-                .map(|value| !paused_profiles.contains(value))
-                .unwrap_or(true)
-        })
-        .collect();
-
-    drop(stmt);
     drop(conn);
 
     let count = jobs.len();
@@ -4532,7 +4638,7 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
                 // stale and get re-queued, producing duplicate prints.
                 {
                     let per_job_now = Utc::now().to_rfc3339();
-                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    let conn = lock_conn_recovering(db);
                     let affected = conn
                         .execute(
                             "UPDATE print_jobs
@@ -7010,6 +7116,117 @@ mod tests {
         assert_eq!(pending.as_array().unwrap().len(), 1);
         let failed = list_print_jobs(&db, Some("failed")).unwrap();
         assert_eq!(failed.as_array().unwrap().len(), 1);
+    }
+
+    // ---- #1: dispatch watchdog (bound the unbounded Windows spooler) ----
+
+    #[test]
+    fn test_run_dispatch_with_timeout_passes_through_fast_result() {
+        // A dispatch that completes within the timeout returns its value verbatim.
+        let out = run_dispatch_with_timeout(std::time::Duration::from_millis(500), || 42);
+        assert_eq!(out, Ok(42));
+    }
+
+    #[test]
+    fn test_run_dispatch_with_timeout_fails_closed_on_hang() {
+        // A dispatch slower than the timeout is abandoned and reported as an error,
+        // so a hung printer can never hold PRINT_PROCESSOR_LOCK and freeze the queue.
+        let out = run_dispatch_with_timeout(std::time::Duration::from_millis(50), || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            99
+        });
+        let err = out.expect_err("a dispatch slower than the timeout must fail");
+        assert!(
+            err.contains("did not respond within the dispatch timeout"),
+            "unexpected error: {err}"
+        );
+        // Fail-closed: a timed-out dispatch is non-retryable so the queue does not
+        // auto-resend a receipt that may already have printed.
+        assert!(
+            is_non_retryable_print_error(&err),
+            "dispatch timeout must be classified non-retryable"
+        );
+    }
+
+    #[test]
+    fn test_tcp_write_deadline_error_is_non_retryable() {
+        // A network write that hits the aggregate deadline (#8) leaves the print in
+        // an unknown state, so it must fail closed (no auto-resend) like a timeout.
+        let err = "Network printer 10.0.0.9:9100 did not accept the receipt within the write deadline; the print may be incomplete. Automatic retry stopped to prevent duplicate output.";
+        assert!(
+            is_non_retryable_print_error(err),
+            "a TCP write-deadline error must be non-retryable"
+        );
+    }
+
+    // ---- #2: paused-profile exclusion happens in SQL, before LIMIT ----
+
+    #[test]
+    fn test_select_ready_pending_excludes_paused_before_limit() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // 10 OLDER pending jobs on a printer profile that is paused...
+        for i in 0..10 {
+            conn.execute(
+                "INSERT INTO print_jobs (id, entity_type, entity_id, printer_profile_id, status, created_at, updated_at)
+                 VALUES (?1, 'order_receipt', ?2, 'paused-printer', 'pending', datetime('now','-10 minutes'), datetime('now','-10 minutes'))",
+                params![format!("job-p-{i}"), format!("ent-p-{i}")],
+            )
+            .unwrap();
+        }
+        // ...and ONE newer pending job on a healthy (NULL) profile.
+        conn.execute(
+            "INSERT INTO print_jobs (id, entity_type, entity_id, printer_profile_id, status, created_at, updated_at)
+             VALUES ('job-healthy', 'order_receipt', 'ent-healthy', NULL, 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let now = Utc::now().to_rfc3339();
+        let mut paused = std::collections::HashSet::new();
+        paused.insert("paused-printer".to_string());
+
+        let jobs = select_ready_pending_jobs(&conn, &now, &paused, 10).unwrap();
+
+        // The healthy job must be selected even though 10 OLDER paused jobs exist:
+        // the LIMIT-10 window must not be starved by a paused printer's backlog.
+        assert!(
+            jobs.iter().any(|(id, ..)| id == "job-healthy"),
+            "healthy NULL-profile job was starved by the paused printer's backlog"
+        );
+        // And no paused-profile job may be returned.
+        assert!(
+            jobs.iter()
+                .all(|(.., profile)| profile.as_deref() != Some("paused-printer")),
+            "paused profile jobs must be excluded in SQL"
+        );
+    }
+
+    // ---- #3: DB mutex poison is recovered on the print path (not a permanent brick) ----
+
+    #[test]
+    fn test_recover_stale_printing_survives_poisoned_conn() {
+        let db = test_db();
+        // Poison the connection mutex: panic while holding the guard.
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let _guard = db.conn.lock().unwrap();
+                panic!("intentional panic to poison the print DB mutex");
+            });
+            let _ = handle.join(); // absorb the panic; the mutex is now poisoned
+        });
+        assert!(
+            db.conn.lock().is_err(),
+            "precondition: the conn mutex must be poisoned"
+        );
+
+        // The print path must recover the poisoned guard (a prior panic does not
+        // corrupt the SQLite connection) instead of permanently bricking the queue.
+        let result = recover_stale_printing_jobs(&db);
+        assert!(
+            result.is_ok(),
+            "recovery must survive a poisoned conn mutex, got {result:?}"
+        );
     }
 
     #[test]

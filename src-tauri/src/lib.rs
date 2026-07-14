@@ -636,22 +636,50 @@ pub fn run() {
                 }
             }
 
-            // Third DB connection for the background print worker
-            match db::init(&app_data_dir) {
-                Ok(db) => {
-                    let db_for_print = Arc::new(db);
-                    // Start background print worker (5s interval)
-                    print::start_print_worker(
-                        db_for_print,
-                        app.handle().clone(),
-                        app_data_dir.clone(),
-                        5,
-                        cancel_token.clone(),
-                    );
-                }
-                Err(e) => {
-                    error!("Failed to init print database: {e} — print worker disabled");
-                }
+            // Third DB connection for the background print worker. This worker is the
+            // ONLY periodic driver of print-job retry backoff and stale-'printing'
+            // recovery, so a transient init failure (AV file lock, handle/disk
+            // exhaustion) must not disable it for the whole process lifetime. Retry
+            // with backoff in the background instead of giving up on the first error.
+            {
+                let print_data_dir = app_data_dir.clone();
+                let print_app_handle = app.handle().clone();
+                let print_cancel = cancel_token.clone();
+                tauri::async_runtime::spawn(async move {
+                    const MAX_PRINT_DB_ATTEMPTS: u32 = 10;
+                    let mut attempt: u32 = 0;
+                    loop {
+                        if print_cancel.is_cancelled() {
+                            return;
+                        }
+                        match db::init(&print_data_dir) {
+                            Ok(db) => {
+                                if attempt > 0 {
+                                    info!("Print worker DB initialized after {attempt} retry attempt(s)");
+                                }
+                                // start_print_worker spawns its own loop and takes ownership.
+                                print::start_print_worker(
+                                    Arc::new(db),
+                                    print_app_handle.clone(),
+                                    print_data_dir.clone(),
+                                    5,
+                                    print_cancel.clone(),
+                                );
+                                return;
+                            }
+                            Err(e) => {
+                                attempt += 1;
+                                if attempt >= MAX_PRINT_DB_ATTEMPTS {
+                                    error!("Print worker permanently disabled after {attempt} DB init attempts: {e}");
+                                    return;
+                                }
+                                let backoff_secs = (attempt as u64).min(10);
+                                warn!("Print worker DB init attempt {attempt} failed: {e}; retrying in {backoff_secs}s");
+                                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                            }
+                        }
+                    }
+                });
             }
 
             // Start background printer status monitor (15s interval)

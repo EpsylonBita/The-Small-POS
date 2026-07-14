@@ -67,6 +67,10 @@ export interface IpcResult<T = unknown> {
   errorCode?: string;
   message?: string;
   blockers?: UnsettledPaymentBlocker[];
+  /** Enqueue de-duped against an existing pending/printing job: nothing new was sent. */
+  duplicate?: boolean;
+  /** The action was intentionally skipped (e.g. a disabled print action). */
+  skipped?: boolean;
 }
 
 export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {

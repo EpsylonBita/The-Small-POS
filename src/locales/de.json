@@ -1932,6 +1932,9 @@
       "title": "Druckwarteschlange",
       "helpText": "Jobs, die bereits an den LAN-Drucker gesendet wurden, können nicht vom Gerät zurückgerufen werden. Diese Steuerelemente stoppen oder wiederholen nur Jobs, die lokal auf diesem POS noch in der Warteschlange stehen.",
       "pausedProfiles": "Pausen für konfigurierte Drucker aktiv",
+      "stuckWarning": "[NEEDS TRANSLATION] {{count}} print job(s) need attention — check the queue below.",
+      "workerAlert": "[NEEDS TRANSLATION] Printing is failing — check the print queue.",
+      "pausedAtStartup": "[NEEDS TRANSLATION] The print queue is paused — jobs are queuing but not printing. Resume it in Settings > Print Queue.",
       "refresh": "Aktualisieren",
       "resume": "Warteschlange fortsetzen",
       "pause": "Warteschlange pausieren",
@@ -4664,6 +4667,8 @@
     "printing": "Drucken...",
     "printSuccess": "Kassenbon erfolgreich gedruckt",
     "printFailed": "Kassenbon konnte nicht gedruckt werden",
+    "printAlreadyQueued": "[NEEDS TRANSLATION] This receipt is already queued or printing — not reprinted.",
+    "printSkipped": "[NEEDS TRANSLATION] Receipt printing is turned off for this action.",
     "guestCustomer": "Gast",
     "loadingItems": "Artikel werden geladen...",
     "loadItemsFailed": "Artikel konnten nicht geladen werden",
@@ -4685,7 +4690,8 @@
   },
   "kioskAutoPrint": {
     "sourceFallback": "Kiosk",
-    "newOrderToast": "Neue Kiosk-Bestellung #{{orderNumber}} von {{sourceLabel}} erhalten."
+    "newOrderToast": "Neue Kiosk-Bestellung #{{orderNumber}} von {{sourceLabel}} erhalten.",
+    "printFailedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue."
   },
   "shiftManager": {
     "noActiveShift": "Keine aktive Schicht zum Schließen",

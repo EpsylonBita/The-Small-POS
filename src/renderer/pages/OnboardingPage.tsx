@@ -89,14 +89,21 @@ const OnboardingPage: React.FC = () => {
             initial="hidden"
             animate="show"
             variants={pageMotionContainer}
-            className="flex h-full min-h-0 flex-col items-center justify-center bg-slate-900 p-4 text-white"
+            className="modern-scrollbar flex h-full min-h-0 flex-col items-center overflow-y-auto bg-zinc-900 p-4 text-white"
         >
-            <motion.div variants={pageMotionItem} className="w-full max-w-md bg-slate-800 rounded-3xl shadow-2xl p-8 border border-slate-700">
+            {/*
+              Centered content that can outgrow short POS windows (setup card + RecoveryPanel).
+              `my-auto` centers it when it fits but collapses to 0 on overflow, so the scroll
+              container above keeps every element — including the header and first language
+              options — reachable. `justify-center` on the scroll root would clip the top instead.
+            */}
+            <motion.div variants={pageMotionContainer} className="my-auto flex w-full max-w-md flex-col items-center">
+            <motion.div variants={pageMotionItem} className="w-full max-w-md bg-zinc-800 rounded-3xl shadow-2xl p-8 border border-zinc-700">
 
                 {/* Header */}
                 <motion.div variants={pageMotionItem} className="text-center mb-8">
                     <h1 className="text-3xl font-bold mb-2 text-yellow-300">{t('onboarding.title', { defaultValue: 'POS Terminal Setup' })}</h1>
-                    <p className="text-slate-400">{t('onboarding.step', { defaultValue: 'Step {{current}} of {{total}}', current: step, total: 2 })}</p>
+                    <p className="text-zinc-400">{t('onboarding.step', { defaultValue: 'Step {{current}} of {{total}}', current: step, total: 2 })}</p>
                 </motion.div>
 
                 {/* Step 1: Language Selection */}
@@ -109,7 +116,7 @@ const OnboardingPage: React.FC = () => {
                                 onClick={() => handleLanguageSelect('en')}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'en'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
-                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
+                                    : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.english', { defaultValue: 'English' })}</span>
@@ -120,7 +127,7 @@ const OnboardingPage: React.FC = () => {
                                 onClick={() => handleLanguageSelect('el')}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'el'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
-                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
+                                    : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.greek', { defaultValue: 'Greek' })}</span>
@@ -131,7 +138,7 @@ const OnboardingPage: React.FC = () => {
                                 onClick={() => handleLanguageSelect('de')}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'de'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
-                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
+                                    : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.german', { defaultValue: 'Deutsch' })}</span>
@@ -142,7 +149,7 @@ const OnboardingPage: React.FC = () => {
                                 onClick={() => handleLanguageSelect('fr')}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'fr'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
-                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
+                                    : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.french', { defaultValue: 'Fran\u00e7ais' })}</span>
@@ -153,7 +160,7 @@ const OnboardingPage: React.FC = () => {
                                 onClick={() => handleLanguageSelect('it')}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'it'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
-                                    : 'border-slate-600 bg-slate-900/40 text-slate-200 active:bg-slate-700'
+                                    : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
                                     }`}
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.italian', { defaultValue: 'Italiano' })}</span>
@@ -167,16 +174,16 @@ const OnboardingPage: React.FC = () => {
                 {step === 2 && (
                     <motion.form initial="hidden" animate="show" variants={pageMotionContainer} onSubmit={handleSubmit} className="space-y-6">
                         <motion.div variants={pageMotionItem}>
-                            <label className="block text-sm font-medium text-slate-300 mb-2">
+                            <label className="block text-sm font-medium text-zinc-300 mb-2">
                                 {t('onboarding.connectionString', { defaultValue: 'Connection String' })}
                             </label>
-                            <p className="text-xs text-slate-400 mb-3">
+                            <p className="text-xs text-zinc-400 mb-3">
                                 {t('onboarding.connectionStringHelp', { defaultValue: 'Paste the connection code from the Admin Dashboard (Branches -> POS -> Regenerate credentials).' })}
                             </p>
                             <textarea
                                 value={connectionString}
                                 onChange={(e) => setConnectionString(e.target.value)}
-                                className="w-full bg-slate-900 border border-slate-600 rounded-2xl px-4 py-3 text-white focus:ring-2 focus:ring-yellow-400 focus:border-transparent outline-none transition-all font-mono text-sm"
+                                className="w-full bg-zinc-900 border border-zinc-600 rounded-2xl px-4 py-3 text-white focus:ring-2 focus:ring-yellow-400 focus:border-transparent outline-none transition-all font-mono text-sm"
                                 placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste connection string here...' })}
                                 rows={3}
                                 required
@@ -194,7 +201,7 @@ const OnboardingPage: React.FC = () => {
                                 variants={pageMotionItem}
                                 type="button"
                                 onClick={() => setStep(1)}
-                                className="flex-1 px-4 py-3 rounded-2xl border border-slate-600 text-slate-300 bg-slate-900/40 transition-transform duration-150 active:scale-[0.98] active:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400"
+                                className="flex-1 px-4 py-3 rounded-2xl border border-zinc-600 text-zinc-300 bg-zinc-900/40 transition-transform duration-150 active:scale-[0.98] active:bg-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400"
                                 disabled={isSubmitting}
                             >
                                 {t('common.back', { defaultValue: 'Back' })}
@@ -216,8 +223,9 @@ const OnboardingPage: React.FC = () => {
                 )}
             </motion.div>
 
-            <motion.div variants={pageMotionItem} className="w-full max-w-md mt-4 bg-slate-800 rounded-3xl shadow-2xl p-6 border border-slate-700">
+            <motion.div variants={pageMotionItem} className="w-full max-w-md mt-4 bg-zinc-800 rounded-3xl shadow-2xl p-6 border border-zinc-700">
                 <RecoveryPanel compact />
+            </motion.div>
             </motion.div>
 
             <Toaster

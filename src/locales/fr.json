@@ -1932,6 +1932,9 @@
       "title": "File d'impression",
       "helpText": "Les tâches déjà envoyées à l'imprimante LAN ne peuvent pas être rappelées depuis l'appareil. Ces contrôles arrêtent ou relancent uniquement les tâches encore en file d'attente localement sur ce POS.",
       "pausedProfiles": "Pauses actives pour les imprimantes configurées",
+      "stuckWarning": "[NEEDS TRANSLATION] {{count}} print job(s) need attention — check the queue below.",
+      "workerAlert": "[NEEDS TRANSLATION] Printing is failing — check the print queue.",
+      "pausedAtStartup": "[NEEDS TRANSLATION] The print queue is paused — jobs are queuing but not printing. Resume it in Settings > Print Queue.",
       "refresh": "Actualiser",
       "resume": "Reprendre la file",
       "pause": "Mettre en pause la file",
@@ -4664,6 +4667,8 @@
     "printing": "Impression en cours...",
     "printSuccess": "Reçu imprimé avec succès",
     "printFailed": "Échec de l'impression du reçu",
+    "printAlreadyQueued": "[NEEDS TRANSLATION] This receipt is already queued or printing — not reprinted.",
+    "printSkipped": "[NEEDS TRANSLATION] Receipt printing is turned off for this action.",
     "guestCustomer": "Client de passage",
     "loadingItems": "Chargement des articles...",
     "loadItemsFailed": "Échec du chargement des articles",
@@ -4685,7 +4690,8 @@
   },
   "kioskAutoPrint": {
     "sourceFallback": "Kiosque",
-    "newOrderToast": "Nouvelle commande kiosque #{{orderNumber}} reçue de {{sourceLabel}}."
+    "newOrderToast": "Nouvelle commande kiosque #{{orderNumber}} reçue de {{sourceLabel}}.",
+    "printFailedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue."
   },
   "shiftManager": {
     "noActiveShift": "Aucun service actif à clôturer",

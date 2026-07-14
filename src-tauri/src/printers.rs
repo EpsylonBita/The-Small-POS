@@ -337,6 +337,9 @@ impl ResolvedPrinterTarget {
 
 const RAW_TCP_CONNECT_TIMEOUT_MS: u64 = 3000;
 const RAW_TCP_WRITE_TIMEOUT_MS: u64 = 5000;
+// Aggregate wall-clock cap on the whole chunked write (kept under the 20s dispatch
+// watchdog so the transport returns a clean error before the watchdog abandons it).
+const RAW_TCP_TOTAL_WRITE_DEADLINE_MS: u64 = 18000;
 const RAW_TCP_PROBE_TIMEOUT_MS: u64 = 1500;
 const RAW_SERIAL_TIMEOUT_MS: u64 = 3000;
 const DEFAULT_SERIAL_BAUD_RATE: u32 = 9600;
@@ -1385,7 +1388,18 @@ pub fn print_raw_to_tcp(
     const TCP_CHUNK_SIZE: usize = 4096;
     const TCP_CHUNK_DELAY_MS: u64 = 20;
     if data.len() > TCP_CHUNK_SIZE {
+        // SO_SNDTIMEO bounds each write()'s NO-PROGRESS time, not the aggregate: a
+        // half-open peer trickling >=1 byte per <5s window keeps write_all alive
+        // indefinitely. Cap the whole chunked write with a wall-clock deadline so a
+        // degraded printer can't grind for minutes holding the print processor lock.
+        let write_deadline =
+            Instant::now() + Duration::from_millis(RAW_TCP_TOTAL_WRITE_DEADLINE_MS);
         for chunk in data.chunks(TCP_CHUNK_SIZE) {
+            if Instant::now() >= write_deadline {
+                return Err(format!(
+                    "Network printer {host}:{port} did not accept the receipt within the write deadline; the print may be incomplete. Automatic retry stopped to prevent duplicate output."
+                ));
+            }
             stream
                 .write_all(chunk)
                 .map_err(|e| format!("Write chunk to network printer {host}:{port}: {e}"))?;

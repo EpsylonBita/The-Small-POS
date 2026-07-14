@@ -624,7 +624,27 @@ export function OrderApprovalPanel({
       if (result?.success === false) {
         throw new Error(result.error || 'Print command returned failure');
       }
-      toast.success(t('orderApprovalPanel.printSuccess') || 'Receipt printed successfully');
+      if (result?.skipped) {
+        // #9: receipt printing is disabled for this action — nothing was enqueued,
+        // so don't claim a successful print.
+        toast(
+          t('orderApprovalPanel.printSkipped', {
+            defaultValue: 'Receipt printing is turned off for this action.',
+          }),
+          { icon: 'ℹ️' },
+        );
+      } else if (result?.duplicate) {
+        // #9: enqueue de-duped against an existing pending/printing job, so nothing
+        // new was sent. Tell the operator instead of claiming a fresh reprint.
+        toast(
+          t('orderApprovalPanel.printAlreadyQueued', {
+            defaultValue: 'This receipt is already queued or printing — not reprinted.',
+          }),
+          { icon: 'ℹ️' },
+        );
+      } else {
+        toast.success(t('orderApprovalPanel.printSuccess') || 'Receipt printed successfully');
+      }
     } catch (error) {
       console.error('[OrderApprovalPanel] Print error:', error);
       toast.error(t('orderApprovalPanel.printFailed') || 'Failed to print receipt');

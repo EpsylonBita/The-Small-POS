@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, createElement } from 'react';
 import { toast } from 'react-hot-toast';
 import { useI18n } from '../contexts/i18n-context';
 import { AlertTriangle, Power, RefreshCw, Ban, CheckCircle, Clock } from 'lucide-react';
-import { offEvent, onEvent } from '../../lib';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface UseAppEventsProps {
     onLogout: () => void;
@@ -19,6 +19,23 @@ interface ShutdownOverlayState {
 
 const SHUTDOWN_OVERLAY_TIMEOUT_MS = 12000;
 const SHUTDOWN_TOAST_ID = 'pos-app-lifecycle';
+
+// True when this webview is a secondary customer/kitchen display (launched with an
+// `externalDisplay` marker in the query string or hash). Mirrors App.tsx's
+// resolveExternalDisplayKind detection so operator-only alerts can be suppressed on
+// customer-facing screens. Kept dependency-free to avoid a circular import with App.
+function isExternalDisplayWebview(): boolean {
+    if (typeof window === 'undefined') return false;
+    try {
+        const fromSearch = new URLSearchParams(window.location.search).get('externalDisplay');
+        const hash = window.location.hash || '';
+        const hashQuery = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : '';
+        const fromHash = new URLSearchParams(hashQuery).get('externalDisplay');
+        return Boolean((fromSearch || fromHash || '').trim());
+    } catch {
+        return false;
+    }
+}
 
 export function useAppEvents({ onLogout }: UseAppEventsProps) {
     const { t } = useI18n();
@@ -147,6 +164,29 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             console.log('Terminal settings updated:', settings);
         };
 
+        const handlePrintWorkerAlert = (data: any) => {
+            // This backend event broadcasts to every webview. The customer- and
+            // kitchen-display webviews render their own <Toaster>, but this is an
+            // operator action ("check the print queue" — the queue lives on the main
+            // POS), so suppress it on any external-display webview to avoid showing
+            // "Printing is failing" on a customer-facing screen.
+            if (isExternalDisplayWebview()) return;
+            // The backend re-emits this every N consecutive dispatch failures. A
+            // stable toast id collapses repeats instead of stacking, and because this
+            // is app-level the operator is warned even when the Print Queue panel
+            // (buried in Settings) is closed.
+            toast.error(
+                tRef.current('settings.printQueue.workerAlert', {
+                    defaultValue: 'Printing is failing — check the print queue.',
+                    count: data?.count,
+                }),
+                {
+                    id: 'print-worker-alert',
+                    duration: 8000,
+                },
+            );
+        };
+
         // List of channels we're subscribing to
         const handlers: Record<string, (data?: any) => void> = {
             'app-close': handleAppClose,
@@ -157,6 +197,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             'terminal-enabled': handleTerminalEnabled,
             'session-timeout': handleSessionTimeout,
             'terminal-settings-updated': handleTerminalSettingsUpdated,
+            'print-worker-alert': handlePrintWorkerAlert,
         };
         const channels = Object.keys(handlers);
 
@@ -172,6 +213,38 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             });
         };
     }, []); // Empty deps - only run once on mount
+
+    // #6: proactively warn once at startup if the print queue is globally paused
+    // (e.g. the app was restarted while paused). Otherwise every receipt/kitchen
+    // ticket silently queues unprinted, with the only indication buried in
+    // Settings > Print Queue. Suppressed on external-display webviews.
+    useEffect(() => {
+        if (isExternalDisplayWebview()) return;
+        let cancelled = false;
+        void (async () => {
+            try {
+                const status = (await getBridge().printer.listJobs()) as {
+                    success?: boolean;
+                    queuePaused?: boolean;
+                };
+                if (cancelled) return;
+                if (status?.success && status?.queuePaused === true) {
+                    toast(
+                        tRef.current('settings.printQueue.pausedAtStartup', {
+                            defaultValue:
+                                'The print queue is paused — jobs are queuing but not printing. Resume it in Settings > Print Queue.',
+                        }),
+                        { id: 'print-queue-paused-startup', icon: '⏸️', duration: 10000 },
+                    );
+                }
+            } catch {
+                // Non-fatal: the startup queue-status probe failed.
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     return {
         isShuttingDown: shutdownState.active,
