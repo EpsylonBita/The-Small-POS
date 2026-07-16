@@ -6431,7 +6431,17 @@
       },
       "serialPort": "Porta seriale",
       "bluetoothAddress": "Indirizzo Bluetooth",
-      "baudRate": "Velocità baud"
+      "baudRate": "Velocità baud",
+      "serialPortRequired": "La porta seriale è richiesta per la connessione USB",
+      "bluetoothAddressRequired": "L'indirizzo Bluetooth è richiesto",
+      "configSaved": "Configurazione MyData salvata",
+      "dashboardBanner": {
+        "title": "La configurazione di myDATA avviene nella dashboard di amministrazione",
+        "body": "Una volta configurato myDATA, gli scontrini vengono inviati automaticamente all'agenzia delle entrate (AADE). La configurazione stessa (credenziali, dati IVA, attivazione) si effettua nella dashboard di amministrazione: apri Plugin → MyData e segui i passaggi. Questa schermata serve solo se colleghi una stampante fiscale (ΦΗΜ) a questa cassa.",
+        "openButton": "Apri dashboard di amministrazione",
+        "linkCopied": "Link copiato — incollalo in un browser per aprire la dashboard di amministrazione.",
+        "openFailed": "Impossibile aprire il browser. Indirizzo dashboard: {{url}}"
+      }
     },
     "routingTitle": "Instradamento ordini",
     "routingHelp": "Instrada gli ordini dei plugin esterni a un terminale specifico. Si applica solo agli ordini dei plugin.",

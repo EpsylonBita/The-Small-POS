@@ -6431,7 +6431,17 @@
       },
       "serialPort": "Port série",
       "bluetoothAddress": "Adresse Bluetooth",
-      "baudRate": "Débit en bauds"
+      "baudRate": "Débit en bauds",
+      "serialPortRequired": "Le port série est requis pour la connexion USB",
+      "bluetoothAddressRequired": "L'adresse Bluetooth est requise",
+      "configSaved": "Configuration MyData enregistrée",
+      "dashboardBanner": {
+        "title": "La configuration de myDATA se fait dans le tableau de bord d'administration",
+        "body": "Une fois myDATA configuré, les reçus sont envoyés automatiquement à l'administration fiscale (AADE). La configuration elle-même (identifiants, informations de TVA, activation) se fait dans votre tableau de bord d'administration : ouvrez Plugins → MyData et suivez les étapes. Cet écran n'est nécessaire que si vous connectez une imprimante fiscale (ΦΗΜ) à cette caisse.",
+        "openButton": "Ouvrir le tableau de bord d'administration",
+        "linkCopied": "Lien copié — collez-le dans un navigateur pour ouvrir votre tableau de bord d'administration.",
+        "openFailed": "Impossible d'ouvrir le navigateur. Adresse du tableau de bord : {{url}}"
+      }
     },
     "routingTitle": "Routage des commandes",
     "routingHelp": "Dirigez les commandes de plugins externes vers un terminal spécifique. S'applique uniquement aux commandes de plugins.",

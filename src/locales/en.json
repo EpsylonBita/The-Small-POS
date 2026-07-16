@@ -6431,7 +6431,17 @@
       },
       "serialPort": "Serial port",
       "bluetoothAddress": "Bluetooth address",
-      "baudRate": "Baud rate"
+      "baudRate": "Baud rate",
+      "serialPortRequired": "Serial port is required for USB connection",
+      "bluetoothAddressRequired": "Bluetooth address is required",
+      "configSaved": "MyData configuration saved",
+      "dashboardBanner": {
+        "title": "myDATA setup happens in the Admin Dashboard",
+        "body": "Receipts are sent to the tax office (AADE) automatically once myDATA is set up. The setup itself (credentials, VAT info, activation) is done in your Admin Dashboard: open Plugins → MyData and follow the steps. This screen is only needed if you connect a fiscal printer (ΦΗΜ) to this till.",
+        "openButton": "Open Admin Dashboard",
+        "linkCopied": "Link copied — paste it into a browser to open your Admin Dashboard.",
+        "openFailed": "Could not open the browser. Dashboard address: {{url}}"
+      }
     },
     "routingTitle": "Order routing",
     "routingHelp": "Route external plugin orders to a specific terminal. Applies only to plugin orders.",

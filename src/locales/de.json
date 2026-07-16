@@ -6431,7 +6431,17 @@
       },
       "serialPort": "Serieller Port",
       "bluetoothAddress": "Bluetooth-Adresse",
-      "baudRate": "Baudrate"
+      "baudRate": "Baudrate",
+      "serialPortRequired": "Serieller Port ist für die USB-Verbindung erforderlich",
+      "bluetoothAddressRequired": "Bluetooth-Adresse ist erforderlich",
+      "configSaved": "MyData-Konfiguration gespeichert",
+      "dashboardBanner": {
+        "title": "Die myDATA-Einrichtung erfolgt im Admin-Dashboard",
+        "body": "Sobald myDATA eingerichtet ist, werden Belege automatisch an das Finanzamt (AADE) übermittelt. Die Einrichtung selbst (Zugangsdaten, USt-Angaben, Aktivierung) erfolgt in Ihrem Admin-Dashboard: Öffnen Sie Plugins → MyData und folgen Sie den Schritten. Dieser Bildschirm wird nur benötigt, wenn Sie einen Fiskaldrucker (ΦΗΜ) mit dieser Kasse verbinden.",
+        "openButton": "Admin-Dashboard öffnen",
+        "linkCopied": "Link kopiert — fügen Sie ihn in einen Browser ein, um Ihr Admin-Dashboard zu öffnen.",
+        "openFailed": "Browser konnte nicht geöffnet werden. Dashboard-Adresse: {{url}}"
+      }
     },
     "routingTitle": "Bestellweiterleitung",
     "routingHelp": "Externe Plugin-Bestellungen an ein bestimmtes Terminal weiterleiten. Gilt nur für Plugin-Bestellungen.",

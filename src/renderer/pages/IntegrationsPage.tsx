@@ -45,8 +45,11 @@ import {
   BarChart3,
   ShoppingCart,
   Phone,
+  ExternalLink,
 } from 'lucide-react';
 import { posApiGet, posApiPost } from '../utils/api-helpers';
+import { openExternalUrl } from '../utils/external-url';
+import { normalizeAdminDashboardUrl } from '../utils/connection-code';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 import { getPluginLogo } from '../utils/plugin-icons';
@@ -1096,12 +1099,12 @@ export const IntegrationsPage: React.FC = () => {
     }
 
     if (myDataConnectionType === 'usb_serial' && !myDataSerialPort.trim()) {
-      toast.error('Serial port is required for USB connection');
+      toast.error(t('integrations.mydata.serialPortRequired', 'Serial port is required for USB connection'));
       return;
     }
 
     if (myDataConnectionType === 'bluetooth' && !myDataBluetoothAddress.trim()) {
-      toast.error('Bluetooth address is required');
+      toast.error(t('integrations.mydata.bluetoothAddressRequired', 'Bluetooth address is required'));
       return;
     }
 
@@ -1129,7 +1132,7 @@ export const IntegrationsPage: React.FC = () => {
           : i
         )
       );
-      toast.success('MyData configuration saved');
+      toast.success(t('integrations.mydata.configSaved', 'MyData configuration saved'));
       setMyDataModalOpen(false);
     } catch (err: any) {
       toast.error(err?.message || 'Failed to save MyData configuration');
@@ -1145,6 +1148,34 @@ export const IntegrationsPage: React.FC = () => {
     saveMyDataAction.message,
     t,
   ]);
+
+  // Full myDATA setup (credentials, VAT info, activation) lives in the web Admin
+  // Dashboard under Plugins -> MyData. Recomputed each time the modal opens so a
+  // re-pair (which rewrites localStorage) is picked up without a page reload.
+  const adminDashboardPluginsUrl = useMemo(() => {
+    if (!myDataModalOpen) return '';
+    let stored = '';
+    try {
+      stored = localStorage.getItem('admin_dashboard_url') || '';
+    } catch {
+      return '';
+    }
+    const base = normalizeAdminDashboardUrl(stored).replace(/\/+$/, '');
+    return base ? `${base}/plugins` : '';
+  }, [myDataModalOpen]);
+
+  const handleOpenAdminDashboard = useCallback(async () => {
+    if (!adminDashboardPluginsUrl) return;
+    const opened = await openExternalUrl(adminDashboardPluginsUrl);
+    if (opened) return;
+    // Opener unavailable (or host not allowlisted): fall back to copying the link.
+    try {
+      await navigator.clipboard.writeText(adminDashboardPluginsUrl);
+      toast.success(t('integrations.mydata.dashboardBanner.linkCopied', 'Link copied — paste it into a browser to open your Admin Dashboard.'));
+    } catch {
+      toast.error(t('integrations.mydata.dashboardBanner.openFailed', 'Could not open the browser. Dashboard address: {{url}}', { url: adminDashboardPluginsUrl }));
+    }
+  }, [adminDashboardPluginsUrl, t]);
 
   const handleSavePluginConfig = useCallback(async () => {
     if (saveAction.disabled) {
@@ -1423,6 +1454,28 @@ export const IntegrationsPage: React.FC = () => {
           closeOnEscape={!myDataSaving}
         >
         <div className="space-y-4">
+            <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+              <div className="font-medium">
+                {t('integrations.mydata.dashboardBanner.title', 'myDATA setup happens in the Admin Dashboard')}
+              </div>
+              <p className={`mt-1 text-xs ${isDark ? 'text-amber-200/80' : 'text-amber-700/90'}`}>
+                {t(
+                  'integrations.mydata.dashboardBanner.body',
+                  'Receipts are sent to the tax office (AADE) automatically once myDATA is set up. The setup itself (credentials, VAT info, activation) is done in your Admin Dashboard: open Plugins → MyData and follow the steps. This screen is only needed if you connect a fiscal printer (ΦΗΜ) to this till.'
+                )}
+              </p>
+              {adminDashboardPluginsUrl && (
+                <div className="mt-2">
+                  <POSGlassButton
+                    variant="warning"
+                    icon={<ExternalLink size={16} />}
+                    onClick={handleOpenAdminDashboard}
+                  >
+                    {t('integrations.mydata.dashboardBanner.openButton', 'Open Admin Dashboard')}
+                  </POSGlassButton>
+                </div>
+              )}
+            </div>
             {saveMyDataAction.disabled && (
               <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
                 {saveMyDataAction.message}

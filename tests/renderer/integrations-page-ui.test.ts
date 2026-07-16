@@ -69,6 +69,45 @@ test('Round 286: IntegrationsPage is touch-first (no hover utilities) and preser
   assert.match(source, /disabled=\{isRefreshing \|\| !isOnline\}/);
 });
 
+// myDATA simple setup: the MyData modal used to be a dead end (read-only status + fiscal
+// device wiring, no hint that real setup lives in the web Admin Dashboard). It now opens
+// with a plain-language amber banner explaining that credentials/VAT/activation happen in
+// the Admin Dashboard under Plugins -> MyData, plus an "Open Admin Dashboard" action that
+// routes through the secure external-url gateway. The three MyData toasts are i18n'd.
+
+test('MyData modal signposts full setup in the Admin Dashboard (banner + secure opener)', () => {
+  // Banner copy is i18n-driven with plain-language fallbacks.
+  assert.match(source, /t\('integrations\.mydata\.dashboardBanner\.title'/);
+  assert.match(source, /t\(\s*'integrations\.mydata\.dashboardBanner\.body'/);
+  assert.match(source, /t\('integrations\.mydata\.dashboardBanner\.openButton'/);
+
+  // The URL is derived from the paired admin_dashboard_url (normalized, trailing
+  // slashes stripped) and targets the /plugins page.
+  assert.match(source, /normalizeAdminDashboardUrl\(stored\)\.replace\(\/\\\/\+\$\/, ''\)/);
+  assert.match(source, /`\$\{base\}\/plugins`/);
+
+  // The open button only renders when a dashboard URL is known, and routes through the
+  // secure external-url gateway (never a raw window.open in this page).
+  assert.match(source, /\{adminDashboardPluginsUrl && \(/);
+  assert.match(source, /onClick=\{handleOpenAdminDashboard\}/);
+  assert.match(source, /await openExternalUrl\(adminDashboardPluginsUrl\)/);
+  assert.doesNotMatch(source, /window\.open\(/);
+
+  // Clipboard copy is the fallback when the opener fails (e.g. host not allowlisted).
+  assert.match(source, /navigator\.clipboard\.writeText\(adminDashboardPluginsUrl\)/);
+  assert.match(source, /t\('integrations\.mydata\.dashboardBanner\.linkCopied'/);
+  assert.match(source, /t\('integrations\.mydata\.dashboardBanner\.openFailed'/);
+});
+
+test('MyData toasts are localized (no hardcoded English strings)', () => {
+  assert.match(source, /t\('integrations\.mydata\.serialPortRequired', 'Serial port is required for USB connection'\)/);
+  assert.match(source, /t\('integrations\.mydata\.bluetoothAddressRequired', 'Bluetooth address is required'\)/);
+  assert.match(source, /t\('integrations\.mydata\.configSaved', 'MyData configuration saved'\)/);
+  assert.doesNotMatch(source, /toast\.error\('Serial port is required for USB connection'\)/);
+  assert.doesNotMatch(source, /toast\.error\('Bluetooth address is required'\)/);
+  assert.doesNotMatch(source, /toast\.success\('MyData configuration saved'\)/);
+});
+
 test('Round 439: IntegrationsPage uses smooth rounded surfaces without stripping modal headings', () => {
   assert.doesNotMatch(source, /rounded-lg|rounded-md/);
   assert.doesNotMatch(source, /hover:|group-hover:|dark:hover:/);

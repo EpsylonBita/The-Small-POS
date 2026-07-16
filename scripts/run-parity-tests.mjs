@@ -126,6 +126,12 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'secure-session-validation.test.ts'),
   path.join(testsRoot, 'renderer', 'privileged-actions.test.ts'),
   path.join(testsRoot, 'renderer', 'reset-actions.test.ts'),
+  // myDATA simple setup: IntegrationsPage MyData modal must signpost the Admin
+  // Dashboard (Plugins -> MyData) and keep its toasts localized. Registered here so
+  // these guards actually run -- the files existed but were never executed by this
+  // runner (same gap recovery-panel-ui.test.ts had).
+  path.join(testsRoot, 'renderer', 'integrations-page-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'fiscal-integration-entitlement.test.ts'),
 ];
 
 await fs.mkdir(outDir, { recursive: true });
