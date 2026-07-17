@@ -6441,6 +6441,10 @@
         "openButton": "Apri dashboard di amministrazione",
         "linkCopied": "Link copiato — incollalo in un browser per aprire la dashboard di amministrazione.",
         "openFailed": "Impossibile aprire il browser. Indirizzo dashboard: {{url}}"
+      },
+      "statusLine": {
+        "reporting": "Gli scontrini vengono inviati automaticamente all'agenzia delle entrate (AADE).",
+        "notReporting": "Non ancora configurato — gli scontrini NON vengono inviati all'AADE. Completa la configurazione nella dashboard di amministrazione."
       }
     },
     "routingTitle": "Instradamento ordini",

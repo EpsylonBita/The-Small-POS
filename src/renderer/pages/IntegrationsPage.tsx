@@ -388,6 +388,7 @@ interface MyDataConfigFetchResult {
   ok: boolean;
   status: number;
   config?: Record<string, any>;
+  providerStatus?: Record<string, any>;
   error?: string;
 }
 
@@ -459,7 +460,10 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
 
 async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
   try {
-    const result = await posApiGet<{ config?: Record<string, any> }>('/pos/mydata/config');
+    const result = await posApiGet<{
+      config?: Record<string, any>;
+      provider_status?: Record<string, any>;
+    }>('/pos/mydata/config');
     if (!result.success) {
       return {
         ok: false,
@@ -472,6 +476,7 @@ async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
       ok: true,
       status: result.status ?? 200,
       config: result.data?.config,
+      providerStatus: result.data?.provider_status,
     };
   } catch (error: any) {
     return {
@@ -481,6 +486,19 @@ async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
     };
   }
 }
+
+// Card status derives from branch_plugin_configs.status, but actual myDATA reporting also
+// requires fiscal_provider_configs.is_enabled (surfaced as provider_status.is_enabled by
+// GET /pos/mydata/config). true/false when the server answered; null = unknown (offline or
+// fetch failed), in which case the card must not claim either way.
+const deriveMyDataReportingEnabled = (result: MyDataConfigFetchResult): boolean | null => {
+  if (result.ok) {
+    return result.providerStatus ? result.providerStatus['is_enabled'] === true : null;
+  }
+  // 404 = "MyData configuration not found": nothing is configured, so nothing is reported.
+  if (result.status === 404) return false;
+  return null;
+};
 
 // ============================================================
 // INTEGRATION CARD COMPONENT
@@ -522,6 +540,7 @@ interface IntegrationCardProps {
   integration: IntegrationWithStatus;
   isDark: boolean;
   toggleDisabledMessage?: string | null;
+  myDataReportingEnabled: boolean | null;
   onToggle: (id: string) => void;
   onConfigure: (integration: IntegrationWithStatus) => void;
 }
@@ -530,6 +549,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
   integration,
   isDark,
   toggleDisabledMessage,
+  myDataReportingEnabled,
   onToggle,
   onConfigure,
 }) => {
@@ -604,6 +624,29 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               </span>
             )}
           </div>
+
+          {/* myDATA fiscal reporting status line: fiscal failures are silent by design, so the
+              owner needs one plain-language sentence saying whether receipts are actually being
+              reported to AADE. The plugin card status alone is not enough — real transmission
+              also requires provider_status.is_enabled from /pos/mydata/config — so the green
+              sentence only renders when BOTH are true. While the flag is still unknown (null,
+              e.g. offline or fetch failed) on a connected card, no line renders at all rather
+              than claiming either way. */}
+          {integration.id === 'mydata' && (
+            integration.status !== 'connected' || myDataReportingEnabled !== null
+          ) && (
+            <p
+              className={`text-xs mt-2 font-medium ${
+                integration.status === 'connected' && myDataReportingEnabled === true
+                  ? isDark ? 'text-emerald-400' : 'text-emerald-600'
+                  : isDark ? 'text-amber-300' : 'text-amber-600'
+              }`}
+            >
+              {integration.status === 'connected' && myDataReportingEnabled === true
+                ? t('integrations.mydata.statusLine.reporting', 'Receipts are sent to the tax office (AADE) automatically.')
+                : t('integrations.mydata.statusLine.notReporting', 'Not set up yet — receipts are NOT being sent to AADE. Finish setup in your Admin Dashboard.')}
+            </p>
+          )}
         </div>
 
         {/* Actions */}
@@ -668,6 +711,7 @@ interface CategorySectionProps {
   integrations: IntegrationWithStatus[];
   isDark: boolean;
   toggleDisabledMessage?: string | null;
+  myDataReportingEnabled: boolean | null;
   onToggle: (id: string) => void;
   onConfigure: (integration: IntegrationWithStatus) => void;
 }
@@ -677,6 +721,7 @@ const CategorySection = memo<CategorySectionProps>(({
   integrations,
   isDark,
   toggleDisabledMessage,
+  myDataReportingEnabled,
   onToggle,
   onConfigure,
 }) => {
@@ -728,6 +773,7 @@ const CategorySection = memo<CategorySectionProps>(({
               integration={integration}
               isDark={isDark}
               toggleDisabledMessage={toggleDisabledMessage}
+              myDataReportingEnabled={myDataReportingEnabled}
               onToggle={onToggle}
               onConfigure={onConfigure}
             />
@@ -796,6 +842,10 @@ export const IntegrationsPage: React.FC = () => {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [myDataConfig, setMyDataConfig] = useState<Record<string, any> | null>(null);
   const [myDataConfigError, setMyDataConfigError] = useState<string | null>(null);
+  // provider_status.is_enabled from /pos/mydata/config: whether receipts are actually
+  // transmitted to AADE. null = unknown (not fetched yet, offline, or fetch failed).
+  const [myDataReportingEnabled, setMyDataReportingEnabled] = useState<boolean | null>(null);
+  const myDataReportingFetchedRef = useRef(false);
   const [myDataModalOpen, setMyDataModalOpen] = useState(false);
   const [myDataSaving, setMyDataSaving] = useState(false);
   const [myDataConnectionType, setMyDataConnectionType] = useState<'usb_serial' | 'bluetooth'>('usb_serial');
@@ -859,9 +909,18 @@ export const IntegrationsPage: React.FC = () => {
     }
   }, [myDataConfig]);
 
+  // Quietly refresh the card-level reporting flag (provider_status.is_enabled).
+  // Never throws and never surfaces an error: on failure the flag goes to null
+  // (unknown) and the connected card simply renders no reporting claim.
+  const refreshMyDataReportingFlag = useCallback(async () => {
+    const result = await fetchMyDataConfigQuietly();
+    setMyDataReportingEnabled(deriveMyDataReportingEnabled(result));
+  }, []);
+
   const fetchMyDataConfig = useCallback(async () => {
     try {
       const myDataResult = await fetchMyDataConfigQuietly();
+      setMyDataReportingEnabled(deriveMyDataReportingEnabled(myDataResult));
       if (myDataResult.ok && myDataResult.config) {
         setMyDataConfig(myDataResult.config);
         setMyDataConfigError(null);
@@ -922,6 +981,16 @@ export const IntegrationsPage: React.FC = () => {
   useEffect(() => {
     fetchIntegrations();
   }, [fetchIntegrations]);
+
+  // Fetch the myDATA reporting flag once when the loaded integrations include the
+  // purchased mydata plugin, so the CARD status line reflects actual transmission
+  // (fiscal_provider_configs.is_enabled) and not just the plugin-config status.
+  useEffect(() => {
+    if (myDataReportingFetchedRef.current) return;
+    if (!integrations.some((item) => item.id === 'mydata')) return;
+    myDataReportingFetchedRef.current = true;
+    refreshMyDataReportingFlag();
+  }, [integrations, refreshMyDataReportingFlag]);
 
   // Lazy-load MyData config only when MyData modal is open.
   useEffect(() => {
@@ -1134,6 +1203,9 @@ export const IntegrationsPage: React.FC = () => {
       );
       toast.success(t('integrations.mydata.configSaved', 'MyData configuration saved'));
       setMyDataModalOpen(false);
+      // Re-derive the card-level reporting flag from the server after the save:
+      // saving device wiring does not by itself enable fiscal transmission.
+      void refreshMyDataReportingFlag();
     } catch (err: any) {
       toast.error(err?.message || 'Failed to save MyData configuration');
     } finally {
@@ -1144,6 +1216,7 @@ export const IntegrationsPage: React.FC = () => {
     myDataBluetoothAddress,
     myDataConnectionType,
     myDataSerialPort,
+    refreshMyDataReportingFlag,
     saveMyDataAction.disabled,
     saveMyDataAction.message,
     t,
@@ -1436,6 +1509,7 @@ export const IntegrationsPage: React.FC = () => {
               integrations={categoryIntegrations}
               isDark={isDark}
               toggleDisabledMessage={toggleAction.message}
+              myDataReportingEnabled={myDataReportingEnabled}
               onToggle={handleToggle}
               onConfigure={handleConfigure}
             />

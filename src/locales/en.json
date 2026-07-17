@@ -6441,6 +6441,10 @@
         "openButton": "Open Admin Dashboard",
         "linkCopied": "Link copied — paste it into a browser to open your Admin Dashboard.",
         "openFailed": "Could not open the browser. Dashboard address: {{url}}"
+      },
+      "statusLine": {
+        "reporting": "Receipts are sent to the tax office (AADE) automatically.",
+        "notReporting": "Not set up yet — receipts are NOT being sent to AADE. Finish setup in your Admin Dashboard."
       }
     },
     "routingTitle": "Order routing",

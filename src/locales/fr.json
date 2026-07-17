@@ -6441,6 +6441,10 @@
         "openButton": "Ouvrir le tableau de bord d'administration",
         "linkCopied": "Lien copié — collez-le dans un navigateur pour ouvrir votre tableau de bord d'administration.",
         "openFailed": "Impossible d'ouvrir le navigateur. Adresse du tableau de bord : {{url}}"
+      },
+      "statusLine": {
+        "reporting": "Les reçus sont envoyés automatiquement à l'administration fiscale (AADE).",
+        "notReporting": "Pas encore configuré — les reçus ne sont PAS envoyés à l'AADE. Terminez la configuration dans votre tableau de bord d'administration."
       }
     },
     "routingTitle": "Routage des commandes",

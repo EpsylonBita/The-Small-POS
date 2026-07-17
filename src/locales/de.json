@@ -6441,6 +6441,10 @@
         "openButton": "Admin-Dashboard öffnen",
         "linkCopied": "Link kopiert — fügen Sie ihn in einen Browser ein, um Ihr Admin-Dashboard zu öffnen.",
         "openFailed": "Browser konnte nicht geöffnet werden. Dashboard-Adresse: {{url}}"
+      },
+      "statusLine": {
+        "reporting": "Belege werden automatisch an das Finanzamt (AADE) übermittelt.",
+        "notReporting": "Noch nicht eingerichtet — Belege werden NICHT an die AADE übermittelt. Schließen Sie die Einrichtung in Ihrem Admin-Dashboard ab."
       }
     },
     "routingTitle": "Bestellweiterleitung",

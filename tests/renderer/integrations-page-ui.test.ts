@@ -99,6 +99,49 @@ test('MyData modal signposts full setup in the Admin Dashboard (banner + secure 
   assert.match(source, /t\('integrations\.mydata\.dashboardBanner\.openFailed'/);
 });
 
+test('myDATA card carries a plain-language reporting status line gated on real transmission', () => {
+  // Fiscal failures are silent by design, so the CARD (not just the modal) must tell the
+  // owner in one sentence whether receipts are actually being reported to AADE. The line is
+  // scoped to the mydata plugin only.
+  assert.match(source, /integration\.id === 'mydata' && \(/);
+
+  // Codex P1 (PR #102): plugin-card status alone (branch_plugin_configs.status) is NOT enough
+  // for the green sentence — actual transmission also requires provider_status.is_enabled from
+  // GET /pos/mydata/config. The green branch must require BOTH connected AND the fetched flag.
+  assert.match(
+    source,
+    /integration\.status === 'connected' && myDataReportingEnabled === true/,
+  );
+
+  // While the flag is unknown (null, e.g. offline/fetch failed) on a connected card, NO status
+  // line renders at all — the card must not claim either way.
+  assert.match(
+    source,
+    /integration\.status !== 'connected' \|\| myDataReportingEnabled !== null/,
+  );
+
+  // The flag is fetched quietly from /pos/mydata/config and derived from provider_status
+  // .is_enabled, with 404 (nothing configured) treated as "not reporting".
+  assert.match(source, /const \[myDataReportingEnabled, setMyDataReportingEnabled\] = useState<boolean \| null>\(null\)/);
+  assert.match(source, /providerStatus\['is_enabled'\] === true/);
+  assert.match(source, /if \(result\.status === 404\) return false;/);
+
+  // Both states are i18n-driven with plain-language fallbacks: green when actually reporting,
+  // amber warning when transmission is off or the plugin is pending/disconnected.
+  assert.match(
+    source,
+    /t\('integrations\.mydata\.statusLine\.reporting', 'Receipts are sent to the tax office \(AADE\) automatically\.'\)/,
+  );
+  assert.match(
+    source,
+    /t\('integrations\.mydata\.statusLine\.notReporting', 'Not set up yet — receipts are NOT being sent to AADE\. Finish setup in your Admin Dashboard\.'\)/,
+  );
+
+  // The line is tone-coded per state with theme-aware (isDark) classes, no hover utilities.
+  assert.match(source, /\? isDark \? 'text-emerald-400' : 'text-emerald-600'/);
+  assert.match(source, /: isDark \? 'text-amber-300' : 'text-amber-600'/);
+});
+
 test('MyData toasts are localized (no hardcoded English strings)', () => {
   assert.match(source, /t\('integrations\.mydata\.serialPortRequired', 'Serial port is required for USB connection'\)/);
   assert.match(source, /t\('integrations\.mydata\.bluetoothAddressRequired', 'Bluetooth address is required'\)/);
