@@ -58,6 +58,12 @@ struct CustomerUpdateAddressPayload {
 }
 
 #[derive(Debug)]
+struct CustomerDeleteAddressPayload {
+    customer_id: String,
+    address_id: String,
+}
+
+#[derive(Debug)]
 struct CustomerResolveConflictPayload {
     conflict_id: String,
     strategy: String,
@@ -280,6 +286,37 @@ fn parse_customer_update_address_payload(
         target_id,
         updates,
         expected_version,
+    })
+}
+
+fn parse_customer_delete_address_payload(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<serde_json::Value>,
+) -> Result<CustomerDeleteAddressPayload, String> {
+    let base = match arg0 {
+        Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
+        Some(serde_json::Value::String(customer_id)) => serde_json::json!({
+            "customerId": customer_id
+        }),
+        Some(value) => value,
+        None => serde_json::json!({}),
+    };
+    let customer_id = payload_arg0_as_string(Some(base.clone()), &["customerId", "customer_id"])
+        .ok_or("Missing customerId")?;
+    let address_id = arg1
+        .and_then(|value| value.as_str().map(str::trim).map(str::to_string))
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            payload_arg0_as_string(
+                Some(base),
+                &["addressId", "address_id", "targetId", "target_id"],
+            )
+        })
+        .ok_or("Missing addressId")?;
+
+    Ok(CustomerDeleteAddressPayload {
+        customer_id,
+        address_id,
     })
 }
 
@@ -1345,6 +1382,20 @@ async fn sync_customer_address_update_remote(
     Ok(remote_address)
 }
 
+async fn sync_customer_address_delete_remote(
+    db: &db::DbState,
+    customer_id: &str,
+    address_id: &str,
+) -> Result<(), String> {
+    let path = format!("/api/pos/customers/{customer_id}/addresses/{address_id}");
+    match crate::admin_fetch(Some(db), &path, "DELETE", None).await {
+        Ok(_) => Ok(()),
+        // DELETE is idempotent: a missing remote address already has the requested state.
+        Err(error) if is_not_found_error(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 #[tauri::command]
 pub async fn customer_get_cache_stats(
     db: tauri::State<'_, db::DbState>,
@@ -2058,6 +2109,100 @@ pub async fn customer_update_address(
 }
 
 #[tauri::command]
+pub async fn customer_delete_address(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_customer_delete_address_payload(arg0, arg1)?;
+    let customer_id = payload.customer_id;
+    let address_id = payload.address_id;
+    let remote_failure = sync_customer_address_delete_remote(&db, &customer_id, &address_id)
+        .await
+        .err();
+
+    let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+    let mut updated_customer: Option<serde_json::Value> = None;
+    let mut removed_version = 1;
+    let mut cache_touched = false;
+
+    for entry in &mut cache {
+        let cached_customer_id = value_str(entry, &["id", "customerId"]).unwrap_or_default();
+        if cached_customer_id != customer_id {
+            continue;
+        }
+
+        if let Some(customer) = entry.as_object_mut() {
+            if let Some(addresses) = customer
+                .get_mut("addresses")
+                .and_then(|value| value.as_array_mut())
+            {
+                if let Some(address) = addresses.iter().find(|address| {
+                    value_str(address, &["id", "addressId"])
+                        .is_some_and(|candidate| candidate == address_id)
+                }) {
+                    removed_version = value_i64(address, &["version"]).unwrap_or(1);
+                }
+                addresses.retain(|address| {
+                    value_str(address, &["id", "addressId"])
+                        .map(|candidate| candidate != address_id)
+                        .unwrap_or(true)
+                });
+            }
+            let next_version = customer
+                .get("version")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(1)
+                + 1;
+            customer.insert("version".to_string(), serde_json::json!(next_version));
+            customer.insert(
+                "updatedAt".to_string(),
+                serde_json::json!(Utc::now().to_rfc3339()),
+            );
+            updated_customer = Some(serde_json::Value::Object(customer.clone()));
+            cache_touched = true;
+        }
+        break;
+    }
+
+    if cache_touched {
+        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+    }
+
+    if remote_failure.is_some() {
+        enqueue_customer_sync_item(
+            &db,
+            "customer_addresses",
+            &address_id,
+            "DELETE",
+            &serde_json::json!({
+                "customer_id": customer_id,
+                "address_id": address_id,
+            }),
+            removed_version,
+        )?;
+    }
+
+    if let Some(customer) = updated_customer.clone() {
+        let _ = app.emit("customer_updated", customer.clone());
+        let _ = app.emit("customer_realtime_update", customer);
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "queued": remote_failure.is_some(),
+        "offline": remote_failure.is_some(),
+        "warning": remote_failure,
+        "data": {
+            "id": address_id,
+            "deleted": true
+        },
+        "customer": updated_customer
+    }))
+}
+
+#[tauri::command]
 pub async fn customer_get_conflicts(
     _arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
@@ -2222,6 +2367,28 @@ mod dto_tests {
             parsed.updates.get("floor").and_then(|v| v.as_str()),
             Some("2")
         );
+    }
+
+    #[test]
+    fn parse_customer_delete_address_payload_supports_tuple_and_object() {
+        let tuple = parse_customer_delete_address_payload(
+            Some(serde_json::json!("cust-1")),
+            Some(serde_json::json!("addr-1")),
+        )
+        .expect("address delete tuple should parse");
+        assert_eq!(tuple.customer_id, "cust-1");
+        assert_eq!(tuple.address_id, "addr-1");
+
+        let object = parse_customer_delete_address_payload(
+            Some(serde_json::json!({
+                "customerId": "cust-2",
+                "addressId": "addr-2"
+            })),
+            None,
+        )
+        .expect("address delete object should parse");
+        assert_eq!(object.customer_id, "cust-2");
+        assert_eq!(object.address_id, "addr-2");
     }
 
     #[test]

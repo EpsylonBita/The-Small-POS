@@ -129,3 +129,11 @@ test('CustomerSearchModal add-new-customer prompt is a yellow info panel with a 
   assert.doesNotMatch(promptSection, /backgroundColor: '#facc15'/);
   assert.doesNotMatch(promptSection, /blue/);
 });
+
+test('CustomerSearchModal deletes saved addresses through the local-first customer bridge', () => {
+  assert.match(source, /bridge\.customers\.deleteAddress\(customer\.id, addr\.id\)/);
+  assert.doesNotMatch(
+    source,
+    /posApiFetch<any>\(`pos\/customers\/\$\{customer\.id\}\/addresses\/\$\{addr\.id\}`/,
+  );
+});

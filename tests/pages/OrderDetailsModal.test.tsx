@@ -216,3 +216,16 @@ test('OrderDetailsModal shows a history empty state for pickup orders without cu
     resetBridge();
   }
 });
+
+test('OrderDetailsModal exposes a copyable customer card with editable saved addresses', () => {
+  const source = readFileSync(orderDetailsModalPath, 'utf8');
+
+  assert.match(source, /bridge\.clipboard\.writeText/);
+  assert.match(source, /bridge\.customers\.lookupById/);
+  assert.match(source, /bridge\.customers\.lookupByPhone/);
+  assert.match(source, /aria-label=\{t\('modals\.orderDetails\.openCustomerCard'/);
+  assert.match(source, /mode="editAddress"/);
+  assert.match(source, /editAddressId:/);
+  assert.match(source, /t\('modals\.orderDetails\.copyCustomer'/);
+  assert.match(source, /t\('modals\.orderDetails\.copyAddress'/);
+});

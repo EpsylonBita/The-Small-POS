@@ -1158,6 +1158,7 @@ pub fn run() {
             commands::customers::customer_update_ban_status,
             commands::customers::customer_add_address,
             commands::customers::customer_update_address,
+            commands::customers::customer_delete_address,
             commands::customers::customer_resolve_conflict,
             commands::customers::customer_get_conflicts,
             // Drivers

@@ -4,6 +4,9 @@ import type { UpdateInfo, ProgressInfo } from '../../lib/update-contracts';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import type { UpdateState as BridgeUpdateState } from '../../lib';
 
+const AUTO_UPDATE_STARTUP_DELAY_MS = 5_000;
+const AUTO_UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000;
+
 interface UpdateState {
   checking: boolean;
   available: boolean;
@@ -87,6 +90,8 @@ export function useAutoUpdater() {
   const checkingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const receivedResponseRef = useRef<boolean>(false);
   const notifiedVersionRef = useRef<string | null>(null);
+  const latestStateRef = useRef(state);
+  latestStateRef.current = state;
 
   useEffect(() => {
     const listeners = {
@@ -282,6 +287,40 @@ export function useAutoUpdater() {
         setCurrentVersion('Unknown');
       });
   }, [bridge.system]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+
+    const runAutomaticCheck = () => {
+      const latestState = latestStateRef.current;
+      if (
+        latestState.checking ||
+        latestState.available ||
+        latestState.downloading ||
+        latestState.ready ||
+        latestState.installPending ||
+        latestState.installingVersion
+      ) {
+        return;
+      }
+
+      void bridge.updates.check();
+    };
+
+    const startupTimer = window.setTimeout(
+      runAutomaticCheck,
+      AUTO_UPDATE_STARTUP_DELAY_MS,
+    );
+    const periodicTimer = window.setInterval(
+      runAutomaticCheck,
+      AUTO_UPDATE_INTERVAL_MS,
+    );
+
+    return () => {
+      window.clearTimeout(startupTimer);
+      window.clearInterval(periodicTimer);
+    };
+  }, [bridge.updates, hydrated]);
 
   useEffect(() => {
     const handleMenuCheckForUpdates = () => {

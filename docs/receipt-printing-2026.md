@@ -105,6 +105,26 @@
   - print density/darkness is controlled at printer utility or memory-switch level
   - keep renderer layout generic; tune density per-device outside receipt template logic
 
+## Windows RAW Spool Fail-Closed Rule (2026-07-23)
+
+- Once a RAW document has started, `WritePrinter` failure, a partial write, or
+  `EndPagePrinter`/`EndDocPrinter` failure leaves the printer's physical state
+  uncertain.
+- The native transport aborts the spool job where Windows still permits it,
+  closes the printer handle, and reports the attempt as non-retryable.
+- The print queue must require an operator-triggered retry for these errors. It
+  must not automatically resend an incomplete byte stream, which can duplicate
+  receipts or leave thermal printers continuously interpreting corrupted data.
+
+## Z-Report Printed Reconciliation Order (2026-07-23)
+
+- Printed Z reports preserve `expenses.items` from the report payload and list
+  every expense reason and amount before the staff and drawer sections.
+- The drawer is the penultimate section: opening cash, cash sales and returns,
+  outflows, expected cash, variance, then bold `Money In Drawer`.
+- Final daily totals follow the drawer. Text, HTML, and raster-exact render
+  paths use the same section order.
+
 ## Classic Customer Receipt v2.1 Lock (2026-03-04)
 - Correction pass for screenshot-2 parity on classic customer receipts only.
 - Strict visual lock for `order_receipt` and `delivery_slip`:

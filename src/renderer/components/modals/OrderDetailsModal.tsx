@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, FileText, History, Banknote, Smartphone, RotateCcw, Split } from 'lucide-react';
+import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, FileText, History, Banknote, Smartphone, RotateCcw, Split, Copy, Edit3, Mail, Loader2 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
 import {
@@ -19,6 +19,7 @@ import type { SplitPaymentResult } from './SplitPaymentModal';
 import { getBridge } from '../../../lib';
 import { buildSplitPaymentItems } from '../../utils/splitPaymentItems';
 import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
+import { AddCustomerModal } from './AddCustomerModal';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -49,6 +50,19 @@ function unwrapBridgeArray<T>(result: any): T[] {
 
 function isSystemGeneratedServiceNote(note: string): boolean {
   return /^kiosk source\s*:/i.test(note);
+}
+
+function formatCustomerAddressForCopy(address: any): string {
+  return [
+    readOrderDetailsString(address?.street_address, address?.street, address?.address),
+    readOrderDetailsString(address?.city),
+    readOrderDetailsString(address?.postal_code, address?.postalCode),
+    readOrderDetailsString(address?.floor_number, address?.floor),
+    readOrderDetailsString(address?.name_on_ringer, address?.nameOnRinger),
+    readOrderDetailsString(address?.notes, address?.delivery_notes),
+  ]
+    .filter(Boolean)
+    .join(', ');
 }
 
 interface OrderCatalogLookups {
@@ -237,6 +251,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [showSplitPaymentModal, setShowSplitPaymentModal] = useState(false);
+  const [showCustomerCard, setShowCustomerCard] = useState(false);
+  const [customerProfile, setCustomerProfile] = useState<any>(null);
+  const [customerProfileLoading, setCustomerProfileLoading] = useState(false);
+  const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
   const [catalogLookups, setCatalogLookups] = useState<OrderCatalogLookups>(() => createEmptyOrderCatalogLookups());
   const paymentAutoOpenKeyRef = useRef<string | null>(null);
 
@@ -248,6 +266,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       setCustomerOrders([]);
       setLoading(false);
       setHistoryLoading(false);
+      setShowCustomerCard(false);
+      setCustomerProfile(null);
+      setCustomerProfileLoading(false);
+      setEditingAddressId(null);
       return;
     }
 
@@ -493,6 +515,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const rawCustomerName = customer.name || displayOrder.customer_name || displayOrder.customerName || '';
   const customerPhone = customer.phone || displayOrder.customer_phone || displayOrder.customerPhone || '';
   const customerEmail = customer.email || displayOrder.customer_email || displayOrder.customerEmail || '';
+  const canonicalCustomerId = readOrderDetailsString(
+    customer.id,
+    displayOrder.customer_id,
+    displayOrder.customerId,
+  );
   const normalizedCustomerPhone = String(customerPhone || '').replace(/\D+/g, '');
 
   const normalizeText = (value: any): string => typeof value === 'string' ? value.trim() : '';
@@ -979,6 +1006,95 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     void loadPaymentState();
   };
 
+  const orderCustomerFallback = {
+    ...customer,
+    id: canonicalCustomerId || customer.id,
+    name: normalizeText(rawCustomerName),
+    phone: normalizeText(customerPhone),
+    email: normalizeText(customerEmail),
+    addresses: Array.isArray(customer.addresses) ? customer.addresses : [],
+  };
+  const canOpenCustomerCard = !tableCustomerNumber && Boolean(canonicalCustomerId || customerPhone);
+  const customerProfileAddresses = Array.isArray(customerProfile?.addresses)
+    && customerProfile.addresses.length > 0
+    ? customerProfile.addresses
+    : customerProfile && formatCustomerAddressForCopy(customerProfile)
+      ? [customerProfile]
+      : [];
+
+  const copyText = async (text: string, successMessage: string) => {
+    if (!text.trim()) {
+      return;
+    }
+    try {
+      await bridge.clipboard.writeText(text);
+      toast.success(successMessage);
+    } catch (error) {
+      console.error('[OrderDetailsModal] Failed to copy customer information', error);
+      toast.error(t('modals.orderDetails.copyFailed', { defaultValue: 'Could not copy details' }));
+    }
+  };
+
+  const copyCustomerDetails = async (profile = customerProfile || orderCustomerFallback) => {
+    const addresses = Array.isArray(profile?.addresses) ? profile.addresses : [];
+    const lines = [
+      readOrderDetailsString(profile?.name, customerIdentityName),
+      profile?.phone
+        ? `${t('modals.orderDetails.phone', { defaultValue: 'Phone' })}: ${profile.phone}`
+        : '',
+      profile?.email
+        ? `${t('modals.orderDetails.email', { defaultValue: 'Email' })}: ${profile.email}`
+        : '',
+      ...addresses
+        .map((address: any, index: number) => {
+          const formatted = formatCustomerAddressForCopy(address);
+          return formatted
+            ? `${t('modals.orderDetails.addressNumber', {
+                defaultValue: 'Address {{number}}',
+                number: index + 1,
+              })}: ${formatted}`
+            : '';
+        })
+        .filter(Boolean),
+    ].filter(Boolean);
+
+    await copyText(
+      lines.join('\n'),
+      t('modals.orderDetails.customerCopied', { defaultValue: 'Customer details copied' }),
+    );
+  };
+
+  const openCustomerCard = async () => {
+    setShowCustomerCard(true);
+    setCustomerProfile(orderCustomerFallback);
+    setCustomerProfileLoading(true);
+
+    try {
+      let resolvedCustomer: any = null;
+      if (canonicalCustomerId) {
+        const result: any = await bridge.customers.lookupById(canonicalCustomerId);
+        resolvedCustomer = result?.customer ?? result?.data ?? result;
+      }
+      if (!resolvedCustomer && customerPhone) {
+        const result: any = await bridge.customers.lookupByPhone(customerPhone);
+        resolvedCustomer = result?.customer ?? result?.data ?? result;
+      }
+      if (resolvedCustomer) {
+        setCustomerProfile({
+          ...orderCustomerFallback,
+          ...resolvedCustomer,
+          addresses: Array.isArray(resolvedCustomer.addresses)
+            ? resolvedCustomer.addresses
+            : orderCustomerFallback.addresses,
+        });
+      }
+    } catch (error) {
+      console.warn('[OrderDetailsModal] Customer profile lookup failed; using order snapshot', error);
+    } finally {
+      setCustomerProfileLoading(false);
+    }
+  };
+
   const modalFooter = (
     <div className="flex-shrink-0 border-t liquid-glass-modal-border bg-white/85 px-6 py-4 backdrop-blur-xl dark:bg-black/30">
       <div className={`grid gap-3 ${footerGridCols}`}>
@@ -1142,28 +1258,80 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                 <div className="mt-4 grid gap-3 lg:grid-cols-2">
                   {hasRealCustomerIdentity ? (
                     <div className={`${insetPanelClass} px-4 py-3`}>
-                      <div className="mb-3 flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
-                        <User className="h-4 w-4" />
-                        {t('modals.orderDetails.customerInformation', { defaultValue: 'Customer' })}
-                      </div>
-                      <div className="text-lg font-semibold liquid-glass-modal-text">{customerIdentityName}</div>
-                      {customerPhone ? (
-                        <div className="mt-2 flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
-                          <Phone className="h-3.5 w-3.5" />
-                          {customerPhone}
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
+                          <User className="h-4 w-4" />
+                          {t('modals.orderDetails.customerInformation', { defaultValue: 'Customer' })}
                         </div>
-                      ) : null}
-                      {customerEmail ? (
-                        <div className="mt-1 text-sm liquid-glass-modal-text-muted">{customerEmail}</div>
-                      ) : null}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void copyCustomerDetails(orderCustomerFallback);
+                          }}
+                          className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200/70 bg-white/70 px-3 text-xs font-semibold text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          {t('modals.orderDetails.copyCustomer', { defaultValue: 'Copy' })}
+                        </button>
+                      </div>
+                      <div
+                        className={`${canOpenCustomerCard ? 'cursor-pointer active:scale-[0.99]' : ''} transition-transform`}
+                        role={canOpenCustomerCard ? 'button' : undefined}
+                        tabIndex={canOpenCustomerCard ? 0 : undefined}
+                        aria-label={t('modals.orderDetails.openCustomerCard', { defaultValue: 'Open customer card' })}
+                        onClick={() => {
+                          if (canOpenCustomerCard) {
+                            void openCustomerCard();
+                          }
+                        }}
+                        onKeyDown={(event) => {
+                          if (canOpenCustomerCard && (event.key === 'Enter' || event.key === ' ')) {
+                            event.preventDefault();
+                            void openCustomerCard();
+                          }
+                        }}
+                      >
+                        <div className="text-lg font-semibold liquid-glass-modal-text">{customerIdentityName}</div>
+                        {customerPhone ? (
+                          <div className="mt-2 flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
+                            <Phone className="h-3.5 w-3.5" />
+                            {customerPhone}
+                          </div>
+                        ) : null}
+                        {customerEmail ? (
+                          <div className="mt-1 text-sm liquid-glass-modal-text-muted">{customerEmail}</div>
+                        ) : null}
+                        {canOpenCustomerCard ? (
+                          <div className="mt-3 flex items-center gap-1 text-xs font-semibold text-amber-600 dark:text-amber-300">
+                            {t('modals.orderDetails.viewCustomerCard', { defaultValue: 'View customer card and addresses' })}
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
                   ) : null}
 
                   {isDeliveryOrder && hasDeliveryAddress ? (
                     <div className={`${insetPanelClass} px-4 py-3`}>
-                      <div className="mb-3 flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
-                        <MapPin className="h-4 w-4" />
-                        {t('modals.orderDetails.deliveryAddress', { defaultValue: 'Delivery Address' })}
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
+                          <MapPin className="h-4 w-4" />
+                          {t('modals.orderDetails.deliveryAddress', { defaultValue: 'Delivery Address' })}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void copyText(
+                              formatCustomerAddressForCopy(deliveryAddress),
+                              t('modals.orderDetails.addressCopied', { defaultValue: 'Address copied' }),
+                            );
+                          }}
+                          className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200/70 bg-white/70 px-3 text-xs font-semibold text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          {t('modals.orderDetails.copyAddress', { defaultValue: 'Copy' })}
+                        </button>
                       </div>
                       <p className="whitespace-pre-line text-base font-semibold leading-7 liquid-glass-modal-text">
                         {primaryAddressLine}
@@ -1540,6 +1708,140 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       </div>
 
     </LiquidGlassModal>
+
+    <LiquidGlassModal
+      isOpen={showCustomerCard}
+      onClose={() => {
+        setShowCustomerCard(false);
+        setEditingAddressId(null);
+      }}
+      title={t('modals.orderDetails.customerCard', { defaultValue: 'Customer Card' })}
+      size="lg"
+      contentClassName="p-0 overflow-hidden"
+    >
+      <div className="max-h-[72vh] overflow-y-auto p-6 scrollbar-hide">
+        {customerProfileLoading ? (
+          <div className="flex items-center justify-center gap-3 py-12 liquid-glass-modal-text-muted">
+            <Loader2 className="h-5 w-5 animate-spin text-amber-500" />
+            {t('modals.orderDetails.loadingCustomer', { defaultValue: 'Loading customer' })}
+          </div>
+        ) : (
+          <div className="space-y-5">
+            <section className={`${shellPanelClass} p-5`}>
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
+                    <User className="h-4 w-4" />
+                    {t('modals.orderDetails.customerInformation', { defaultValue: 'Customer' })}
+                  </div>
+                  <h3 className="mt-2 text-2xl font-bold liquid-glass-modal-text">
+                    {readOrderDetailsString(customerProfile?.name, customerIdentityName)}
+                  </h3>
+                  {customerProfile?.phone ? (
+                    <div className="mt-3 flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
+                      <Phone className="h-4 w-4 text-amber-500" />
+                      <span className="select-text">{customerProfile.phone}</span>
+                    </div>
+                  ) : null}
+                  {customerProfile?.email ? (
+                    <div className="mt-2 flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
+                      <Mail className="h-4 w-4 text-amber-500" />
+                      <span className="select-text">{customerProfile.email}</span>
+                    </div>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void copyCustomerDetails()}
+                  className="inline-flex min-h-11 items-center gap-2 rounded-2xl bg-amber-500 px-4 text-sm font-bold text-black active:bg-amber-400"
+                >
+                  <Copy className="h-4 w-4" />
+                  {t('modals.orderDetails.copyCustomer', { defaultValue: 'Copy customer' })}
+                </button>
+              </div>
+            </section>
+
+            <section className={`${shellPanelClass} p-5`}>
+              <div className="mb-4 flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
+                <MapPin className="h-4 w-4" />
+                {t('modals.orderDetails.savedAddresses', { defaultValue: 'Saved Addresses' })}
+              </div>
+              {customerProfileAddresses.length > 0 ? (
+                <div className="space-y-3">
+                  {customerProfileAddresses.map((address: any, index: number) => {
+                    const addressText = formatCustomerAddressForCopy(address);
+                    const canEditAddress = Boolean(customerProfile?.id && address?.id);
+                    return (
+                      <div key={address?.id || `customer-address-${index}`} className={`${insetPanelClass} p-4`}>
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold liquid-glass-modal-text-muted">
+                              {t('modals.orderDetails.addressNumber', {
+                                defaultValue: 'Address {{number}}',
+                                number: index + 1,
+                              })}
+                            </div>
+                            <p className="mt-2 select-text whitespace-pre-line text-base font-semibold leading-6 liquid-glass-modal-text">
+                              {addressText}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void copyText(
+                                  addressText,
+                                  t('modals.orderDetails.addressCopied', { defaultValue: 'Address copied' }),
+                                );
+                              }}
+                              aria-label={t('modals.orderDetails.copyAddress', { defaultValue: 'Copy address' })}
+                              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200/70 bg-white/70 text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200"
+                            >
+                              <Copy className="h-4 w-4" />
+                            </button>
+                            {canEditAddress ? (
+                              <button
+                                type="button"
+                                onClick={() => setEditingAddressId(address.id)}
+                                className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-amber-500 px-3 text-xs font-bold text-black active:bg-amber-400"
+                              >
+                                <Edit3 className="h-4 w-4" />
+                                {t('modals.orderDetails.editAddress', { defaultValue: 'Edit' })}
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className={`${insetPanelClass} px-4 py-6 text-center text-sm liquid-glass-modal-text-muted`}>
+                  {t('modals.orderDetails.noSavedAddresses', { defaultValue: 'No saved addresses' })}
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+      </div>
+    </LiquidGlassModal>
+
+    {editingAddressId && customerProfile ? (
+      <AddCustomerModal
+        isOpen
+        onClose={() => setEditingAddressId(null)}
+        onCustomerAdded={(updatedCustomer) => {
+          setCustomerProfile(updatedCustomer);
+          setEditingAddressId(null);
+        }}
+        initialCustomer={{
+          ...customerProfile,
+          phone: customerProfile.phone || customerPhone || '',
+          editAddressId: editingAddressId,
+        }}
+        mode="editAddress"
+      />
+    ) : null}
 
     {showRefundModal && (
       <RefundVoidModal

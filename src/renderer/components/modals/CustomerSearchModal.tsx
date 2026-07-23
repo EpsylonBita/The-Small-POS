@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search, Ban, AlertTriangle, Mail } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import { posApiDelete, posApiFetch, posApiGet } from '../../utils/api-helpers';
+import { posApiDelete, posApiGet } from '../../utils/api-helpers';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useTheme } from '../../contexts/theme-context';
@@ -12,6 +12,7 @@ import {
   resolveSelectedCustomerAddress,
   withMaterializedCustomerAddresses,
 } from '../../utils/customer-addresses';
+import { getBridge } from '../../../lib';
 
 interface CustomerAddress {
   id: string;
@@ -120,6 +121,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   onEditCustomer,
   initialCustomer,
 }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [searchQuery, setSearchQuery] = useState('');
@@ -796,11 +798,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                                     onClick={async () => {
                                       toast.dismiss(toastInstance.id);
                                       try {
-                                        const result = await posApiFetch<any>(`pos/customers/${customer.id}/addresses/${addr.id}`, {
-                                          method: 'DELETE',
-                                          headers: { 'Content-Type': 'application/json' },
-                                        });
-                                        if (result.success && result.data?.success !== false) {
+                                        const result = await bridge.customers.deleteAddress(customer.id, addr.id);
+                                        if (result?.success !== false) {
                                           setCustomer(prev => prev ? {
                                             ...prev,
                                             addresses: prev.addresses?.filter(a => a.id !== addr.id)
@@ -809,7 +808,11 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                                             const remaining = customer.addresses?.filter(a => a.id !== addr.id);
                                             setSelectedAddressId(remaining?.[0]?.id || null);
                                           }
-                                          toast.success(t('modals.customerSearch.deleteAddressSuccess', 'Address deleted'));
+                                          toast.success(
+                                            result?.queued
+                                              ? t('modals.customerSearch.deleteAddressQueued', 'Address deleted and queued for sync')
+                                              : t('modals.customerSearch.deleteAddressSuccess', 'Address deleted'),
+                                          );
                                         } else {
                                           toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
                                         }

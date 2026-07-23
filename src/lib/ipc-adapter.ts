@@ -71,6 +71,12 @@ export interface IpcResult<T = unknown> {
   duplicate?: boolean;
   /** The action was intentionally skipped (e.g. a disabled print action). */
   skipped?: boolean;
+  /** Mutation was accepted locally and queued for remote synchronization. */
+  queued?: boolean;
+  /** Mutation completed against local state while the remote endpoint was unavailable. */
+  offline?: boolean;
+  /** Non-fatal transport/synchronization warning returned with a successful local mutation. */
+  warning?: string;
 }
 
 export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {
@@ -1467,6 +1473,7 @@ export interface PlatformBridge {
       updates: Partial<CustomerAddress>,
       currentVersion: number,
     ): Promise<IpcResult>;
+    deleteAddress(customerId: string, addressId: string): Promise<IpcResult>;
     resolveConflict(
       conflictId: string,
       strategy: string,
@@ -2233,6 +2240,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "customer:update-ban-status": "customers.updateBanStatus",
   "customer:add-address": "customers.addAddress",
   "customer:update-address": "customers.updateAddress",
+  "customer:delete-address": "customers.deleteAddress",
   "customer:resolve-conflict": "customers.resolveConflict",
   "customer:get-conflicts": "customers.getConflicts",
 
@@ -2898,6 +2906,8 @@ export class TauriBridge implements PlatformBridge {
       this.inv("customer:add-address", id, a),
     updateAddress: (id: string, u: Partial<CustomerAddress>, v: number) =>
       this.inv("customer:update-address", id, u, v),
+    deleteAddress: (customerId: string, addressId: string) =>
+      this.inv("customer:delete-address", customerId, addressId),
     resolveConflict: (cid: string, s: string, d?: any) =>
       this.inv("customer:resolve-conflict", cid, s, d),
     getConflicts: (f?: any) => this.inv("customer:get-conflicts", f),

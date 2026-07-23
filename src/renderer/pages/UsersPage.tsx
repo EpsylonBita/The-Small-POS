@@ -683,34 +683,19 @@ const UsersPage: React.FC = () => {
     const addressId = addressPendingDelete;
     setAddressPendingDelete(null);
 
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      toast.error(
-        t(
-          'users.deleteAddressRequiresOnline',
-          'Deleting an address requires an online connection.',
-        ),
-      );
-      return;
-    }
-
     try {
-      const result = await posApiFetch<any>(`pos/customers/${selectedUser.id}/addresses/${addressId}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const result = await bridge.customers.deleteAddress(selectedUser.id, addressId);
 
-      if (!result.success) {
+      if (result?.success === false) {
         throw new Error(result.error || 'Failed to delete address');
       }
 
-      if (result.data?.success !== false) {
-        toast.success(t('users.deleteAddressSuccess', 'Address deleted successfully'));
-
-        // Update local state
-        setUserAddresses(prev => prev.filter(addr => addr.id !== addressId));
-      } else {
-        throw new Error(result.error || 'Failed to delete address');
-      }
+      toast.success(
+        result?.queued
+          ? t('users.deleteAddressQueued', 'Address deleted and queued for sync')
+          : t('users.deleteAddressSuccess', 'Address deleted successfully'),
+      );
+      setUserAddresses(prev => prev.filter(addr => addr.id !== addressId));
     } catch (error) {
       console.error('Error deleting address:', error);
       toast.error(t('users.deleteAddressError', 'Failed to delete address'));

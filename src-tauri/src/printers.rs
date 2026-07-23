@@ -1217,6 +1217,7 @@ pub fn print_raw_to_windows(
             pDefault: *const u8,
         ) -> i32;
         fn ClosePrinter(hPrinter: HANDLE) -> i32;
+        fn AbortPrinter(hPrinter: HANDLE) -> i32;
         fn StartDocPrinterA(hPrinter: HANDLE, Level: u32, pDocInfo: *const DOC_INFO_1A) -> u32;
         fn EndDocPrinter(hPrinter: HANDLE) -> i32;
         fn StartPagePrinter(hPrinter: HANDLE) -> i32;
@@ -1264,7 +1265,7 @@ pub fn print_raw_to_windows(
     let page_ok = unsafe { StartPagePrinter(h_printer) };
     if page_ok == 0 {
         unsafe {
-            EndDocPrinter(h_printer);
+            AbortPrinter(h_printer);
             ClosePrinter(h_printer);
         }
         return Err(format!("StartPagePrinter failed for \"{printer_name}\""));
@@ -1274,24 +1275,46 @@ pub fn print_raw_to_windows(
     let write_ok =
         unsafe { WritePrinter(h_printer, data.as_ptr(), data.len() as u32, &mut written) };
 
-    // Always clean up
-    unsafe {
-        EndPagePrinter(h_printer);
-        EndDocPrinter(h_printer);
-        ClosePrinter(h_printer);
-    }
-
     if write_ok == 0 {
+        unsafe {
+            AbortPrinter(h_printer);
+            ClosePrinter(h_printer);
+        }
         return Err(format!(
-            "WritePrinter failed for \"{printer_name}\": wrote {written}/{} bytes",
+            "WritePrinter failed for \"{printer_name}\": wrote {written}/{} bytes; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output.",
             data.len()
         ));
     }
 
     if written as usize != data.len() {
+        unsafe {
+            AbortPrinter(h_printer);
+            ClosePrinter(h_printer);
+        }
         return Err(format!(
-            "Partial spool write for \"{printer_name}\": wrote {written}/{} bytes",
+            "Partial spool write for \"{printer_name}\": wrote {written}/{} bytes; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output.",
             data.len()
+        ));
+    }
+
+    let end_page_ok = unsafe { EndPagePrinter(h_printer) };
+    if end_page_ok == 0 {
+        unsafe {
+            AbortPrinter(h_printer);
+            ClosePrinter(h_printer);
+        }
+        return Err(format!(
+            "EndPagePrinter failed for \"{printer_name}\"; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output."
+        ));
+    }
+
+    let end_doc_ok = unsafe { EndDocPrinter(h_printer) };
+    unsafe {
+        ClosePrinter(h_printer);
+    }
+    if end_doc_ok == 0 {
+        return Err(format!(
+            "EndDocPrinter failed for \"{printer_name}\"; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output."
         ));
     }
 

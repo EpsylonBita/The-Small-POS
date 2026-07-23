@@ -84,6 +84,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'users-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'user-directory-filters.test.ts'),
   path.join(testsRoot, 'renderer', 'custom-titlebar-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'automatic-update-check.test.ts'),
   path.join(testsRoot, 'renderer', 'navigation-sidebar-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'i18n-labels.test.ts'),
   path.join(testsRoot, 'renderer', 'remaining-page-headers-ui.test.ts'),

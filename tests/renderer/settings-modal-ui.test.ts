@@ -51,7 +51,8 @@ test('ConnectionSettingsModal exposes navigable settings sections via the hub le
   // Grouped left-rail navigation (daily / device / system) over the section ids.
   assert.match(source, /const settingsNavGroups: Array<\{ id: 'daily' \| 'device' \| 'system'; items: SettingsSectionId\[\] \}>/);
   assert.match(source, /\{ id: 'daily', items: \['admin', 'connection'\] \}/);
-  assert.match(source, /\{ id: 'device', items: \['printing', 'payments', 'hardware', 'terminal'\] \}/);
+  assert.match(source, /items: \(\['printing', 'payments', 'waiter_devices', 'hardware', 'terminal'\] as SettingsSectionId\[\]\)\.filter\(/);
+  assert.match(source, /\(id\) => id !== 'waiter_devices' \|\| isMainTerminal/);
   assert.match(source, /\{ id: 'system', items: \['security', 'database', 'about'\] \}/);
 
   // A left-rail row selects its section via openSection -> setActiveSettingsSection, marked aria-current.
@@ -61,12 +62,12 @@ test('ConnectionSettingsModal exposes navigable settings sections via the hub le
   assert.match(source, /aria-current=\{isActive \? 'page' : undefined\}/);
 
   // Each section body renders directly, gated by the active section (no setShow* visibility booleans).
-  for (const section of ['admin', 'connection', 'terminal', 'security', 'database', 'hardware', 'printing', 'payments', 'about']) {
+  for (const section of ['admin', 'connection', 'terminal', 'security', 'database', 'hardware', 'printing', 'payments', 'waiter_devices', 'about']) {
     assert.match(source, new RegExp(`activeSettingsSection === '${section}'`), `section ${section} must render conditionally`);
   }
   // admin is surfaced as the "This register" status label; the rest use hub section labels.
   assert.match(source, /settings\.settingsHub\.status\.register/);
-  for (const section of ['connection', 'terminal', 'security', 'database', 'hardware', 'printing', 'payments', 'about']) {
+  for (const section of ['connection', 'terminal', 'security', 'database', 'hardware', 'printing', 'payments', 'waiter_devices', 'about']) {
     assert.match(source, new RegExp(`settings\\.settingsHub\\.sections\\.${section}\\.label`), `${section} needs a hub section label`);
   }
 
@@ -84,7 +85,7 @@ test('Round 367: Settings left-rail icon chips are solid yellow with black line 
   const navBlock = source.slice(navStart, navEnd);
 
   const blackIconCount = (navBlock.match(/className="h-5 w-5 text-black"/g) ?? []).length;
-  assert.equal(blackIconCount, 9, `all nine Settings nav icons must use black strokes (found ${blackIconCount})`);
+  assert.equal(blackIconCount, 10, `all ten Settings nav icons must use black strokes (found ${blackIconCount})`);
   assert.doesNotMatch(navBlock, /text-yellow-700|dark:text-yellow-200/);
 
   const chipStart = source.indexOf('flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-yellow-400 text-black');

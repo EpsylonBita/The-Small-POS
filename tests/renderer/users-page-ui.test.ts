@@ -480,3 +480,19 @@ test('UsersPage address-delete confirmation closes itself on Escape (topmost), l
   assert.ok(adds.length >= 3, `expected >=3 keydown registrations (filter + details + confirmation), found ${adds.length}`);
   assert.ok(removes.length >= 3, 'each Escape listener must be cleaned up');
 });
+
+test('UsersPage deletes addresses through the local-first customer bridge', () => {
+  const source = readFileSync(usersPagePath, 'utf8');
+
+  assert.match(source, /bridge\.customers\.deleteAddress\(selectedUser\.id, addressId\)/);
+  assert.doesNotMatch(
+    source,
+    /Deleting an address requires an online connection/,
+    'address deletion must queue offline instead of being blocked by navigator.onLine',
+  );
+  assert.doesNotMatch(
+    source,
+    /posApiFetch<any>\(`pos\/customers\/\$\{selectedUser\.id\}\/addresses\/\$\{addressId\}`/,
+    'the Users page must not bypass the native customer sync path',
+  );
+});

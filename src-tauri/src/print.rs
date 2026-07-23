@@ -646,6 +646,7 @@ fn is_non_retryable_print_error(error_msg: &str) -> bool {
         // auto-resending a possible duplicate — same stance as a stale `printing` row.
         || normalized.contains("did not respond within the dispatch timeout")
         || normalized.contains("within the write deadline")
+        || normalized.contains("raw print state is unknown")
 }
 
 /// Lock the shared DB connection, recovering from mutex poisoning.
@@ -3654,6 +3655,52 @@ fn text_from_paths(payload: &Value, paths: &[&str]) -> Option<String> {
     None
 }
 
+fn z_report_expense_entries(payload: &Value) -> Vec<receipt_renderer::ZReportExpenseEntry> {
+    payload
+        .pointer("/expenses/items")
+        .or_else(|| payload.get("expenseItems"))
+        .or_else(|| payload.get("expense_items"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let expense_type =
+                        text_from_paths(item, &["/expenseType", "/expense_type", "/type"])
+                            .unwrap_or_default();
+                    let reason =
+                        text_from_paths(item, &["/description", "/reason", "/notes", "/note"])
+                            .filter(|value| !value.trim().is_empty())
+                            .or_else(|| {
+                                if expense_type.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(expense_type.clone())
+                                }
+                            })
+                            .unwrap_or_else(|| "Expense".to_string());
+                    let amount =
+                        number_from_paths(item, &["/amount", "/total"]).unwrap_or_else(|| {
+                            number_from_paths(item, &["/amountCents", "/amount_cents"])
+                                .unwrap_or(0.0)
+                                / 100.0
+                        });
+
+                    receipt_renderer::ZReportExpenseEntry {
+                        reason,
+                        expense_type,
+                        amount,
+                        created_at: text_from_paths(
+                            item,
+                            &["/createdAt", "/created_at", "/timestamp"],
+                        ),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &str) -> ZReportDoc {
     let report_date = text_from_paths(payload, &["/date", "/reportDate", "/report_date"])
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
@@ -3826,6 +3873,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         takeaway_sales,
         delivery_orders,
         delivery_sales,
+        expense_lines: z_report_expense_entries(payload),
         staff_reports: payload
             .get("staffReports")
             .and_then(Value::as_array)
@@ -4017,6 +4065,7 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
             .pointer("/sales/deliverySales")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
+        expense_lines: z_report_expense_entries(&rj),
         staff_reports: rj
             .get("staffReports")
             .and_then(Value::as_array)
@@ -6879,6 +6928,51 @@ mod tests {
             "No hardware printer profile resolved for entity type order_receipt"
         ));
         assert!(!is_non_retryable_print_error("printer offline"));
+    }
+
+    #[test]
+    fn test_windows_raw_spool_unknown_state_errors_are_non_retryable() {
+        for error in [
+            "WritePrinter failed for \"Receipt\": wrote 80/120 bytes; raw print state is unknown",
+            "Partial spool write for \"Receipt\": wrote 80/120 bytes; raw print state is unknown",
+            "EndPagePrinter failed for \"Receipt\"; raw print state is unknown",
+            "EndDocPrinter failed for \"Receipt\"; raw print state is unknown",
+        ] {
+            assert!(
+                is_non_retryable_print_error(error),
+                "uncertain Windows spool errors must require an operator retry: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_z_report_expense_entries_preserve_each_reason() {
+        let entries = z_report_expense_entries(&serde_json::json!({
+            "expenses": {
+                "total": 18.0,
+                "items": [
+                    {
+                        "expenseType": "supplies",
+                        "amount": 12.0,
+                        "description": "Cleaning supplies",
+                        "createdAt": "2026-07-23T12:00:00Z"
+                    },
+                    {
+                        "expenseType": "transport",
+                        "amount": 6.0,
+                        "description": "Taxi for stock",
+                        "createdAt": "2026-07-23T14:00:00Z"
+                    }
+                ]
+            }
+        }));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].reason, "Cleaning supplies");
+        assert_eq!(entries[0].expense_type, "supplies");
+        assert_eq!(entries[0].amount, 12.0);
+        assert_eq!(entries[1].reason, "Taxi for stock");
+        assert_eq!(entries[1].amount, 6.0);
     }
 
     #[test]

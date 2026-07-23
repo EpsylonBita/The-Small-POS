@@ -1,24 +1,24 @@
 [package]
 name = "the-small-pos"
-version = "1.4.32"
+version = "1.4.33"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.77.2"
 
 [lib]
 name = "the_small_pos_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 # Tauri v2 core
-tauri = { version = "2", features = [
+tauri = { version = "2.11.5", features = [
   "tray-icon",
 ] }
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "2.10.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
