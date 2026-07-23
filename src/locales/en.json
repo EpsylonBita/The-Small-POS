@@ -1722,6 +1722,10 @@
           "label": "Card Machines",
           "detail": "Card payment devices"
         },
+        "waiter_devices": {
+          "label": "Waiter Devices",
+          "detail": "Mobile waiter access"
+        },
         "about": {
           "label": "Info",
           "detail": "App version"
@@ -1732,6 +1736,33 @@
         "device": "Device",
         "system": "System"
       }
+    },
+    "waiterDevices": {
+      "title": "Waiter Devices",
+      "helpText": "Mobile waiter devices paired to this register",
+      "refresh": "Refresh",
+      "loading": "Loading waiter devices...",
+      "empty": "No waiter devices paired",
+      "emptyHelp": "Pair a mobile waiter device from the admin dashboard to manage it here.",
+      "loadFailed": "Could not load waiter devices",
+      "mainOnly": "Only the main terminal can manage waiter devices.",
+      "online": "Online",
+      "offline": "Offline",
+      "lastSeen": "Last seen {{time}}",
+      "inactive": "Inactive",
+      "activeStaff": "Checked in: {{names}}",
+      "noActiveStaff": "No staff checked in",
+      "features": {
+        "title": "Allowed actions",
+        "order_creation": "Take orders",
+        "table_management": "Manage tables",
+        "payment_processing": "Take payments",
+        "refunds": "Refunds"
+      },
+      "save": "Save",
+      "saving": "Saving...",
+      "saved": "Waiter device updated",
+      "saveFailed": "Could not save changes"
     },
     "title": "Settings",
     "subtitle": "Configure terminal settings",

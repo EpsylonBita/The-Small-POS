@@ -1722,6 +1722,10 @@
           "label": "Terminali di pagamento",
           "detail": "Dispositivi di pagamento con carta"
         },
+        "waiter_devices": {
+          "label": "Dispositivi camerieri",
+          "detail": "Accesso dei dispositivi camerieri mobili"
+        },
         "about": {
           "label": "Info",
           "detail": "Versione app"
@@ -1732,6 +1736,33 @@
         "device": "Dispositivo",
         "system": "Sistema"
       }
+    },
+    "waiterDevices": {
+      "title": "Dispositivi camerieri",
+      "helpText": "Dispositivi camerieri mobili associati a questa cassa",
+      "refresh": "Aggiorna",
+      "loading": "Caricamento dei dispositivi camerieri...",
+      "empty": "Nessun dispositivo cameriere associato",
+      "emptyHelp": "Associa un dispositivo cameriere mobile dal pannello di amministrazione per gestirlo qui.",
+      "loadFailed": "Impossibile caricare i dispositivi camerieri",
+      "mainOnly": "Solo il terminale principale può gestire i dispositivi camerieri.",
+      "online": "In linea",
+      "offline": "Non in linea",
+      "lastSeen": "Ultimo accesso {{time}}",
+      "inactive": "Inattivo",
+      "activeStaff": "In turno: {{names}}",
+      "noActiveStaff": "Nessun membro del personale in turno",
+      "features": {
+        "title": "Azioni consentite",
+        "order_creation": "Prendere ordini",
+        "table_management": "Gestire i tavoli",
+        "payment_processing": "Incassare pagamenti",
+        "refunds": "Rimborsi"
+      },
+      "save": "Salva",
+      "saving": "Salvataggio...",
+      "saved": "Dispositivo cameriere aggiornato",
+      "saveFailed": "Impossibile salvare le modifiche"
     },
     "title": "Impostazioni",
     "subtitle": "Configura le impostazioni del terminale",

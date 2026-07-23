@@ -2185,3 +2185,99 @@ test('desktop hotel and room-charge locale keys exist in every POS locale', () =
     assert.deepEqual(missing, [], `${locale} is missing desktop hotel/payment locale keys`);
   }
 });
+
+// --- Waiter-device management (feat/waiter-terminal-lockdown) ---
+
+const connectionSettingsModalPath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'components',
+  'modals',
+  'ConnectionSettingsModal.tsx',
+);
+const waiterDevicesSectionPath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'components',
+  'settings',
+  'WaiterDevicesSection.tsx',
+);
+
+test('settings hub registers the waiter_devices section gated on main terminal', () => {
+  const source = readFileSync(connectionSettingsModalPath, 'utf8');
+
+  // The section id exists in the SettingsSectionId union and renders the section component.
+  assert.match(source, /\|\s*'waiter_devices'/);
+  assert.match(source, /<WaiterDevicesSection\s*\/>/);
+  assert.match(source, /settings\.settingsHub\.sections\.waiter_devices\.label/);
+  assert.match(source, /settings\.settingsHub\.sections\.waiter_devices\.detail/);
+
+  // Main-terminal gate: derived from useFeatures' terminalType, stripping the
+  // nav entry AND guarding the render block for non-main terminals.
+  assert.match(source, /const isMainTerminal = terminalType === 'main'/);
+  assert.match(source, /id !== 'waiter_devices' \|\| isMainTerminal/);
+  assert.match(
+    source,
+    /activeSettingsSection === 'waiter_devices' && isMainTerminal/,
+  );
+});
+
+test('WaiterDevicesSection consumes the terminal-authenticated waiter-device endpoints', () => {
+  const source = readFileSync(waiterDevicesSectionPath, 'utf8');
+
+  // Reads and writes go through the shared POS API helpers (dual transport),
+  // never through a direct Supabase client.
+  assert.match(source, /posApiGet[\s\S]{0,120}'\/api\/pos\/terminals\/waiter-devices'/);
+  assert.match(
+    source,
+    /posApiPut[\s\S]{0,200}\/api\/pos\/terminals\/waiter-devices\/\$\{encodeURIComponent\(/,
+  );
+  assert.doesNotMatch(source, /supabase/i);
+
+  // Saves send only enabled_features; the not-a-main-terminal denial is
+  // recognized on both transport shapes and surfaced with friendly copy.
+  assert.match(source, /\{ enabled_features: nextFeatures \}/);
+  assert.match(source, /WAITER_MGMT_MAIN_ONLY/);
+  assert.match(source, /Only a main terminal can manage waiter devices/);
+  assert.match(source, /settings\.waiterDevices\.mainOnly/);
+
+  // The managed allowed-action keys stay pinned to the server vocabulary.
+  for (const key of [
+    'order_creation',
+    'table_management',
+    'payment_processing',
+    'refunds',
+  ]) {
+    assert.match(source, new RegExp(`'${key}'`));
+  }
+});
+
+test('waiter-device locale keys exist in every POS locale', () => {
+  const requiredKeys = new Set([
+    'settings.settingsHub.sections.waiter_devices.label',
+    'settings.settingsHub.sections.waiter_devices.detail',
+  ]);
+  const translationCallPattern = /t\(\s*\n?\s*['"]([^'"`]+)['"]/g;
+  const source = readFileSync(waiterDevicesSectionPath, 'utf8');
+  for (const match of source.matchAll(translationCallPattern)) {
+    const key = match[1];
+    if (key.startsWith('settings.waiterDevices.') || key.startsWith('sync.time.')) {
+      requiredKeys.add(key);
+    }
+  }
+  assert.ok(
+    [...requiredKeys].some((key) => key.startsWith('settings.waiterDevices.')),
+    'expected WaiterDevicesSection to reference settings.waiterDevices.* keys',
+  );
+
+  for (const locale of posLocaleCodes) {
+    const messages = JSON.parse(
+      readFileSync(path.join(localeDirectoryPath, `${locale}.json`), 'utf8'),
+    );
+    const missing = [...requiredKeys].filter((key) => !hasLocaleValue(messages, key)).sort();
+
+    assert.deepEqual(missing, [], `${locale} is missing waiter-device locale keys`);
+  }
+});

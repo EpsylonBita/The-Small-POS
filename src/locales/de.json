@@ -1722,6 +1722,10 @@
           "label": "Kartengeräte",
           "detail": "Kartenzahlungsgeräte"
         },
+        "waiter_devices": {
+          "label": "Kellnergeräte",
+          "detail": "Zugriff mobiler Kellnergeräte"
+        },
         "about": {
           "label": "Info",
           "detail": "App-Version"
@@ -1732,6 +1736,33 @@
         "device": "Gerät",
         "system": "System"
       }
+    },
+    "waiterDevices": {
+      "title": "Kellnergeräte",
+      "helpText": "Mit dieser Kasse gekoppelte mobile Kellnergeräte",
+      "refresh": "Aktualisieren",
+      "loading": "Kellnergeräte werden geladen...",
+      "empty": "Keine Kellnergeräte gekoppelt",
+      "emptyHelp": "Koppeln Sie ein mobiles Kellnergerät über das Admin-Dashboard, um es hier zu verwalten.",
+      "loadFailed": "Kellnergeräte konnten nicht geladen werden",
+      "mainOnly": "Nur das Hauptterminal kann Kellnergeräte verwalten.",
+      "online": "Online",
+      "offline": "Offline",
+      "lastSeen": "Zuletzt gesehen {{time}}",
+      "inactive": "Inaktiv",
+      "activeStaff": "Eingecheckt: {{names}}",
+      "noActiveStaff": "Kein Personal eingecheckt",
+      "features": {
+        "title": "Erlaubte Aktionen",
+        "order_creation": "Bestellungen aufnehmen",
+        "table_management": "Tische verwalten",
+        "payment_processing": "Zahlungen entgegennehmen",
+        "refunds": "Erstattungen"
+      },
+      "save": "Speichern",
+      "saving": "Wird gespeichert...",
+      "saved": "Kellnergerät aktualisiert",
+      "saveFailed": "Änderungen konnten nicht gespeichert werden"
     },
     "title": "Einstellungen",
     "subtitle": "Terminal-Einstellungen konfigurieren",

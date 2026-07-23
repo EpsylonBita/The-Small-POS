@@ -1722,6 +1722,10 @@
           "label": "Terminaux de carte",
           "detail": "Terminaux de paiement par carte"
         },
+        "waiter_devices": {
+          "label": "Appareils serveurs",
+          "detail": "Accès des appareils serveurs mobiles"
+        },
         "about": {
           "label": "Infos",
           "detail": "Version de l'app"
@@ -1732,6 +1736,33 @@
         "device": "Appareil",
         "system": "Système"
       }
+    },
+    "waiterDevices": {
+      "title": "Appareils serveurs",
+      "helpText": "Appareils serveurs mobiles associés à cette caisse",
+      "refresh": "Actualiser",
+      "loading": "Chargement des appareils serveurs...",
+      "empty": "Aucun appareil serveur associé",
+      "emptyHelp": "Associez un appareil serveur mobile depuis le tableau d'administration pour le gérer ici.",
+      "loadFailed": "Impossible de charger les appareils serveurs",
+      "mainOnly": "Seul le terminal principal peut gérer les appareils serveurs.",
+      "online": "En ligne",
+      "offline": "Hors ligne",
+      "lastSeen": "Vu pour la dernière fois {{time}}",
+      "inactive": "Inactif",
+      "activeStaff": "En service : {{names}}",
+      "noActiveStaff": "Aucun membre du personnel en service",
+      "features": {
+        "title": "Actions autorisées",
+        "order_creation": "Prendre des commandes",
+        "table_management": "Gérer les tables",
+        "payment_processing": "Encaisser des paiements",
+        "refunds": "Remboursements"
+      },
+      "save": "Enregistrer",
+      "saving": "Enregistrement...",
+      "saved": "Appareil serveur mis à jour",
+      "saveFailed": "Impossible d'enregistrer les modifications"
     },
     "title": "Paramètres",
     "subtitle": "Configurer les paramètres du terminal",

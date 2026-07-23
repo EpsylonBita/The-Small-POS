@@ -249,6 +249,19 @@ export async function posApiPost<T = any>(
 }
 
 /**
+ * Shorthand for PUT requests
+ */
+export async function posApiPut<T = any>(
+  endpoint: string,
+  body: any
+): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
+  return posApiFetch<T>(endpoint, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
+
+/**
  * Shorthand for PATCH requests
  */
 export async function posApiPatch<T = any>(

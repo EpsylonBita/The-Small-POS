@@ -5,13 +5,14 @@ import { posApiGet } from '../../utils/api-helpers'
 import { resolveNavigationLabel } from '../../utils/i18nLabels'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check, Wrench, AlertTriangle, ChevronDown, RefreshCw } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check, Wrench, AlertTriangle, ChevronDown, RefreshCw, Smartphone } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
 import CashRegisterSection, { type CashRegisterSetupIntent } from '../peripherals/CashRegisterSection';
 import CallerIdSection from '../peripherals/CallerIdSection';
 import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
+import { WaiterDevicesSection } from '../settings/WaiterDevicesSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useHardwareManager } from '../../hooks/useHardwareManager';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
@@ -68,6 +69,7 @@ type SettingsSectionId =
   | 'hardware'
   | 'printing'
   | 'payments'
+  | 'waiter_devices'
   | 'about'
 
 const parseBooleanSetting = (value: unknown): boolean => {
@@ -903,6 +905,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       label: t('settings.settingsHub.sections.payments.label', 'Card Machines'),
       detail: t('settings.settingsHub.sections.payments.detail', 'Card payment devices'),
     },
+    waiter_devices: {
+      label: t('settings.settingsHub.sections.waiter_devices.label', 'Waiter Devices'),
+      detail: t('settings.settingsHub.sections.waiter_devices.detail', 'Mobile waiter access'),
+    },
     about: {
       label: t('settings.settingsHub.sections.about.label', 'Info'),
       detail: t('settings.settingsHub.sections.about.detail', 'App version'),
@@ -917,6 +923,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     { id: 'connection', icon: <Wifi className="h-5 w-5 text-black" /> },
     { id: 'printing', icon: <Printer className="h-5 w-5 text-black" /> },
     { id: 'payments', icon: <CreditCard className="h-5 w-5 text-black" /> },
+    { id: 'waiter_devices', icon: <Smartphone className="h-5 w-5 text-black" /> },
     { id: 'terminal', icon: <Monitor className="h-5 w-5 text-black" /> },
     { id: 'security', icon: <Lock className="h-5 w-5 text-black" /> },
     { id: 'hardware', icon: <Cable className="h-5 w-5 text-black" /> },
@@ -928,9 +935,18 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   // of nine equal-weight rows, to lower cognitive load. Labels, details, and icons are
   // unchanged (sectionMeta + settingsNav); only the grouping and the small uppercase
   // group headers are new. Group strings come from settings.settingsHub.groups.*.
+  // 'waiter_devices' is main-terminal-only management of the unit's mobile_waiter
+  // devices, so it is stripped from the rail for every other terminal type
+  // (the server enforces the same rule with 403 WAITER_MGMT_MAIN_ONLY).
+  const isMainTerminal = terminalType === 'main'
   const settingsNavGroups: Array<{ id: 'daily' | 'device' | 'system'; items: SettingsSectionId[] }> = [
     { id: 'daily', items: ['admin', 'connection'] },
-    { id: 'device', items: ['printing', 'payments', 'hardware', 'terminal'] },
+    {
+      id: 'device',
+      items: (['printing', 'payments', 'waiter_devices', 'hardware', 'terminal'] as SettingsSectionId[]).filter(
+        (id) => id !== 'waiter_devices' || isMainTerminal,
+      ),
+    },
     { id: 'system', items: ['security', 'database', 'about'] },
   ]
 
@@ -2288,6 +2304,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             </button>
           </div>
         </div>
+        )}
+
+        {/* Waiter Devices Section — main terminal manages its mobile_waiter unit */}
+        {activeSettingsSection === 'waiter_devices' && isMainTerminal && (
+          <WaiterDevicesSection />
         )}
 
         {/* About Section */}
