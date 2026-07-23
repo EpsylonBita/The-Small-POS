@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble } from 'lucide-react';
+import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble, HandCoins } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../../hooks/useFeatures';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
@@ -8,6 +8,11 @@ import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { ActivityTracker } from '../../services/ActivityTracker';
+import {
+  TipModal,
+  type TipRecipientRole,
+  type TipSelection,
+} from './TipModal';
 
 export interface RoomChargeContext {
   roomId: string;
@@ -28,6 +33,25 @@ export type PaymentMethodSelection = 'cash' | 'card' | 'room_charge';
 
 export type PaymentCompletionResult = void | boolean | RoomChargeFallbackPrompt;
 
+export interface PaymentCompletionData {
+  method: PaymentMethodSelection;
+  amount: number;
+  transactionId?: string;
+  driverId?: string;
+  cashReceived?: number;
+  change?: number;
+  tipAmount?: number;
+  tipRecipientRole?: TipRecipientRole;
+  tipRecipientStaffId?: string;
+  tipRecipientStaffShiftId?: string;
+  roomId?: string;
+  room_id?: string;
+  roomCharge?: RoomChargeContext;
+  existingOrderId?: string;
+  existingOrderNumber?: string;
+  roomChargeFallback?: boolean;
+}
+
 export const isRoomChargeFallbackPrompt = (
   value: PaymentCompletionResult,
 ): value is RoomChargeFallbackPrompt =>
@@ -47,22 +71,11 @@ interface PaymentModalProps {
   isProcessing?: boolean;
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   minimumOrderAmount?: number; // From delivery zone settings in admin dashboard
-  onPaymentComplete: (paymentData: {
-    method: PaymentMethodSelection;
-    amount: number;
-    transactionId?: string;
-    driverId?: string;
-    cashReceived?: number;
-    change?: number;
-    roomId?: string;
-    room_id?: string;
-    roomCharge?: RoomChargeContext;
-    existingOrderId?: string;
-    existingOrderNumber?: string;
-    roomChargeFallback?: boolean;
-  }) => PaymentCompletionResult | Promise<PaymentCompletionResult>;
+  onPaymentComplete: (
+    paymentData: PaymentCompletionData,
+  ) => PaymentCompletionResult | Promise<PaymentCompletionResult>;
   /** When provided, a "Split" button is rendered alongside Cash/Card in the payment selection step. */
-  onSplitPayment?: () => void;
+  onSplitPayment?: (tipSelection: TipSelection | null) => void;
   roomChargeContext?: RoomChargeContext | null;
 }
 
@@ -105,6 +118,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [cashReceived, setCashReceived] = useState<string>('');
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethodSelection | null>(null);
   const [roomChargeFallback, setRoomChargeFallback] = useState<RoomChargeFallbackPrompt | null>(null);
+  const [showTipModal, setShowTipModal] = useState(false);
+  const [tipSelection, setTipSelection] = useState<TipSelection | null>(null);
   const cashInputRef = useRef<HTMLInputElement | null>(null);
   const canUseRoomCharge =
     !roomChargeFallback &&
@@ -136,8 +151,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   const showDeliveryFee = orderType === 'delivery';
   const subtotalBeforeDiscount = Math.max(0, orderTotal + discountAmount - (showDeliveryFee ? deliveryFee : 0));
+  const tipBaseAmount = Math.max(0, orderTotal - (showDeliveryFee ? deliveryFee : 0));
+  const tipAmount = roundMoney(tipSelection?.amount || 0);
+  const payableTotal = roundMoney(orderTotal + tipAmount);
 
-  const roundedOrderTotal = roundMoney(orderTotal);
+  const roundedOrderTotal = payableTotal;
 
   // Calculate change
   const cashAmount = parseMoneyInputValue(cashReceived);
@@ -199,6 +217,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setCashReceived('');
       setSelectedPaymentMethod(null);
       setRoomChargeFallback(null);
+      setShowTipModal(false);
+      setTipSelection(null);
     }
   }, [isOpen, isProcessing, isBelowMinimum]);
 
@@ -240,11 +260,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
       const paymentPayload = {
         method,
-        amount: orderTotal,
+        amount: payableTotal,
         transactionId: txId,
         driverId: undefined,
-        cashReceived: method === 'cash' ? (cashAmount || orderTotal) : undefined,
+        cashReceived: method === 'cash' ? (cashAmount || payableTotal) : undefined,
         change: method === 'cash' ? (changeAmount > 0 ? changeAmount : 0) : undefined,
+        tipAmount: tipSelection?.amount,
+        tipRecipientRole: tipSelection?.recipientRole,
         ...(method === 'room_charge' && roomChargeContext
           ? {
               roomId: roomChargeContext.roomId,
@@ -284,7 +306,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           roomChargeApplied: false,
           orderId: paymentPayload.existingOrderId,
           orderNumber: paymentPayload.existingOrderNumber,
-          amount: orderTotal,
+          amount: payableTotal,
           reason: 'room_charge_not_applied',
         });
         setSelectedPaymentMethod(null);
@@ -302,7 +324,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       }
 
       try {
-        ActivityTracker.trackPaymentCompleted(orderTotal, method, txId, undefined);
+        ActivityTracker.trackPaymentCompleted(payableTotal, method, txId, undefined);
       } catch { }
 
       toast.success(
@@ -342,6 +364,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setCashReceived('');
     setSelectedPaymentMethod(null);
     setRoomChargeFallback(null);
+    setShowTipModal(false);
+    setTipSelection(null);
   };
 
   const handleBackToPaymentSelection = () => {
@@ -385,6 +409,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     (currentStep === 'payment_selection' && !onSplitPayment && canUseCash !== canUseCard);
 
   return (
+    <>
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={handleClose}
@@ -401,7 +426,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       <div>
         {/* Order Total with Discount Breakdown */}
         <div className="text-center mb-8">
-          {(discountAmount > 0 || showDeliveryFee) && (
+          {(discountAmount > 0 || showDeliveryFee || tipAmount > 0) && (
             <div className="mb-4 space-y-2 p-4 rounded-2xl bg-white/5 border border-white/10">
               <div className="flex justify-between text-sm">
                 <span className="liquid-glass-modal-text-muted">
@@ -431,6 +456,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   </span>
                 </div>
               )}
+              {tipAmount > 0 && (
+                <div className="flex justify-between text-sm">
+                  <span className="font-medium text-emerald-400">
+                    {t('modals.payment.tip', 'Tip')}
+                  </span>
+                  <span className="font-medium text-emerald-400">
+                    +{formatCurrency(tipAmount)}
+                  </span>
+                </div>
+              )}
               <div className="border-t border-white/10 pt-2 mt-2"></div>
             </div>
           )}
@@ -438,7 +473,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             {discountAmount > 0 ? t('modals.payment.finalAmount') : t('modals.payment.totalAmount')}
           </p>
           <p className="text-4xl font-bold text-emerald-500 dark:text-emerald-400 tracking-tight">
-            {formatCurrency(orderTotal)}
+            {formatCurrency(payableTotal)}
           </p>
         </div>
 
@@ -476,6 +511,37 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
         {currentStep === 'payment_selection' && (
           <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowTipModal(true)}
+              disabled={isProcessingPayment}
+              className={`mb-4 flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-colors ${
+                tipAmount > 0
+                  ? 'border-emerald-400/50 bg-emerald-500/15'
+                  : 'border-white/10 bg-white/5 hover:bg-white/10'
+              } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.99]'}`}
+            >
+              <span className="flex items-center gap-3">
+                <span className="rounded-xl bg-emerald-500/15 p-2">
+                  <HandCoins className="h-6 w-6 text-emerald-400" />
+                </span>
+                <span>
+                  <span className="block font-bold liquid-glass-modal-text">
+                    {tipAmount > 0
+                      ? t('modals.payment.editTip', 'Edit tip')
+                      : t('modals.payment.addTip', 'Add tip')}
+                  </span>
+                  <span className="block text-xs liquid-glass-modal-text-muted">
+                    {tipSelection
+                      ? t(`modals.tip.recipients.${tipSelection.recipientRole}`)
+                      : t('modals.payment.tipOptional', 'Optional — added before payment')}
+                  </span>
+                </span>
+              </span>
+              <span className="text-lg font-bold text-emerald-400">
+                {tipAmount > 0 ? formatCurrency(tipAmount) : '+'}
+              </span>
+            </button>
             {isFeatureLoading ? (
               <div className="flex items-center gap-3 p-4 rounded-2xl bg-white/5 border border-white/10 w-full">
                 <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white/70 animate-spin flex-shrink-0" />
@@ -592,7 +658,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 {/* Split Option — shown only when onSplitPayment callback is provided */}
                 {onSplitPayment && (
                   <button
-                    onClick={() => { onSplitPayment(); }}
+                    onClick={() => { onSplitPayment(tipSelection); }}
                     disabled={isProcessingPayment}
                     className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                       ${isProcessingPayment
@@ -698,7 +764,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     {t('modals.payment.totalAmount')}
                   </span>
                   <span className="font-bold liquid-glass-modal-text">
-                    {formatCurrency(orderTotal)}
+                    {formatCurrency(payableTotal)}
                   </span>
                 </div>
                 <div className="flex justify-between items-center mb-2">
@@ -772,6 +838,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           </div>
         )}
       </div>
-    </LiquidGlassModal >
+    </LiquidGlassModal>
+    <TipModal
+      isOpen={isOpen && showTipModal}
+      onClose={() => setShowTipModal(false)}
+      baseAmount={tipBaseAmount}
+      orderType={orderType}
+      selection={tipSelection}
+      onApply={setTipSelection}
+    />
+    </>
   );
 };

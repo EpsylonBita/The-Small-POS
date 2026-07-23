@@ -886,7 +886,29 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         taxDivisor > 0
           ? Math.round((subtotalAfterDiscount - subtotalAfterDiscount / taxDivisor) * 100) / 100
           : 0;
-      const total_amount = subtotalAfterDiscount + deliveryFee;
+      const tipAmount = Math.max(
+        0,
+        Number(orderData.paymentData?.tipAmount ?? orderData.paymentData?.tip_amount ?? 0) || 0,
+      );
+      const requestedTipRecipientRole = String(
+        orderData.paymentData?.tipRecipientRole || '',
+      );
+      const tipRecipientRole: 'waiter' | 'cashier' | 'driver' | undefined =
+        tipAmount > 0 &&
+        ['waiter', 'cashier', 'driver'].includes(requestedTipRecipientRole)
+          ? (requestedTipRecipientRole as 'waiter' | 'cashier' | 'driver')
+          : undefined;
+      const actualWaiterId =
+        selectedTable?.currentWaiterId || staff?.staffId || undefined;
+      const actualWaiterShiftId =
+        actualWaiterId && actualWaiterId === staff?.staffId
+          ? activeShift?.id
+          : undefined;
+      const tipRecipientStaffId =
+        tipRecipientRole === 'waiter' ? actualWaiterId : undefined;
+      const tipRecipientStaffShiftId =
+        tipRecipientRole === 'waiter' ? actualWaiterShiftId : undefined;
+      const total_amount = subtotalAfterDiscount + deliveryFee + tipAmount;
       const paymentMethod = typeof orderData.paymentData?.method === 'string'
         ? orderData.paymentData.method
         : null;
@@ -910,6 +932,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               transactionRef: orderData.paymentData.transactionId,
               staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
               staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
+              tipAmount,
+              tipRecipientRole,
+              tipRecipientStaffId,
+              tipRecipientStaffShiftId,
             }
           : undefined;
 
@@ -949,6 +975,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           transactionRef: orderData.paymentData.transactionId,
           staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
           staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
+          tipAmount,
+          tipRecipientRole,
+          tipRecipientStaffId,
+          tipRecipientStaffShiftId,
         });
         if (paymentResult?.success === false) {
           throw new Error(paymentResult.error || 'Failed to record payment');
@@ -1002,6 +1032,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         // Discount fields (matching shared types)
         discount_percentage: discountPercentage,
         discount_amount: discountAmount,
+        tip_amount: tipAmount,
 
         status: 'pending' as const,
         payment_method: isGhostOrder ? null : (paymentMethod || null),

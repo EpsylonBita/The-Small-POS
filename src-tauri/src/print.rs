@@ -3678,7 +3678,7 @@ fn z_report_expense_entries(payload: &Value) -> Vec<receipt_renderer::ZReportExp
                                     Some(expense_type.clone())
                                 }
                             })
-                            .unwrap_or_else(|| "Expense".to_string());
+                            .unwrap_or_default();
                     let amount =
                         number_from_paths(item, &["/amount", "/total"]).unwrap_or_else(|| {
                             number_from_paths(item, &["/amountCents", "/amount_cents"])
@@ -6973,6 +6973,20 @@ mod tests {
         assert_eq!(entries[0].amount, 12.0);
         assert_eq!(entries[1].reason, "Taxi for stock");
         assert_eq!(entries[1].amount, 6.0);
+    }
+
+    #[test]
+    fn test_z_report_expense_entries_keep_missing_reason_empty_for_localization() {
+        let entries = z_report_expense_entries(&serde_json::json!({
+            "expenses": {
+                "items": [{
+                    "amount": 5.0
+                }]
+            }
+        }));
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].reason.is_empty());
     }
 
     #[test]

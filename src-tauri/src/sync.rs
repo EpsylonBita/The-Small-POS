@@ -15382,6 +15382,24 @@ async fn sync_payment_items(
             .or_else(|| data.get("seatNumber"))
             .and_then(Value::as_i64)
             .filter(|value| *value > 0);
+        let tip_recipient_role = data
+            .get("tip_recipient_role")
+            .or_else(|| data.get("tipRecipientRole"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let tip_recipient_staff_id = data
+            .get("tip_recipient_staff_id")
+            .or_else(|| data.get("tipRecipientStaffId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let tip_recipient_staff_shift_id = data
+            .get("tip_recipient_staff_shift_id")
+            .or_else(|| data.get("tipRecipientStaffShiftId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
 
         // Build the POST body for /api/pos/payments.
         // W4d-i: emit BOTH `amount`/`tip_amount` (legacy float, what the
@@ -15417,6 +15435,9 @@ async fn sync_payment_items(
             "terminal_id": terminal_id,
             "local_payment_id": entity_id,
             "payment_origin": payment_origin,
+            "tip_recipient_role": tip_recipient_role,
+            "tip_recipient_staff_id": tip_recipient_staff_id,
+            "tip_recipient_staff_shift_id": tip_recipient_staff_shift_id,
         });
 
         // Include payment_items if present in the sync payload (split-by-items)

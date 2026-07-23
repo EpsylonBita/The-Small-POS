@@ -1,6 +1,14 @@
 {
   "common": {
     "all": "Tutti",
+    "floorPresets": {
+      "basementValue": "Seminterrato",
+      "basement": "Seminterrato",
+      "groundValue": "Piano terra",
+      "ground": "Piano terra",
+      "quickPick": "Selezione rapida del piano",
+      "manualHint": "Scegli un piano comune o inserisci un valore qualsiasi qui sopra."
+    },
     "actions": {
       "add": "Aggiungi",
       "remove": "Rimuovi",
@@ -865,6 +873,7 @@
       "pageOf": "Pagina {{current}} di {{total}}"
     },
     "deleteAddressSuccess": "Indirizzo eliminato con successo",
+    "deleteAddressQueued": "Indirizzo eliminato e messo in coda per la sincronizzazione",
     "deleteAddressError": "Impossibile eliminare l'indirizzo",
     "updateAddressSuccess": "Indirizzo aggiornato con successo",
     "updateAddressError": "Impossibile aggiornare l'indirizzo",
@@ -1672,6 +1681,10 @@
     },
     "summary": {
       "totalExpenses": "Spese totali",
+      "tipsReceived": "Mance ricevute",
+      "tipAllocationHelp": "Accreditate a questo membro del personale per questo turno.",
+      "tipAllocations": "Assegnazioni delle mance",
+      "tipOrder": "Ordine",
       "thisMonth": "Questo mese",
       "lastMonth": "Mese scorso",
       "byCategory": "Per categoria",
@@ -3227,7 +3240,29 @@
       "roomChargeRoom": "Camera {{roomNumber}}",
       "roomChargeLabel": "Addebita alla camera",
       "roomChargeSuccess": "Addebitato alla camera",
-      "roomChargeFallback": "L'addebito alla camera non è stato applicato. Incassa ora questa ordinazione."
+      "roomChargeFallback": "L'addebito alla camera non è stato applicato. Incassa ora questa ordinazione.",
+      "tip": "Mancia",
+      "editTip": "Modifica mancia",
+      "addTip": "Aggiungi mancia",
+      "tipOptional": "Facoltativa — aggiunta prima del pagamento"
+    },
+    "tip": {
+      "title": "Aggiungi mancia",
+      "presetLabel": "Scegli una mancia",
+      "manualLabel": "Oppure inserisci un importo",
+      "recipientLabel": "La mancia va a",
+      "recipients": {
+        "waiter": "Cameriere",
+        "waiterHelp": "Accredita la mancia al cameriere assegnato a questo tavolo.",
+        "cashier": "Cassiere",
+        "cashierHelp": "Accredita la mancia al cassiere con la cassa attiva.",
+        "driver": "Autista",
+        "driverHelp": "La mancia viene tenuta per l’autista e assegnata automaticamente quando prende in carico la consegna."
+      },
+      "tipAmount": "Mancia",
+      "totalWithTip": "Totale con mancia",
+      "noTip": "Nessuna mancia",
+      "apply": "Applica mancia"
     },
     "customerSearch": {
       "title": "Cerca cliente",
@@ -3262,6 +3297,8 @@
       "continueWithAddress": "Continua con {{address}}",
       "confirmDeleteAddress": "Eliminare questo indirizzo?",
       "deleteAddressFailed": "Impossibile eliminare l'indirizzo",
+      "deleteAddressSuccess": "Indirizzo eliminato",
+      "deleteAddressQueued": "Indirizzo eliminato e messo in coda per la sincronizzazione",
       "banned": "BANNATO",
       "bannedCustomer": "Cliente bannato",
       "banReason": "Motivo",
@@ -3331,7 +3368,22 @@
       "item": "Articolo",
       "address": "Indirizzo",
       "noPhone": "Nessun telefono",
-      "paymentMethod": "Metodo di pagamento"
+      "paymentMethod": "Metodo di pagamento",
+      "copyFailed": "Impossibile copiare i dati",
+      "phone": "Telefono",
+      "email": "E-mail",
+      "addressNumber": "Indirizzo {{number}}",
+      "customerCopied": "Dati cliente copiati",
+      "copyCustomer": "Copia cliente",
+      "openCustomerCard": "Apri scheda cliente",
+      "viewCustomerCard": "Visualizza scheda cliente e indirizzi",
+      "addressCopied": "Indirizzo copiato",
+      "copyAddress": "Copia indirizzo",
+      "customerCard": "Scheda Cliente",
+      "loadingCustomer": "Caricamento cliente...",
+      "savedAddresses": "Indirizzi Salvati",
+      "editAddress": "Modifica indirizzo",
+      "noSavedAddresses": "Nessun indirizzo salvato"
     },
     "simplePricing": {
       "orderTypePricing": "Prezzi per tipo ordine",
@@ -4487,7 +4539,7 @@
     "connectionSettings": "Impostazioni di connessione",
     "footer": "The Small POS",
     "enterWithoutPin": "Entra senza PIN",
-    "noPinWarning": "Nessun PIN impostato. Puoi impostarne uno nelle Impostazioni dopo l'accesso.",
+    "noPinWarning": "Nessun PIN configurato. Creane uno per continuare.",
     "pinResetRequired": "Reimpostazione PIN richiesta. Imposta un nuovo PIN per continuare.",
     "setupPin": "Imposta PIN",
     "setupPinDesc": "Crea un PIN di 6 cifre per l'accesso amministratore",

@@ -11,6 +11,7 @@ import {
   PaymentModal,
   type RoomChargeContext,
 } from './PaymentModal';
+import type { TipSelection } from './TipModal';
 import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
@@ -319,6 +320,8 @@ interface LoyaltyCustomerState {
   customer_name?: string | null;
 }
 
+type CheckoutPhase = 'editing' | 'payment' | 'finishing';
+
 interface MenuModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -409,7 +412,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
   const { topSellerIds, rankedTopSellerIds } = useFeaturedItems(staff?.branchId || null, {
-    strategy: 'daily_then_weekly',
+    strategy: 'weekly',
     limit: 20,
   });
   const { hasModule } = useAcquiredModules();
@@ -424,6 +427,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [cartItems, setCartItems] = useState<MenuModalCartItem[]>([]);
   const [offerEvaluation, setOfferEvaluation] = useState<CatalogOfferEvaluationResult | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [checkoutPhase, setCheckoutPhase] = useState<CheckoutPhase>('editing');
   // Split payment state managed by OrderDashboard (SplitPaymentModal renders there)
   const [manualDiscountMode, setManualDiscountMode] = useState<'percentage' | 'fixed'>('percentage');
   const [manualDiscountValue, setManualDiscountValue] = useState<number>(0);
@@ -446,6 +450,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     if (typeof window === 'undefined') return;
     window.setTimeout(() => menuSearchRef.current?.focus(), 50);
   }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setShowPaymentModal(false);
+      setCheckoutPhase('editing');
+    }
+  }, [isOpen]);
 
   // Capture keyboard input and redirect to search bar when typing printable characters
   useEffect(() => {
@@ -2171,6 +2182,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
 
     // Show payment modal instead of immediately completing order
+    setCheckoutPhase('payment');
     setShowPaymentModal(true);
   };
 
@@ -2233,6 +2245,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   const handlePaymentComplete = async (paymentData?: any): Promise<boolean> => {
     setIsLocalProcessing(true);
+    setCheckoutPhase('finishing');
     const isGhostOrder = shouldBypassPaymentWithGhostMode;
     const ghostMetadata = buildGhostMetadata();
 
@@ -2295,6 +2308,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
         if (completionResult === false) {
           setIsLocalProcessing(false);
+          setCheckoutPhase('payment');
           return false;
         }
       }
@@ -2317,6 +2331,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       toast.error(t('modals.menu.orderFailed'));
       setShowPaymentModal(false);
       setIsLocalProcessing(false);
+      setCheckoutPhase('editing');
       return false;
     }
   };
@@ -2326,12 +2341,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
    * Creates the order first (with payment_status='pending'), then opens
    * SplitPaymentModal so the user can allocate amounts to each person.
    */
-  const handleSplitPayment = async () => {
+  const handleSplitPayment = async (tipSelection: TipSelection | null) => {
     if (!onOrderComplete) {
       return;
     }
 
     setIsLocalProcessing(true);
+    setCheckoutPhase('finishing');
     try {
       // Create the order with pending payment method.
       // Parent flows detect split checkout and open SplitPaymentModal after creation.
@@ -2342,7 +2358,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         address: selectedAddress || null,
         orderType,
         notes: '',
-        paymentData: { method: 'pending', status: 'pending', amount: 0 },
+        paymentData: {
+          method: 'pending',
+          status: 'pending',
+          amount: 0,
+          tipAmount: tipSelection?.amount,
+          tipRecipientRole: tipSelection?.recipientRole,
+        },
         discountPercentage: currentDiscountPercentage,
         discountAmount: currentManualDiscountAmount,
         manualDiscountMode,
@@ -2370,11 +2392,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       });
 
       if (completionResult === false) {
+        setCheckoutPhase('payment');
         return;
       }
     } catch (error) {
       console.error('[MenuModal.handleSplitPayment] Error creating order for split:', error);
       toast.error(t('modals.menu.orderFailed'));
+      setCheckoutPhase('payment');
     } finally {
       setIsLocalProcessing(false);
     }
@@ -2399,7 +2423,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   return (
     <>
       <LiquidGlassModal
-        isOpen={isOpen}
+        isOpen={isOpen && checkoutPhase === 'editing'}
         onClose={requestClose}
         ariaLabel={getModalTitle()}
         header={
@@ -2648,7 +2672,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       {isOpen && (
         <PaymentModal
           isOpen={showPaymentModal}
-          onClose={() => setShowPaymentModal(false)}
+          onClose={() => {
+            setShowPaymentModal(false);
+            // PaymentModal also calls onClose after a successful completion.
+            // Keep the menu surface suppressed while the parent is opening the
+            // receipt prompt; only an actual cancel from the payment phase may
+            // return to editing.
+            if (checkoutPhase === 'payment') {
+              setCheckoutPhase('editing');
+            }
+          }}
           orderTotal={finalOrderTotal}
           discountAmount={totalDiscountAmount}
           deliveryFee={resolvedDeliveryFee}

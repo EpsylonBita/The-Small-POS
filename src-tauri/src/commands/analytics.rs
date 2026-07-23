@@ -381,16 +381,15 @@ fn top_items_to_json(items: Vec<AggregatedTopItem>, limit: usize) -> Vec<serde_j
 // closed-out orders that the existing top-items report queries against.
 //
 // To preserve the leaderboard, the Z-report flow now folds the
-// about-to-be-deleted orders into a persistent `top_sellers_rolling`
-// table just before deletion (see `top_sellers_aggregate_into_rolling`
-// below). The reports queries then merge live orders + this rolling
-// table so the Featured tab is always populated, weighted by all-time
-// sales plus the current day's activity.
+// about-to-be-deleted orders into persistent all-time and daily archive
+// tables just before deletion (see `top_sellers_aggregate_into_rolling`
+// below). Featured rankings read the daily archive so their date windows
+// remain accurate; the all-time table is retained for compatibility.
 
 /// Reads order rows whose ids are in `temp_z_report_order_ids`,
-/// aggregates their items into per-(branch, menu_item) totals using
-/// the same logic as the live top-items reports, and UPSERTs into
-/// the persistent `top_sellers_rolling` table. Called from the Z-report
+/// aggregates their items using the same logic as the live top-items
+/// reports, and UPSERTs both per-(branch, menu_item) lifetime totals and
+/// per-(branch, sale_date, menu_item) daily totals. Called from the Z-report
 /// flow immediately before the `DELETE FROM orders WHERE id IN
 /// (SELECT id FROM temp_z_report_order_ids)` statement so the totals
 /// don't get lost when the source rows are removed.
@@ -414,6 +413,10 @@ pub(crate) fn top_sellers_aggregate_into_rolling(
     let mut by_branch_item: std::collections::HashMap<
         (String, String),
         (AggregatedTopItem, String),
+    > = std::collections::HashMap::new();
+    let mut by_branch_date_item: std::collections::HashMap<
+        (String, String, String),
+        AggregatedTopItem,
     > = std::collections::HashMap::new();
 
     let rows = stmt
@@ -485,10 +488,41 @@ pub(crate) fn top_sellers_aggregate_into_rolling(
             if (entry.0.name.trim().is_empty() || entry.0.name == "Item")
                 && !item_name.trim().is_empty()
             {
-                entry.0.name = item_name;
+                entry.0.name = item_name.clone();
             }
             if entry.0.category_id.is_none() && category_id.is_some() {
-                entry.0.category_id = category_id;
+                entry.0.category_id = category_id.clone();
+            }
+
+            if let Some(sale_date) = created_at
+                .get(0..10)
+                .filter(|value| !value.trim().is_empty())
+            {
+                let daily_key = (
+                    branch_id.clone(),
+                    sale_date.to_string(),
+                    menu_item_id.clone(),
+                );
+                let daily_entry =
+                    by_branch_date_item
+                        .entry(daily_key)
+                        .or_insert_with(|| AggregatedTopItem {
+                            menu_item_id: menu_item_id.clone(),
+                            name: item_name.clone(),
+                            quantity: 0.0,
+                            revenue: 0.0,
+                            category_id: category_id.clone(),
+                        });
+                daily_entry.quantity += quantity;
+                daily_entry.revenue += revenue;
+                if (daily_entry.name.trim().is_empty() || daily_entry.name == "Item")
+                    && !item_name.trim().is_empty()
+                {
+                    daily_entry.name = item_name;
+                }
+                if daily_entry.category_id.is_none() && category_id.is_some() {
+                    daily_entry.category_id = category_id;
+                }
             }
         }
     }
@@ -528,28 +562,73 @@ pub(crate) fn top_sellers_aggregate_into_rolling(
         upserts += 1;
     }
 
+    for ((branch_id, sale_date, menu_item_id), item) in by_branch_date_item {
+        conn.execute(
+            "INSERT INTO top_sellers_daily
+                (branch_id, sale_date, menu_item_id, name, category_id,
+                 total_quantity, total_revenue, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+             ON CONFLICT (branch_id, sale_date, menu_item_id) DO UPDATE SET
+                total_quantity = top_sellers_daily.total_quantity + excluded.total_quantity,
+                total_revenue  = top_sellers_daily.total_revenue  + excluded.total_revenue,
+                name           = CASE WHEN top_sellers_daily.name = 'Item' OR top_sellers_daily.name = ''
+                                      THEN excluded.name ELSE top_sellers_daily.name END,
+                category_id    = COALESCE(top_sellers_daily.category_id, excluded.category_id),
+                updated_at     = datetime('now')",
+            rusqlite::params![
+                branch_id,
+                sale_date,
+                menu_item_id,
+                item.name,
+                item.category_id,
+                item.quantity,
+                item.revenue,
+            ],
+        )
+        .map_err(|e| format!("top_sellers_daily upsert {menu_item_id}: {e}"))?;
+    }
+
+    // Featured only needs a seven-day window. Keep a wider bounded archive
+    // for diagnostics without allowing this local cache to grow forever.
+    conn.execute(
+        "DELETE FROM top_sellers_daily
+         WHERE sale_date < date(
+             (SELECT MAX(sale_date) FROM top_sellers_daily),
+             '-35 days'
+         )",
+        [],
+    )
+    .map_err(|e| format!("top_sellers_daily prune: {e}"))?;
+
     Ok(upserts)
 }
 
-/// Loads aggregated rows from the persistent `top_sellers_rolling`
-/// table for the given branch (or all branches when empty). The
-/// returned items are merged with live-order aggregates by the
-/// reports query so the Featured tab combines historical weight with
-/// current-day activity.
-fn load_rolling_top_items(
+/// Loads archived sales for an exact date range. Keeping daily buckets is
+/// what lets the Featured tab rank the last seven days rather than lifetime
+/// totals after Z-report cleanup removes the original order rows.
+fn load_daily_top_items(
     conn: &rusqlite::Connection,
     branch_id: &str,
+    date_from: &str,
+    date_to: &str,
 ) -> Result<Vec<AggregatedTopItem>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT menu_item_id, name, category_id, total_quantity, total_revenue
-             FROM top_sellers_rolling
-             WHERE (?1 = '' OR branch_id = ?1)",
+            "SELECT menu_item_id,
+                    MAX(name),
+                    MAX(category_id),
+                    SUM(total_quantity),
+                    SUM(total_revenue)
+             FROM top_sellers_daily
+             WHERE (?1 = '' OR branch_id = ?1)
+               AND sale_date >= ?2
+               AND sale_date <= ?3
+             GROUP BY menu_item_id",
         )
-        .map_err(|e| format!("load_rolling_top_items prepare: {e}"))?;
+        .map_err(|e| format!("load_daily_top_items prepare: {e}"))?;
 
     let rows = stmt
-        .query_map([branch_id], |row| {
+        .query_map(rusqlite::params![branch_id, date_from, date_to], |row| {
             Ok(AggregatedTopItem {
                 menu_item_id: row.get::<_, String>(0)?,
                 name: row.get::<_, String>(1)?,
@@ -558,16 +637,16 @@ fn load_rolling_top_items(
                 revenue: row.get::<_, f64>(4)?,
             })
         })
-        .map_err(|e| format!("load_rolling_top_items query: {e}"))?;
+        .map_err(|e| format!("load_daily_top_items query: {e}"))?;
 
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| format!("load_rolling_top_items row: {e}"))?);
+        out.push(row.map_err(|e| format!("load_daily_top_items row: {e}"))?);
     }
     Ok(out)
 }
 
-/// Merges two AggregatedTopItem lists (live + rolling), summing
+/// Merges two AggregatedTopItem lists (live + archived), summing
 /// per-menu-item counters. Used by `report_get_top_items` and
 /// `report_get_weekly_top_items` so the Featured tab reflects both
 /// historical and current activity.
@@ -1249,12 +1328,10 @@ pub async fn report_get_top_items(
             .into_iter()
             .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
     );
-    // Merge in the persistent rolling leaderboard so the Featured tab
-    // stays populated across Z-report rollovers (the rollover deletes
-    // closed-out orders from the orders table; without this merge the
-    // tab would go blank until enough new orders accumulate today).
-    let rolling = load_rolling_top_items(&conn, &branch_id).unwrap_or_default();
-    let merged = merge_aggregated_top_items(live, rolling);
+    // Merge only archived sales from the requested day. Lifetime totals must
+    // not leak into this daily ranking.
+    let archived = load_daily_top_items(&conn, &branch_id, &date, &date).unwrap_or_default();
+    let merged = merge_aggregated_top_items(live, archived);
     let top = top_items_to_json(merged, limit);
     Ok(serde_json::json!({ "success": true, "data": top }))
 }
@@ -1282,12 +1359,11 @@ pub async fn report_get_weekly_top_items(
             .into_iter()
             .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
     );
-    // Merge in the persistent rolling leaderboard. The weekly window
-    // (last 7 days) often spans a Z-report rollover, so the rolling
-    // table is essential here — without it the Featured tab would
-    // forget items sold before the most-recent rollover.
-    let rolling = load_rolling_top_items(&conn, &branch_id).unwrap_or_default();
-    let merged = merge_aggregated_top_items(live, rolling);
+    // Merge only the archived daily buckets inside this exact seven-day
+    // window. The former lifetime aggregate made old favorites outrank
+    // what customers actually bought this week.
+    let archived = load_daily_top_items(&conn, &branch_id, &from, &today).unwrap_or_default();
+    let merged = merge_aggregated_top_items(live, archived);
     let top = top_items_to_json(merged, limit);
     Ok(serde_json::json!({ "success": true, "data": top }))
 }
@@ -2036,6 +2112,17 @@ mod dto_tests {
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (branch_id, menu_item_id)
             );
+            CREATE TABLE top_sellers_daily (
+                branch_id TEXT NOT NULL,
+                sale_date TEXT NOT NULL,
+                menu_item_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT 'Item',
+                category_id TEXT,
+                total_quantity REAL NOT NULL DEFAULT 0,
+                total_revenue REAL NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (branch_id, sale_date, menu_item_id)
+            );
             CREATE TEMP TABLE temp_z_report_order_ids (id TEXT PRIMARY KEY);",
         )
         .expect("setup tables");
@@ -2049,10 +2136,21 @@ mod dto_tests {
         status: &str,
         items: &str,
     ) {
+        insert_order_at(conn, id, branch, status, "2026-05-03T12:00:00Z", items);
+    }
+
+    fn insert_order_at(
+        conn: &rusqlite::Connection,
+        id: &str,
+        branch: &str,
+        status: &str,
+        created_at: &str,
+        items: &str,
+    ) {
         conn.execute(
             "INSERT INTO orders (id, status, branch_id, created_at, items)
-             VALUES (?1, ?2, ?3, '2026-05-03T12:00:00Z', ?4)",
-            rusqlite::params![id, status, branch, items],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, status, branch, created_at, items],
         )
         .unwrap();
         conn.execute(
@@ -2100,6 +2198,35 @@ mod dto_tests {
         assert_eq!(burger.1, 25.0, "5 burgers @ €5");
         assert_eq!(burger.2, "Burger");
         assert_eq!(burger.3.as_deref(), Some("cat-food"));
+    }
+
+    #[test]
+    fn top_sellers_archive_keeps_daily_buckets_for_true_weekly_ranking() {
+        let conn = setup_top_sellers_test_db();
+        insert_order_at(
+            &conn,
+            "ord-old",
+            "branch-A",
+            "completed",
+            "2026-07-10T12:00:00Z",
+            r#"[{"menu_item_id": "m1", "name": "Old favorite", "quantity": 50, "unit_price": 5}]"#,
+        );
+        insert_order_at(
+            &conn,
+            "ord-week",
+            "branch-A",
+            "completed",
+            "2026-07-22T12:00:00Z",
+            r#"[{"menu_item_id": "m2", "name": "Weekly favorite", "quantity": 8, "unit_price": 4}]"#,
+        );
+
+        top_sellers_aggregate_into_rolling(&conn).expect("aggregator should succeed");
+
+        let archived = load_daily_top_items(&conn, "branch-A", "2026-07-17", "2026-07-23")
+            .expect("weekly archive should load");
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].menu_item_id, "m2");
+        assert_eq!(archived[0].quantity, 8.0);
     }
 
     #[test]

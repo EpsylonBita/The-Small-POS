@@ -20,6 +20,7 @@ import { getResolvedTerminalCredentials } from '../../services/terminal-credenti
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 import { getBridge } from '../../../lib';
 import { parseSpecialAddressInput } from '../../utils/specialAddress';
+import { FloorPresetPicker } from '../forms/FloorPresetPicker';
 
 interface Customer {
   id: string;
@@ -687,17 +688,14 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-              {t('modals.addNewAddress.floorNumber')}
-            </label>
-            <input
-              type="text"
+            <FloorPresetPicker
               value={formData.floorNumber}
-              onChange={(e) => handleInputChange('floorNumber', e.target.value)}
+              onChange={(value) => handleInputChange('floorNumber', value)}
               onKeyPress={handleKeyPress}
+              label={t('modals.addNewAddress.floorNumber')}
               placeholder={t('modals.addNewAddress.floorPlaceholder')}
               maxLength={100}
-              className={fieldClass}
+              inputClassName={fieldClass}
             />
             {(formData.floorNumber?.length ?? 0) >= 100 && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">

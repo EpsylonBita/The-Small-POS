@@ -1791,7 +1791,51 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         .map(|e| e["amount"].as_f64().unwrap_or(0.0))
         .sum();
 
-    // --- 7. Driver data (role-dependent) ---
+    // --- 7. Tips credited to this exact staff shift ---
+    // Payment collection and tip ownership are intentionally independent:
+    // a cashier may collect a waiter/driver tip. Attribute by the durable
+    // recipient shift written on order_payments, never by the payment owner.
+    let tip_sql = format!(
+        "SELECT op.id, op.order_id, o.order_number,
+                COALESCE(
+                    op.tip_amount_cents,
+                    CAST(ROUND(op.tip_amount * 100) AS INTEGER),
+                    0
+                ),
+                op.tip_recipient_role, op.created_at
+         FROM order_payments op
+         JOIN orders o ON o.id = op.order_id
+         WHERE op.tip_recipient_staff_shift_id = ?1
+           AND op.status = 'completed'
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           AND {order_financial_expr} >= ?2
+           AND (?3 IS NULL OR {order_financial_expr} <= ?3)
+         ORDER BY op.created_at ASC"
+    );
+    let mut tip_stmt = conn
+        .prepare(&tip_sql)
+        .map_err(|e| format!("prepare shift tip allocations: {e}"))?;
+    let tip_allocations: Vec<Value> = tip_stmt
+        .query_map(params![shift_id, check_in_time, shift_end_param], |row| {
+            Ok(serde_json::json!({
+                "paymentId": row.get::<_, String>(0)?,
+                "orderId": row.get::<_, String>(1)?,
+                "orderNumber": row.get::<_, Option<String>>(2)?,
+                "amount": Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                "recipientRole": row.get::<_, Option<String>>(4)?,
+                "createdAt": row.get::<_, String>(5)?,
+            }))
+        })
+        .map_err(|e| format!("query shift tip allocations: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    let tips_received = tip_allocations
+        .iter()
+        .map(|entry| entry["amount"].as_f64().unwrap_or(0.0))
+        .sum::<f64>();
+
+    // --- 8. Driver data (role-dependent) ---
     let mut driver_deliveries: Vec<Value> = Vec::new();
     let mut transferred_drivers: Vec<Value> = Vec::new();
     let mut transferred_waiters: Vec<Value> = Vec::new();
@@ -1965,6 +2009,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         "driverDeliveries": driver_deliveries,
         "waiterTables": waiter_tables,
         "staffPayments": staff_payments,
+        "tipsReceived": tips_received,
+        "tipAllocations": tip_allocations,
         "ordersCount": orders_count,
         "salesAmount": sales_amount,
     });
@@ -4346,6 +4392,78 @@ mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    #[test]
+    fn shift_summary_attributes_tip_to_recipient_shift_not_payment_owner() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                 check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                 status, calculation_version, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-waiter-tip', 'staff-waiter-tip', 'Alex Waiter', 'server',
+                 'branch-tip', 'terminal-tip', '2026-07-23T08:00:00Z',
+                 0.0, 0, 'active', 2, 'pending',
+                 '2026-07-23T08:00:00Z', '2026-07-23T08:00:00Z'
+             )",
+            [],
+        )
+        .expect("insert waiter shift");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, order_type,
+                 total_amount, total_amount_cents, tip_amount, tip_amount_cents,
+                 status, payment_status, staff_shift_id, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-waiter-tip', 'TIP-42', '[]', 'dine-in',
+                 12.0, 1200, 2.0, 200,
+                 'completed', 'paid', 'shift-waiter-tip', 'pending',
+                 '2026-07-23T09:00:00Z', '2026-07-23T09:00:00Z'
+             )",
+            [],
+        )
+        .expect("insert waiter order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents,
+                 staff_id, staff_shift_id,
+                 tip_amount, tip_amount_cents, tip_recipient_role,
+                 tip_recipient_staff_id, tip_recipient_staff_shift_id,
+                 status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'payment-waiter-tip', 'order-waiter-tip', 'card', 12.0, 1200,
+                 'staff-cashier', 'shift-cashier-other',
+                 2.0, 200, 'waiter',
+                 'staff-waiter-tip', 'shift-waiter-tip',
+                 'completed', 'pending', 'pending',
+                 '2026-07-23T09:00:00Z', '2026-07-23T09:00:00Z'
+             )",
+            [],
+        )
+        .expect("insert waiter tip payment");
+        drop(conn);
+
+        let summary = get_shift_summary(&db, "shift-waiter-tip").expect("get shift summary");
+        assert_eq!(
+            summary.get("tipsReceived").and_then(Value::as_f64),
+            Some(2.0)
+        );
+        let allocations = summary
+            .get("tipAllocations")
+            .and_then(Value::as_array)
+            .expect("tip allocations");
+        assert_eq!(allocations.len(), 1);
+        assert_eq!(
+            allocations[0].get("paymentId").and_then(Value::as_str),
+            Some("payment-waiter-tip")
+        );
+        assert_eq!(
+            allocations[0].get("recipientRole").and_then(Value::as_str),
+            Some("waiter")
+        );
     }
 
     fn load_latest_shift_sync_payload(db: &DbState, operation: &str, shift_id: &str) -> Value {

@@ -1,6 +1,14 @@
 {
   "common": {
     "all": "Tous",
+    "floorPresets": {
+      "basementValue": "Sous-sol",
+      "basement": "Sous-sol",
+      "groundValue": "Rez-de-chaussée",
+      "ground": "Rez-de-chaussée",
+      "quickPick": "Sélection rapide de l’étage",
+      "manualHint": "Choisissez un étage courant ou saisissez une valeur ci-dessus."
+    },
     "actions": {
       "add": "Ajouter",
       "remove": "Retirer",
@@ -865,6 +873,7 @@
       "pageOf": "Page {{current}} sur {{total}}"
     },
     "deleteAddressSuccess": "Adresse supprimée avec succès",
+    "deleteAddressQueued": "Adresse supprimée et mise en attente de synchronisation",
     "deleteAddressError": "Échec de la suppression de l'adresse",
     "updateAddressSuccess": "Adresse mise à jour avec succès",
     "updateAddressError": "Échec de la mise à jour de l'adresse",
@@ -1672,6 +1681,10 @@
     },
     "summary": {
       "totalExpenses": "Total des dépenses",
+      "tipsReceived": "Pourboires reçus",
+      "tipAllocationHelp": "Crédités à ce membre du personnel pour cette période.",
+      "tipAllocations": "Attributions des pourboires",
+      "tipOrder": "Commande",
       "thisMonth": "Ce mois-ci",
       "lastMonth": "Mois dernier",
       "byCategory": "Par catégorie",
@@ -3227,7 +3240,29 @@
       "roomChargeRoom": "Chambre {{roomNumber}}",
       "roomChargeLabel": "Facturer à la chambre",
       "roomChargeSuccess": "Facturé à la chambre",
-      "roomChargeFallback": "La facturation à la chambre n'a pas été appliquée. Encaissez maintenant cette commande."
+      "roomChargeFallback": "La facturation à la chambre n'a pas été appliquée. Encaissez maintenant cette commande.",
+      "tip": "Pourboire",
+      "editTip": "Modifier le pourboire",
+      "addTip": "Ajouter un pourboire",
+      "tipOptional": "Facultatif — ajouté avant le paiement"
+    },
+    "tip": {
+      "title": "Ajouter un pourboire",
+      "presetLabel": "Choisissez un pourboire",
+      "manualLabel": "Ou saisissez un montant",
+      "recipientLabel": "Le pourboire revient à",
+      "recipients": {
+        "waiter": "Serveur",
+        "waiterHelp": "Crédite le serveur affecté à cette table.",
+        "cashier": "Caissier",
+        "cashierHelp": "Crédite le caissier responsable de la caisse active.",
+        "driver": "Livreur",
+        "driverHelp": "Le pourboire est réservé au livreur et lui est automatiquement attribué lorsqu’il prend la livraison."
+      },
+      "tipAmount": "Pourboire",
+      "totalWithTip": "Total avec pourboire",
+      "noTip": "Sans pourboire",
+      "apply": "Appliquer le pourboire"
     },
     "customerSearch": {
       "title": "Rechercher un client",
@@ -3262,6 +3297,8 @@
       "continueWithAddress": "Continuer avec {{address}}",
       "confirmDeleteAddress": "Supprimer cette adresse ?",
       "deleteAddressFailed": "Échec de la suppression de l'adresse",
+      "deleteAddressSuccess": "Adresse supprimée",
+      "deleteAddressQueued": "Adresse supprimée et mise en attente de synchronisation",
       "banned": "BANNI",
       "bannedCustomer": "Client banni",
       "banReason": "Raison",
@@ -3331,7 +3368,22 @@
       "item": "Article",
       "address": "Adresse",
       "noPhone": "Aucun téléphone",
-      "paymentMethod": "Mode de paiement"
+      "paymentMethod": "Mode de paiement",
+      "copyFailed": "Impossible de copier les informations",
+      "phone": "Téléphone",
+      "email": "E-mail",
+      "addressNumber": "Adresse {{number}}",
+      "customerCopied": "Informations client copiées",
+      "copyCustomer": "Copier le client",
+      "openCustomerCard": "Ouvrir la fiche client",
+      "viewCustomerCard": "Afficher la fiche client et les adresses",
+      "addressCopied": "Adresse copiée",
+      "copyAddress": "Copier l'adresse",
+      "customerCard": "Fiche client",
+      "loadingCustomer": "Chargement du client...",
+      "savedAddresses": "Adresses enregistrées",
+      "editAddress": "Modifier l'adresse",
+      "noSavedAddresses": "Aucune adresse enregistrée"
     },
     "simplePricing": {
       "orderTypePricing": "Prix par type de commande",
@@ -4487,7 +4539,7 @@
     "connectionSettings": "Paramètres de connexion",
     "footer": "The Small POS",
     "enterWithoutPin": "Entrer sans PIN",
-    "noPinWarning": "Aucun PIN défini. Vous pouvez en définir un dans les Paramètres après connexion.",
+    "noPinWarning": "Aucun code PIN configuré. Créez-en un pour continuer.",
     "pinResetRequired": "Réinitialisation du PIN requise. Veuillez définir un nouveau PIN pour continuer.",
     "setupPin": "Configurer le PIN",
     "setupPinDesc": "Créez un code PIN à 6 chiffres pour l'accès administrateur",

@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 68;
+const CURRENT_SCHEMA_VERSION: i32 = 70;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -448,6 +448,12 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 68 {
         run_migration_tx(conn, 68, migrate_v68)?;
+    }
+    if current < 69 {
+        run_migration_tx(conn, 69, migrate_v69)?;
+    }
+    if current < 70 {
+        run_migration_tx(conn, 70, migrate_v70)?;
     }
 
     Ok(())
@@ -4417,6 +4423,105 @@ fn migrate_v68(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v69: date-bucketed top sellers for accurate Featured rankings.
+///
+/// The v60 cache stored lifetime totals only. Merging those totals into
+/// "today" and "last seven days" reports made old favorites dominate the
+/// Featured tab after Z-report cleanup. Daily buckets preserve the requested
+/// report window while still surviving deletion of closed-out order rows.
+fn migrate_v69(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS top_sellers_daily (
+            branch_id TEXT NOT NULL,
+            sale_date TEXT NOT NULL,
+            menu_item_id TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT 'Item',
+            category_id TEXT,
+            total_quantity REAL NOT NULL DEFAULT 0,
+            total_revenue REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (branch_id, sale_date, menu_item_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_top_sellers_daily_branch_date_qty
+          ON top_sellers_daily (branch_id, sale_date, total_quantity DESC);
+        ",
+    )
+    .map_err(|e| format!("v69 create top_sellers_daily: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (69)", [])
+        .map_err(|e| format!("v69 record schema_version: {e}"))?;
+
+    info!("Applied migration v69 (date-bucketed Featured rankings)");
+    Ok(())
+}
+
+/// Migration v70: durable tip amount and staff attribution on local payments.
+///
+/// The server payment ledger already accepts `tip_amount`, but the local
+/// `order_payments` row previously discarded it after creating the sync queue
+/// payload. That made tip audit/recovery dependent on an ephemeral queue row.
+/// Recipient fields keep waiter/cashier/driver ownership explicit; delivery
+/// tips may remain unassigned until the driver assignment command resolves
+/// them to the real driver shift.
+fn migrate_v70(conn: &Connection) -> Result<(), String> {
+    let has_order_payments = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'order_payments'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("v70 inspect order_payments table: {e}"))?;
+
+    // Repair-oriented migration tests and rare partial legacy databases can
+    // legitimately have a later schema marker without the payment ledger.
+    // Record v70 in that shape without trying to ALTER a nonexistent table;
+    // normal POS databases always take the branch below.
+    if has_order_payments {
+        for (column, definition) in [
+            ("tip_amount", "REAL NOT NULL DEFAULT 0"),
+            ("tip_amount_cents", "INTEGER"),
+            (
+                "tip_recipient_role",
+                "TEXT CHECK (tip_recipient_role IN ('waiter', 'cashier', 'driver'))",
+            ),
+            ("tip_recipient_staff_id", "TEXT"),
+            ("tip_recipient_staff_shift_id", "TEXT"),
+        ] {
+            if !column_exists(conn, "order_payments", column)? {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE order_payments ADD COLUMN {column} {definition};"
+                ))
+                .map_err(|e| format!("v70 add order_payments.{column}: {e}"))?;
+            }
+        }
+
+        conn.execute_batch(
+            "
+            UPDATE order_payments
+            SET tip_amount_cents = CAST(ROUND(COALESCE(tip_amount, 0) * 100) AS INTEGER)
+            WHERE tip_amount_cents IS NULL;
+
+            CREATE INDEX IF NOT EXISTS idx_order_payments_tip_recipient_shift
+              ON order_payments (tip_recipient_staff_shift_id, status, created_at)
+              WHERE tip_amount_cents > 0;
+            ",
+        )
+        .map_err(|e| format!("v70 backfill/index tip attribution: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (70)", [])
+        .map_err(|e| format!("v70 record schema_version: {e}"))?;
+
+    info!("Applied migration v70 (durable payment tip attribution)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -5499,13 +5604,12 @@ mod tests {
 
     #[test]
     fn test_run_migrations_advances_existing_v67_database_to_current() {
-        // CURRENT_SCHEMA_VERSION must include the registered v68 cleanup migration;
-        // otherwise the early-return guard (current == CURRENT_SCHEMA_VERSION) skips
-        // v68 for databases the old app left at v67, and fresh DBs record a version
-        // newer than the app claims to support.
+        // CURRENT_SCHEMA_VERSION must include every migration after v67;
+        // otherwise the early-return guard can skip pending work for databases
+        // left behind by an older app.
         assert!(
-            CURRENT_SCHEMA_VERSION >= 68,
-            "CURRENT_SCHEMA_VERSION must cover the registered v68 migration",
+            CURRENT_SCHEMA_VERSION >= 69,
+            "CURRENT_SCHEMA_VERSION must cover the registered v69 migration",
         );
 
         let conn = test_db();
@@ -5525,13 +5629,68 @@ mod tests {
             "precondition: the simulated existing database sits at v67",
         );
 
-        // The early-return guard compares against CURRENT_SCHEMA_VERSION (now 68),
-        // so current (67) < CURRENT and the pending v68 cleanup still runs.
-        run_migrations(&conn).expect("rerun must apply the pending v68 migration");
+        // current (67) < CURRENT, so every pending migration still runs.
+        run_migrations(&conn).expect("rerun must apply all pending migrations");
         assert_eq!(
             max_schema_version(&conn),
             CURRENT_SCHEMA_VERSION,
-            "an existing v67 DB must be advanced to CURRENT; the early return must not skip v68",
+            "an existing v67 DB must be advanced to CURRENT",
+        );
+    }
+
+    #[test]
+    fn test_migrate_v69_adds_date_bucketed_featured_rankings() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'top_sellers_daily'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table check");
+        assert_eq!(
+            table_count, 1,
+            "v69 must create the daily archive used by weekly Featured rankings",
+        );
+        for column in [
+            "branch_id",
+            "sale_date",
+            "menu_item_id",
+            "total_quantity",
+            "total_revenue",
+        ] {
+            assert!(
+                column_exists(&conn, "top_sellers_daily", column).expect("column check"),
+                "top_sellers_daily.{column} should exist after v69",
+            );
+        }
+    }
+
+    #[test]
+    fn test_migrate_v70_adds_durable_payment_tip_attribution() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        for column in [
+            "tip_amount",
+            "tip_amount_cents",
+            "tip_recipient_role",
+            "tip_recipient_staff_id",
+            "tip_recipient_staff_shift_id",
+        ] {
+            assert!(
+                column_exists(&conn, "order_payments", column).expect("column check"),
+                "order_payments.{column} should exist after v70",
+            );
+        }
+
+        assert_eq!(
+            max_schema_version(&conn),
+            CURRENT_SCHEMA_VERSION,
+            "fresh databases should reach the tip-attribution migration",
         );
     }
 

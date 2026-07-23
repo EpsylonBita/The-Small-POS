@@ -521,7 +521,23 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         taxRatePercentage > 0 && taxDivisor > 0
           ? Math.round((subtotalAfterDiscount - (subtotalAfterDiscount / taxDivisor)) * 100) / 100
           : 0;
-      const totalAmount = subtotalAfterDiscount + deliveryFee;
+      const tipAmount = Math.max(
+        0,
+        Number(orderData.paymentData?.tipAmount ?? orderData.paymentData?.tip_amount ?? 0) || 0,
+      );
+      const requestedTipRecipientRole = String(
+        orderData.paymentData?.tipRecipientRole || '',
+      );
+      const tipRecipientRole: 'waiter' | 'cashier' | 'driver' | undefined =
+        tipAmount > 0 &&
+        ['waiter', 'cashier', 'driver'].includes(requestedTipRecipientRole)
+          ? (requestedTipRecipientRole as 'waiter' | 'cashier' | 'driver')
+          : undefined;
+      const tipRecipientStaffId =
+        tipRecipientRole === 'waiter' ? staff?.staffId : undefined;
+      const tipRecipientStaffShiftId =
+        tipRecipientRole === 'waiter' ? activeShift?.id : undefined;
+      const totalAmount = subtotalAfterDiscount + deliveryFee + tipAmount;
       const paymentMethod = typeof orderData.paymentData?.method === 'string'
         ? orderData.paymentData.method
         : null;
@@ -545,6 +561,10 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
               transactionRef: orderData.paymentData.transactionId,
               staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
               staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
+              tipAmount,
+              tipRecipientRole,
+              tipRecipientStaffId,
+              tipRecipientStaffShiftId,
             }
           : undefined;
 
@@ -599,6 +619,10 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           transactionRef: orderData.paymentData.transactionId,
           staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
           staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
+          tipAmount,
+          tipRecipientRole,
+          tipRecipientStaffId,
+          tipRecipientStaffShiftId,
         });
         if (paymentResult?.success === false) {
           throw new Error(paymentResult.error || 'Failed to record payment');
@@ -660,6 +684,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         delivery_fee: deliveryFee,
         discount_percentage: discountPercentage,
         discount_amount: discountAmount,
+        tip_amount: tipAmount,
         country_code: 'GR',
         pricing_mode: 'tax_inclusive',
         status: 'pending' as const,

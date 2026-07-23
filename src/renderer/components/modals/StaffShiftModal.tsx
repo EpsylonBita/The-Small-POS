@@ -6079,6 +6079,60 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 })()
               )}
 
+              {Number(shiftSummary?.tipsReceived || 0) > 0 && (
+                <div className={liquidGlassModalCard() + ' p-4'}>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <div className="rounded-xl border border-emerald-400/30 bg-emerald-500/15 p-2 text-emerald-300">
+                        <Star className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="font-bold liquid-glass-modal-text">
+                          {t('modals.staffShift.tipsReceived', 'Tips received')}
+                        </h3>
+                        <p className="text-xs liquid-glass-modal-text-muted">
+                          {t(
+                            'modals.staffShift.tipAllocationHelp',
+                            'Credited to this staff member for this shift.',
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-xl font-black text-emerald-400">
+                      {formatCurrency(Number(shiftSummary.tipsReceived || 0))}
+                    </span>
+                  </div>
+
+                  {Array.isArray(shiftSummary.tipAllocations) &&
+                    shiftSummary.tipAllocations.length > 0 && (
+                      <details className="mt-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                        <summary className="cursor-pointer text-sm font-semibold liquid-glass-modal-text">
+                          {t('modals.staffShift.tipAllocations', 'Tip allocations')} ·{' '}
+                          {shiftSummary.tipAllocations.length}
+                        </summary>
+                        <div className="mt-2 divide-y divide-white/10">
+                          {shiftSummary.tipAllocations.map((allocation: any) => (
+                            <div
+                              key={allocation.paymentId}
+                              className="flex items-center justify-between gap-3 py-2 text-sm"
+                            >
+                              <span className="liquid-glass-modal-text-muted">
+                                {t('modals.staffShift.tipOrder', 'Order')}{' '}
+                                {allocation.orderNumber
+                                  ? `#${allocation.orderNumber}`
+                                  : allocation.orderId}
+                              </span>
+                              <span className="font-bold text-emerald-400">
+                                {formatCurrency(Number(allocation.amount || 0))}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                </div>
+              )}
+
               {/* Expenses Section */}
               {!isNonFinancialCheckoutRole && (
                 <div>

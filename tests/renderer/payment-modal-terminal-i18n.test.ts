@@ -64,10 +64,11 @@ const loadPaymentMessages = (lng: string): Record<string, string> =>
 test('PaymentModal renders every money value via the shared formatCurrency, not hardcoded € + toFixed(2)', () => {
   assert.match(modalSource, /import \{ formatCurrency \} from '\.\.\/\.\.\/utils\/format';/);
   // Main total + cash summary total, subtotal, discount, delivery fee, cash received, change.
-  assert.match(modalSource, /\{formatCurrency\(orderTotal\)\}/);
+  assert.match(modalSource, /\{formatCurrency\(payableTotal\)\}/);
   assert.match(modalSource, /\{formatCurrency\(subtotalBeforeDiscount\)\}/);
   assert.match(modalSource, /-\{formatCurrency\(discountAmount\)\}/);
   assert.match(modalSource, /\{formatCurrency\(deliveryFee\)\}/);
+  assert.match(modalSource, /\{formatCurrency\(tipAmount\)\}/);
   assert.match(modalSource, /\{formatCurrency\(cashAmount\)\}/);
   assert.match(modalSource, /hasEnoughCash \? formatCurrency\(changeAmount\)/);
   // Below-minimum interpolation passes the formatted amount (the symbol comes from the

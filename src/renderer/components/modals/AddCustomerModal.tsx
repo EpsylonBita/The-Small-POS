@@ -25,6 +25,7 @@ import {
 } from '../../services/terminal-credentials';
 import { parseSpecialAddressInput } from '../../utils/specialAddress';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
+import { FloorPresetPicker } from '../forms/FloorPresetPicker';
 
 import { inputBase } from '../../styles/designSystem';
 
@@ -1533,20 +1534,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         {/* Floor Number */}
         <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.floorLabel')}
-          </label>
-          <div className="relative">
-            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
-            <input
-              type="text"
-              value={formData.floorNumber}
-              onChange={(e) => handleInputChange('floorNumber', e.target.value)}
-              placeholder={t('modals.addCustomer.floorPlaceholder')}
-              maxLength={100}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
-            />
-          </div>
+          <FloorPresetPicker
+            value={formData.floorNumber}
+            onChange={(value) => handleInputChange('floorNumber', value)}
+            label={t('modals.addCustomer.floorLabel')}
+            placeholder={t('modals.addCustomer.floorPlaceholder')}
+            inputClassName={inputBase(resolvedTheme)}
+            maxLength={100}
+          />
           {(formData.floorNumber?.length ?? 0) >= 100 && (
             <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
               {t('common.validation.maxLength', { count: 100 })}

@@ -1,6 +1,14 @@
 {
   "common": {
     "all": "Alle",
+    "floorPresets": {
+      "basementValue": "Untergeschoss",
+      "basement": "Untergeschoss",
+      "groundValue": "Erdgeschoss",
+      "ground": "Erdgeschoss",
+      "quickPick": "Schnellauswahl der Etage",
+      "manualHint": "Wählen Sie eine häufige Etage oder geben Sie oben einen beliebigen Wert ein."
+    },
     "actions": {
       "add": "Hinzufügen",
       "remove": "Entfernen",
@@ -865,6 +873,7 @@
       "pageOf": "Seite {{current}} von {{total}}"
     },
     "deleteAddressSuccess": "Adresse erfolgreich gelöscht",
+    "deleteAddressQueued": "Adresse gelöscht und zur Synchronisierung vorgemerkt",
     "deleteAddressError": "Adresse konnte nicht gelöscht werden",
     "updateAddressSuccess": "Adresse erfolgreich aktualisiert",
     "updateAddressError": "Adresse konnte nicht aktualisiert werden",
@@ -1672,6 +1681,10 @@
     },
     "summary": {
       "totalExpenses": "Gesamtausgaben",
+      "tipsReceived": "Erhaltene Trinkgelder",
+      "tipAllocationHelp": "Dieser Person für diese Schicht gutgeschrieben.",
+      "tipAllocations": "Trinkgeldzuordnungen",
+      "tipOrder": "Bestellung",
       "thisMonth": "Dieser Monat",
       "lastMonth": "Letzter Monat",
       "byCategory": "Nach Kategorie",
@@ -3227,7 +3240,29 @@
       "roomChargeRoom": "Zimmer {{roomNumber}}",
       "roomChargeLabel": "Auf Zimmer buchen",
       "roomChargeSuccess": "Auf Zimmer gebucht",
-      "roomChargeFallback": "Zimmerbuchung wurde nicht angewendet. Zahlung für diese Bestellung jetzt kassieren."
+      "roomChargeFallback": "Zimmerbuchung wurde nicht angewendet. Zahlung für diese Bestellung jetzt kassieren.",
+      "tip": "Trinkgeld",
+      "editTip": "Trinkgeld bearbeiten",
+      "addTip": "Trinkgeld hinzufügen",
+      "tipOptional": "Optional — wird vor der Zahlung hinzugefügt"
+    },
+    "tip": {
+      "title": "Trinkgeld hinzufügen",
+      "presetLabel": "Trinkgeld auswählen",
+      "manualLabel": "Oder Betrag eingeben",
+      "recipientLabel": "Trinkgeld geht an",
+      "recipients": {
+        "waiter": "Servicekraft",
+        "waiterHelp": "Wird der diesem Tisch zugewiesenen Servicekraft gutgeschrieben.",
+        "cashier": "Kassierer",
+        "cashierHelp": "Wird dem Kassierer mit der aktiven Kasse gutgeschrieben.",
+        "driver": "Fahrer",
+        "driverHelp": "Das Trinkgeld wird für den Fahrer vorgemerkt und automatisch zugeordnet, sobald er die Lieferung übernimmt."
+      },
+      "tipAmount": "Trinkgeld",
+      "totalWithTip": "Gesamt mit Trinkgeld",
+      "noTip": "Kein Trinkgeld",
+      "apply": "Trinkgeld anwenden"
     },
     "customerSearch": {
       "title": "Kunde suchen",
@@ -3262,6 +3297,8 @@
       "continueWithAddress": "Fortfahren mit {{address}}",
       "confirmDeleteAddress": "Diese Adresse löschen?",
       "deleteAddressFailed": "Adresse konnte nicht gelöscht werden",
+      "deleteAddressSuccess": "Adresse gelöscht",
+      "deleteAddressQueued": "Adresse gelöscht und zur Synchronisierung vorgemerkt",
       "banned": "GESPERRT",
       "bannedCustomer": "Gesperrter Kunde",
       "banReason": "Grund",
@@ -3331,7 +3368,22 @@
       "item": "Artikel",
       "address": "Adresse",
       "noPhone": "Keine Telefonnummer",
-      "paymentMethod": "Zahlungsmethode"
+      "paymentMethod": "Zahlungsmethode",
+      "copyFailed": "Details konnten nicht kopiert werden",
+      "phone": "Telefon",
+      "email": "E-Mail",
+      "addressNumber": "Adresse {{number}}",
+      "customerCopied": "Kundendaten kopiert",
+      "copyCustomer": "Kunde kopieren",
+      "openCustomerCard": "Kundenkarte öffnen",
+      "viewCustomerCard": "Kundenkarte und Adressen anzeigen",
+      "addressCopied": "Adresse kopiert",
+      "copyAddress": "Adresse kopieren",
+      "customerCard": "Kundenkarte",
+      "loadingCustomer": "Kundendaten werden geladen...",
+      "savedAddresses": "Gespeicherte Adressen",
+      "editAddress": "Adresse bearbeiten",
+      "noSavedAddresses": "Keine gespeicherten Adressen"
     },
     "simplePricing": {
       "orderTypePricing": "Preise nach Bestellart",
@@ -4487,7 +4539,7 @@
     "connectionSettings": "Verbindungseinstellungen",
     "footer": "The Small POS",
     "enterWithoutPin": "Ohne PIN fortfahren",
-    "noPinWarning": "Keine PIN festgelegt. Sie können eine in den Einstellungen nach der Anmeldung festlegen.",
+    "noPinWarning": "Keine PIN konfiguriert. Erstellen Sie eine, um fortzufahren.",
     "pinResetRequired": "PIN-Zurücksetzung erforderlich. Bitte legen Sie eine neue PIN fest, um fortzufahren.",
     "setupPin": "PIN einrichten",
     "setupPinDesc": "Erstellen Sie eine 6-stellige PIN für den Administratorzugang",

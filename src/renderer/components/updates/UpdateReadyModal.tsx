@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
 import type { UpdateInfo } from '../../../lib/update-contracts';
 import { AlertTriangle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface UpdateReadyModalProps {
     isOpen: boolean;
@@ -16,13 +17,14 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
     onInstallNow,
     onInstallOnRestart
 }) => {
-    const version = updateInfo?.version || 'New Version';
+    const { t } = useTranslation();
+    const version = updateInfo?.version;
 
     return (
         <LiquidGlassModal
             isOpen={isOpen}
             onClose={onInstallOnRestart}
-            title="Update Ready to Install"
+            title={t('updates.title.downloaded')}
             size="md"
             className="!max-w-lg"
         >
@@ -35,16 +37,19 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
                     </div>
                 </div>
 
-                <h3 className="text-xl font-bold text-white">Version {version} is ready!</h3>
+                <h3 className="text-xl font-bold text-white">
+                    {version
+                        ? t('updates.downloaded.ready', { version })
+                        : t('updates.downloaded.readyGeneric')}
+                </h3>
 
                 <p className="text-gray-300">
-                    The update has been downloaded successfully.
-                    You can install it now (requires restart) or it will be installed automatically the next time you restart the app.
+                    {t('updates.downloaded.description')}
                 </p>
 
                 <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-3 text-sm text-yellow-200 flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 mt-0.5 text-yellow-300" />
-                    <span>Note: The application will restart immediately if you choose "Install Now".</span>
+                    <span>{t('updates.downloaded.warning')}</span>
                 </div>
 
                 <div className="flex flex-col gap-3 pt-4">
@@ -55,7 +60,7 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
                         fullWidth
                         className="font-bold"
                     >
-                        Restart & Install Now
+                        {t('updates.actions.installNow')}
                     </POSGlassButton>
 
                     <POSGlassButton
@@ -63,7 +68,7 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
                         onClick={onInstallOnRestart}
                         fullWidth
                     >
-                        Install on Next Restart
+                        {t('updates.actions.installLater')}
                     </POSGlassButton>
                 </div>
             </div>

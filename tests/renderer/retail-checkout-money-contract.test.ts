@@ -57,7 +57,7 @@ test('ProductCatalogModal hands OrderFlow the fee-exclusive discounted subtotal'
   assert.match(paymentHandler, /deliveryFee,/);
 });
 
-test('OrderFlow adds the delivery fee to the payload total exactly once', () => {
+test('OrderFlow adds the delivery fee and selected tip to the payload total exactly once', () => {
   const source = rendererSource('components', 'OrderFlow.tsx');
   const handler = sliceBetween(
     source,
@@ -66,9 +66,9 @@ test('OrderFlow adds the delivery fee to the payload total exactly once', () => 
   );
 
   // The other side of the contract: orderData.total is treated as the
-  // fee-exclusive discounted subtotal and the fee is added here.
+  // fee-exclusive discounted subtotal and the fee/tip are added here.
   assert.match(handler, /const subtotalAfterDiscount = orderData\.total;/);
-  assert.match(handler, /const total_amount = subtotalAfterDiscount \+ deliveryFee;/);
+  assert.match(handler, /const total_amount = subtotalAfterDiscount \+ deliveryFee \+ tipAmount;/);
 });
 
 test('MenuModal and ProductCatalogModal share the same fee-exclusive total contract', () => {

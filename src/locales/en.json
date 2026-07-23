@@ -1,6 +1,14 @@
 {
   "common": {
     "all": "All",
+    "floorPresets": {
+      "basementValue": "Basement",
+      "basement": "Basement",
+      "groundValue": "Ground",
+      "ground": "Ground",
+      "quickPick": "Quick floor selection",
+      "manualHint": "Pick a common floor or enter any value above."
+    },
     "actions": {
       "add": "Add",
       "remove": "Remove",
@@ -865,6 +873,7 @@
       "pageOf": "Page {{current}} of {{total}}"
     },
     "deleteAddressSuccess": "Address deleted successfully",
+    "deleteAddressQueued": "Address deleted and queued for sync",
     "deleteAddressError": "Failed to delete address",
     "updateAddressSuccess": "Address updated successfully",
     "updateAddressError": "Failed to update address",
@@ -1672,6 +1681,10 @@
     },
     "summary": {
       "totalExpenses": "Total Expenses",
+      "tipsReceived": "Tips received",
+      "tipAllocationHelp": "Credited to this staff member for this shift.",
+      "tipAllocations": "Tip allocations",
+      "tipOrder": "Order",
       "thisMonth": "This Month",
       "lastMonth": "Last Month",
       "byCategory": "By Category",
@@ -3227,7 +3240,29 @@
       "roomChargeRoom": "Room {{roomNumber}}",
       "roomChargeLabel": "Charge to room",
       "roomChargeSuccess": "Charged to room",
-      "roomChargeFallback": "Room charge was not applied. Complete payment now for this order."
+      "roomChargeFallback": "Room charge was not applied. Complete payment now for this order.",
+      "tip": "Tip",
+      "editTip": "Edit tip",
+      "addTip": "Add tip",
+      "tipOptional": "Optional — added before payment"
+    },
+    "tip": {
+      "title": "Add Tip",
+      "presetLabel": "Choose a tip",
+      "manualLabel": "Or enter an amount",
+      "recipientLabel": "Tip goes to",
+      "recipients": {
+        "waiter": "Waiter",
+        "waiterHelp": "Credits the waiter assigned to this table.",
+        "cashier": "Cashier",
+        "cashierHelp": "Credits the cashier with the active drawer.",
+        "driver": "Driver",
+        "driverHelp": "The tip is held for the driver and assigned automatically when a driver takes the delivery."
+      },
+      "tipAmount": "Tip",
+      "totalWithTip": "Total with tip",
+      "noTip": "No tip",
+      "apply": "Apply Tip"
     },
     "customerSearch": {
       "title": "Search Customer",
@@ -3262,6 +3297,8 @@
       "continueWithAddress": "Continue with {{address}}",
       "confirmDeleteAddress": "Delete this address?",
       "deleteAddressFailed": "Failed to delete address",
+      "deleteAddressSuccess": "Address deleted",
+      "deleteAddressQueued": "Address deleted and queued for sync",
       "banned": "BANNED",
       "bannedCustomer": "Banned Customer",
       "banReason": "Reason",
@@ -3331,7 +3368,22 @@
       "item": "Item",
       "address": "Address",
       "noPhone": "No phone",
-      "paymentMethod": "Payment Method"
+      "paymentMethod": "Payment Method",
+      "copyFailed": "Could not copy details",
+      "phone": "Phone",
+      "email": "Email",
+      "addressNumber": "Address {{number}}",
+      "customerCopied": "Customer details copied",
+      "copyCustomer": "Copy customer",
+      "openCustomerCard": "Open customer card",
+      "viewCustomerCard": "View customer card and addresses",
+      "addressCopied": "Address copied",
+      "copyAddress": "Copy address",
+      "customerCard": "Customer Card",
+      "loadingCustomer": "Loading customer...",
+      "savedAddresses": "Saved Addresses",
+      "editAddress": "Edit address",
+      "noSavedAddresses": "No saved addresses"
     },
     "simplePricing": {
       "orderTypePricing": "Order Type Pricing",
@@ -4487,7 +4539,7 @@
     "connectionSettings": "Connection settings",
     "footer": "The Small POS",
     "enterWithoutPin": "Enter Without PIN",
-    "noPinWarning": "No PIN set. You can set one in Settings after logging in.",
+    "noPinWarning": "No PIN configured. Create one to continue.",
     "pinResetRequired": "PIN reset required. Please set a new PIN to continue.",
     "setupPin": "Setup PIN",
     "setupPinDesc": "Create a 6-digit PIN for admin access",

@@ -589,6 +589,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Orders" => "Παραγγελίες",
             "Sales" => "Πωλήσεις",
             "Expenses" => "Έξοδα",
+            "Expense" => "Έξοδο",
             "Refunds" => "Επιστροφές",
             "Opening" => "Άνοιγμα",
             "Expected" => "Αναμενόμενο",
@@ -708,6 +709,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Orders" => "Bestellungen",
             "Sales" => "Umsatz",
             "Expenses" => "Ausgaben",
+            "Expense" => "Ausgabe",
             "Refunds" => "Erstattungen",
             "Opening" => "Anfang",
             "Expected" => "Erwartet",
@@ -827,6 +829,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Orders" => "Commandes",
             "Sales" => "Ventes",
             "Expenses" => "Depenses",
+            "Expense" => "Depense",
             "Refunds" => "Remboursements",
             "Opening" => "Ouverture",
             "Expected" => "Attendu",
@@ -946,6 +949,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Orders" => "Ordini",
             "Sales" => "Vendite",
             "Expenses" => "Spese",
+            "Expense" => "Spesa",
             "Refunds" => "Rimborsi",
             "Opening" => "Apertura",
             "Expected" => "Atteso",
@@ -1011,6 +1015,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             _ => key,
         },
         _ => key,
+    }
+}
+
+fn z_report_expense_reason<'a>(lang: &str, reason: &'a str) -> &'a str {
+    if reason.trim().is_empty() {
+        receipt_label(lang, "Expense")
+    } else {
+        reason
     }
 }
 
@@ -3559,7 +3571,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 for expense in &doc.expense_lines {
                     body.push_str(&format!(
                         "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
-                        esc(&expense.reason),
+                        esc(z_report_expense_reason(lang, &expense.reason)),
                         money(expense.amount),
                     ));
                 }
@@ -4479,6 +4491,13 @@ fn raster_exact_preset_for_paper(paper: PaperWidth) -> RasterExactPreset {
         footer_star_style: style(22.0, 28, 0.1, RasterTextWeight::Regular, false),
         footer_text_style: style(30.0, 37, 0.05, RasterTextWeight::Regular, true),
     }
+}
+
+fn z_report_expense_total_style(preset: &RasterExactPreset) -> RasterTextStyle {
+    // This is a section subtotal, not the report's final grand total.
+    // Keep it bold and readable without making it larger than every
+    // surrounding Z-report section.
+    preset.section_style
 }
 
 fn classic_raster_spacing_scale(cfg: &LayoutConfig) -> f32 {
@@ -6765,7 +6784,7 @@ fn render_classic_non_customer_raster_exact_ttf(
                 );
                 for expense in &doc.expense_lines {
                     canvas.draw_pair(
-                        &format!("{}:", expense.reason),
+                        &format!("{}:", z_report_expense_reason(lang, &expense.reason)),
                         &format!(
                             "-{}",
                             money_with_currency_locale(expense.amount, &cur, comma)
@@ -6780,7 +6799,7 @@ fn render_classic_non_customer_raster_exact_ttf(
                         "-{}",
                         money_with_currency_locale(doc.expenses_total, &cur, comma)
                     ),
-                    preset.total_style,
+                    z_report_expense_total_style(&preset),
                 );
             }
 
@@ -6814,7 +6833,7 @@ fn render_classic_non_customer_raster_exact_ttf(
                         .as_deref()
                         .and_then(|v| v.get(11..16))
                         .unwrap_or("--:--");
-                    let time_range = format!("  {}-{}", ci_display, co_display);
+                    let time_range = format!("  {} - {}", ci_display, co_display);
                     if staff.staff_payment > 0.0 {
                         canvas.draw_pair(
                             &format!("{} {}", time_range, receipt_label(lang, "Payout")),
@@ -8477,7 +8496,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 for expense in &doc.expense_lines {
                     emit_pair(
                         &mut builder,
-                        &expense.reason,
+                        z_report_expense_reason(lang, &expense.reason),
                         &format!("-{}", money_locale(expense.amount, comma)),
                         width,
                     );
@@ -8521,7 +8540,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         .as_deref()
                         .and_then(|v| v.get(11..16))
                         .unwrap_or("--:--");
-                    let time_range = format!("{}-{}", ci_display, co_display);
+                    let time_range = format!("{} - {}", ci_display, co_display);
                     if staff.staff_payment > 0.0 {
                         emit_pair(
                             &mut builder,
@@ -9984,6 +10003,18 @@ mod tests {
             ..ZReportDoc::default()
         });
 
+        let (preview_data_url, preview_warnings) =
+            render_classic_raster_exact_preview_data_url(&doc, &cfg)
+                .expect("Z-report raster preview");
+        assert!(preview_warnings.is_empty());
+        if let Some(path) = std::env::var_os("POS_TAURI_AUDIT_Z_REPORT_PNG") {
+            let encoded = preview_data_url
+                .strip_prefix("data:image/png;base64,")
+                .expect("PNG data URL");
+            let png = BASE64_STANDARD.decode(encoded).expect("decode preview PNG");
+            std::fs::write(path, png).expect("write requested audit preview");
+        }
+
         let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
         let expenses = text.find("EXPENSE ANALYSIS").expect("expense section");
         let staff = text.find("STAFF").expect("staff section");
@@ -9997,6 +10028,7 @@ mod tests {
         assert!(money_in_drawer < totals);
         assert!(text.contains("Cleaning supplies"));
         assert!(text.contains("Taxi for stock"));
+        assert!(text.contains("--:-- - --:--"));
 
         let opening = text[drawer..].find("Opening").expect("opening row");
         let cash_sales = text[drawer..].find("Cash Sales").expect("cash sales row");
@@ -10016,9 +10048,46 @@ mod tests {
         assert_eq!(receipt_label("el", "SHIFT CHECKOUT"), "ΚΛΕΙΣΙΜΟ ΒΑΡΔΙΑΣ");
         assert_eq!(receipt_label("el", "Z REPORT"), "ΑΝΑΦΟΡΑ Z");
         assert_eq!(receipt_label("el", "Driver ID"), "ID Οδηγού");
+        assert_eq!(receipt_label("el", "Expense"), "Έξοδο");
         assert_eq!(receipt_label("fr", "Orders"), "Commandes");
+        assert_eq!(receipt_label("fr", "Expense"), "Depense");
         assert_eq!(receipt_label("de", "Generated"), "Erstellt");
+        assert_eq!(receipt_label("de", "Expense"), "Ausgabe");
         assert_eq!(receipt_label("it", "Variance"), "Differenza");
+        assert_eq!(receipt_label("it", "Expense"), "Spesa");
+    }
+
+    #[test]
+    fn z_report_expense_total_does_not_use_grand_total_typography() {
+        let preset = raster_exact_preset_for_paper(PaperWidth::Mm80);
+        let expense_total = z_report_expense_total_style(&preset);
+
+        assert_eq!(expense_total.size_px, preset.section_style.size_px);
+        assert!(
+            expense_total.size_px < preset.total_style.size_px,
+            "expense subtotal must not be as large as Money In Drawer or the final report total",
+        );
+    }
+
+    #[test]
+    fn z_report_localizes_an_expense_without_a_saved_reason() {
+        let cfg = LayoutConfig {
+            language: "el".to_string(),
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ZReport(ZReportDoc {
+            expenses_total: 5.0,
+            expense_lines: vec![ZReportExpenseEntry {
+                reason: String::new(),
+                amount: 5.0,
+                ..ZReportExpenseEntry::default()
+            }],
+            ..ZReportDoc::default()
+        });
+
+        let html = render_html(&doc, &cfg);
+        assert!(html.contains("Έξοδο"));
+        assert!(!html.contains(">Expense<"));
     }
 
     #[test]

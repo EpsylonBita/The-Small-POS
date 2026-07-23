@@ -156,7 +156,7 @@ test('MenuModal keeps the cart and reports failure when onOrderComplete resolves
   );
   assert.match(
     paymentHandler,
-    /if \(completionResult === false\) \{\s*setIsLocalProcessing\(false\);\s*return false;\s*\}/,
+    /if \(completionResult === false\) \{\s*setIsLocalProcessing\(false\);\s*setCheckoutPhase\('payment'\);\s*return false;\s*\}/,
     'a false completion must abort before the cart-clearing success path',
   );
   const guardIndex = paymentHandler.indexOf('if (completionResult === false)');
@@ -165,7 +165,10 @@ test('MenuModal keeps the cart and reports failure when onOrderComplete resolves
     'the false-guard must run before setCartItems([]) clears the keyed-in order');
 
   // The split flow must also abort instead of treating undefined as success.
-  assert.match(source, /if \(completionResult === false\) \{\s*return;\s*\}/);
+  assert.match(
+    source,
+    /if \(completionResult === false\) \{\s*setCheckoutPhase\('payment'\);\s*return;\s*\}/,
+  );
 });
 
 test('PaymentModal fires the success toast only after a non-false completion result', () => {

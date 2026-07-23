@@ -4032,6 +4032,18 @@ pub async fn order_assign_driver(
         order_ownership::upsert_driver_earning(&conn, &order_id, &driver_id, &assignment, &now)?;
     let earning_created = true;
 
+    // A delivery tip can be collected before dispatch. Resolve every pending
+    // driver allocation to the actual driver/shift at the same point that the
+    // canonical driver earning is created, then rebuild its payment sync row
+    // so an already-offline payment cannot retain a stale pending recipient.
+    resolve_delivery_tip_recipients_for_assignment(
+        &conn,
+        &order_id,
+        &driver_id,
+        &assignment.driver_shift_id,
+        &now,
+    )?;
+
     let assigned_status: String = conn
         .query_row(
             "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
@@ -4322,6 +4334,71 @@ pub async fn order_update_type(
             "driverName": serde_json::Value::Null
         }
     }))
+}
+
+fn resolve_delivery_tip_recipients_for_assignment(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    driver_id: &str,
+    driver_shift_id: &str,
+    now: &str,
+) -> Result<usize, String> {
+    let payment_ids = {
+        let mut statement = conn
+            .prepare(
+                "SELECT id
+                 FROM order_payments
+                 WHERE order_id = ?1
+                   AND tip_recipient_role = 'driver'
+                   AND COALESCE(
+                         tip_amount_cents,
+                         CAST(ROUND(tip_amount * 100) AS INTEGER),
+                         0
+                       ) > 0",
+            )
+            .map_err(|e| format!("prepare pending delivery tip lookup: {e}"))?;
+        let rows = statement
+            .query_map(rusqlite::params![order_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("load pending delivery tip payments: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read pending delivery tip payment: {e}"))?
+    };
+
+    if payment_ids.is_empty() {
+        return Ok(0);
+    }
+
+    conn.execute(
+        "UPDATE order_payments
+         SET tip_recipient_staff_id = ?1,
+             tip_recipient_staff_shift_id = ?2,
+             sync_status = 'pending',
+             sync_state = CASE
+                 WHEN EXISTS (
+                     SELECT 1
+                     FROM orders
+                     WHERE orders.id = order_payments.order_id
+                       AND COALESCE(orders.supabase_id, '') != ''
+                 ) THEN 'pending'
+                 ELSE 'waiting_parent'
+             END,
+             updated_at = ?3
+         WHERE order_id = ?4
+           AND tip_recipient_role = 'driver'
+           AND COALESCE(
+                 tip_amount_cents,
+                 CAST(ROUND(tip_amount * 100) AS INTEGER),
+                 0
+               ) > 0",
+        rusqlite::params![driver_id, driver_shift_id, now, order_id],
+    )
+    .map_err(|e| format!("assign delivery tip to driver payment: {e}"))?;
+
+    for payment_id in &payment_ids {
+        payments::refresh_payment_sync_queue_entry(conn, payment_id)?;
+    }
+
+    Ok(payment_ids.len())
 }
 
 #[tauri::command]
@@ -5032,6 +5109,139 @@ mod transition_tests {
             params![order_id, status],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn delivery_driver_assignment_resolves_and_requeues_pending_tip_recipient() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, order_type, total_amount, total_amount_cents,
+                 tip_amount, tip_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-driver-tip', 'remote-order-driver-tip', '[]', 'delivery',
+                 12.0, 1200, 2.0, 200, 'pending', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert delivery order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents,
+                 tip_amount, tip_amount_cents, tip_recipient_role,
+                 status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'payment-driver-tip', 'order-driver-tip', 'cash', 12.0, 1200,
+                 2.0, 200, 'driver',
+                 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert pending driver tip payment");
+
+        let updated = resolve_delivery_tip_recipients_for_assignment(
+            &conn,
+            "order-driver-tip",
+            "driver-1",
+            "driver-shift-1",
+            "2026-07-23T10:00:00Z",
+        )
+        .expect("resolve driver tip");
+        assert_eq!(updated, 1);
+
+        let (staff_id, shift_id, sync_status, sync_state): (
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT tip_recipient_staff_id, tip_recipient_staff_shift_id,
+                        sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = 'payment-driver-tip'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load assigned driver tip payment");
+        assert_eq!(staff_id.as_deref(), Some("driver-1"));
+        assert_eq!(shift_id.as_deref(), Some("driver-shift-1"));
+        assert_eq!(sync_status, "pending");
+        assert_eq!(sync_state, "pending");
+
+        let queue_data: String = conn
+            .query_row(
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = 'payment-driver-tip'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load rebuilt payment sync payload");
+        let queue_payload: serde_json::Value =
+            serde_json::from_str(&queue_data).expect("parse rebuilt payment sync payload");
+        assert_eq!(
+            queue_payload
+                .get("tipRecipientStaffId")
+                .and_then(serde_json::Value::as_str),
+            Some("driver-1")
+        );
+        assert_eq!(
+            queue_payload
+                .get("tipRecipientStaffShiftId")
+                .and_then(serde_json::Value::as_str),
+            Some("driver-shift-1")
+        );
+
+        let reassigned = resolve_delivery_tip_recipients_for_assignment(
+            &conn,
+            "order-driver-tip",
+            "driver-2",
+            "driver-shift-2",
+            "2026-07-23T10:15:00Z",
+        )
+        .expect("reassign driver tip");
+        assert_eq!(reassigned, 1);
+
+        let (reassigned_staff_id, reassigned_shift_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT tip_recipient_staff_id, tip_recipient_staff_shift_id
+                 FROM order_payments
+                 WHERE id = 'payment-driver-tip'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load reassigned driver tip payment");
+        assert_eq!(reassigned_staff_id.as_deref(), Some("driver-2"));
+        assert_eq!(reassigned_shift_id.as_deref(), Some("driver-shift-2"));
+
+        let reassigned_queue_data: String = conn
+            .query_row(
+                "SELECT data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'payments'
+                   AND record_id = 'payment-driver-tip'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load requeued reassigned driver tip");
+        let reassigned_queue_payload: serde_json::Value =
+            serde_json::from_str(&reassigned_queue_data)
+                .expect("parse requeued reassigned driver tip");
+        assert_eq!(
+            reassigned_queue_payload
+                .get("tipRecipientStaffId")
+                .and_then(serde_json::Value::as_str),
+            Some("driver-2")
+        );
+        assert_eq!(
+            reassigned_queue_payload
+                .get("tipRecipientStaffShiftId")
+                .and_then(serde_json::Value::as_str),
+            Some("driver-shift-2")
+        );
     }
 
     fn insert_order_with_financials(

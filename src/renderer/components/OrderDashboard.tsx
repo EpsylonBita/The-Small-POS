@@ -3480,7 +3480,29 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               )
             : 0;
 
-        const total = subtotal - totalDiscountAmount + deliveryFee;
+        const tipAmount = Math.max(
+          0,
+          Number(orderData.paymentData?.tipAmount ?? orderData.paymentData?.tip_amount ?? 0) || 0,
+        );
+        const requestedTipRecipientRole = String(
+          orderData.paymentData?.tipRecipientRole || "",
+        );
+        const tipRecipientRole: "waiter" | "cashier" | "driver" | undefined =
+          tipAmount > 0 &&
+          ["waiter", "cashier", "driver"].includes(requestedTipRecipientRole)
+            ? (requestedTipRecipientRole as "waiter" | "cashier" | "driver")
+            : undefined;
+        const actualWaiterId =
+          selectedTable?.currentWaiterId || staff?.staffId || undefined;
+        const actualWaiterShiftId =
+          actualWaiterId && actualWaiterId === staff?.staffId
+            ? activeShift?.id
+            : undefined;
+        const tipRecipientStaffId =
+          tipRecipientRole === "waiter" ? actualWaiterId : undefined;
+        const tipRecipientStaffShiftId =
+          tipRecipientRole === "waiter" ? actualWaiterShiftId : undefined;
+        const total = subtotal - totalDiscountAmount + deliveryFee + tipAmount;
         const paymentMethod =
           typeof orderData.paymentData?.method === "string"
             ? orderData.paymentData.method
@@ -3511,6 +3533,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     ? orderData.paymentData?.change
                     : undefined,
                 transactionRef: orderData.paymentData?.transactionId,
+                tipAmount,
+                tipRecipientRole,
+                tipRecipientStaffId,
+                tipRecipientStaffShiftId,
               }
             : undefined;
 
@@ -3530,6 +3556,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 ? orderData.paymentData?.change
                 : undefined,
             transactionRef: orderData.paymentData?.transactionId,
+            tipAmount,
+            tipRecipientRole,
+            tipRecipientStaffId,
+            tipRecipientStaffShiftId,
           });
           if (paymentResult?.success === false) {
             throw new Error(paymentResult.error || "Failed to record payment");
@@ -3632,6 +3662,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           total_amount: total,
           subtotal: subtotal,
           discount_amount: totalDiscountAmount,
+          tip_amount: tipAmount,
           discount_percentage: discountPercentage,
           manual_discount_mode: manualDiscountMode,
           manual_discount_value: manualDiscountValue,
@@ -3666,6 +3697,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           delivery_notes: deliveryNotes,
           name_on_ringer: nameOnRinger,
           notes: orderData.notes || null,
+          staff_id: isTableOrder ? actualWaiterId || null : undefined,
+          staff_shift_id: isTableOrder ? actualWaiterShiftId || null : undefined,
         };
 
         console.log(

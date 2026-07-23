@@ -394,6 +394,9 @@ pub(crate) struct PaymentRecordInput {
     pub seat_number: Option<i64>,
     pub requested_staff_id: Option<String>,
     pub requested_staff_shift_id: Option<String>,
+    pub requested_tip_recipient_role: Option<String>,
+    pub requested_tip_recipient_staff_id: Option<String>,
+    pub requested_tip_recipient_staff_shift_id: Option<String>,
     pub collected_by: Option<String>,
     items: Vec<PaymentItemInput>,
 }
@@ -576,6 +579,17 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         .or_else(|| num_field(payload, "tip_amount"))
         .unwrap_or(0.0)
         .max(0.0);
+    let requested_tip_recipient_role = str_field(payload, "tipRecipientRole")
+        .or_else(|| str_field(payload, "tip_recipient_role"))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    if let Some(role) = requested_tip_recipient_role.as_deref() {
+        if !matches!(role, "waiter" | "cashier" | "driver") {
+            return Err(format!(
+                "Invalid tip recipient role: {role}. Must be waiter, cashier, or driver"
+            ));
+        }
+    }
 
     let cash_received =
         num_field(payload, "cashReceived").or_else(|| num_field(payload, "cash_received"));
@@ -643,6 +657,11 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
             .or_else(|| str_field(payload, "staff_id")),
         requested_staff_shift_id: str_field(payload, "staffShiftId")
             .or_else(|| str_field(payload, "staff_shift_id")),
+        requested_tip_recipient_role,
+        requested_tip_recipient_staff_id: str_field(payload, "tipRecipientStaffId")
+            .or_else(|| str_field(payload, "tip_recipient_staff_id")),
+        requested_tip_recipient_staff_shift_id: str_field(payload, "tipRecipientStaffShiftId")
+            .or_else(|| str_field(payload, "tip_recipient_staff_shift_id")),
         collected_by,
         items: parse_payment_items(payload),
     })
@@ -833,6 +852,155 @@ pub(crate) fn recompute_order_payment_state(
     Ok(())
 }
 
+fn resolve_tip_recipient(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+    order_type: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    driver_id: Option<&str>,
+    resolved_payment_shift_id: Option<&str>,
+    resolved_payment_staff_id: Option<&str>,
+) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    if Cents::round_half_even(input.tip_amount).as_i64() <= 0 {
+        return Ok((None, None, None));
+    }
+
+    let role = input
+        .requested_tip_recipient_role
+        .clone()
+        .unwrap_or_else(|| {
+            if order_type.eq_ignore_ascii_case("delivery") {
+                "driver".to_string()
+            } else {
+                "cashier".to_string()
+            }
+        });
+
+    match role.as_str() {
+        "driver" => {
+            if !order_type.eq_ignore_ascii_case("delivery") {
+                return Err("Driver tips are only valid for delivery orders".to_string());
+            }
+            let Some(actual_driver_id) = driver_id.map(str::trim).filter(|value| !value.is_empty())
+            else {
+                // Delivery tips are intentionally durable before dispatch. The
+                // driver-assignment command fills these two nullable fields.
+                return Ok((Some(role), None, None));
+            };
+            let shift_id = order_ownership::resolve_driver_shift_id(
+                conn,
+                actual_driver_id,
+                input.requested_tip_recipient_staff_shift_id.as_deref(),
+            )?;
+            Ok((Some(role), Some(actual_driver_id.to_string()), shift_id))
+        }
+        "waiter" => {
+            let waiter_id = input
+                .requested_tip_recipient_staff_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+
+            let waiter_shift_id = if let Some(requested_shift_id) = input
+                .requested_tip_recipient_staff_shift_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let Some((shift_role, shift_staff_id, shift_status)) =
+                    load_shift_role_status_and_staff(conn, requested_shift_id)?
+                else {
+                    return Err(format!(
+                        "Requested waiter shift {requested_shift_id} does not exist"
+                    ));
+                };
+                if shift_role != "server" || shift_status != "active" {
+                    return Err(format!(
+                        "Requested waiter shift {requested_shift_id} is not an active waiter shift"
+                    ));
+                }
+                if waiter_id.as_deref().is_some_and(|id| id != shift_staff_id) {
+                    return Err(
+                        "Requested waiter tip staff does not match the waiter shift".to_string()
+                    );
+                }
+                Some(requested_shift_id.to_string())
+            } else if let Some(waiter_id_value) = waiter_id.as_deref() {
+                conn.query_row(
+                    "SELECT id
+                     FROM staff_shifts
+                     WHERE staff_id = ?1
+                       AND role_type = 'server'
+                       AND status = 'active'
+                     ORDER BY check_in_time DESC
+                     LIMIT 1",
+                    params![waiter_id_value],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            } else {
+                None
+            };
+
+            Ok((Some(role), waiter_id, waiter_shift_id))
+        }
+        "cashier" => {
+            if let Some(requested_shift_id) = input
+                .requested_tip_recipient_staff_shift_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let Some((shift_role, shift_staff_id, shift_status)) =
+                    load_shift_role_status_and_staff(conn, requested_shift_id)?
+                else {
+                    return Err(format!(
+                        "Requested cashier tip shift {requested_shift_id} does not exist"
+                    ));
+                };
+                if !matches!(shift_role.as_str(), "cashier" | "manager") || shift_status != "active"
+                {
+                    return Err(format!(
+                        "Requested cashier tip shift {requested_shift_id} is not an active cashier shift"
+                    ));
+                }
+                return Ok((
+                    Some(role),
+                    Some(
+                        input
+                            .requested_tip_recipient_staff_id
+                            .clone()
+                            .unwrap_or(shift_staff_id),
+                    ),
+                    Some(requested_shift_id.to_string()),
+                ));
+            }
+
+            let cashier_assignment =
+                order_ownership::resolve_active_cashier_assignment(conn, branch_id, terminal_id)?
+                    .or(
+                        order_ownership::resolve_active_cashier_assignment_for_branch(
+                            conn, branch_id,
+                        )?,
+                    )
+                    .or_else(|| {
+                        resolved_payment_shift_id
+                            .zip(resolved_payment_staff_id)
+                            .map(|(shift_id, staff_id)| {
+                                (shift_id.to_string(), staff_id.to_string())
+                            })
+                    });
+
+            let (shift_id, staff_id) =
+                cashier_assignment.ok_or("No active cashier is available to receive this tip")?;
+            Ok((Some(role), Some(staff_id), Some(shift_id)))
+        }
+        _ => Err(format!("Unsupported tip recipient role: {role}")),
+    }
+}
+
 pub(crate) fn record_payment_in_connection(
     conn: &Connection,
     input: &PaymentRecordInput,
@@ -982,6 +1150,17 @@ pub(crate) fn record_payment_in_connection(
                 .or(order_staff_id.as_deref()),
         )?
     };
+    let (tip_recipient_role, tip_recipient_staff_id, tip_recipient_staff_shift_id) =
+        resolve_tip_recipient(
+            conn,
+            input,
+            &order_type,
+            &branch_id,
+            &terminal_id,
+            driver_id.as_deref(),
+            resolved_shift_id.as_deref(),
+            resolved_staff_id.as_deref(),
+        )?;
 
     validate_payment_amount_against_outstanding(conn, input, options)?;
 
@@ -1024,15 +1203,22 @@ pub(crate) fn record_payment_in_connection(
         .change_given
         .map(|v| Cents::round_half_even(v).as_i64());
     let discount_amount_cents = Cents::round_half_even(input.discount_amount).as_i64();
+    let tip_amount_cents = Cents::round_half_even(input.tip_amount).as_i64();
     conn.execute(
         "INSERT INTO order_payments (
             id, order_id, method, amount, amount_cents, currency, status,
             cash_received, cash_received_cents, change_given, change_given_cents,
             transaction_ref, discount_amount, discount_amount_cents,
+            tip_amount, tip_amount_cents, tip_recipient_role,
+            tip_recipient_staff_id, tip_recipient_staff_shift_id,
             payment_origin, terminal_device_id,
             remote_payment_id, staff_id, staff_shift_id, sync_status,
             sync_state, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'completed', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, 'completed', ?7, ?8, ?9, ?10,
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
+            ?22, ?23, ?24, ?25, ?26, ?27
+        )",
         params![
             payment_id,
             input.order_id,
@@ -1047,6 +1233,11 @@ pub(crate) fn record_payment_in_connection(
             input.transaction_ref,
             input.discount_amount,
             discount_amount_cents,
+            input.tip_amount,
+            tip_amount_cents,
+            tip_recipient_role,
+            tip_recipient_staff_id,
+            tip_recipient_staff_shift_id,
             input.payment_origin,
             input.terminal_device_id,
             options.remote_payment_id,
@@ -1187,6 +1378,12 @@ pub(crate) fn record_payment_in_connection(
             "tipAmount": input.tip_amount,
             "tip_amount": input.tip_amount,
             "tip_amount_cents": Cents::round_half_even(input.tip_amount).as_i64(),
+            "tipRecipientRole": tip_recipient_role,
+            "tip_recipient_role": tip_recipient_role,
+            "tipRecipientStaffId": tip_recipient_staff_id,
+            "tip_recipient_staff_id": tip_recipient_staff_id,
+            "tipRecipientStaffShiftId": tip_recipient_staff_shift_id,
+            "tip_recipient_staff_shift_id": tip_recipient_staff_shift_id,
             "currency": input.currency,
             "cashReceived": input.cash_received,
             "cash_received_cents": input.cash_received
@@ -1450,6 +1647,10 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         Option<String>,
         Option<String>,
         Option<String>,
+        f64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
     );
 
     let (
@@ -1467,6 +1668,10 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         terminal_device_id,
         staff_id,
         staff_shift_id,
+        tip_amount,
+        tip_recipient_role,
+        tip_recipient_staff_id,
+        tip_recipient_staff_shift_id,
     ): PaymentSyncRow = conn
         .query_row(
             // W4b: cols 2 (amount), 4 (cash_received), 5 (change_given),
@@ -1481,7 +1686,9 @@ pub(crate) fn build_payment_sync_payload_for_payment(
                     transaction_ref,
                     COALESCE(discount_amount_cents, CAST(ROUND(discount_amount * 100) AS INTEGER), 0),
                     COALESCE(payment_origin, 'manual'), remote_payment_id, idempotency_key, terminal_device_id,
-                    staff_id, staff_shift_id
+                    staff_id, staff_shift_id,
+                    COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
+                    tip_recipient_role, tip_recipient_staff_id, tip_recipient_staff_shift_id
              FROM order_payments
              WHERE id = ?1",
             params![payment_id],
@@ -1503,6 +1710,10 @@ pub(crate) fn build_payment_sync_payload_for_payment(
                     row.get(11)?,
                     row.get(12)?,
                     row.get(13)?,
+                    Cents::new(row.get::<_, i64>(14)?).to_f64_dp2(),
+                    row.get(15)?,
+                    row.get(16)?,
+                    row.get(17)?,
                 ))
             },
         )
@@ -1538,6 +1749,15 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         "terminalDeviceId": terminal_device_id,
         "staffId": staff_id,
         "staffShiftId": staff_shift_id,
+        "tipAmount": tip_amount,
+        "tip_amount": tip_amount,
+        "tip_amount_cents": Cents::round_half_even(tip_amount).as_i64(),
+        "tipRecipientRole": tip_recipient_role,
+        "tip_recipient_role": tip_recipient_role,
+        "tipRecipientStaffId": tip_recipient_staff_id,
+        "tip_recipient_staff_id": tip_recipient_staff_id,
+        "tipRecipientStaffShiftId": tip_recipient_staff_shift_id,
+        "tip_recipient_staff_shift_id": tip_recipient_staff_shift_id,
         "items": if items.is_empty() { Value::Null } else { Value::Array(items) },
         "settlement_adjustments": if settlement_adjustments.is_empty() {
             Value::Null
@@ -2218,9 +2438,14 @@ mod tests {
         .expect("seed order");
         conn.execute(
             "INSERT INTO order_payments (
-                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state, created_at, updated_at
+                 id, order_id, method, amount, amount_cents,
+                 tip_amount, tip_amount_cents, tip_recipient_role,
+                 tip_recipient_staff_id, tip_recipient_staff_shift_id,
+                 status, sync_status, sync_state, created_at, updated_at
              ) VALUES (
-                 'pay-settlement-proof', 'order-settlement-proof', 'card', 15.19, 1519, 'completed', 'pending', 'pending', datetime('now'), datetime('now')
+                 'pay-settlement-proof', 'order-settlement-proof', 'card', 15.19, 1519,
+                 1.25, 125, 'waiter', 'staff-waiter-1', 'shift-waiter-1',
+                 'completed', 'pending', 'pending', datetime('now'), datetime('now')
              )",
             [],
         )
@@ -2271,6 +2496,24 @@ mod tests {
                 .get("idempotency_key")
                 .and_then(Value::as_str),
             Some("adjustment:adj-settlement-proof")
+        );
+        assert_eq!(
+            payload.get("tip_amount_cents").and_then(Value::as_i64),
+            Some(125)
+        );
+        assert_eq!(
+            payload.get("tipRecipientRole").and_then(Value::as_str),
+            Some("waiter")
+        );
+        assert_eq!(
+            payload.get("tipRecipientStaffId").and_then(Value::as_str),
+            Some("staff-waiter-1")
+        );
+        assert_eq!(
+            payload
+                .get("tipRecipientStaffShiftId")
+                .and_then(Value::as_str),
+            Some("shift-waiter-1")
         );
     }
 
@@ -2349,6 +2592,62 @@ mod tests {
         assert_eq!(arr[0]["cashReceived"], 30.0);
         assert_eq!(arr[0]["changeGiven"], 5.0);
         assert_eq!(arr[0]["id"], payment_id);
+    }
+
+    #[test]
+    fn test_record_delivery_tip_stays_pending_until_driver_assignment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, order_type, total_amount, total_amount_cents,
+                 tip_amount, tip_amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-delivery-tip', '[]', 'delivery', 12.0, 1200,
+                 2.0, 200, 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert delivery tip order");
+        drop(conn);
+
+        let recorded = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-delivery-tip",
+                "method": "cash",
+                "amount": 12.0,
+                "cashReceived": 12.0,
+                "changeGiven": 0.0,
+                "tipAmount": 2.0,
+                "tipRecipientRole": "driver",
+            }),
+        )
+        .expect("record delivery payment with pending driver tip");
+        let payment_id = recorded["paymentId"].as_str().expect("payment id");
+
+        let conn = db.conn.lock().unwrap();
+        let (tip_cents, role, staff_id, shift_id): (
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT tip_amount_cents, tip_recipient_role,
+                        tip_recipient_staff_id, tip_recipient_staff_shift_id
+                 FROM order_payments
+                 WHERE id = ?1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load durable tip allocation");
+
+        assert_eq!(tip_cents, 200);
+        assert_eq!(role.as_deref(), Some("driver"));
+        assert_eq!(staff_id, None);
+        assert_eq!(shift_id, None);
     }
 
     #[test]
@@ -2716,6 +3015,9 @@ mod tests {
             "method": "cash",
             "amount": 11.0,
             "tipAmount": 1.5,
+            "tipRecipientRole": "waiter",
+            "tipRecipientStaffId": "staff-waiter-1",
+            "tipRecipientStaffShiftId": "shift-waiter-1",
             "tableSessionId": "local-table-session:ord-table-payment",
             "seatNumber": 2,
             "idempotencyKey": "table-payment-idempotency-1",
@@ -2733,6 +3035,18 @@ mod tests {
         assert_eq!(input.order_id, "ord-table-payment");
         assert_eq!(input.method, "cash");
         assert_eq!(input.tip_amount, 1.5);
+        assert_eq!(
+            input.requested_tip_recipient_role.as_deref(),
+            Some("waiter")
+        );
+        assert_eq!(
+            input.requested_tip_recipient_staff_id.as_deref(),
+            Some("staff-waiter-1")
+        );
+        assert_eq!(
+            input.requested_tip_recipient_staff_shift_id.as_deref(),
+            Some("shift-waiter-1")
+        );
         assert_eq!(
             input.table_session_id.as_deref(),
             Some("local-table-session:ord-table-payment")

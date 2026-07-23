@@ -909,6 +909,12 @@ export interface RecordPaymentParams {
   tipAmount?: number;
   tip_amount?: number;
   tip_amount_cents?: number;
+  tipRecipientRole?: "waiter" | "cashier" | "driver";
+  tip_recipient_role?: "waiter" | "cashier" | "driver";
+  tipRecipientStaffId?: string;
+  tip_recipient_staff_id?: string;
+  tipRecipientStaffShiftId?: string;
+  tip_recipient_staff_shift_id?: string;
   tableSessionId?: string;
   table_session_id?: string;
   seatNumber?: number;
