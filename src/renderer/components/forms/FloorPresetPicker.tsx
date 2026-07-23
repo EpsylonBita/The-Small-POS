@@ -10,6 +10,7 @@ interface FloorPresetPickerProps {
   inputClassName: string;
   onKeyPress?: React.KeyboardEventHandler<HTMLInputElement>;
   maxLength?: number;
+  required?: boolean;
 }
 
 const NUMERIC_FLOORS = ['1', '2', '3', '4', '5', '6'];
@@ -22,18 +23,21 @@ export const FloorPresetPicker: React.FC<FloorPresetPickerProps> = ({
   inputClassName,
   onKeyPress,
   maxLength = 100,
+  required = false,
 }) => {
   const { t } = useTranslation();
   const presets = [
     {
       value: t('common.floorPresets.basementValue', 'Basement'),
       label: t('common.floorPresets.basement', 'Basement'),
+      wide: true,
     },
     {
       value: t('common.floorPresets.groundValue', 'Ground'),
       label: t('common.floorPresets.ground', 'Ground'),
+      wide: true,
     },
-    ...NUMERIC_FLOORS.map(floor => ({ value: floor, label: floor })),
+    ...NUMERIC_FLOORS.map(floor => ({ value: floor, label: floor, wide: false })),
   ];
 
   return (
@@ -50,6 +54,8 @@ export const FloorPresetPicker: React.FC<FloorPresetPickerProps> = ({
           onKeyPress={onKeyPress}
           placeholder={placeholder}
           maxLength={maxLength}
+          required={required}
+          aria-required={required}
           className={`${inputClassName} pl-10 pr-4`}
         />
       </div>
@@ -66,7 +72,7 @@ export const FloorPresetPicker: React.FC<FloorPresetPickerProps> = ({
               type="button"
               onClick={() => onChange(preset.value)}
               aria-pressed={isSelected}
-              className={`min-h-9 rounded-xl border px-2 py-1.5 text-xs font-semibold transition-colors active:scale-[0.98] ${
+              className={`min-h-9 rounded-xl border px-2 py-1.5 text-xs font-semibold transition-colors active:scale-[0.98] ${preset.wide ? 'col-span-2' : ''} ${
                 isSelected
                   ? 'border-blue-400/60 bg-blue-500/20 text-blue-100'
                   : 'border-white/10 bg-white/5 liquid-glass-modal-text hover:bg-white/10'

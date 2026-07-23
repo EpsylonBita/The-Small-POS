@@ -4,11 +4,14 @@ import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal, POSGlassButton, POSGlassInput } from '../ui/pos-glass-components';
 import { DeliveryValidationComponent } from '../delivery/DeliveryValidationComponent';
 import { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
+import { FloorPresetPicker } from '../forms/FloorPresetPicker';
 
 interface CustomerInfo {
   name: string;
   phone: string;
   address: string;
+  floor_number?: string;
+  name_on_ringer?: string;
   coordinates?: { lat: number; lng: number };
   deliveryValidation?: DeliveryBoundaryValidationResponse;
 }
@@ -90,6 +93,16 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
     if (orderType === 'delivery') {
       if (!customerInfo.address.trim()) {
         toast.error(t('modals.customerInfo.addressRequired'));
+        return;
+      }
+
+      if (!customerInfo.floor_number?.trim()) {
+        toast.error(t('modals.customerInfo.floorRequired'));
+        return;
+      }
+
+      if (!customerInfo.name_on_ringer?.trim()) {
+        toast.error(t('modals.customerInfo.nameOnRingerRequired'));
         return;
       }
 
@@ -188,6 +201,7 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
               onAddressChange={handleAddressChange}
               staffId={staffId}
               staffRole={staffRole}
+              initialAddress={customerInfo.address}
               className="bg-white/5 border border-white/10 rounded-2xl p-4"
             />
           ) : (
@@ -204,6 +218,33 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
             </>
           )}
         </div>
+
+        {orderType === 'delivery' && (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <FloorPresetPicker
+              value={customerInfo.floor_number || ''}
+              onChange={(value) => handleInputChange('floor_number', value)}
+              label={t('modals.customerInfo.floorNumber')}
+              placeholder={t('modals.addCustomer.floorPlaceholder')}
+              inputClassName="liquid-glass-modal-input w-full"
+              required
+            />
+
+            <div>
+              <label className="mb-2 block text-sm font-medium liquid-glass-modal-text">
+                {t('modals.customerInfo.nameOnRinger')}
+              </label>
+              <POSGlassInput
+                type="text"
+                value={customerInfo.name_on_ringer || ''}
+                onChange={(e) => handleInputChange('name_on_ringer', e.target.value)}
+                placeholder={t('modals.addCustomer.nameOnRingerPlaceholder')}
+                required
+                aria-required="true"
+              />
+            </div>
+          </div>
+        )}
 
         {/* Order Type Display */}
         <div className="p-3 bg-white/10 dark:bg-gray-800/20 rounded-2xl border liquid-glass-modal-border">

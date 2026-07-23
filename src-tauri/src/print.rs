@@ -3519,6 +3519,8 @@ fn build_shift_checkout_doc(
         total_card_collected: 0.0,
         total_delivery_fees: 0.0,
         total_tips: 0.0,
+        tips_received: number_from_paths(&summary, &["/tipsReceived", "/tips_received"])
+            .unwrap_or(0.0),
         amount_to_return: 0.0,
         total_sells: 0.0,
         cancelled_or_refunded_total: 0.0,
@@ -3607,7 +3609,11 @@ fn build_shift_checkout_doc(
             doc.total_cash_collected = cash_total;
             doc.total_card_collected = card_total;
             doc.total_delivery_fees = fees_total;
-            doc.total_tips = tips_total;
+            doc.total_tips = if doc.tips_received > 0.0 {
+                doc.tips_received
+            } else {
+                tips_total
+            };
             doc.total_sells = cash_total + card_total;
             doc.cancelled_or_refunded_total = cancelled_or_refunded_total;
             doc.cancelled_or_refunded_count = cancelled_or_refunded_count;
@@ -3781,7 +3787,15 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
     .unwrap_or(0.0);
     let closing_cash = number_from_paths(
         payload,
-        &["/cashDrawer/closing", "/closingCash", "/closing_cash"],
+        &[
+            "/cashDrawer/moneyInDrawer",
+            "/cashDrawer/money_in_drawer",
+            "/moneyInDrawer",
+            "/money_in_drawer",
+            "/cashDrawer/closing",
+            "/closingCash",
+            "/closing_cash",
+        ],
     )
     .unwrap_or(0.0);
     let expected_cash = number_from_paths(
@@ -6132,7 +6146,9 @@ mod tests {
                 "cardSales": 125.0
             },
             "cashDrawer": {
-                "totalVariance": 0.0
+                "totalVariance": 0.0,
+                "closing": 0.0,
+                "moneyInDrawer": 325.02
             }
         });
         let raw_payload = payload.to_string();
@@ -6150,6 +6166,7 @@ mod tests {
                 assert_eq!(doc.shift_count, Some(4));
                 assert_eq!(doc.terminal_name, "Main POS");
                 assert_eq!(doc.generated_at, "2026-03-15T23:59:00Z");
+                assert_eq!(doc.closing_cash, 325.02);
             }
             _ => panic!("expected z-report document"),
         }

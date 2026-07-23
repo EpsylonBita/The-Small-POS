@@ -68,6 +68,37 @@ test('StaffShiftModal shows raw close-shift IPC rejection messages to the operat
   );
 });
 
+test('StaffShiftModal separates cash handover from tip allocation in every checkout role', () => {
+  const modal = source(staffShiftModalPath);
+  const locales = ['en', 'el', 'de', 'fr', 'it'];
+  const requiredKeys = [
+    'cashToHandToCashier',
+    'cashReturnHelper',
+    'cashActuallyHandedOver',
+    'tipsReceived',
+    'tipsSeparateFromCashReturn',
+    'tipAllocations',
+    'tipOrder',
+  ];
+
+  assert.match(modal, /const renderTipsSummaryCard = \(\) =>/);
+  assert.match(modal, /data-testid="staff-checkout-tips"/);
+  assert.match(modal, /shiftSummary\?\.tipsReceived/);
+  assert.match(modal, /shiftSummary\?\.tipAllocations/);
+  assert.match(modal, /modals\.staffShift\.cashToHandToCashier/);
+  assert.match(modal, /modals\.staffShift\.cashActuallyHandedOver/);
+
+  for (const locale of locales) {
+    const staffShift = JSON.parse(
+      source(path.join(projectRoot, 'src', 'locales', `${locale}.json`)),
+    ).modals.staffShift;
+    for (const key of requiredKeys) {
+      assert.equal(typeof staffShift[key], 'string', `${locale}.${key} must exist`);
+      assert.notEqual(staffShift[key].trim(), '', `${locale}.${key} must not be empty`);
+    }
+  }
+});
+
 test('StaffShiftModal renders checkout add actions as yellow icon-only buttons', () => {
   const modal = source(staffShiftModalPath);
 

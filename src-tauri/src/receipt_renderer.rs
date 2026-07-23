@@ -9,7 +9,7 @@ use std::io::Cursor;
 
 use crate::escpos::{EscPosBuilder, PaperWidth};
 
-pub const RECEIPT_LAYOUT_REVISION: &str = "2026-03-05-r16";
+pub const RECEIPT_LAYOUT_REVISION: &str = "2026-07-24-r17";
 
 pub fn layout_revision() -> &'static str {
     RECEIPT_LAYOUT_REVISION
@@ -349,6 +349,8 @@ pub struct ShiftCheckoutDoc {
     #[serde(default)]
     pub total_tips: f64,
     #[serde(default)]
+    pub tips_received: f64,
+    #[serde(default)]
     pub amount_to_return: f64,
     #[serde(default)]
     pub total_sells: f64,
@@ -617,9 +619,10 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Canceled/Refunded" => "Ακυρωμένα/Επιστροφές",
             "SALES" => "ΠΩΛΗΣΕΙΣ",
             "PAYMENTS" => "ΠΛΗΡΩΜΕΣ",
-            "Tips" => "Φιλοδωρήματα",
+            "Tips" | "Tips Received" => "Φιλοδωρήματα",
             "ORDER BREAKDOWN" => "ΑΝΑΛΥΣΗ ΠΑΡΑΓΓΕΛΙΩΝ",
             "EXPENSE ANALYSIS" => "ΑΝΑΛΥΣΗ ΕΞΟΔΩΝ",
+            "EXPENSES" => "ΕΞΟΔΑ",
             "Total Expenses" => "Σύνολο Εξόδων",
             "Dine-in" => "Επιτόπου",
             "Takeaway" => "Παραλαβή",
@@ -627,6 +630,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "STAFF" => "ΠΡΟΣΩΠΙΚΟ",
             "Cash Sales" => "Πωλήσεις Μετρητών",
             "Money In Drawer" => "Χρήματα στο Ταμείο",
+            "Drawer" => "Ταμείο",
             "Card Sales" => "Πωλήσεις Κάρτας",
             "Cash Drops" => "Αποσύρσεις Μετρητών",
             "Driver Given" => "Δόθηκαν σε Οδηγό",
@@ -738,8 +742,10 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "SALES" => "UMSATZ",
             "PAYMENTS" => "ZAHLUNGEN",
             "Tips" => "Trinkgelder",
+            "Tips Received" => "Erhaltene Trinkgelder",
             "ORDER BREAKDOWN" => "BESTELL-UEBERSICHT",
             "EXPENSE ANALYSIS" => "AUSGABENDETAILS",
+            "EXPENSES" => "AUSGABEN",
             "Total Expenses" => "Ausgaben gesamt",
             "Dine-in" => "Vor Ort",
             "Takeaway" => "Mitnahme",
@@ -747,6 +753,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "STAFF" => "PERSONAL",
             "Cash Sales" => "Barumsatz",
             "Money In Drawer" => "Bargeld in der Kasse",
+            "Drawer" => "Kasse",
             "Card Sales" => "Kartenumsatz",
             "Cash Drops" => "Barentnahmen",
             "Driver Given" => "Fahrer ausgezahlt",
@@ -858,8 +865,10 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "SALES" => "VENTES",
             "PAYMENTS" => "PAIEMENTS",
             "Tips" => "Pourboires",
+            "Tips Received" => "Pourboires reçus",
             "ORDER BREAKDOWN" => "REPARTITION COMMANDES",
             "EXPENSE ANALYSIS" => "DETAIL DES DEPENSES",
+            "EXPENSES" => "DEPENSES",
             "Total Expenses" => "Total des depenses",
             "Dine-in" => "Sur place",
             "Takeaway" => "A emporter",
@@ -867,6 +876,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "STAFF" => "PERSONNEL",
             "Cash Sales" => "Ventes especes",
             "Money In Drawer" => "Argent en caisse",
+            "Drawer" => "Caisse",
             "Card Sales" => "Ventes carte",
             "Cash Drops" => "Sorties especes",
             "Driver Given" => "Donne au livreur",
@@ -978,8 +988,10 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "SALES" => "VENDITE",
             "PAYMENTS" => "PAGAMENTI",
             "Tips" => "Mance",
+            "Tips Received" => "Mance ricevute",
             "ORDER BREAKDOWN" => "RIPARTIZIONE ORDINI",
             "EXPENSE ANALYSIS" => "DETTAGLIO SPESE",
+            "EXPENSES" => "SPESE",
             "Total Expenses" => "Totale spese",
             "Dine-in" => "Al tavolo",
             "Takeaway" => "Asporto",
@@ -987,6 +999,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "STAFF" => "PERSONALE",
             "Cash Sales" => "Vendite contanti",
             "Money In Drawer" => "Denaro nel cassetto",
+            "Drawer" => "Cassa",
             "Card Sales" => "Vendite carta",
             "Cash Drops" => "Prelievi contanti",
             "Driver Given" => "Dato al corriere",
@@ -1429,6 +1442,14 @@ fn should_render_minimal_shift_checkout(doc: &ShiftCheckoutDoc) -> bool {
     crate::shifts::is_non_financial_shift_role(&doc.role_type)
 }
 
+fn shift_checkout_tips_received(doc: &ShiftCheckoutDoc) -> f64 {
+    if doc.tips_received > 0.0 {
+        doc.tips_received
+    } else {
+        doc.total_tips
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DriverShiftCheckoutSummaryRow {
     label_key: &'static str,
@@ -1476,13 +1497,11 @@ fn driver_shift_checkout_summary_rows(
         });
     }
 
-    if doc.total_tips > 0.0 {
-        rows.push(DriverShiftCheckoutSummaryRow {
-            label_key: "Tips",
-            amount: doc.total_tips,
-            emphasize: false,
-        });
-    }
+    rows.push(DriverShiftCheckoutSummaryRow {
+        label_key: "Tips Received",
+        amount: shift_checkout_tips_received(doc),
+        emphasize: false,
+    });
 
     if doc.cancelled_or_refunded_total > 0.0 {
         rows.push(DriverShiftCheckoutSummaryRow {
@@ -3435,6 +3454,14 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         ));
                     }
                 }
+                if !should_render_shift_checkout_driver_summary(doc) {
+                    let tips_received = shift_checkout_tips_received(doc);
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Tips Received")),
+                        money(tips_received),
+                    ));
+                }
             }
             body.push_str("</div>");
             html_shell(receipt_label(lang, "SHIFT CHECKOUT"), &body, cfg)
@@ -3566,7 +3593,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
                 body.push_str(&format!(
                     "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
-                    esc(receipt_label(lang, "EXPENSE ANALYSIS"))
+                    esc(receipt_label(lang, "EXPENSES"))
                 ));
                 for expense in &doc.expense_lines {
                     body.push_str(&format!(
@@ -3606,6 +3633,20 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         money(staff.cash_amount),
                         esc(receipt_label(lang, "Card")),
                         money(staff.card_amount),
+                    ));
+                    if staff.staff_payment > 0.0 {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(receipt_label(lang, "Payout")),
+                            money(staff.staff_payment),
+                        ));
+                    }
+                }
+                if doc.staff_payments_total > 0.0 {
+                    body.push_str(&format!(
+                        "<hr/><div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                        esc(receipt_label(lang, "Staff Payouts")),
+                        money(doc.staff_payments_total),
                     ));
                 }
                 body.push_str("</div>");
@@ -3650,15 +3691,6 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     money(doc.driver_cash_given),
                 ));
             }
-            if doc.staff_payments_total > 0.0 {
-                body.push_str(&format!(
-                    "<div class=\"line\"><span>{}</span><span>{}</span></div>\
-                     <div class=\"note\">* {}</div>",
-                    esc(receipt_label(lang, "Staff Payouts*")),
-                    money(doc.staff_payments_total),
-                    esc(receipt_label(lang, "Informational only")),
-                ));
-            }
             body.push_str(&format!(
                 "<hr/>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
@@ -3669,7 +3701,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 money(doc.expected_cash),
                 esc(receipt_label(lang, "Variance")),
                 money(doc.cash_variance),
-                esc(receipt_label(lang, "Money In Drawer")),
+                esc(receipt_label(lang, "Drawer")),
                 money(doc.closing_cash),
             ));
 
@@ -6710,6 +6742,14 @@ fn render_classic_non_customer_raster_exact_ttf(
                         );
                     }
                 }
+                if !should_render_shift_checkout_driver_summary(doc) {
+                    let tips_received = shift_checkout_tips_received(doc);
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Tips Received")),
+                        &money_with_currency_locale(tips_received, &cur, comma),
+                        preset.item_style,
+                    );
+                }
             }
         }
         ReceiptDocument::ZReport(doc) => {
@@ -6778,8 +6818,8 @@ fn render_classic_non_customer_raster_exact_ttf(
             if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
                 canvas.draw_rule();
                 canvas.draw_text_line(
-                    receipt_label(lang, "EXPENSE ANALYSIS"),
-                    BitmapAlign::Left,
+                    receipt_label(lang, "EXPENSES"),
+                    BitmapAlign::Center,
                     preset.section_style,
                 );
                 for expense in &doc.expense_lines {
@@ -6808,7 +6848,7 @@ fn render_classic_non_customer_raster_exact_ttf(
                 canvas.draw_rule();
                 canvas.draw_text_line(
                     receipt_label(lang, "STAFF"),
-                    BitmapAlign::Left,
+                    BitmapAlign::Center,
                     preset.section_style,
                 );
                 for staff in &doc.staff_reports {
@@ -6822,7 +6862,6 @@ fn render_classic_non_customer_raster_exact_ttf(
                         BitmapAlign::Left,
                         preset.section_style,
                     );
-                    // Time range + staff payment on one line
                     let ci_display = staff
                         .check_in
                         .as_deref()
@@ -6834,14 +6873,13 @@ fn render_classic_non_customer_raster_exact_ttf(
                         .and_then(|v| v.get(11..16))
                         .unwrap_or("--:--");
                     let time_range = format!("  {} - {}", ci_display, co_display);
+                    canvas.draw_text_line(&time_range, BitmapAlign::Left, preset.item_style);
                     if staff.staff_payment > 0.0 {
                         canvas.draw_pair(
-                            &format!("{} {}", time_range, receipt_label(lang, "Payout")),
+                            &format!("  {}:", receipt_label(lang, "Payout")),
                             &money_with_currency_locale(staff.staff_payment, &cur, comma),
                             preset.item_style,
                         );
-                    } else {
-                        canvas.draw_text_line(&time_range, BitmapAlign::Left, preset.item_style);
                     }
                     if staff.opening_cash > 0.0 {
                         canvas.draw_pair(
@@ -6864,6 +6902,14 @@ fn render_classic_non_customer_raster_exact_ttf(
                         &format!("  {}:", receipt_label(lang, "Card")),
                         &money_with_currency_locale(staff.card_amount, &cur, comma),
                         preset.item_style,
+                    );
+                }
+                if doc.staff_payments_total > 0.0 {
+                    canvas.draw_rule();
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Staff Payouts")),
+                        &money_with_currency_locale(doc.staff_payments_total, &cur, comma),
+                        preset.total_style,
                     );
                 }
             }
@@ -6928,18 +6974,6 @@ fn render_classic_non_customer_raster_exact_ttf(
                     preset.item_style,
                 );
             }
-            if doc.staff_payments_total > 0.0 {
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Staff Payouts*")),
-                    &money_with_currency_locale(doc.staff_payments_total, &cur, comma),
-                    preset.item_style,
-                );
-                canvas.draw_text_line(
-                    &format!("* {}", receipt_label(lang, "Informational only")),
-                    BitmapAlign::Left,
-                    preset.meta_style,
-                );
-            }
             canvas.draw_rule();
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Expected")),
@@ -6952,7 +6986,7 @@ fn render_classic_non_customer_raster_exact_ttf(
                 preset.item_style,
             );
             canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Money In Drawer")),
+                &format!("{}:", receipt_label(lang, "Drawer")),
                 &money_with_currency_locale(doc.closing_cash, &cur, comma),
                 preset.total_style,
             );
@@ -6961,7 +6995,7 @@ fn render_classic_non_customer_raster_exact_ttf(
             canvas.draw_rule();
             canvas.draw_text_line(
                 receipt_label(lang, "TOTAL"),
-                BitmapAlign::Left,
+                BitmapAlign::Center,
                 preset.section_style,
             );
             canvas.draw_pair(
@@ -8347,6 +8381,15 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         );
                     }
                 }
+                if !should_render_shift_checkout_driver_summary(doc) {
+                    let tips_received = shift_checkout_tips_received(doc);
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Tips Received"),
+                        &money_locale(tips_received, comma),
+                        width,
+                    );
+                }
             }
         }
         ReceiptDocument::ZReport(doc) => {
@@ -8489,10 +8532,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             // --- Expense analysis ---
             if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
                 builder
+                    .center()
                     .bold(true)
-                    .text(receipt_label(lang, "EXPENSE ANALYSIS"))
+                    .text(receipt_label(lang, "EXPENSES"))
                     .lf()
-                    .bold(false);
+                    .bold(false)
+                    .left();
                 for expense in &doc.expense_lines {
                     emit_pair(
                         &mut builder,
@@ -8514,10 +8559,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             if !doc.staff_reports.is_empty() {
                 emit_rule(&mut builder, width, '-');
                 builder
+                    .center()
                     .bold(true)
                     .text(receipt_label(lang, "STAFF"))
                     .lf()
-                    .bold(false);
+                    .bold(false)
+                    .left();
                 for staff in &doc.staff_reports {
                     let role_label = match staff.role.as_str() {
                         "driver" => receipt_label(lang, "Driver"),
@@ -8529,7 +8576,6 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         .text(&format!("{} ({})", staff.name, role_label))
                         .lf()
                         .bold(false);
-                    // Time range + staff payment on one line
                     let ci_display = staff
                         .check_in
                         .as_deref()
@@ -8541,15 +8587,14 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         .and_then(|v| v.get(11..16))
                         .unwrap_or("--:--");
                     let time_range = format!("{} - {}", ci_display, co_display);
+                    builder.text(&format!("  {}", time_range)).lf();
                     if staff.staff_payment > 0.0 {
                         emit_pair(
                             &mut builder,
-                            &format!("{} {}", time_range, receipt_label(lang, "Payout")),
+                            receipt_label(lang, "Payout"),
                             &money_locale(staff.staff_payment, comma),
                             width,
                         );
-                    } else {
-                        builder.text(&format!("  {}", time_range)).lf();
                     }
                     if staff.opening_cash > 0.0 {
                         emit_pair(
@@ -8575,6 +8620,15 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         &mut builder,
                         receipt_label(lang, "Card"),
                         &money_locale(staff.card_amount, comma),
+                        width,
+                    );
+                }
+                if doc.staff_payments_total > 0.0 {
+                    emit_rule(&mut builder, width, '-');
+                    emit_pair_bold(
+                        &mut builder,
+                        receipt_label(lang, "Staff Payouts"),
+                        &money_locale(doc.staff_payments_total, comma),
                         width,
                     );
                 }
@@ -8631,17 +8685,6 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     width,
                 );
             }
-            if doc.staff_payments_total > 0.0 {
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "Staff Payouts*"),
-                    &money_locale(doc.staff_payments_total, comma),
-                    width,
-                );
-                builder
-                    .text(&format!("* {}", receipt_label(lang, "Informational only")))
-                    .lf();
-            }
             emit_rule(&mut builder, width, '-');
             emit_pair(
                 &mut builder,
@@ -8657,7 +8700,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             );
             emit_pair_bold(
                 &mut builder,
-                receipt_label(lang, "Money In Drawer"),
+                receipt_label(lang, "Drawer"),
                 &money_locale(doc.closing_cash, comma),
                 width,
             );
@@ -8665,10 +8708,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             // --- Daily totals ---
             emit_rule(&mut builder, width, '=');
             builder
+                .center()
                 .bold(true)
                 .text(receipt_label(lang, "TOTAL"))
                 .lf()
-                .bold(false);
+                .bold(false)
+                .left();
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Orders"),
@@ -9998,8 +10043,10 @@ mod tests {
             staff_reports: vec![ZReportStaffEntry {
                 name: "Alex".to_string(),
                 role: "cashier".to_string(),
+                staff_payment: 34.0,
                 ..ZReportStaffEntry::default()
             }],
+            staff_payments_total: 34.0,
             ..ZReportDoc::default()
         });
 
@@ -10016,10 +10063,10 @@ mod tests {
         }
 
         let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
-        let expenses = text.find("EXPENSE ANALYSIS").expect("expense section");
+        let expenses = text.find("EXPENSES").expect("expense section");
         let staff = text.find("STAFF").expect("staff section");
         let drawer = text.find("CASH DRAWER").expect("drawer section");
-        let money_in_drawer = text.find("Money In Drawer").expect("closing drawer money");
+        let money_in_drawer = text.find("Drawer").expect("closing drawer money");
         let totals = text.rfind("TOTAL").expect("final totals section");
 
         assert!(expenses < staff);
@@ -10029,14 +10076,29 @@ mod tests {
         assert!(text.contains("Cleaning supplies"));
         assert!(text.contains("Taxi for stock"));
         assert!(text.contains("--:-- - --:--"));
+        let staff_section = &text[staff..drawer];
+        assert!(staff_section.contains("Alex"));
+        assert!(staff_section.contains("Payout"));
+        assert!(staff_section.contains("Staff Payouts"));
+        assert!(staff_section.contains("34.00") || staff_section.contains("34,00"));
+        assert!(
+            !text[drawer..totals].contains("Staff Payouts"),
+            "staff payouts belong in staff analysis, not drawer analysis"
+        );
+
+        let html = render_html(&doc, &cfg);
+        let html_staff = html.find("STAFF").expect("HTML staff section");
+        let html_drawer = html.find("CASH DRAWER").expect("HTML drawer section");
+        let html_staff_section = &html[html_staff..html_drawer];
+        assert!(html_staff_section.contains("Payout"));
+        assert!(html_staff_section.contains("Staff Payouts"));
+        assert!(html_staff_section.contains("34.00"));
 
         let opening = text[drawer..].find("Opening").expect("opening row");
         let cash_sales = text[drawer..].find("Cash Sales").expect("cash sales row");
         let expected = text[drawer..].find("Expected").expect("expected row");
         let variance = text[drawer..].find("Variance").expect("variance row");
-        let closing = text[drawer..]
-            .find("Money In Drawer")
-            .expect("money in drawer row");
+        let closing = text[drawer..].find("Drawer").expect("money in drawer row");
         assert!(opening < cash_sales);
         assert!(cash_sales < expected);
         assert!(expected < variance);
@@ -10049,6 +10111,8 @@ mod tests {
         assert_eq!(receipt_label("el", "Z REPORT"), "ΑΝΑΦΟΡΑ Z");
         assert_eq!(receipt_label("el", "Driver ID"), "ID Οδηγού");
         assert_eq!(receipt_label("el", "Expense"), "Έξοδο");
+        assert_eq!(receipt_label("el", "EXPENSES"), "ΕΞΟΔΑ");
+        assert_eq!(receipt_label("el", "Drawer"), "Ταμείο");
         assert_eq!(receipt_label("fr", "Orders"), "Commandes");
         assert_eq!(receipt_label("fr", "Expense"), "Depense");
         assert_eq!(receipt_label("de", "Generated"), "Erstellt");
@@ -10065,7 +10129,7 @@ mod tests {
         assert_eq!(expense_total.size_px, preset.section_style.size_px);
         assert!(
             expense_total.size_px < preset.total_style.size_px,
-            "expense subtotal must not be as large as Money In Drawer or the final report total",
+            "expense subtotal must not be as large as the Drawer row or the final report total",
         );
     }
 
@@ -10172,6 +10236,7 @@ mod tests {
         assert!(text.contains(&expected_checkout));
         assert!(text.contains("Starting Amount"));
         assert!(text.contains("Total Sells"));
+        assert!(text.contains("Tips Received"));
         assert!(text.contains("Canceled/Refunded"));
         assert!(text.contains("30.50") || text.contains("30,50"));
         assert!(text.contains("40.00") || text.contains("40,00"));
@@ -10217,6 +10282,45 @@ mod tests {
 
         assert!(text.contains("Transferred Staff"));
         assert!(text.contains("63.50") || text.contains("63,50"));
+    }
+
+    #[test]
+    fn financial_staff_checkout_receipts_show_tips_separately() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..LayoutConfig::default()
+        };
+
+        for role in ["cashier", "server"] {
+            let doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+                shift_id: format!("SHIFT-{role}-TIPS"),
+                role_type: role.to_string(),
+                staff_name: "Tip Recipient".to_string(),
+                check_in: "2026-07-24T08:00:00Z".to_string(),
+                check_out: "2026-07-24T16:00:00Z".to_string(),
+                expected_amount: Some(75.0),
+                closing_amount: Some(75.0),
+                tips_received: 6.5,
+                ..ShiftCheckoutDoc::default()
+            });
+
+            let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+            let html = render_html(&doc, &cfg);
+            assert!(
+                text.contains("Tips Received"),
+                "{role} text checkout must label tips"
+            );
+            assert!(
+                text.contains("6.50") || text.contains("6,50"),
+                "{role} text checkout must show the tip amount"
+            );
+            assert!(
+                html.contains("Tips Received") && html.contains("6.50"),
+                "{role} HTML checkout must show tips"
+            );
+        }
     }
 
     #[test]

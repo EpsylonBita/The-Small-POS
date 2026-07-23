@@ -378,6 +378,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         street: info.address || '',
         city: '', // info.address is single string in modal often, might need parsing or just store as street
         postalCode: '',
+        floor_number: info.floor_number || '',
+        name_on_ringer: info.name_on_ringer || '',
         coordinates: info.coordinates
       }
     });
@@ -1217,6 +1219,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
             name: customerInfo.name,
             phone: customerInfo.phone,
             address: customerInfo.address?.street || '',
+            floor_number:
+              customerInfo.address?.floor_number || customerInfo.address?.floor || '',
+            name_on_ringer: customerInfo.address?.name_on_ringer || '',
             coordinates: customerInfo.address?.coordinates,
             deliveryValidation: undefined
           }}

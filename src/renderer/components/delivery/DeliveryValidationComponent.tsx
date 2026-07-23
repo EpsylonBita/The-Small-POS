@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { MapPin, AlertTriangle, CheckCircle, Clock, Shield, Settings } from 'lucide-react';
 import { 
   DeliveryBoundaryValidationRequest,
@@ -32,6 +32,7 @@ interface DeliveryValidationComponentProps {
   staffId: string;
   staffRole: 'staff' | 'manager' | 'admin';
   className?: string;
+  initialAddress?: string;
 }
 
 export function DeliveryValidationComponent({
@@ -40,7 +41,8 @@ export function DeliveryValidationComponent({
   onAddressChange,
   staffId,
   staffRole,
-  className = ''
+  className = '',
+  initialAddress = '',
 }: DeliveryValidationComponentProps) {
   const { t } = useTranslation()
   const [uiState, setUIState] = useState<DeliveryValidationUIState>({
@@ -48,7 +50,7 @@ export function DeliveryValidationComponent({
     showOverrideModal: false,
     showZoneSelector: false,
     showManagerApproval: false,
-    addressInput: '',
+    addressInput: initialAddress,
     error: undefined
   });
 
@@ -75,6 +77,7 @@ export function DeliveryValidationComponent({
 
   // Debounced validation
   const [validationTimeout, setValidationTimeout] = useState<NodeJS.Timeout | null>(null);
+  const initializedAddressRef = useRef<string | null>(null);
 
   const validateAddress = useCallback(async (address: string, skipValidation = false) => {
     if (!address.trim()) {
@@ -117,6 +120,18 @@ export function DeliveryValidationComponent({
       }));
     }
   }, [orderAmount, staffId, validationService, onValidationResult, onAddressChange]);
+
+  useEffect(() => {
+    const address = initialAddress.trim();
+    if (initializedAddressRef.current === address) {
+      return;
+    }
+    initializedAddressRef.current = address;
+    setUIState(prev => ({ ...prev, addressInput: address }));
+    if (address) {
+      void validateAddress(address);
+    }
+  }, [initialAddress, validateAddress]);
 
   const handleAddressInput = useCallback((value: string) => {
     setUIState(prev => ({ ...prev, addressInput: value }));
@@ -205,7 +220,7 @@ export function DeliveryValidationComponent({
       {/* Address Input */}
       <div className="space-y-2">
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-          {t('delivery.fields.deliveryAddress')}
+          {t('delivery.fields.deliveryAddress')} *
         </label>
         <div className="relative">
           <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -214,6 +229,8 @@ export function DeliveryValidationComponent({
             value={uiState.addressInput}
             onChange={(e) => handleAddressInput(e.target.value)}
             placeholder={t('forms.placeholders.enterAddress')}
+            required
+            aria-required="true"
             className="w-full rounded-2xl border border-gray-300 bg-white/80 py-2.5 pl-10 pr-4 text-gray-900 outline-none backdrop-blur-sm transition-shadow focus:border-amber-400 focus:ring-2 focus:ring-amber-400/35 dark:border-white/10 dark:bg-zinc-950/70 dark:text-white"
           />
         </div>

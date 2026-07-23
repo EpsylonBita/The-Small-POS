@@ -421,6 +421,16 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       return;
     }
 
+    if (!customerInfo.delivery_floor?.trim()) {
+      toast.error(t('modals.editCustomer.floorRequired'));
+      return;
+    }
+
+    if (!customerInfo.name_on_ringer?.trim()) {
+      toast.error(t('modals.editCustomer.nameOnRingerRequired'));
+      return;
+    }
+
     const validation = await ensureValidationForSubmit();
     const decisionError = evaluateValidationDecision(validation);
     if (decisionError) {
@@ -687,6 +697,8 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                 value={customerInfo.delivery_floor || ''}
                 onChange={(e) => handleInputChange('delivery_floor', e.target.value)}
                 placeholder={t('modals.addCustomer.floorPlaceholder')}
+                required
+                aria-required="true"
                 className={editCustomerInputClass}
               />
             </div>
@@ -700,6 +712,8 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                 value={customerInfo.name_on_ringer || ''}
                 onChange={(e) => handleInputChange('name_on_ringer', e.target.value)}
                 placeholder={t('modals.addCustomer.nameOnRingerPlaceholder')}
+                required
+                aria-required="true"
                 className={editCustomerInputClass}
               />
             </div>

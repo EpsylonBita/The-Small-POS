@@ -50,6 +50,8 @@ interface CustomerInfo {
   name: string;
   phone: string;
   address: string;
+  floor_number?: string;
+  name_on_ringer?: string;
 }
 
 const MenuPage: React.FC = () => {
@@ -440,6 +442,8 @@ const MenuPage: React.FC = () => {
         customer_name: customerInfo.name,
         customer_phone: customerInfo.phone,
         delivery_address: orderType === 'delivery' ? customerInfo.address : undefined,
+        delivery_floor: orderType === 'delivery' ? customerInfo.floor_number : undefined,
+        name_on_ringer: orderType === 'delivery' ? customerInfo.name_on_ringer : undefined,
         table_number: orderType === 'dine-in' ? customerInfo.address : undefined,
         special_instructions: orderType === 'pickup' ? customerInfo.address : undefined,
       };

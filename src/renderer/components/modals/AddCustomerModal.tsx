@@ -825,6 +825,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.address = t('modals.addCustomer.streetRequired');
     }
 
+    if (!formData.floorNumber.trim()) {
+      newErrors.floorNumber = t('modals.addCustomer.floorRequired');
+    }
+
+    if (!formData.nameOnRinger.trim()) {
+      newErrors.nameOnRinger = t('modals.addCustomer.nameOnRingerRequired');
+    }
+
     if (overrideApplied && overrideReason.trim().length < 6) {
       newErrors.overrideReason = t('modals.addCustomer.overrideReasonRequired', 'Override reason must be at least 6 characters.');
     }
@@ -1524,6 +1532,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               value={formData.nameOnRinger}
               onChange={(e) => handleInputChange('nameOnRinger', e.target.value)}
               placeholder={t('modals.addCustomer.nameOnRingerPlaceholder')}
+              required
+              aria-required="true"
               className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
             />
           </div>
@@ -1541,6 +1551,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             placeholder={t('modals.addCustomer.floorPlaceholder')}
             inputClassName={inputBase(resolvedTheme)}
             maxLength={100}
+            required
           />
           {(formData.floorNumber?.length ?? 0) >= 100 && (
             <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">

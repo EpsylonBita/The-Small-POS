@@ -35,6 +35,46 @@ test('customer address forms expose reusable floor presets without removing manu
   assert.match(presetPicker, /BASEMENT|basement/i);
   assert.match(presetPicker, /GROUND|ground/i);
   assert.match(presetPicker, /type="text"/);
+  assert.match(presetPicker, /preset\.wide \? 'col-span-2'/);
+});
+
+test('delivery customer forms require floor and ringer name and preserve saved address context', () => {
+  const customerInfo = readSource(
+    'src',
+    'renderer',
+    'components',
+    'modals',
+    'CustomerInfoModal.tsx',
+  );
+  const addCustomer = readSource(
+    'src',
+    'renderer',
+    'components',
+    'modals',
+    'AddCustomerModal.tsx',
+  );
+  const editCustomer = readSource(
+    'src',
+    'renderer',
+    'components',
+    'modals',
+    'EditCustomerInfoModal.tsx',
+  );
+  const deliveryValidation = readSource(
+    'src',
+    'renderer',
+    'components',
+    'delivery',
+    'DeliveryValidationComponent.tsx',
+  );
+
+  for (const source of [customerInfo, addCustomer, editCustomer]) {
+    assert.match(source, /floorRequired/);
+    assert.match(source, /nameOnRingerRequired/);
+  }
+  assert.match(customerInfo, /initialAddress=\{customerInfo\.address\}/);
+  assert.match(deliveryValidation, /addressInput:\s*initialAddress/);
+  assert.match(deliveryValidation, /required\s+aria-required="true"/);
 });
 
 test('payment checkout treats tip as an auditable addition, not a payment method', () => {

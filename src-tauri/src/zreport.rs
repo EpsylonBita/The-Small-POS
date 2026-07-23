@@ -1532,6 +1532,27 @@ fn load_drawer_rows_for_period(
     Ok(rows)
 }
 
+fn money_in_drawer_from_rows(drawer_rows: &[Value]) -> f64 {
+    drawer_rows
+        .iter()
+        .map(|drawer| {
+            drawer
+                .get("closing")
+                .and_then(Value::as_f64)
+                .unwrap_or_else(|| {
+                    drawer
+                        .get("expected")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0)
+                        + drawer
+                            .get("variance")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0)
+                })
+        })
+        .sum()
+}
+
 fn load_drawer_rows_for_shift(conn: &Connection, shift_id: &str) -> Result<Vec<Value>, String> {
     let expected_expr = drawer_expected_cents_expr(Some("cds"));
     let mut stmt = conn
@@ -3917,6 +3938,27 @@ fn build_z_report_for_date(
         lower_bound_mode,
         branch_id.as_str(),
     )?;
+    let money_in_drawer = if drawer_rows.is_empty() {
+        if include_active_shifts {
+            total_expected + total_variance
+        } else {
+            total_closing
+        }
+    } else {
+        money_in_drawer_from_rows(&drawer_rows)
+    };
+    if let Some(ref mut drawer) = drawer_agg {
+        if let Some(obj) = drawer.as_object_mut() {
+            obj.insert(
+                "moneyInDrawer".to_string(),
+                serde_json::json!(money_in_drawer),
+            );
+            obj.insert(
+                "moneyInDrawer_cents".to_string(),
+                serde_json::json!(Cents::round_half_even(money_in_drawer).as_i64()),
+            );
+        }
+    }
     let cash_breakdown_lookup = driver_cash_breakdown
         .iter()
         .chain(waiter_cash_breakdown.iter())
@@ -6156,6 +6198,7 @@ mod tests {
         assert_eq!(report_json["sales"]["totalSales"], 22.0);
         assert_eq!(report_json["sales"]["cashSales"], 13.0);
         assert_eq!(report_json["cashDrawer"]["expected"], 113.0);
+        assert_eq!(report_json["cashDrawer"]["moneyInDrawer"], 113.0);
 
         let drawers = report_json["drawers"].as_array().expect("drawer rows");
         assert_eq!(drawers.len(), 1);

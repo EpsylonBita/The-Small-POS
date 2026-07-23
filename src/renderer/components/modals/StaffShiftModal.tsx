@@ -2426,7 +2426,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           actual = 0;
         } else {
           setError(t('modals.staffShift.actualCashReturnedRequired', {
-            defaultValue: 'Enter the actual cash returned before checkout.',
+            defaultValue: 'Enter the cash actually handed to the cashier before checkout.',
           }));
           return;
         }
@@ -2523,7 +2523,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           actual = 0;
         } else {
           setError(t('modals.staffShift.actualCashReturnedRequired', {
-            defaultValue: 'Enter the actual cash returned before checkout.',
+            defaultValue: 'Enter the cash actually handed to the cashier before checkout.',
           }));
           return;
         }
@@ -3150,10 +3150,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       });
       const cashCollected = completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
       const amountToReturn = openingAmount + cashCollected - (shiftSummary.totalExpenses || 0);
-      primaryLabel = t('modals.staffShift.amountToReturn', { defaultValue: 'Amount To Return' });
+      primaryLabel = t('modals.staffShift.cashToHandToCashier', {
+        defaultValue: 'Cash To Hand To Cashier',
+      });
       primaryAmount = Math.abs(amountToReturn);
-      helper = t('modals.staffShift.driverPaymentNote', {
-        defaultValue: 'Driver payment will be recorded when you return cash to the cashier'
+      helper = t('modals.staffShift.cashReturnHelper', {
+        defaultValue: 'Hand this cash to the cashier. Tips are recorded separately.',
       });
       variant = amountToReturn >= 0 ? 'info' : 'error';
     } else if (effectiveShift.role_type === 'server' && shiftSummary?.waiterTables) {
@@ -3164,11 +3166,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         ? openingAmount + cashFromTables - (shiftSummary.totalExpenses || 0)
         : openingAmount + cashFromTables - (shiftSummary.totalExpenses || 0) - paymentAmount;
 
-      primaryLabel = t('modals.staffShift.cashToReturn', { defaultValue: 'Cash To Return' });
+      primaryLabel = t('modals.staffShift.cashToHandToCashier', {
+        defaultValue: 'Cash To Hand To Cashier',
+      });
       primaryAmount = Math.abs(cashToReturn);
       helper = calculationVersion >= 2
-        ? t('modals.staffShift.waiterPaymentNote', {
-          defaultValue: 'Payment will be recorded when you return cash to the cashier'
+        ? t('modals.staffShift.cashReturnHelper', {
+          defaultValue: 'Hand this cash to the cashier. Tips are recorded separately.',
         })
         : t('modals.staffShift.paymentDeductedNote', {
           defaultValue: 'Payment already deducted from amount to return'
@@ -3255,7 +3259,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const variance = actual === null ? null : actual - expected;
 
       return {
-        label: t('modals.staffShift.amountToReturn', { defaultValue: 'Amount To Return' }),
+        label: t('modals.staffShift.cashToHandToCashier', {
+          defaultValue: 'Cash To Hand To Cashier',
+        }),
         amount: Math.abs(expected),
         note: driverActualCash.trim()
           ? t('modals.staffShift.countedCashVariance', {
@@ -3264,7 +3270,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             variance: `${(variance ?? 0) >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance ?? 0))}`,
           })
           : t('modals.staffShift.actualCashReturnedRequired', {
-            defaultValue: 'Enter the actual cash returned before checkout.',
+            defaultValue: 'Enter the cash actually handed to the cashier before checkout.',
           }),
         accentClass: expected >= 0 ? 'text-slate-300' : 'text-red-300',
         minimal: false,
@@ -3284,7 +3290,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const variance = actual === null ? null : actual - expected;
 
       return {
-        label: t('modals.staffShift.cashToReturn', { defaultValue: 'Cash To Return' }),
+        label: t('modals.staffShift.cashToHandToCashier', {
+          defaultValue: 'Cash To Hand To Cashier',
+        }),
         amount: Math.abs(expected),
         note: closingCash.trim()
           ? t('modals.staffShift.countedCashVariance', {
@@ -3293,7 +3301,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             variance: `${(variance ?? 0) >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance ?? 0))}`,
           })
           : t('modals.staffShift.actualCashReturnedRequired', {
-            defaultValue: 'Enter the actual cash returned before checkout.',
+            defaultValue: 'Enter the cash actually handed to the cashier before checkout.',
           }),
         accentClass: expected >= 0 ? 'text-slate-300' : 'text-red-300',
         minimal: false,
@@ -3320,6 +3328,58 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const checkInFooterClass = 'sticky bottom-0 z-10 mt-3 border-t border-slate-200/80 bg-white/88 px-1 pt-3 backdrop-blur-xl dark:border-white/10 dark:bg-[#071018]/88';
   const checkInEyebrowClass = 'text-xs font-semibold text-slate-500 dark:text-slate-400';
   const checkInMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
+
+  const renderTipsSummaryCard = () => {
+    const tipsReceived = Number(shiftSummary?.tipsReceived || 0);
+    const allocations = Array.isArray(shiftSummary?.tipAllocations)
+      ? shiftSummary.tipAllocations
+      : [];
+
+    return (
+      <div className={checkoutSurfaceClass} data-testid="staff-checkout-tips">
+        <div className="text-xs uppercase tracking-[0.2em] text-amber-600 dark:text-amber-300">
+          {t('modals.staffShift.tipsReceived', { defaultValue: 'Tips Received' })}
+        </div>
+        <div className="mt-2 text-3xl font-black tracking-tight text-amber-600 dark:text-amber-300">
+          {formatCurrency(tipsReceived)}
+        </div>
+        <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
+          {t('modals.staffShift.tipsSeparateFromCashReturn', {
+            defaultValue: 'Tips are recorded separately and are not included in the cash to return.',
+          })}
+        </p>
+
+        {allocations.length > 0 && (
+          <details className={`group mt-4 ${checkoutInsetSurfaceClass}`}>
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+              <span className="text-sm font-semibold liquid-glass-modal-text">
+                {t('modals.staffShift.tipAllocations', { defaultValue: 'Tip Allocations' })}
+              </span>
+              <span className="rounded-full bg-amber-400/15 px-2.5 py-1 text-xs font-bold text-amber-700 dark:text-amber-200">
+                {allocations.length}
+              </span>
+            </summary>
+            <div className="mt-3 space-y-2 border-t border-slate-200/70 pt-3 dark:border-white/10">
+              {allocations.map((allocation: any) => (
+                <div
+                  key={allocation.paymentId || allocation.orderId}
+                  className="flex items-center justify-between gap-3 text-sm"
+                >
+                  <span className="truncate text-slate-600 dark:text-slate-300">
+                    {t('modals.staffShift.tipOrder', { defaultValue: 'Order' })}{' '}
+                    #{allocation.orderNumber || allocation.orderId}
+                  </span>
+                  <span className="font-black text-amber-700 dark:text-amber-200">
+                    {formatCurrency(Number(allocation.amount || 0))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    );
+  };
 
   const renderAuditSection = (content: React.ReactNode) => (
     <details className={`${checkoutSurfaceClass} group`}>
@@ -3915,6 +3975,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           <div className="space-y-6">
             {renderExpensesPanel()}
             {renderStaffPaymentsPanel()}
+            {renderTipsSummaryCard()}
           </div>
         </div>
 
@@ -4305,20 +4366,24 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           <div className="space-y-6">
             <div className={checkoutSurfaceClass}>
               <div className="text-xs uppercase tracking-[0.22em] text-slate-600 dark:text-slate-300/90">
-                {t('modals.staffShift.amountToReturn', { defaultValue: 'Amount To Return' })}
+                {t('modals.staffShift.cashToHandToCashier', {
+                  defaultValue: 'Cash To Hand To Cashier',
+                })}
               </div>
               <div className="mt-3 text-4xl font-black tracking-tight text-slate-900 dark:text-white">
                 {formatCurrency(Math.abs(amountToReturn))}
               </div>
               <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
-                {t('modals.staffShift.driverPaymentNote', {
-                  defaultValue: 'Driver payment will be recorded when you return cash to the cashier',
+                {t('modals.staffShift.cashReturnHelper', {
+                  defaultValue: 'Hand this cash to the cashier. Tips are recorded separately.',
                 })}
               </p>
 
               <div className={`mt-5 ${checkoutInsetSurfaceClass}`}>
                 <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
-                  {t('modals.staffShift.actualCashReturned', { defaultValue: 'Actual Cash Returned' })}
+                  {t('modals.staffShift.cashActuallyHandedOver', {
+                    defaultValue: 'Cash Actually Handed Over',
+                  })}
                 </label>
                 <input
                   type="text"
@@ -4333,7 +4398,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 {variance === null ? (
                   <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">
                     {t('modals.staffShift.actualCashReturnedRequired', {
-                      defaultValue: 'Enter the actual cash returned before checkout.',
+                      defaultValue: 'Enter the cash actually handed to the cashier before checkout.',
                     })}
                   </p>
                 ) : (
@@ -4369,7 +4434,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 ))}
                 <div className="flex items-center justify-between rounded-2xl border border-slate-200/90 bg-slate-50/80 px-4 py-3 dark:border-slate-400/30 dark:bg-slate-500/10">
                   <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                    {t('modals.staffShift.amountToReturn', { defaultValue: 'Amount To Return' })}
+                    {t('modals.staffShift.cashToHandToCashier', {
+                      defaultValue: 'Cash To Hand To Cashier',
+                    })}
                   </span>
                   <span className={`text-xl font-black ${amountToReturn >= 0 ? 'text-slate-700 dark:text-slate-200' : 'text-rose-600 dark:text-rose-300'}`}>
                     {formatCurrency(Math.abs(amountToReturn))}
@@ -4381,6 +4448,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
           <div className="space-y-6">
             {renderExpensesPanel()}
+            {renderTipsSummaryCard()}
 
             <div className={checkoutSurfaceClass}>
               <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
@@ -4474,15 +4542,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           <div className="space-y-6">
             <div className={checkoutSurfaceClass}>
               <div className="text-xs uppercase tracking-[0.22em] text-slate-600 dark:text-slate-300/90">
-                {t('modals.staffShift.cashToReturn', { defaultValue: 'Cash To Return' })}
+                {t('modals.staffShift.cashToHandToCashier', {
+                  defaultValue: 'Cash To Hand To Cashier',
+                })}
               </div>
               <div className="mt-3 text-4xl font-black tracking-tight text-slate-900 dark:text-white">
                 {formatCurrency(Math.abs(cashToReturn))}
               </div>
               <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
                 {calculationVersion >= 2
-                  ? t('modals.staffShift.waiterPaymentNote', {
-                    defaultValue: 'Payment will be recorded when you return cash to the cashier',
+                  ? t('modals.staffShift.cashReturnHelper', {
+                    defaultValue: 'Hand this cash to the cashier. Tips are recorded separately.',
                   })
                   : t('modals.staffShift.paymentDeductedNote', {
                     defaultValue: 'Payment already deducted from amount to return',
@@ -4491,7 +4561,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
               <div className={`mt-5 ${checkoutInsetSurfaceClass}`}>
                 <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
-                  {t('modals.staffShift.actualCashReturned', { defaultValue: 'Actual Cash Returned' })}
+                  {t('modals.staffShift.cashActuallyHandedOver', {
+                    defaultValue: 'Cash Actually Handed Over',
+                  })}
                 </label>
                 <input
                   type="text"
@@ -4506,7 +4578,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 {variance === null ? (
                   <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">
                     {t('modals.staffShift.actualCashReturnedRequired', {
-                      defaultValue: 'Enter the actual cash returned before checkout.',
+                      defaultValue: 'Enter the cash actually handed to the cashier before checkout.',
                     })}
                   </p>
                 ) : (
@@ -4545,7 +4617,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 ))}
                 <div className="flex items-center justify-between rounded-2xl border border-slate-200/90 bg-slate-50/80 px-4 py-3 dark:border-slate-400/30 dark:bg-slate-500/10">
                   <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                    {t('modals.staffShift.cashToReturn', { defaultValue: 'Cash To Return' })}
+                    {t('modals.staffShift.cashToHandToCashier', {
+                      defaultValue: 'Cash To Hand To Cashier',
+                    })}
                   </span>
                   <span className={`text-xl font-black ${cashToReturn >= 0 ? 'text-slate-700 dark:text-slate-200' : 'text-rose-600 dark:text-rose-300'}`}>
                     {formatCurrency(Math.abs(cashToReturn))}
@@ -4557,6 +4631,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
           <div className="space-y-6">
             {renderExpensesPanel()}
+            {renderTipsSummaryCard()}
 
             <div className={checkoutSurfaceClass}>
               <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
