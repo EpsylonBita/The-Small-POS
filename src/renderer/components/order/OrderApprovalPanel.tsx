@@ -9,6 +9,7 @@ import { getBridge } from '../../../lib';
 import { calculateSubtotalFromItems } from './order-math';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
+import { getPluginColor, getPluginName, isExternalPlugin } from '../../utils/plugin-icons';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -279,6 +280,14 @@ export function OrderApprovalPanel({
   const orderNumber = resolveDisplayOrderNumber(rawOrderNumber, createdAtRaw);
   const isKioskOrder = isKioskOrderNumber(rawOrderNumber.trim());
   const createdAt = createdAtRaw ? new Date(createdAtRaw) : null;
+  // Platform identity: bridge payloads are camelCase, admin API is snake_case.
+  const orderAsRecord = order as unknown as Record<string, unknown>;
+  const rawPlatform = order.plugin || order.platform
+    || (typeof orderAsRecord['order_plugin'] === 'string' ? (orderAsRecord['order_plugin'] as string) : '');
+  const orderPlatform = rawPlatform && isExternalPlugin(rawPlatform) ? rawPlatform : null;
+  const externalOrderId = (['external_plugin_order_id', 'externalPluginOrderId', 'external_platform_order_id', 'externalPlatformOrderId']
+    .map((key) => orderAsRecord[key])
+    .find((value): value is string => typeof value === 'string' && value.trim().length > 0)) ?? null;
   const deliveryAddressRaw = order.delivery_address || order.address || '';
   const [deliveryAddress, setDeliveryAddress] = React.useState<string>(deliveryAddressRaw);
   const [fullOrder, setFullOrder] = React.useState<Order>(order);
@@ -698,6 +707,15 @@ export function OrderApprovalPanel({
                   <span className="text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
                     {paymentMethodLabel}
                   </span>
+                  {orderPlatform && (
+                    <span
+                      className="rounded-full px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-white"
+                      style={{ backgroundColor: getPluginColor(orderPlatform) }}
+                    >
+                      {getPluginName(orderPlatform)}
+                      {externalOrderId ? ` · ${externalOrderId}` : ''}
+                    </span>
+                  )}
                 </div>
                 <h2
                   id={`order-approval-title-${order.id}`}

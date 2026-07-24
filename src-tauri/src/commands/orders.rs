@@ -4158,7 +4158,7 @@ pub async fn order_notify_platform_ready(
 ) -> Result<serde_json::Value, String> {
     let order_id_raw = arg0.ok_or("Missing orderId")?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, &order_id_raw)?;
     let now = Utc::now().to_rfc3339();
     ensure_order_status_transition_allowed(&conn, &order_id, "ready")?;
     conn.execute(
@@ -4175,6 +4175,15 @@ pub async fn order_notify_platform_ready(
     let payload = serde_json::json!({ "orderId": order_id_raw, "status": "ready" });
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload);
+    // Immediate server PATCH so the platform "ready" relay fires in seconds
+    // instead of waiting for the 15s sync loop (the queue entry above stays as
+    // the offline-replay fallback, matching order_approve/order_decline).
+    if let Some(remote_order_id) = remote_order_id.as_deref() {
+        spawn_immediate_order_status_patch(
+            &db,
+            build_order_status_patch_body(remote_order_id, "ready", None, None, None),
+        );
+    }
     Ok(serde_json::json!({ "success": true }))
 }
 

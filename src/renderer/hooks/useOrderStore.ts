@@ -201,11 +201,22 @@ const getOrderPlugin = (order: Order): string | null => {
 };
 
 const getExternalPluginOrderId = (order: Order): string | null => {
-  return (
-    order.external_plugin_order_id ||
-    order.external_platform_order_id ||
-    null
-  );
+  // The Rust bridge emits camelCase (externalPluginOrderId) while the admin
+  // API sends snake_case — accept both so platform-order detection works for
+  // orders from either path.
+  const record = order as unknown as Record<string, unknown>;
+  const candidates = [
+    order.external_plugin_order_id,
+    order.external_platform_order_id,
+    record['externalPluginOrderId'],
+    record['externalPlatformOrderId'],
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate;
+    }
+  }
+  return null;
 };
 
 const hasCustomerOrderMetadata = (order: Order): boolean => {

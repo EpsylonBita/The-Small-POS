@@ -40,9 +40,15 @@ export function OrderStatusControls({
   const [preparationProgress, setPreparationProgress] = useState(order.preparationProgress || 0);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Check if this is an external platform order
+  // Check if this is an external platform order. The Rust bridge emits
+  // camelCase (externalPluginOrderId) while the admin API sends snake_case —
+  // accept both so the Notify-Platform button works for either source.
+  const orderRecord = order as unknown as Record<string, unknown>;
   const orderPlugin = order.plugin || order.order_plugin || order.platform || order.order_platform;
-  const externalOrderId = order.external_plugin_order_id || order.external_platform_order_id;
+  const externalOrderId = order.external_plugin_order_id
+    || order.external_platform_order_id
+    || (typeof orderRecord['externalPluginOrderId'] === 'string' ? (orderRecord['externalPluginOrderId'] as string) : undefined)
+    || (typeof orderRecord['externalPlatformOrderId'] === 'string' ? (orderRecord['externalPlatformOrderId'] as string) : undefined);
   const isPlatformOrder = orderPlugin && externalOrderId && isExternalPlatform(orderPlugin);
 
   // Handle notifying platform that order is ready
