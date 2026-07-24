@@ -2101,8 +2101,62 @@ fn build_order_insert_body(
     // sibling so admin-dashboard can read either shape during the bake
     // window. coupon_discount_amount and manual_discount_value are
     // included; manual_discount_mode is a string so no cents needed.
-    let tip_amount =
+    let explicit_tip_amount =
         number_field_from_sources(&sources, &["tip_amount", "tipAmount"]).unwrap_or(0.0);
+    let expected_pre_tip_total =
+        (subtotal + tax_amount + delivery_fee - discount_amount - coupon_discount_amount).max(0.0);
+    let tip_amount = if explicit_tip_amount > 0.0 {
+        explicit_tip_amount
+    } else {
+        let expected_tip_cents = Cents::round_half_even(total_amount).as_i64()
+            - Cents::round_half_even(expected_pre_tip_total).as_i64();
+        if expected_tip_cents > 0 {
+            let completed_payment_tip_cents: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(
+                         COALESCE(
+                           tip_amount_cents,
+                           CAST(ROUND(COALESCE(tip_amount, 0) * 100) AS INTEGER),
+                           0
+                         )
+                       ), 0)
+                     FROM order_payments
+                     WHERE order_id = ?1
+                       AND lower(COALESCE(status, '')) = 'completed'",
+                    params![record_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    format!("sync_queue recover missing order tip from payment: {error}")
+                })?;
+            if completed_payment_tip_cents == expected_tip_cents {
+                conn.execute(
+                    "UPDATE orders
+                     SET tip_amount = ?1,
+                         tip_amount_cents = ?2
+                     WHERE id = ?3
+                       AND COALESCE(
+                         tip_amount_cents,
+                         CAST(ROUND(COALESCE(tip_amount, 0) * 100) AS INTEGER),
+                         0
+                       ) = 0",
+                    params![
+                        Cents::new(completed_payment_tip_cents).to_f64_dp2(),
+                        completed_payment_tip_cents,
+                        record_id
+                    ],
+                )
+                .map_err(|error| {
+                    format!("sync_queue persist recovered missing order tip: {error}")
+                })?;
+                Cents::new(completed_payment_tip_cents).to_f64_dp2()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        }
+    };
     let mut body = serde_json::json!({
         "client_order_id": string_field_from_sources(&sources, &["client_order_id", "clientOrderId"])
             .unwrap_or_else(|| record_id.to_string()),
@@ -7975,6 +8029,88 @@ mod tests {
                 "name": "Extra Cheese"
             }))
         );
+    }
+
+    #[test]
+    fn prepare_order_request_recovers_missing_order_tip_from_completed_payment() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                tip_amount, tip_amount_cents, status, order_type, payment_status,
+                sync_status, branch_id, created_at, updated_at
+             ) VALUES (
+                'order-missing-tip',
+                '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"name\":\"Crepe\",\"quantity\":1,\"unit_price\":11.5,\"total_price\":11.5}]',
+                12.0, 1200, 11.5, 1150,
+                0.0, 0, 'pending', 'delivery', 'paid',
+                'pending', ?1, datetime('now'), datetime('now')
+             )",
+            params![TEST_BRANCH_ID],
+        )
+        .expect("seed tipped order whose order payload lost the tip");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                tip_amount, tip_amount_cents, sync_status, sync_state,
+                created_at, updated_at
+             ) VALUES (
+                'payment-missing-order-tip', 'order-missing-tip', 'card',
+                12.0, 1200, 'EUR', 'completed',
+                0.5, 50, 'pending', 'waiting_parent',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed completed payment with durable tip");
+
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-missing-tip",
+            json!({
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "delivery",
+                "paymentMethod": "card",
+                "paymentStatus": "paid",
+                "totalAmount": 12.0,
+                "subtotal": 11.5,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 11.5,
+                    "name": "Crepe"
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare repaired tipped order request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(body.get("tip_amount").and_then(Value::as_f64), Some(0.5));
+        assert_eq!(
+            body.get("tip_amount_cents").and_then(Value::as_i64),
+            Some(50)
+        );
+        assert_eq!(
+            body.get("total_amount_cents").and_then(Value::as_i64),
+            Some(1200)
+        );
+        let repaired_tip_cents: i64 = conn
+            .query_row(
+                "SELECT tip_amount_cents FROM orders WHERE id = 'order-missing-tip'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read repaired local order tip");
+        assert_eq!(repaired_tip_cents, 50);
     }
 
     #[test]

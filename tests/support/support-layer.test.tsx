@@ -1137,16 +1137,13 @@ test('parseSpecialAddressInput rejects empty # labels', () => {
   assert.equal(parsed.normalizedAddress, '');
 });
 
-test('buildGoogleMapsDirectionsUrl falls back to current location when store origin is missing', () => {
+test('buildGoogleMapsDirectionsUrl refuses to fall back to the cashier PC location', () => {
   const url = buildGoogleMapsDirectionsUrl(null, {
     address: '12 Main Street',
     coordinates: null,
   });
 
-  assert.equal(
-    url,
-    'https://www.google.com/maps/dir/?api=1&destination=12+Main+Street&travelmode=driving',
-  );
+  assert.equal(url, null);
 });
 
 test('buildGoogleMapsDirectionsUrl includes store origin when configured', () => {

@@ -4489,14 +4489,74 @@ fn is_failed_order_insert_parent_blocker_sql() -> &'static str {
        AND status IN ('failed', 'conflict')
        AND error_message IS NOT NULL
        AND (
-         lower(error_message) LIKE '%failed to create order%'
-         OR lower(error_message) LIKE '%customer not found in organization%'
+         lower(error_message) LIKE '%customer not found in organization%'
          OR (
            lower(error_message) LIKE '%validation failed%'
            AND lower(error_message) LIKE '%payment_method%'
            AND (
              lower(error_message) LIKE '%required%'
              OR lower(error_message) LIKE '%received null%'
+           )
+         )
+         OR (
+           lower(error_message) LIKE '%total mismatch%'
+           AND EXISTS (
+             SELECT 1
+             FROM orders repaired_order
+             WHERE repaired_order.id = parity_sync_queue.record_id
+               AND (
+                 SELECT COALESCE(SUM(
+                   COALESCE(
+                     payment.tip_amount_cents,
+                     CAST(ROUND(COALESCE(payment.tip_amount, 0) * 100) AS INTEGER),
+                     0
+                   )
+                 ), 0)
+                 FROM order_payments payment
+                 WHERE payment.order_id = repaired_order.id
+                   AND lower(COALESCE(payment.status, '')) = 'completed'
+               ) > 0
+               AND ABS(
+                 COALESCE(
+                   repaired_order.total_amount_cents,
+                   CAST(ROUND(COALESCE(repaired_order.total_amount, 0) * 100) AS INTEGER),
+                   0
+                 )
+                 - (
+                   COALESCE(
+                     repaired_order.subtotal_cents,
+                     CAST(ROUND(COALESCE(repaired_order.subtotal, 0) * 100) AS INTEGER),
+                     0
+                   )
+                   + COALESCE(
+                     repaired_order.tax_amount_cents,
+                     CAST(ROUND(COALESCE(repaired_order.tax_amount, 0) * 100) AS INTEGER),
+                     0
+                   )
+                   + COALESCE(
+                     repaired_order.delivery_fee_cents,
+                     CAST(ROUND(COALESCE(repaired_order.delivery_fee, 0) * 100) AS INTEGER),
+                     0
+                   )
+                   - COALESCE(
+                     repaired_order.discount_amount_cents,
+                     CAST(ROUND(COALESCE(repaired_order.discount_amount, 0) * 100) AS INTEGER),
+                     0
+                   )
+                 )
+                 - (
+                   SELECT COALESCE(SUM(
+                     COALESCE(
+                       payment.tip_amount_cents,
+                       CAST(ROUND(COALESCE(payment.tip_amount, 0) * 100) AS INTEGER),
+                       0
+                     )
+                   ), 0)
+                   FROM order_payments payment
+                   WHERE payment.order_id = repaired_order.id
+                     AND lower(COALESCE(payment.status, '')) = 'completed'
+                 )
+               ) <= 1
            )
          )
        )"
@@ -26498,6 +26558,105 @@ mod tests {
         assert_eq!(insert_attempts, 0);
         assert!(insert_error.is_none());
         assert_eq!(update_status, "conflict");
+    }
+
+    #[test]
+    fn unrepaired_total_mismatch_parent_is_quarantined_instead_of_requeued_forever() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-unrepaired-total-mismatch', 'orders', 'ord-unrepaired-total-mismatch', 'INSERT',
+                 '{\"orderId\":\"ord-unrepaired-total-mismatch\",\"totalAmount\":12.0,\"subtotal\":11.5}',
+                 'org-test', datetime('now'), 10, 60000, 1, 'orders',
+                 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to create order: Total mismatch - order totals do not match computed values\"}'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let requeued = requeue_failed_order_insert_parent_blockers(&conn).unwrap();
+        assert_eq!(requeued, 0);
+
+        let (status, attempts): (String, i64) = conn
+            .query_row(
+                "SELECT status, attempts
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-unrepaired-total-mismatch'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(attempts, 10);
+    }
+
+    #[test]
+    fn tipped_total_mismatch_parent_is_requeued_when_completed_payment_reconciles_it() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                 tax_amount, tax_amount_cents, delivery_fee, delivery_fee_cents,
+                 discount_amount, discount_amount_cents, tip_amount, tip_amount_cents,
+                 status, payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'ord-recoverable-tipped-total', '[]', 12.0, 1200, 11.5, 1150,
+                 0.0, 0, 0.0, 0, 0.0, 0, 0.0, 0,
+                 'completed', 'paid', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 tip_amount, tip_amount_cents, sync_status, sync_state,
+                 created_at, updated_at
+             ) VALUES (
+                 'payment-recoverable-tip', 'ord-recoverable-tipped-total', 'card',
+                 12.0, 1200, 'EUR', 'completed', 0.5, 50, 'failed', 'waiting_parent',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'queue-recoverable-tipped-total', 'orders', 'ord-recoverable-tipped-total', 'INSERT',
+                 '{\"orderId\":\"ord-recoverable-tipped-total\",\"totalAmount\":12.0,\"subtotal\":11.5}',
+                 'org-test', datetime('now'), 10, 60000, 1, 'orders',
+                 'server-wins', 1, 'failed',
+                 'HTTP 500: {\"success\":false,\"error\":\"Failed to create order: Total mismatch\"}'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let requeued = requeue_failed_order_insert_parent_blockers(&conn).unwrap();
+        assert_eq!(requeued, 1);
+
+        let (status, attempts): (String, i64) = conn
+            .query_row(
+                "SELECT status, attempts
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-recoverable-tipped-total'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
     }
 
     #[test]

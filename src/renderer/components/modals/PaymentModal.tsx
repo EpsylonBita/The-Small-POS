@@ -332,7 +332,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           ? t('modals.payment.roomChargeSuccess', 'Charged to room')
           : t(`modals.payment.${method}Success`),
       );
-      onClose();
     } catch (error) {
       toast.error(t('modals.payment.paymentFailed'));
     } finally {

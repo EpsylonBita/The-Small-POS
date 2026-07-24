@@ -8,6 +8,14 @@ const source = readFileSync(
   'utf8',
 );
 
+test('MenuModal reserves its full working height before async delivery data arrives', () => {
+  assert.match(
+    source,
+    /size="full"\s*className="h-\[92vh\]"/,
+    'delivery-zone and menu loading must not resize the modal shell after it opens',
+  );
+});
+
 test('pickup customer popover is portaled app-level above the LiquidGlassModal viewport (z-index 20000)', () => {
   // The parent MenuModal is a LiquidGlassModal whose viewport is z-index 20000, so a
   // z-[1200] in-modal layer was mounted underneath it and stayed invisible.
@@ -154,7 +162,7 @@ test('MenuModal routes the X / Escape close through a dirty-cart discard confirm
   // otherwise closes immediately (edit mode / empty cart).
   assert.match(
     source,
-    /const requestClose = useCallback\(\(\) => \{\s*if \(!editMode && cartItems\.length > 0\) \{\s*setShowDiscardConfirm\(true\);\s*return;\s*\}\s*onClose\(\);\s*\}, \[editMode, cartItems\.length, onClose\]\);/,
+    /const requestClose = useCallback\(\(\) => \{\s*if \(!editMode && checkoutPhase === 'editing' && cartItems\.length > 0\) \{\s*setShowDiscardConfirm\(true\);\s*return;\s*\}\s*onClose\(\);\s*\}, \[editMode, checkoutPhase, cartItems\.length, onClose\]\);/,
   );
 
   // Both the header X and the LiquidGlassModal (its internal Escape) close via requestClose,

@@ -105,9 +105,9 @@ test('both order-edit modals preserve LiquidGlassModal title props + business ca
   );
   assert.match(cancellation, /title=\{t\('modals\.orderCancellation\.title'\)\}/);
 
-  // Callbacks / handlers untouched (no business/data-flow change).
+  // Callbacks / handlers preserve the explicit selected-payment identity.
   assert.match(editPayment, /onClick=\{handleSubmit\}/);
-  assert.match(editPayment, /onSave\(selectedMethod\)/);
+  assert.match(editPayment, /onSave\(selectedPaymentId, selectedMethod\)/);
   assert.match(cancellation, /onClick=\{handleConfirm\}/);
   assert.match(cancellation, /onConfirmCancel\(cancelReason\)/);
 });

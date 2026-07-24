@@ -4119,6 +4119,8 @@
     "editPaymentMethod": {
       "title": "Zahlungsmethode bearbeiten",
       "message": "Wählen Sie die neue Zahlungsmethode für diese Bestellung.",
+      "selectPayment": "Wählen Sie die Zahlung aus, die Sie ändern möchten.",
+      "paymentNumber": "Zahlung {{number}}",
       "save": "Änderungen speichern",
       "saving": "Speichern...",
       "cancel": "Abbrechen",
@@ -4733,6 +4735,7 @@
   },
   "orderCard": {
     "missingAddress": "Lieferadresse nicht verfügbar",
+    "storeLocationNotConfigured": "Die Geschäftsadresse ist nicht konfiguriert",
     "openInMaps": "In Google Maps öffnen",
     "addressNotAvailable": "Adresse nicht verfügbar",
     "loadingAddress": "Adresse wird geladen...",

@@ -14,6 +14,7 @@ struct PaymentUpdateStatusPayload {
 #[derive(Debug)]
 struct PaymentMethodUpdatePayload {
     order_id: String,
+    payment_id: Option<String>,
     payment_method: String,
 }
 
@@ -142,9 +143,16 @@ fn parse_payment_method_update_payload(
         "card" => "card".to_string(),
         _ => return Err("Payment method edits only support cash or card".into()),
     };
+    let payment_id = payload
+        .get("paymentId")
+        .or_else(|| payload.get("payment_id"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     Ok(PaymentMethodUpdatePayload {
         order_id: order_id.trim().to_string(),
+        payment_id,
         payment_method,
     })
 }
@@ -328,7 +336,12 @@ pub async fn payment_update_payment_method(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = parse_payment_method_update_payload(arg0, arg1)?;
-    let result = payments::update_payment_method(&db, &payload.order_id, &payload.payment_method)?;
+    let result = payments::update_payment_method_for_payment(
+        &db,
+        &payload.order_id,
+        payload.payment_id.as_deref(),
+        &payload.payment_method,
+    )?;
     if let Some(event_payload) = result.get("data").cloned() {
         let _ = app.emit("order_payment_updated", event_payload);
     }
@@ -567,6 +580,22 @@ mod dto_tests {
         .expect("legacy method edit args should parse");
         assert_eq!(parsed.order_id, "order-2");
         assert_eq!(parsed.payment_method, "cash");
+    }
+
+    #[test]
+    fn parse_payment_method_update_supports_explicit_payment_target() {
+        let parsed = parse_payment_method_update_payload(
+            Some(serde_json::json!({
+                "orderId": "order-split-1",
+                "paymentId": "payment-split-2",
+                "paymentMethod": "card"
+            })),
+            None,
+        )
+        .expect("targeted payment method edit payload should parse");
+        assert_eq!(parsed.order_id, "order-split-1");
+        assert_eq!(parsed.payment_id.as_deref(), Some("payment-split-2"));
+        assert_eq!(parsed.payment_method, "card");
     }
 
     #[test]

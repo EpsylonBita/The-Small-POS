@@ -123,6 +123,26 @@ test('all new-order paths persist tip financials and recipient attribution', () 
   }
 });
 
+test('OrderService preserves order tip fields in both native and Admin API create payloads', () => {
+  const orderService = readSource('src', 'services', 'OrderService.ts');
+
+  assert.match(
+    orderService,
+    /tipAmount:\s*orderDataAny\.tipAmount\s*\?\?\s*orderDataAny\.tip_amount\s*\?\?\s*0/,
+    'native order normalization must keep the tip that is already included in totalAmount',
+  );
+  assert.match(
+    orderService,
+    /tip_amount:\s*orderDataAny\.tip_amount\s*\?\?\s*orderDataAny\.tipAmount\s*\?\?\s*0/,
+    'native order normalization must emit the snake_case tip consumed by Rust',
+  );
+  assert.match(
+    orderService,
+    /const apiPayload:[\s\S]*?tip_amount:\s*orderDataAny\.tip_amount\s*\?\?\s*orderDataAny\.tipAmount\s*\?\?\s*0/,
+    'Admin API fallback must receive the same tip as native checkout',
+  );
+});
+
 test('menu surface remains suppressed from payment selection through completion', () => {
   const menuModal = readSource(
     'src',
@@ -138,5 +158,10 @@ test('menu surface remains suppressed from payment selection through completion'
   assert.match(
     menuModal,
     /if \(checkoutPhase === ['"]payment['"]\) \{\s*setCheckoutPhase\(['"]editing['"]\)/,
+  );
+  assert.match(
+    menuModal,
+    /if \(!editMode && checkoutPhase === ['"]editing['"] && cartItems\.length > 0\)/,
+    'the unsaved-cart dialog must only run while actively editing, never while payment is finishing',
   );
 });

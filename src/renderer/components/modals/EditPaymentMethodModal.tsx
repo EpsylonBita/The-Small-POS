@@ -4,12 +4,20 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 
 type EditablePaymentMethod = 'cash' | 'card';
 
+export interface EditablePaymentRow {
+  id: string;
+  method: EditablePaymentMethod;
+  amount: number;
+  transactionRef?: string | null;
+}
+
 interface EditPaymentMethodModalProps {
   isOpen: boolean;
   orderNumber?: string;
   currentMethod: EditablePaymentMethod;
+  payments?: EditablePaymentRow[];
   isSaving?: boolean;
-  onSave: (nextMethod: EditablePaymentMethod) => void;
+  onSave: (paymentId: string | null, nextMethod: EditablePaymentMethod) => void;
   onClose: () => void;
 }
 
@@ -17,23 +25,41 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
   isOpen,
   orderNumber,
   currentMethod,
+  payments = [],
   isSaving = false,
   onSave,
   onClose,
 }) => {
   const { t } = useTranslation();
   const [selectedMethod, setSelectedMethod] = useState<EditablePaymentMethod>(currentMethod);
+  const [selectedPaymentId, setSelectedPaymentId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
-    setSelectedMethod(currentMethod);
-  }, [isOpen, currentMethod]);
+    const firstPayment = payments[0];
+    setSelectedPaymentId(firstPayment?.id ?? null);
+    setSelectedMethod(firstPayment?.method ?? currentMethod);
+  }, [isOpen, currentMethod, payments]);
 
-  const hasChanged = useMemo(() => selectedMethod !== currentMethod, [selectedMethod, currentMethod]);
+  const selectedPayment = useMemo(
+    () => payments.find((payment) => payment.id === selectedPaymentId) ?? null,
+    [payments, selectedPaymentId],
+  );
+  const selectedCurrentMethod = selectedPayment?.method ?? currentMethod;
+  const hasChanged = useMemo(
+    () => selectedMethod !== selectedCurrentMethod,
+    [selectedMethod, selectedCurrentMethod],
+  );
+
+  const selectPayment = (payment: EditablePaymentRow) => {
+    if (isSaving) return;
+    setSelectedPaymentId(payment.id);
+    setSelectedMethod(payment.method);
+  };
 
   const handleSubmit = () => {
     if (!hasChanged || isSaving) return;
-    onSave(selectedMethod);
+    onSave(selectedPaymentId, selectedMethod);
   };
 
   return (
@@ -52,6 +78,48 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
       <p className="liquid-glass-modal-text-muted mb-6">
         {t('modals.editPaymentMethod.message')}
       </p>
+
+      {payments.length > 1 && (
+        <div className="mb-6">
+          <p className="liquid-glass-modal-text mb-3 text-sm font-semibold">
+            {t('modals.editPaymentMethod.selectPayment')}
+          </p>
+          <div className="space-y-2">
+            {payments.map((payment, index) => {
+              const isSelected = payment.id === selectedPaymentId;
+              return (
+                <button
+                  key={payment.id}
+                  type="button"
+                  onClick={() => selectPayment(payment)}
+                  disabled={isSaving}
+                  className={`w-full rounded-2xl border p-3 text-left transition-colors ${
+                    isSelected
+                      ? 'border-amber-400/70 bg-amber-100/60 dark:border-amber-400/50 dark:bg-amber-500/20'
+                      : 'border-zinc-300/70 bg-white/65 active:bg-zinc-100 dark:border-white/15 dark:bg-white/[0.06] dark:active:bg-white/[0.1]'
+                  } ${isSaving ? 'cursor-not-allowed opacity-70' : ''}`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="liquid-glass-modal-text font-medium">
+                      {t('modals.editPaymentMethod.paymentNumber', { number: index + 1 })}
+                    </span>
+                    <span className="liquid-glass-modal-text font-semibold">
+                      {new Intl.NumberFormat(undefined, {
+                        style: 'currency',
+                        currency: 'EUR',
+                      }).format(payment.amount)}
+                    </span>
+                  </div>
+                  <div className="liquid-glass-modal-text-muted mt-1 text-sm">
+                    {t(`modals.editPaymentMethod.methods.${payment.method}`)}
+                    {payment.transactionRef ? ` · ${payment.transactionRef}` : ''}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="space-y-3 mb-6">
         <button

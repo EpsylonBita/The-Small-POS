@@ -16,7 +16,9 @@ import BulkActionsBar from "./BulkActionsBar";
 import DriverAssignmentModal from "./modals/DriverAssignmentModal";
 import OrderCancellationModal from "./modals/OrderCancellationModal";
 import EditOptionsModal from "./modals/EditOptionsModal";
-import EditPaymentMethodModal from "./modals/EditPaymentMethodModal";
+import EditPaymentMethodModal, {
+  type EditablePaymentRow,
+} from "./modals/EditPaymentMethodModal";
 import {
   EditCustomerInfoModal,
   type EditCustomerInfoFormData,
@@ -950,6 +952,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       orderNumber?: string;
       currentMethod: "cash" | "card";
       paymentStatus: string;
+      payments: EditablePaymentRow[];
     } | null>(null);
     const [pendingEditOrders, setPendingEditOrders] = useState<string[]>([]);
     const [editingSingleOrder, setEditingSingleOrder] = useState<string | null>(
@@ -5234,15 +5237,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return t("orderDashboard.paymentMethodEditUnavailable");
       }
 
-      if (!editablePaymentMethod) {
-        return t("orderDashboard.paymentMethodEditUnavailable");
-      }
-
       return undefined;
     }, [
       pendingEditOrders.length,
       editablePaymentOrder,
-      editablePaymentMethod,
       t,
     ]);
 
@@ -5254,17 +5252,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const localizePaymentMethodEditError = (error: unknown) => {
       const rawMessage = extractOrderDashboardErrorMessage(error) || "";
-      if (
-        rawMessage.includes(
-          "PAYMENT_METHOD_EDIT_REQUIRES_SINGLE_COMPLETED_PAYMENT",
-        ) ||
-        rawMessage.includes(
-          "Payment method can only be edited for orders with exactly one completed payment",
-        )
-      ) {
-        return t(
-          "orderDashboard.paymentMethodEditRequiresSingleCompletedPayment",
-        );
+      if (rawMessage.includes("PAYMENT_METHOD_EDIT_TARGET_NOT_FOUND")) {
+        return t("orderDashboard.paymentMethodEditUnavailable");
       }
       return t("orderDashboard.paymentMethodUpdateFailed");
     };
@@ -5280,7 +5269,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return;
       }
 
-      if (!editablePaymentOrder || !editablePaymentMethod) {
+      if (!editablePaymentOrder) {
         showPaymentMethodEditError(
           t("orderDashboard.paymentMethodEditUnavailable"),
         );
@@ -5294,24 +5283,39 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           editablePaymentOrder.id,
         );
         const paymentRows = Array.isArray(orderPayments)
-          ? (orderPayments as Array<{ method?: unknown; status?: unknown }>)
+          ? (orderPayments as Array<{
+              id?: unknown;
+              method?: unknown;
+              status?: unknown;
+              amount?: unknown;
+              transactionRef?: unknown;
+            }>)
           : [];
-        const completedPayments = paymentRows.filter(
-          (payment) =>
-            String(payment?.status || "").trim().toLowerCase() === "completed",
-        );
+        const completedPayments = paymentRows
+          .filter(
+            (payment) =>
+              String(payment?.status || "").trim().toLowerCase() ===
+              "completed",
+          )
+          .filter((payment) => {
+            const method = String(payment?.method || "")
+              .trim()
+              .toLowerCase();
+            return (
+              String(payment?.id || "").trim().length > 0 &&
+              (method === "cash" || method === "card")
+            );
+          });
 
-        if (completedPayments.length > 1) {
+        if (paymentRows.length > 0 && completedPayments.length === 0) {
           showPaymentMethodEditError(
-            t(
-              "orderDashboard.paymentMethodEditRequiresSingleCompletedPayment",
-            ),
+            t("orderDashboard.paymentMethodEditUnavailable"),
           );
           return;
         }
 
         const completedPaymentMethod =
-          completedPayments.length === 1
+          completedPayments.length > 0
             ? String(completedPayments[0]?.method || "")
                 .trim()
                 .toLowerCase()
@@ -5320,6 +5324,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           completedPaymentMethod === "cash" || completedPaymentMethod === "card"
             ? completedPaymentMethod
             : editablePaymentMethod;
+        if (!currentMethod) {
+          showPaymentMethodEditError(
+            t("orderDashboard.paymentMethodEditUnavailable"),
+          );
+          return;
+        }
         const paymentStatus =
           String(
             editablePaymentOrder.payment_status ||
@@ -5336,6 +5346,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             editablePaymentOrder.orderNumber,
           currentMethod,
           paymentStatus,
+          payments: completedPayments.map((payment) => ({
+            id: String(payment.id),
+            method: String(payment.method).trim().toLowerCase() as
+              | "cash"
+              | "card",
+            amount: Number(payment.amount || 0),
+            transactionRef:
+              typeof payment.transactionRef === "string"
+                ? payment.transactionRef
+                : null,
+          })),
         });
         setShowEditOptionsModal(false);
         setShowEditPaymentModal(true);
@@ -5533,19 +5554,27 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setEditingSingleOrder(null);
     };
 
-    const handlePaymentMethodSave = async (nextMethod: "cash" | "card") => {
+    const handlePaymentMethodSave = async (
+      paymentId: string | null,
+      nextMethod: "cash" | "card",
+    ) => {
       if (!editPaymentTarget) {
         toast.error(t("orderDashboard.paymentMethodEditUnavailable"));
         return;
       }
+      const selectedPayment = editPaymentTarget.payments.find(
+        (payment) => payment.id === paymentId,
+      );
       const sameMethodRequested =
-        editPaymentTarget.currentMethod === nextMethod;
+        (selectedPayment?.method ?? editPaymentTarget.currentMethod) ===
+        nextMethod;
 
       setIsUpdatingPaymentMethod(true);
       try {
         const result: any = await bridge.payments.updatePaymentMethod(
           editPaymentTarget.orderId,
           nextMethod,
+          paymentId,
         );
         if (!result?.success) {
           throw new Error(result?.error || "Failed to update payment method");
@@ -7322,6 +7351,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           isOpen={showEditPaymentModal}
           orderNumber={editPaymentTarget?.orderNumber}
           currentMethod={editPaymentTarget?.currentMethod || "cash"}
+          payments={editPaymentTarget?.payments || []}
           isSaving={isUpdatingPaymentMethod}
           onSave={handlePaymentMethodSave}
           onClose={handleEditPaymentClose}

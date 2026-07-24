@@ -508,12 +508,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // drop the draft. Edit mode and the post-checkout success paths (which call onClose
   // directly) bypass this and close immediately.
   const requestClose = useCallback(() => {
-    if (!editMode && cartItems.length > 0) {
+    if (!editMode && checkoutPhase === 'editing' && cartItems.length > 0) {
       setShowDiscardConfirm(true);
       return;
     }
     onClose();
-  }, [editMode, cartItems.length, onClose]);
+  }, [editMode, checkoutPhase, cartItems.length, onClose]);
 
   const handleDiscardOrder = useCallback(() => {
     setShowDiscardConfirm(false);
@@ -2529,6 +2529,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           </div>
         }
         size="full"
+        className="h-[92vh]"
         closeOnBackdrop={false}
         closeOnEscape={true}
       >

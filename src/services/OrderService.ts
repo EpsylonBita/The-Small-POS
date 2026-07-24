@@ -1034,6 +1034,8 @@ export class OrderService {
         coupon_discount_amount:
           (orderData as any).coupon_discount_amount ?? (orderData as any).couponDiscountAmount ?? 0,
         deliveryFee: (orderData as any).deliveryFee ?? (orderData as any).delivery_fee ?? 0,
+        tipAmount: orderDataAny.tipAmount ?? orderDataAny.tip_amount ?? 0,
+        tip_amount: orderDataAny.tip_amount ?? orderDataAny.tipAmount ?? 0,
         is_ghost: (orderData as any).is_ghost ?? (orderData as any).isGhost ?? false,
         skipAutoPrint: orderDataAny.skipAutoPrint ?? orderDataAny.skip_auto_print ?? false,
         skip_auto_print: orderDataAny.skip_auto_print ?? orderDataAny.skipAutoPrint ?? false,
@@ -1306,6 +1308,7 @@ export class OrderService {
         coupon_code: normalizedCouponCode,
         coupon_discount_amount: normalizedCouponDiscountAmount,
         delivery_fee: orderDataAny.delivery_fee ?? orderData.deliveryFee ?? 0,
+        tip_amount: orderDataAny.tip_amount ?? orderDataAny.tipAmount ?? 0,
         is_ghost: normalizedIsGhost,
         ghost_source: normalizedGhostSource,
         ghost_metadata: normalizedGhostMetadata,

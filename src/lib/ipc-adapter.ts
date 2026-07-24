@@ -944,7 +944,7 @@ export interface ResolvePaymentBlockerParams {
 
 export interface UpdatePaymentMethodResult {
   orderId: string;
-  paymentId: string;
+  paymentId: string | null;
   paymentMethod: string;
   paymentStatus: string;
   retriedSync?: boolean;
@@ -1400,6 +1400,7 @@ export interface PlatformBridge {
     updatePaymentMethod(
       orderId: string,
       method: "cash" | "card",
+      paymentId?: string | null,
     ): Promise<IpcResult<UpdatePaymentMethodResult>>;
     printReceipt(receiptData: any, type?: string): Promise<IpcResult>;
     printKitchenTicket(ticketData: any): Promise<IpcResult>;
@@ -2819,8 +2820,16 @@ export class TauriBridge implements PlatformBridge {
   payments = {
     updatePaymentStatus: (id: string, s: string, m?: string) =>
       this.inv("payment:update-payment-status", id, s, m),
-    updatePaymentMethod: (id: string, method: "cash" | "card") =>
-      this.inv("payment:update-payment-method", id, method),
+    updatePaymentMethod: (
+      orderId: string,
+      paymentMethod: "cash" | "card",
+      paymentId?: string | null,
+    ) =>
+      this.inv("payment:update-payment-method", {
+        orderId,
+        paymentId,
+        paymentMethod,
+      }),
     printReceipt: (data: any, type?: string) =>
       this.inv("payment:print-receipt", data, type),
     printKitchenTicket: (data: any) => this.inv("kitchen:print-ticket", data),

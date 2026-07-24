@@ -1929,9 +1929,19 @@ fn enqueue_order_payment_snapshot_sync(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn update_payment_method(
     db: &DbState,
     order_id_raw: &str,
+    next_method: &str,
+) -> Result<Value, String> {
+    update_payment_method_for_payment(db, order_id_raw, None, next_method)
+}
+
+pub fn update_payment_method_for_payment(
+    db: &DbState,
+    order_id_raw: &str,
+    target_payment_id: Option<&str>,
     next_method: &str,
 ) -> Result<Value, String> {
     let next_method = match next_method.trim().to_ascii_lowercase().as_str() {
@@ -1988,7 +1998,14 @@ pub fn update_payment_method(
         payments
     };
 
+    let target_payment_id = target_payment_id
+        .map(str::trim)
+        .filter(|payment_id| !payment_id.is_empty());
+
     if completed_payments.is_empty() {
+        if target_payment_id.is_some() {
+            return Err("PAYMENT_METHOD_EDIT_TARGET_NOT_FOUND".into());
+        }
         if normalized_payment_status != "paid" {
             return Err(
                 "Payment method can only be edited for fully paid orders when no local payment record exists"
@@ -2036,12 +2053,19 @@ pub fn update_payment_method(
         }));
     }
 
-    if completed_payments.len() != 1 {
-        return Err("PAYMENT_METHOD_EDIT_REQUIRES_SINGLE_COMPLETED_PAYMENT".into());
-    }
-
     let (payment_id, current_method, _item_assignment_count): CompletedPaymentRow =
-        completed_payments[0].clone();
+        if let Some(target_payment_id) = target_payment_id {
+            completed_payments
+                .iter()
+                .find(|(payment_id, _, _)| payment_id == target_payment_id)
+                .cloned()
+                .ok_or("PAYMENT_METHOD_EDIT_TARGET_NOT_FOUND")?
+        } else {
+            if completed_payments.len() != 1 {
+                return Err("PAYMENT_METHOD_EDIT_REQUIRES_SINGLE_COMPLETED_PAYMENT".into());
+            }
+            completed_payments[0].clone()
+        };
     if current_method == next_method {
         if payment_sync_queue_needs_retry(&conn, &payment_id)? {
             let tx = conn
@@ -3270,6 +3294,92 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("read split payment methods");
         assert_eq!(methods, vec!["cash".to_string(), "card".to_string()]);
+    }
+
+    #[test]
+    fn test_update_payment_method_targets_one_completed_split_payment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, total_amount_cents, status, sync_status, payment_status,
+                created_at, updated_at
+             ) VALUES (
+                'ord-method-targeted-split',
+                '[]',
+                10.0,
+                1000,
+                'completed',
+                'pending',
+                'pending',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .expect("insert split order for targeted payment method edit");
+        drop(conn);
+
+        let first = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-method-targeted-split",
+                "method": "cash",
+                "amount": 4.0,
+                "cashReceived": 4.0,
+                "changeGiven": 0.0,
+                "transactionRef": "TARGETED-SPLIT-CASH-1",
+            }),
+        )
+        .expect("record first targeted split payment");
+        let first_payment_id = first["paymentId"]
+            .as_str()
+            .expect("first payment id")
+            .to_string();
+        let second = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-method-targeted-split",
+                "method": "cash",
+                "amount": 6.0,
+                "cashReceived": 6.0,
+                "changeGiven": 0.0,
+                "transactionRef": "TARGETED-SPLIT-CASH-2",
+            }),
+        )
+        .expect("record second targeted split payment");
+        let second_payment_id = second["paymentId"]
+            .as_str()
+            .expect("second payment id")
+            .to_string();
+
+        let result = update_payment_method_for_payment(
+            &db,
+            "ord-method-targeted-split",
+            Some(first_payment_id.as_str()),
+            "card",
+        )
+        .expect("targeted split payment method edit");
+        assert_eq!(result["data"]["paymentId"], first_payment_id);
+        assert_eq!(result["data"]["paymentMethod"], "card");
+
+        let conn = db.conn.lock().unwrap();
+        let first_method: String = conn
+            .query_row(
+                "SELECT method FROM order_payments WHERE id = ?1",
+                params![first_payment_id],
+                |row| row.get(0),
+            )
+            .expect("read targeted payment method");
+        let second_method: String = conn
+            .query_row(
+                "SELECT method FROM order_payments WHERE id = ?1",
+                params![second_payment_id],
+                |row| row.get(0),
+            )
+            .expect("read untouched payment method");
+        assert_eq!(first_method, "card");
+        assert_eq!(second_method, "cash");
     }
 
     #[test]

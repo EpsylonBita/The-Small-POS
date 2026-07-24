@@ -163,6 +163,8 @@ export interface Order {
   paymentMethod?: PaymentMethod; // For backward compatibility
   payment_transaction_id?: string;
   paymentTransactionId?: string; // For backward compatibility
+  tip_amount?: number;
+  tipAmount?: number; // For backward compatibility
 
   // Discount information
   discount_percentage?: number; // Discount percentage (0-100)

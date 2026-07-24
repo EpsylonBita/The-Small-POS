@@ -188,6 +188,11 @@ test('PaymentModal fires the success toast only after a non-false completion res
   const successToastIndex = handler.indexOf('toast.success');
   assert.ok(guardIndex !== -1 && successToastIndex !== -1 && guardIndex < successToastIndex,
     'the false-guard must run before the payment success toast');
+  assert.doesNotMatch(
+    handler.slice(successToastIndex),
+    /\bonClose\(\)/,
+    'the owning checkout flow already tears down a successful checkout; a second stale close can reopen MenuModal and trigger its dirty-cart guard',
+  );
 });
 
 test('ProductCatalogModal keeps the cart and reports failure when onOrderComplete resolves false', () => {

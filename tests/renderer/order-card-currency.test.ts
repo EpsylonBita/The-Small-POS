@@ -87,6 +87,19 @@ test('OrderCard delivery directions affordance uses aria-label/role, not a nativ
   assert.match(cardSource, /aria-disabled=\{!isEnabled\}/);
 });
 
+test('OrderCard directions require a configured store origin and target the resolved selected address', () => {
+  assert.match(
+    cardSource,
+    /delivery_address:\s*deliveryAddressNormalized \|\| resolvedAddress,\s*deliveryAddress:\s*deliveryAddressNormalized \|\| resolvedAddress/,
+    'both address aliases must target the address rendered on the selected order row',
+  );
+  assert.match(
+    cardSource,
+    /const disabledReason = !storeMapOrigin[\s\S]*?orderCard\.storeLocationNotConfigured/,
+    'the grid route button must not silently fall back to the cashier PC location',
+  );
+});
+
 // Round 343 (live QA, delivered/history tab): a completed pickup row showed a huge red elapsed timer
 // ("4570λ") plus an age-based red left edge -- it read like a broken urgency counter. Terminal rows
 // (completed / delivered / cancelled / canceled) must show a calm timestamp instead of the live

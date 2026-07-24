@@ -4187,6 +4187,8 @@
     "editPaymentMethod": {
       "title": "Επεξεργασία Τρόπου Πληρωμής",
       "message": "Επιλέξτε τον νέο τρόπο πληρωμής για αυτή την παραγγελία.",
+      "selectPayment": "Επιλέξτε την πληρωμή που θέλετε να αλλάξετε.",
+      "paymentNumber": "Πληρωμή {{number}}",
       "save": "Αποθήκευση Αλλαγών",
       "saving": "Αποθήκευση...",
       "cancel": "Ακύρωση",
@@ -4733,6 +4735,7 @@
   },
   "orderCard": {
     "missingAddress": "Η διεύθυνση παράδοσης δεν είναι διαθέσιμη",
+    "storeLocationNotConfigured": "Η διεύθυνση του καταστήματος δεν έχει ρυθμιστεί",
     "openInMaps": "Άνοιγμα στο Google Maps",
     "addressNotAvailable": "Η διεύθυνση δεν είναι διαθέσιμη",
     "loadingAddress": "Φόρτωση διεύθυνσης...",

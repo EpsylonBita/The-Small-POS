@@ -376,6 +376,11 @@ export function buildGoogleMapsDirectionsUrl(
   origin: StoreMapOrigin | null | undefined,
   stop: DeliveryRouteStopPayload,
 ): string | null {
+  const originValue = origin ? locationToMapsValue(origin) : ''
+  if (!originValue) {
+    return null
+  }
+
   const destination = stop.coordinates
     ? `${stop.coordinates.lat},${stop.coordinates.lng}`
     : normalizeText(stop.address)
@@ -390,10 +395,7 @@ export function buildGoogleMapsDirectionsUrl(
     travelmode: 'driving',
   })
 
-  const originValue = origin ? locationToMapsValue(origin) : ''
-  if (originValue) {
-    params.set('origin', originValue)
-  }
+  params.set('origin', originValue)
 
   return `https://www.google.com/maps/dir/?${params.toString()}`
 }
