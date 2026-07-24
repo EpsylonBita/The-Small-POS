@@ -3707,6 +3707,133 @@ fn z_report_expense_entries(payload: &Value) -> Vec<receipt_renderer::ZReportExp
         .unwrap_or_default()
 }
 
+fn z_report_staff_payment_entries(
+    payload: &Value,
+) -> Vec<receipt_renderer::ZReportStaffPaymentEntry> {
+    let reports = payload
+        .get("staffReports")
+        .or_else(|| payload.get("staff_reports"))
+        .and_then(Value::as_array);
+    let Some(reports) = reports else {
+        return Vec::new();
+    };
+
+    let mut itemized = Vec::<(String, receipt_renderer::ZReportStaffPaymentEntry, bool)>::new();
+    let mut item_index = HashMap::<String, usize>::new();
+
+    for report in reports {
+        let report_name =
+            text_from_paths(report, &["/staffName", "/staff_name", "/name"]).unwrap_or_default();
+        let report_role =
+            text_from_paths(report, &["/role", "/roleType", "/role_type"]).unwrap_or_default();
+        let report_is_probable_recipient = !matches!(report_role.as_str(), "cashier" | "manager");
+
+        let Some(payments) = report
+            .pointer("/payments/list")
+            .or_else(|| report.pointer("/staffPayments/items"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+
+        for (payment_offset, payment) in payments.iter().enumerate() {
+            let amount = number_from_paths(payment, &["/amount", "/total"]).unwrap_or_else(|| {
+                number_from_paths(payment, &["/amountCents", "/amount_cents"]).unwrap_or(0.0)
+                    / 100.0
+            });
+            if amount == 0.0 {
+                continue;
+            }
+
+            let explicit_staff_name = text_from_paths(
+                payment,
+                &[
+                    "/staffName",
+                    "/staff_name",
+                    "/paidToStaffName",
+                    "/paid_to_staff_name",
+                ],
+            );
+            let explicit_role = text_from_paths(payment, &["/role", "/roleType", "/role_type"]);
+            let staff_name = explicit_staff_name
+                .clone()
+                .unwrap_or_else(|| report_name.clone());
+            let role = explicit_role.unwrap_or_else(|| report_role.clone());
+            let reason = text_from_paths(payment, &["/notes", "/note", "/description", "/reason"])
+                .or_else(|| {
+                    text_from_paths(payment, &["/paymentType", "/payment_type", "/type"])
+                        .map(|value| value.replace(['_', '-'], " "))
+                })
+                .unwrap_or_default();
+            let payment_id = text_from_paths(payment, &["/id", "/paymentId", "/payment_id"])
+                .unwrap_or_else(|| {
+                    format!("{}:{}:{}:{}", report_name, amount, reason, payment_offset)
+                });
+            let is_probable_recipient =
+                explicit_staff_name.is_some() || report_is_probable_recipient;
+            let entry = receipt_renderer::ZReportStaffPaymentEntry {
+                staff_name,
+                role,
+                reason,
+                amount,
+                created_at: text_from_paths(payment, &["/createdAt", "/created_at", "/timestamp"]),
+            };
+
+            if let Some(existing_index) = item_index.get(&payment_id).copied() {
+                if is_probable_recipient && !itemized[existing_index].2 {
+                    itemized[existing_index] = (payment_id.clone(), entry, is_probable_recipient);
+                }
+            } else {
+                item_index.insert(payment_id.clone(), itemized.len());
+                itemized.push((payment_id, entry, is_probable_recipient));
+            }
+        }
+    }
+
+    if !itemized.is_empty() {
+        return itemized.into_iter().map(|(_, entry, _)| entry).collect();
+    }
+
+    // Older persisted reports may contain only one aggregate per staff member.
+    // Prefer recipient shifts over cashier/manager outflow summaries so the same
+    // payout is not presented twice.
+    let mut aggregate_entries = reports
+        .iter()
+        .filter_map(|report| {
+            let amount = number_from_paths(
+                report,
+                &[
+                    "/payments/staffPayments",
+                    "/payments/staff_payments",
+                    "/staffPayments",
+                    "/staff_payments",
+                ],
+            )
+            .unwrap_or(0.0);
+            if amount == 0.0 {
+                return None;
+            }
+            let role =
+                text_from_paths(report, &["/role", "/roleType", "/role_type"]).unwrap_or_default();
+            Some(receipt_renderer::ZReportStaffPaymentEntry {
+                staff_name: text_from_paths(report, &["/staffName", "/staff_name", "/name"])
+                    .unwrap_or_default(),
+                role,
+                reason: String::new(),
+                amount,
+                created_at: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    if aggregate_entries
+        .iter()
+        .any(|entry| !matches!(entry.role.as_str(), "cashier" | "manager"))
+    {
+        aggregate_entries.retain(|entry| !matches!(entry.role.as_str(), "cashier" | "manager"));
+    }
+    aggregate_entries
+}
+
 fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &str) -> ZReportDoc {
     let report_date = text_from_paths(payload, &["/date", "/reportDate", "/report_date"])
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
@@ -3815,6 +3942,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         &["/cashDrawer/driverCashReturned", "/driverCashReturned"],
     )
     .unwrap_or(0.0);
+    let staff_payment_lines = z_report_staff_payment_entries(payload);
     let staff_payments_total = number_from_paths(
         payload,
         &[
@@ -3823,7 +3951,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
             "/staffPaymentsTotal",
         ],
     )
-    .unwrap_or(0.0);
+    .unwrap_or_else(|| staff_payment_lines.iter().map(|entry| entry.amount).sum());
     let dine_in_orders = number_from_paths(payload, &["/sales/dineInOrders", "/dineInOrders"])
         .unwrap_or(0.0)
         .round() as i64;
@@ -3888,6 +4016,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         delivery_orders,
         delivery_sales,
         expense_lines: z_report_expense_entries(payload),
+        staff_payment_lines,
         staff_reports: payload
             .get("staffReports")
             .and_then(Value::as_array)
@@ -4016,6 +4145,16 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
     let terminal_name =
         resolve_printed_terminal_name_with_conn(&conn, explicit_terminal_name.as_deref())
             .unwrap_or_default();
+    let staff_payment_lines = z_report_staff_payment_entries(&rj);
+    let staff_payments_total = number_from_paths(
+        &rj,
+        &[
+            "/staffPayments/total",
+            "/cashDrawer/staffPaymentsTotal",
+            "/staffPaymentsTotal",
+        ],
+    )
+    .unwrap_or_else(|| staff_payment_lines.iter().map(|entry| entry.amount).sum());
 
     Ok(ZReportDoc {
         report_id,
@@ -4050,11 +4189,7 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
             .pointer("/cashDrawer/driverCashReturned")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
-        staff_payments_total: rj
-            .pointer("/staffPayments/total")
-            .or_else(|| rj.pointer("/cashDrawer/staffPaymentsTotal"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
+        staff_payments_total,
         dine_in_orders: rj
             .pointer("/sales/dineInOrders")
             .and_then(|v| v.as_i64())
@@ -4080,6 +4215,7 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
         expense_lines: z_report_expense_entries(&rj),
+        staff_payment_lines,
         staff_reports: rj
             .get("staffReports")
             .and_then(Value::as_array)
@@ -7004,6 +7140,73 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert!(entries[0].reason.is_empty());
+    }
+
+    #[test]
+    fn test_z_report_staff_payment_entries_are_itemized_named_and_deduplicated() {
+        let entries = z_report_staff_payment_entries(&serde_json::json!({
+            "staffReports": [
+                {
+                    "staffName": "Maria",
+                    "role": "cashier",
+                    "payments": {
+                        "staffPayments": 34.0,
+                        "list": [{
+                            "id": "staff-payment-1",
+                            "amount": 34.0,
+                            "type": "salary_advance",
+                            "notes": "Friday advance",
+                            "staffName": "Alex",
+                            "role": "driver",
+                            "createdAt": "2026-07-23T15:00:00Z"
+                        }]
+                    }
+                },
+                {
+                    "staffName": "Alex",
+                    "role": "driver",
+                    "payments": {
+                        "staffPayments": 34.0,
+                        "list": [{
+                            "id": "staff-payment-1",
+                            "amount": 34.0,
+                            "type": "salary_advance",
+                            "notes": "Friday advance",
+                            "createdAt": "2026-07-23T15:00:00Z"
+                        }]
+                    }
+                }
+            ]
+        }));
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].staff_name, "Alex");
+        assert_eq!(entries[0].role, "driver");
+        assert_eq!(entries[0].reason, "Friday advance");
+        assert_eq!(entries[0].amount, 34.0);
+    }
+
+    #[test]
+    fn test_z_report_staff_payment_entries_support_legacy_aggregate_reports() {
+        let entries = z_report_staff_payment_entries(&serde_json::json!({
+            "staffReports": [
+                {
+                    "staffName": "Maria",
+                    "role": "cashier",
+                    "payments": {"staffPayments": 34.0}
+                },
+                {
+                    "staffName": "Alex",
+                    "role": "driver",
+                    "payments": {"staffPayments": 34.0}
+                }
+            ]
+        }));
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].staff_name, "Alex");
+        assert_eq!(entries[0].role, "driver");
+        assert_eq!(entries[0].amount, 34.0);
     }
 
     #[test]

@@ -384,6 +384,18 @@ pub struct ZReportExpenseEntry {
     pub created_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZReportStaffPaymentEntry {
+    pub staff_name: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub reason: String,
+    pub amount: f64,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ZReportDoc {
     pub report_id: String,
@@ -433,6 +445,8 @@ pub struct ZReportDoc {
     pub delivery_sales: f64,
     #[serde(default)]
     pub expense_lines: Vec<ZReportExpenseEntry>,
+    #[serde(default)]
+    pub staff_payment_lines: Vec<ZReportStaffPaymentEntry>,
     #[serde(default)]
     pub staff_reports: Vec<ZReportStaffEntry>,
 }
@@ -639,6 +653,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Transferred Staff Returns" => "Επιστροφές Μεταφερμένου Προσωπικού",
             "Expected In Drawer" => "Αναμενόμενο στο Ταμείο",
             "Counted Cash" => "Μετρημένα Μετρητά",
+            "Staff Payment" => "Πληρωμή Προσωπικού",
+            "Staff Payments" => "Πληρωμές Προσωπικού",
             "Staff Payouts" => "Εκταμιεύσεις Προσωπικού",
             "Staff Payouts*" => "Εκταμιεύσεις Προσωπικού*",
             "STAFF PAYOUTS" => "ΕΚΤΑΜΙΕΥΣΕΙΣ ΠΡΟΣΩΠΙΚΟΥ",
@@ -762,6 +778,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Transferred Staff Returns" => "Übernommene Personalrückgaben",
             "Expected In Drawer" => "Erwartet in der Kasse",
             "Counted Cash" => "Gezähltes Bargeld",
+            "Staff Payment" => "Mitarbeiterzahlung",
+            "Staff Payments" => "Mitarbeiterzahlungen",
             "Staff Payouts" => "Mitarbeiterauszahlungen",
             "Staff Payouts*" => "Mitarbeiterauszahlungen*",
             "STAFF PAYOUTS" => "MITARBEITERAUSZAHLUNGEN",
@@ -885,6 +903,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Transferred Staff Returns" => "Retours du personnel transfere",
             "Expected In Drawer" => "Attendu en caisse",
             "Counted Cash" => "Especes comptees",
+            "Staff Payment" => "Paiement du personnel",
+            "Staff Payments" => "Paiements du personnel",
             "Staff Payouts" => "Decaissements du personnel",
             "Staff Payouts*" => "Decaissements du personnel*",
             "STAFF PAYOUTS" => "DECAISSEMENTS DU PERSONNEL",
@@ -1008,6 +1028,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Transferred Staff Returns" => "Restituzioni personale trasferito",
             "Expected In Drawer" => "Atteso in cassa",
             "Counted Cash" => "Contanti contati",
+            "Staff Payment" => "Pagamento personale",
+            "Staff Payments" => "Pagamenti personale",
             "Staff Payouts" => "Uscite personale",
             "Staff Payouts*" => "Uscite personale*",
             "STAFF PAYOUTS" => "USCITE PERSONALE",
@@ -1036,6 +1058,30 @@ fn z_report_expense_reason<'a>(lang: &str, reason: &'a str) -> &'a str {
         receipt_label(lang, "Expense")
     } else {
         reason
+    }
+}
+
+fn z_report_staff_payment_label(lang: &str, payment: &ZReportStaffPaymentEntry) -> String {
+    let role = match payment.role.trim() {
+        "driver" => receipt_label(lang, "Driver"),
+        "cashier" => receipt_label(lang, "Cashier"),
+        "manager" => receipt_label(lang, "Manager"),
+        role if !role.is_empty() => role,
+        _ => "",
+    };
+    let staff_name = payment.staff_name.trim();
+
+    if staff_name.is_empty() {
+        receipt_label(lang, "Staff Payment").to_string()
+    } else if role.is_empty() {
+        format!("{}: {}", receipt_label(lang, "Staff Payment"), staff_name)
+    } else {
+        format!(
+            "{}: {} ({})",
+            receipt_label(lang, "Staff Payment"),
+            staff_name,
+            role
+        )
     }
 }
 
@@ -3590,7 +3636,11 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             }
 
             // Expense analysis appears before the drawer reconciliation.
-            if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
+            if !doc.expense_lines.is_empty()
+                || doc.expenses_total != 0.0
+                || !doc.staff_payment_lines.is_empty()
+                || doc.staff_payments_total != 0.0
+            {
                 body.push_str(&format!(
                     "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
                     esc(receipt_label(lang, "EXPENSES"))
@@ -3602,11 +3652,36 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         money(expense.amount),
                     ));
                 }
-                body.push_str(&format!(
-                    "<hr/><div class=\"line\"><strong>{}</strong><strong>-{}</strong></div></div>",
-                    esc(receipt_label(lang, "Total Expenses")),
-                    money(doc.expenses_total),
-                ));
+                for payment in &doc.staff_payment_lines {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
+                        esc(&z_report_staff_payment_label(lang, payment)),
+                        money(payment.amount),
+                    ));
+                    if !payment.reason.trim().is_empty() {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>&nbsp;&nbsp;{}: {}</span><span></span></div>",
+                            esc(receipt_label(lang, "Note")),
+                            esc(payment.reason.trim()),
+                        ));
+                    }
+                }
+                body.push_str("<hr/>");
+                if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><strong>{}</strong><strong>-{}</strong></div>",
+                        esc(receipt_label(lang, "Total Expenses")),
+                        money(doc.expenses_total),
+                    ));
+                }
+                if !doc.staff_payment_lines.is_empty() || doc.staff_payments_total != 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><strong>{}</strong><strong>-{}</strong></div>",
+                        esc(receipt_label(lang, "Staff Payments")),
+                        money(doc.staff_payments_total),
+                    ));
+                }
+                body.push_str("</div>");
             }
 
             if !doc.staff_reports.is_empty() {
@@ -6815,7 +6890,11 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &money_with_currency_locale(doc.discounts_total, &cur, comma),
                 preset.item_style,
             );
-            if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
+            if !doc.expense_lines.is_empty()
+                || doc.expenses_total != 0.0
+                || !doc.staff_payment_lines.is_empty()
+                || doc.staff_payments_total != 0.0
+            {
                 canvas.draw_rule();
                 canvas.draw_text_line(
                     receipt_label(lang, "EXPENSES"),
@@ -6832,15 +6911,44 @@ fn render_classic_non_customer_raster_exact_ttf(
                         preset.item_style,
                     );
                 }
+                for payment in &doc.staff_payment_lines {
+                    canvas.draw_pair(
+                        &format!("{}:", z_report_staff_payment_label(lang, payment)),
+                        &format!(
+                            "-{}",
+                            money_with_currency_locale(payment.amount, &cur, comma)
+                        ),
+                        preset.item_style,
+                    );
+                    if !payment.reason.trim().is_empty() {
+                        canvas.draw_pair(
+                            &format!("  {}:", receipt_label(lang, "Note")),
+                            payment.reason.trim(),
+                            preset.item_style,
+                        );
+                    }
+                }
                 canvas.draw_rule();
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Total Expenses")),
-                    &format!(
-                        "-{}",
-                        money_with_currency_locale(doc.expenses_total, &cur, comma)
-                    ),
-                    z_report_expense_total_style(&preset),
-                );
+                if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Total Expenses")),
+                        &format!(
+                            "-{}",
+                            money_with_currency_locale(doc.expenses_total, &cur, comma)
+                        ),
+                        z_report_expense_total_style(&preset),
+                    );
+                }
+                if !doc.staff_payment_lines.is_empty() || doc.staff_payments_total != 0.0 {
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Staff Payments")),
+                        &format!(
+                            "-{}",
+                            money_with_currency_locale(doc.staff_payments_total, &cur, comma)
+                        ),
+                        z_report_expense_total_style(&preset),
+                    );
+                }
             }
 
             // --- Staff details ---
@@ -8530,7 +8638,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }
 
             // --- Expense analysis ---
-            if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
+            if !doc.expense_lines.is_empty()
+                || doc.expenses_total != 0.0
+                || !doc.staff_payment_lines.is_empty()
+                || doc.staff_payments_total != 0.0
+            {
                 builder
                     .center()
                     .bold(true)
@@ -8546,13 +8658,39 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         width,
                     );
                 }
+                for payment in &doc.staff_payment_lines {
+                    emit_pair(
+                        &mut builder,
+                        &z_report_staff_payment_label(lang, payment),
+                        &format!("-{}", money_locale(payment.amount, comma)),
+                        width,
+                    );
+                    if !payment.reason.trim().is_empty() {
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Note"),
+                            payment.reason.trim(),
+                            width,
+                        );
+                    }
+                }
                 emit_rule(&mut builder, width, '-');
-                emit_pair_bold(
-                    &mut builder,
-                    receipt_label(lang, "Total Expenses"),
-                    &format!("-{}", money_locale(doc.expenses_total, comma)),
-                    width,
-                );
+                if !doc.expense_lines.is_empty() || doc.expenses_total != 0.0 {
+                    emit_pair_bold(
+                        &mut builder,
+                        receipt_label(lang, "Total Expenses"),
+                        &format!("-{}", money_locale(doc.expenses_total, comma)),
+                        width,
+                    );
+                }
+                if !doc.staff_payment_lines.is_empty() || doc.staff_payments_total != 0.0 {
+                    emit_pair_bold(
+                        &mut builder,
+                        receipt_label(lang, "Staff Payments"),
+                        &format!("-{}", money_locale(doc.staff_payments_total, comma)),
+                        width,
+                    );
+                }
             }
 
             // --- Staff details ---
@@ -10040,6 +10178,13 @@ mod tests {
                     created_at: Some("2026-07-23T14:00:00Z".to_string()),
                 },
             ],
+            staff_payment_lines: vec![ZReportStaffPaymentEntry {
+                staff_name: "Alex".to_string(),
+                role: "cashier".to_string(),
+                reason: "Payroll advance".to_string(),
+                amount: 34.0,
+                created_at: Some("2026-07-23T15:00:00Z".to_string()),
+            }],
             staff_reports: vec![ZReportStaffEntry {
                 name: "Alex".to_string(),
                 role: "cashier".to_string(),
@@ -10076,6 +10221,12 @@ mod tests {
         assert!(text.contains("Cleaning supplies"));
         assert!(text.contains("Taxi for stock"));
         assert!(text.contains("--:-- - --:--"));
+        let expense_section = &text[expenses..staff];
+        assert!(expense_section.contains("Staff Payment"));
+        assert!(expense_section.contains("Alex"));
+        assert!(expense_section.contains("Payroll advance"));
+        assert!(expense_section.contains("Staff Payments"));
+        assert!(expense_section.contains("34.00") || expense_section.contains("34,00"));
         let staff_section = &text[staff..drawer];
         assert!(staff_section.contains("Alex"));
         assert!(staff_section.contains("Payout"));
@@ -10089,6 +10240,13 @@ mod tests {
         let html = render_html(&doc, &cfg);
         let html_staff = html.find("STAFF").expect("HTML staff section");
         let html_drawer = html.find("CASH DRAWER").expect("HTML drawer section");
+        let html_expenses = html.find("EXPENSES").expect("HTML expense section");
+        let html_expense_section = &html[html_expenses..html_staff];
+        assert!(html_expense_section.contains("Staff Payment"));
+        assert!(html_expense_section.contains("Alex"));
+        assert!(html_expense_section.contains("Payroll advance"));
+        assert!(html_expense_section.contains("Staff Payments"));
+        assert!(html_expense_section.contains("34.00"));
         let html_staff_section = &html[html_staff..html_drawer];
         assert!(html_staff_section.contains("Payout"));
         assert!(html_staff_section.contains("Staff Payouts"));
@@ -10112,7 +10270,15 @@ mod tests {
         assert_eq!(receipt_label("el", "Driver ID"), "ID Οδηγού");
         assert_eq!(receipt_label("el", "Expense"), "Έξοδο");
         assert_eq!(receipt_label("el", "EXPENSES"), "ΕΞΟΔΑ");
+        assert_eq!(receipt_label("el", "Staff Payment"), "Πληρωμή Προσωπικού");
+        assert_eq!(receipt_label("el", "Staff Payments"), "Πληρωμές Προσωπικού");
         assert_eq!(receipt_label("el", "Drawer"), "Ταμείο");
+        assert_eq!(receipt_label("de", "Staff Payment"), "Mitarbeiterzahlung");
+        assert_eq!(
+            receipt_label("fr", "Staff Payment"),
+            "Paiement du personnel"
+        );
+        assert_eq!(receipt_label("it", "Staff Payment"), "Pagamento personale");
         assert_eq!(receipt_label("fr", "Orders"), "Commandes");
         assert_eq!(receipt_label("fr", "Expense"), "Depense");
         assert_eq!(receipt_label("de", "Generated"), "Erstellt");

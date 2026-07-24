@@ -1373,10 +1373,20 @@ fn load_staff_payment_items(
     if matches!(shift.role_type.as_str(), "cashier" | "manager") {
         let mut stmt = conn
             .prepare(
-                "SELECT id, amount, payment_type, notes, created_at
-                 FROM staff_payments
-                 WHERE cashier_shift_id = ?1
-                 ORDER BY created_at ASC",
+                "SELECT sp.id, sp.amount, sp.payment_type, sp.notes, sp.created_at,
+                        (SELECT ss.staff_name
+                         FROM staff_shifts ss
+                         WHERE ss.staff_id = sp.paid_to_staff_id
+                         ORDER BY ss.check_in_time DESC
+                         LIMIT 1),
+                        (SELECT ss.role_type
+                         FROM staff_shifts ss
+                         WHERE ss.staff_id = sp.paid_to_staff_id
+                         ORDER BY ss.check_in_time DESC
+                         LIMIT 1)
+                 FROM staff_payments sp
+                 WHERE sp.cashier_shift_id = ?1
+                 ORDER BY sp.created_at ASC",
             )
             .map_err(|e| format!("prepare cashier staff payments: {e}"))?;
 
@@ -1388,6 +1398,8 @@ fn load_staff_payment_items(
                     "type": row.get::<_, Option<String>>(2)?,
                     "notes": row.get::<_, Option<String>>(3)?,
                     "createdAt": row.get::<_, Option<String>>(4)?,
+                    "staffName": row.get::<_, Option<String>>(5)?,
+                    "role": row.get::<_, Option<String>>(6)?,
                 }))
             })
             .map_err(|e| format!("query cashier staff payments: {e}"))?
@@ -1399,12 +1411,22 @@ fn load_staff_payment_items(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, amount, payment_type, notes, created_at
-             FROM staff_payments
-             WHERE paid_to_staff_id = ?1
-               AND (?2 IS NULL OR created_at >= ?2)
-               AND (?3 IS NULL OR created_at <= ?3)
-             ORDER BY created_at ASC",
+            "SELECT sp.id, sp.amount, sp.payment_type, sp.notes, sp.created_at,
+                    (SELECT ss.staff_name
+                     FROM staff_shifts ss
+                     WHERE ss.staff_id = sp.paid_to_staff_id
+                     ORDER BY ss.check_in_time DESC
+                     LIMIT 1),
+                    (SELECT ss.role_type
+                     FROM staff_shifts ss
+                     WHERE ss.staff_id = sp.paid_to_staff_id
+                     ORDER BY ss.check_in_time DESC
+                     LIMIT 1)
+             FROM staff_payments sp
+             WHERE sp.paid_to_staff_id = ?1
+               AND (?2 IS NULL OR sp.created_at >= ?2)
+               AND (?3 IS NULL OR sp.created_at <= ?3)
+             ORDER BY sp.created_at ASC",
         )
         .map_err(|e| format!("prepare received staff payments: {e}"))?;
 
@@ -1422,6 +1444,8 @@ fn load_staff_payment_items(
                     "type": row.get::<_, Option<String>>(2)?,
                     "notes": row.get::<_, Option<String>>(3)?,
                     "createdAt": row.get::<_, Option<String>>(4)?,
+                    "staffName": row.get::<_, Option<String>>(5)?,
+                    "role": row.get::<_, Option<String>>(6)?,
                 }))
             },
         )
