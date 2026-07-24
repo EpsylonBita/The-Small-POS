@@ -290,7 +290,7 @@
 - Delivery-specific fields in kitchen delivery blocks remain bolded for quick scanning.
 
 ## Runtime Verification
-- Current renderer revision marker: `2026-07-24-r17`.
+- Current renderer revision marker: `2026-07-24-r18`.
 - Queue dispatch logs include:
   - `layout_revision`
   - `template`

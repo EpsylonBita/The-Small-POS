@@ -35,6 +35,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'menu-category-tabs-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'menu-modal-customer-popover.test.ts'),
   path.join(testsRoot, 'renderer', 'modal-escape-native-menu-focus.test.ts'),
+  path.join(testsRoot, 'renderer', 'liquid-glass-modal-a11y.test.ts'),
   path.join(testsRoot, 'renderer', 'manual-address-i18n.test.ts'),
   path.join(testsRoot, 'renderer', 'order-modal-plural-i18n.test.ts'),
   path.join(testsRoot, 'renderer', 'order-edit-modals-ui.test.ts'),

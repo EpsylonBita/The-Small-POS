@@ -711,6 +711,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const previousActiveElementRef = React.useRef<HTMLElement | null>(null)
   const previousOverflowRef = React.useRef<string>('')
   const externalClosingRef = React.useRef<boolean>(false)
+  const closeFinalizedRef = React.useRef<boolean>(false)
   const enterActionRef = React.useRef(onEnterKey)
   const enterKeyEnabledRef = React.useRef(enterKeyEnabled)
 
@@ -758,29 +759,37 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
   // Handle close with animation
   const handleClose = React.useCallback(() => {
+    if (isClosing) return
+    closeFinalizedRef.current = false
+    externalClosingRef.current = false
     setIsClosing(true)
-  }, [])
+  }, [isClosing])
 
   // Handle animation end
-  const handleAnimationEnd = React.useCallback(() => {
-    if (isClosing) {
-      if (externalClosingRef.current) {
-        // Parent-driven closure - don't call onClose
-        externalClosingRef.current = false
-        setIsClosing(false)
-        setMounted(false)
-      } else {
-        // User-initiated close - call onClose after unmount
-        setIsClosing(false)
-        setMounted(false)
-        onClose()
-      }
+  const handleAnimationEnd = React.useCallback((event: React.AnimationEvent<HTMLDivElement>) => {
+    // Only the shell owns close settlement. Ignore descendant animations and
+    // finalize once so a parent-driven transition can never become a user close.
+    if (
+      event.target !== event.currentTarget ||
+      !isClosing ||
+      closeFinalizedRef.current
+    ) {
+      return
     }
+
+    closeFinalizedRef.current = true
+    const externallyClosed = externalClosingRef.current
+    externalClosingRef.current = false
+    setIsClosing(false)
+    setMounted(false)
+    if (!externallyClosed) onClose()
   }, [isClosing, onClose])
 
   // Sync mounted state with isOpen
   React.useEffect(() => {
     if (isOpen) {
+      closeFinalizedRef.current = false
+      externalClosingRef.current = false
       setMounted(true)
       setIsClosing(false)
     }
@@ -789,6 +798,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   // Handle external isOpen changes (parent-driven closure)
   React.useEffect(() => {
     if (!isOpen && mounted && !isClosing) {
+      closeFinalizedRef.current = false
       externalClosingRef.current = true
       setIsClosing(true)
     }
@@ -971,7 +981,6 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         ref={backdropRef}
         className={cn('liquid-glass-modal-backdrop', isClosing && 'leaving')}
         onClick={closeOnBackdrop ? handleClose : undefined}
-        onAnimationEnd={handleAnimationEnd}
         aria-hidden="true"
       />
 

@@ -154,6 +154,34 @@ test('LiquidGlassModal Escape is gated on isTopMostDialog so only the topmost ov
   );
 });
 
+// Regression contract for checkout on 2026-07-25: MenuModal closes its glass surface while
+// PaymentModal opens. LiquidGlassModal previously wired the same close callback to both the
+// backdrop and shell animation-end events. The first event consumed the parent-driven close;
+// the second then looked user-driven and closed the whole order/payment flow.
+test('LiquidGlassModal settles a close animation from one animation endpoint only', () => {
+  const glassSource = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'ui', 'pos-glass-components.tsx'),
+    'utf8',
+  );
+  const liquidGlassModal = glassSource.slice(
+    glassSource.indexOf('export const LiquidGlassModal'),
+    glassSource.indexOf('LiquidGlassModal.displayName'),
+  );
+  const animationEndBindings =
+    liquidGlassModal.match(/onAnimationEnd=\{handleAnimationEnd\}/g) || [];
+
+  assert.equal(
+    animationEndBindings.length,
+    1,
+    'a single close must not be settled twice by both backdrop and shell animations',
+  );
+  assert.match(
+    liquidGlassModal,
+    /event\.target !== event\.currentTarget/,
+    'animations bubbling from modal children must not settle the shell close',
+  );
+});
+
 // Regression contract for the discarded dirty cart (2026-06-21 live QA): closing a new
 // order with items in the cart via X/Escape dropped the draft with no warning. The close
 // must route through a discard confirmation; only final discard/success paths close directly.
@@ -165,9 +193,19 @@ test('MenuModal routes the X / Escape close through a dirty-cart discard confirm
     /const requestClose = useCallback\(\(\) => \{\s*if \(!editMode && checkoutPhase === 'editing' && cartItems\.length > 0\) \{\s*setShowDiscardConfirm\(true\);\s*return;\s*\}\s*onClose\(\);\s*\}, \[editMode, checkoutPhase, cartItems\.length, onClose\]\);/,
   );
 
-  // Both the header X and the LiquidGlassModal (its internal Escape) close via requestClose,
-  // not the raw onClose.
-  assert.match(source, /onClose=\{requestClose\}/, 'LiquidGlassModal must close via requestClose');
+  // The shell may only route a close callback while editing. Parent-driven checkout
+  // swaps to PaymentModal and must never be mistaken for a dirty-cart close request.
+  assert.match(
+    source,
+    /const handleMenuSurfaceClose = useCallback\(\(\) => \{\s*if \(checkoutPhase !== 'editing'\) \{\s*return;\s*\}\s*requestClose\(\);\s*\}, \[checkoutPhase, requestClose\]\);/,
+  );
+  assert.match(
+    source,
+    /onClose=\{handleMenuSurfaceClose\}/,
+    'LiquidGlassModal must ignore close callbacks from the payment transition',
+  );
+
+  // The header X still routes directly through the dirty-cart guard.
   assert.match(source, /onClick=\{requestClose\}/, 'the header X must close via requestClose');
   assert.doesNotMatch(source, /onClose=\{onClose\}/, 'LiquidGlassModal must no longer wire the raw onClose');
 

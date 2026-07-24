@@ -9,7 +9,7 @@ use std::io::Cursor;
 
 use crate::escpos::{EscPosBuilder, PaperWidth};
 
-pub const RECEIPT_LAYOUT_REVISION: &str = "2026-07-24-r17";
+pub const RECEIPT_LAYOUT_REVISION: &str = "2026-07-24-r18";
 
 pub fn layout_revision() -> &'static str {
     RECEIPT_LAYOUT_REVISION
@@ -1135,14 +1135,32 @@ pub fn receipt_role_text(lang: &str, role_type: &str) -> String {
 
 fn z_report_shift_line(doc: &ZReportDoc, lang: &str) -> Option<(String, String)> {
     if let Some(shift_ref) = non_empty_receipt_value(&doc.shift_ref) {
-        return Some((
-            receipt_label(lang, "Shift").to_string(),
-            shift_ref.to_string(),
-        ));
+        if !is_opaque_shift_reference(shift_ref) {
+            return Some((
+                receipt_label(lang, "Shift").to_string(),
+                shift_ref.to_string(),
+            ));
+        }
     }
-    doc.shift_count
-        .filter(|count| *count > 0)
-        .map(|count| (receipt_label(lang, "Shifts").to_string(), count.to_string()))
+    doc.shift_count.filter(|count| *count > 0).map(|count| {
+        let label = if count == 1 { "Shift" } else { "Shifts" };
+        (receipt_label(lang, label).to_string(), count.to_string())
+    })
+}
+
+fn is_opaque_shift_reference(value: &str) -> bool {
+    let value = value.trim();
+    if uuid::Uuid::parse_str(value).is_ok() {
+        return true;
+    }
+
+    // Some older records prefixed the UUID (for example `shift-<uuid>`).
+    // Keep readable references such as SHIFT-001, but suppress UUID suffixes.
+    value
+        .len()
+        .checked_sub(36)
+        .and_then(|offset| value.get(offset..))
+        .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok())
 }
 
 /// Translate an order type string (e.g. "pickup", "delivery", "dine_in", "takeaway")
@@ -10154,6 +10172,8 @@ mod tests {
         let doc = ReceiptDocument::ZReport(ZReportDoc {
             report_date: "2026-07-23".to_string(),
             generated_at: "2026-07-23T23:59:00Z".to_string(),
+            shift_ref: "5ed0983c-41be-49c6-a029-0fb848d1ae7f".to_string(),
+            shift_count: Some(1),
             total_orders: 12,
             gross_sales: 230.0,
             net_sales: 220.0,
@@ -10227,6 +10247,8 @@ mod tests {
         assert!(expense_section.contains("Payroll advance"));
         assert!(expense_section.contains("Staff Payments"));
         assert!(expense_section.contains("34.00") || expense_section.contains("34,00"));
+        assert!(!text.contains("5ed0983c-41be-49c6-a029-0fb848d1ae7f"));
+        assert!(text.contains("Shift"));
         let staff_section = &text[staff..drawer];
         assert!(staff_section.contains("Alex"));
         assert!(staff_section.contains("Payout"));
@@ -10247,6 +10269,7 @@ mod tests {
         assert!(html_expense_section.contains("Payroll advance"));
         assert!(html_expense_section.contains("Staff Payments"));
         assert!(html_expense_section.contains("34.00"));
+        assert!(!html.contains("5ed0983c-41be-49c6-a029-0fb848d1ae7f"));
         let html_staff_section = &html[html_staff..html_drawer];
         assert!(html_staff_section.contains("Payout"));
         assert!(html_staff_section.contains("Staff Payouts"));
@@ -10285,6 +10308,37 @@ mod tests {
         assert_eq!(receipt_label("de", "Expense"), "Ausgabe");
         assert_eq!(receipt_label("it", "Variance"), "Differenza");
         assert_eq!(receipt_label("it", "Expense"), "Spesa");
+    }
+
+    #[test]
+    fn z_report_shift_line_never_exposes_internal_uuid() {
+        let raw_uuid = "5ed0983c-41be-49c6-a029-0fb848d1ae7f";
+        let single_shift = ZReportDoc {
+            shift_ref: raw_uuid.to_string(),
+            shift_count: Some(1),
+            ..ZReportDoc::default()
+        };
+        assert_eq!(
+            z_report_shift_line(&single_shift, "en"),
+            Some(("Shift".to_string(), "1".to_string()))
+        );
+
+        let prefixed_uuid = ZReportDoc {
+            shift_ref: format!("shift-{raw_uuid}"),
+            shift_count: None,
+            ..ZReportDoc::default()
+        };
+        assert_eq!(z_report_shift_line(&prefixed_uuid, "en"), None);
+
+        let readable_shift = ZReportDoc {
+            shift_ref: "SHIFT-001".to_string(),
+            shift_count: Some(1),
+            ..ZReportDoc::default()
+        };
+        assert_eq!(
+            z_report_shift_line(&readable_shift, "en"),
+            Some(("Shift".to_string(), "SHIFT-001".to_string()))
+        );
     }
 
     #[test]

@@ -81,6 +81,20 @@ test('background isolation ref-counts modals and restores previous aria-hidden/i
   assert.match(source, /backgroundIsolationSaved\.clear\(\)/);
 });
 
+test('LiquidGlassModal finalizes a parent-driven close exactly once', () => {
+  assert.match(source, /const closeFinalizedRef = React\.useRef<boolean>\(false\)/);
+  assert.match(
+    source,
+    /event\.target !== event\.currentTarget[\s\S]*?!isClosing[\s\S]*?closeFinalizedRef\.current/,
+    'bubbled and duplicate animation events must be ignored',
+  );
+  assert.match(
+    source,
+    /closeFinalizedRef\.current = true[\s\S]*?const externallyClosed = externalClosingRef\.current[\s\S]*?if \(!externallyClosed\) onClose\(\)/,
+    'an external close must unmount without firing the user onClose callback',
+  );
+});
+
 // Containment must not regress the existing modal semantics, and stay touch-first.
 test('glass modals preserve dialog semantics, portal behaviour, and add no hover utilities', () => {
   assert.match(source, /role="dialog"/);

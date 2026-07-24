@@ -515,6 +515,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     onClose();
   }, [editMode, checkoutPhase, cartItems.length, onClose]);
 
+  // LiquidGlassModal closes externally when checkout swaps the menu surface for
+  // PaymentModal. That transition is not a user request to abandon the cart, so
+  // only route close callbacks through the discard guard while actively editing.
+  const handleMenuSurfaceClose = useCallback(() => {
+    if (checkoutPhase !== 'editing') {
+      return;
+    }
+    requestClose();
+  }, [checkoutPhase, requestClose]);
+
   const handleDiscardOrder = useCallback(() => {
     setShowDiscardConfirm(false);
     setCartItems([]);
@@ -2424,7 +2434,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     <>
       <LiquidGlassModal
         isOpen={isOpen && checkoutPhase === 'editing'}
-        onClose={requestClose}
+        onClose={handleMenuSurfaceClose}
         ariaLabel={getModalTitle()}
         header={
           <div className="flex flex-col gap-1 px-5 py-2.5 border-b border-white/10 flex-shrink-0 min-w-0">

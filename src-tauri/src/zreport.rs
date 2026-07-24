@@ -4933,11 +4933,12 @@ pub fn generate_z_report_file(
     let shift_count = report_json
         .pointer("/shifts/total")
         .and_then(Value::as_i64)
-        .filter(|count| *count > 1);
+        .filter(|count| *count > 0);
     let shift_line = if let Some(count) = shift_count {
-        format!("Shifts: {count}<br/>")
+        let label = if count == 1 { "Shift" } else { "Shifts" };
+        format!("{label}: {count}<br/>")
     } else if !shift_id.trim().is_empty() {
-        format!("Shift: {}<br/>", shift_id)
+        "Shift: 1<br/>".to_string()
     } else {
         String::new()
     };
