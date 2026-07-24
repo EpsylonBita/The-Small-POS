@@ -113,6 +113,17 @@ fn test_connection_on_handle(handle: &DeviceHandle, device_id: &str) -> Result<b
     dev.protocol.test_connection()
 }
 
+fn x_report_on_handle(handle: &DeviceHandle, device_id: &str) -> Result<Option<String>, String> {
+    let mut dev = handle.lock().unwrap_or_else(|poisoned| {
+        warn!(
+            device_id = %device_id,
+            "ManagedDevice mutex poisoned; recovering for X-report"
+        );
+        poisoned.into_inner()
+    });
+    dev.protocol.x_report()
+}
+
 /// Create a temporary transport + protocol (never registered in the map)
 /// and run a connectivity test against it.
 fn test_connection_unregistered(
@@ -122,7 +133,12 @@ fn test_connection_unregistered(
     protocol_config: &serde_json::Value,
 ) -> Result<bool, String> {
     let transport_box = transport::create_transport(connection_type, connection_details)?;
-    let mut protocol = protocols::create_protocol(protocol_name, transport_box, protocol_config)?;
+    let mut protocol = protocols::create_protocol(
+        protocol_name,
+        transport_box,
+        protocol_config,
+        connection_details,
+    )?;
     protocol.test_connection()
 }
 
@@ -165,7 +181,12 @@ fn build_initialized_protocol(
     let transport_description = transport_box.description();
     let initial_transport_state = transport_box.state();
 
-    let mut protocol = protocols::create_protocol(protocol_name, transport_box, protocol_config)?;
+    let mut protocol = protocols::create_protocol(
+        protocol_name,
+        transport_box,
+        protocol_config,
+        connection_details,
+    )?;
 
     // Initialize (connects transport + handshake)
     protocol.initialize()?;
@@ -497,6 +518,17 @@ impl DeviceManager {
         })
         .await
         .map_err(|e| format!("ecr_test_connection join error: {e}"))?
+    }
+
+    /// Print a non-closing fiscal X-report on the blocking pool.
+    pub async fn x_report_offloaded(&self, device_id: &str) -> Result<Option<String>, String> {
+        let handle = self
+            .handle_for(device_id)?
+            .ok_or_else(|| format!("Device {device_id} not connected"))?;
+        let device_id = device_id.to_string();
+        tokio::task::spawn_blocking(move || x_report_on_handle(&handle, &device_id))
+            .await
+            .map_err(|error| format!("ecr_x_report join error: {error}"))?
     }
 
     /// Run end-of-day settlement on a device.

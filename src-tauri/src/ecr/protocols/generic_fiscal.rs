@@ -1,8 +1,10 @@
-//! Generic ESC/POS Fiscal protocol.
+//! Legacy Datecs-style fiscal protocol.
 //!
-//! Implements a generic fiscal cash register protocol using STX/ETX framing
-//! with LRC checksum. This covers most fiscal thermal printers in "ECR mode"
-//! (Datecs, Elcom, Casio, Star, Epson Fiscal, Sam4s, Bixolon, RBS, etc.).
+//! Implements one STX/ETX + LRC command profile used by some fiscal devices.
+//! Fiscal command sets are vendor/model/firmware specific, so this adapter must
+//! only be selected when the device vendor confirms this exact ERP protocol.
+//! In particular, this is not an RBS adapter and must not be inferred from an
+//! RBS brand selection.
 //!
 //! Frame format: `STX | LenLo | LenHi | Seq | Cmd | Data... | PostAmble | LRC | ETX`
 //! (Simplified variant uses `STX | Cmd | Data | LRC | ETX`)
@@ -69,7 +71,7 @@ const STRICT_LRC: bool = true;
 // Protocol implementation
 // ---------------------------------------------------------------------------
 
-/// Generic ESC/POS Fiscal protocol adapter.
+/// Legacy Datecs-style STX/ETX fiscal protocol adapter.
 pub struct GenericEscPosFiscal {
     transport: Box<dyn EcrTransport>,
     seq: u8,
@@ -705,6 +707,8 @@ mod tests {
                 quantity: 1.0,
                 unit_price: 250,
                 tax_code: "A".into(),
+                tax_rate: 24.0,
+                department: Some(3),
                 discount: None,
             }],
             payments: vec![FiscalPayment {

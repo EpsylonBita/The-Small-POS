@@ -53,6 +53,11 @@ pub struct FiscalLineItem {
     pub unit_price: i64,
     /// Tax rate code (e.g. "A", "B", "C", "D").
     pub tax_code: String,
+    /// Tax rate percentage sent to devices whose item command requires it.
+    pub tax_rate: f64,
+    /// Device-programmed department number. Some file-driver protocols
+    /// require both the department and its VAT rate.
+    pub department: Option<u8>,
     /// Optional discount in cents.
     pub discount: Option<i64>,
 }
@@ -88,6 +93,9 @@ pub struct TaxRateConfig {
     pub rate: f64,
     /// Human-readable label (e.g. "Standard", "Reduced").
     pub label: String,
+    /// Optional department programmed on the fiscal cashier.
+    #[serde(default)]
+    pub department: Option<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,8 +178,8 @@ pub struct SettlementResult {
 
 /// Protocol adapter trait for ECR (Electronic Cash Register) devices.
 ///
-/// Each supported wire protocol (Generic Fiscal STX/ETX, ZVT DLE/STX, PAX
-/// STX/ETX) implements this trait. The trait abstracts the byte-level
+/// Each implemented wire profile (legacy Datecs-style fiscal STX/ETX, ZVT,
+/// or PAX) implements this trait. The trait abstracts the byte-level
 /// encoding/decoding so that higher-level code (commands, UI) can work with
 /// any cash register or payment terminal uniformly.
 ///

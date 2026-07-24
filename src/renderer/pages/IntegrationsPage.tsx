@@ -54,6 +54,8 @@ import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 import { getPluginLogo } from '../utils/plugin-icons';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
+import { getBridge } from '../../lib';
+import { getCachedTerminalCredentials } from '../services/terminal-credentials';
 
 // ============================================================
 // TYPES
@@ -107,6 +109,14 @@ interface IntegrationStats {
 // ============================================================
 // CONSTANTS
 // ============================================================
+
+const MYDATA_FISCAL_DEVICE_ID = 'mydata-fiscal-device';
+const MYDATA_FISCAL_TAX_RATES = [
+  { code: 'A', rate: 24, label: 'Standard' },
+  { code: 'B', rate: 13, label: 'Reduced' },
+  { code: 'C', rate: 6, label: 'Super reduced' },
+  { code: 'D', rate: 0, label: 'Zero' },
+] as const;
 
 const ALL_INTEGRATIONS: Integration[] = [
   // Delivery plugins - require 'delivery' module
@@ -493,6 +503,9 @@ async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
 // fetch failed), in which case the card must not claim either way.
 const deriveMyDataReportingEnabled = (result: MyDataConfigFetchResult): boolean | null => {
   if (result.ok) {
+    if (result.config?.['mode'] === 'fiscal_device') {
+      return result.config?.['status'] === 'connected';
+    }
     return result.providerStatus ? result.providerStatus['is_enabled'] === true : null;
   }
   // 404 = "MyData configuration not found": nothing is configured, so nothing is reported.
@@ -848,10 +861,21 @@ export const IntegrationsPage: React.FC = () => {
   const myDataReportingFetchedRef = useRef(false);
   const [myDataModalOpen, setMyDataModalOpen] = useState(false);
   const [myDataSaving, setMyDataSaving] = useState(false);
-  const [myDataConnectionType, setMyDataConnectionType] = useState<'usb_serial' | 'bluetooth'>('usb_serial');
+  const [myDataConnectionType, setMyDataConnectionType] = useState<'usb_serial' | 'bluetooth' | 'network'>('usb_serial');
   const [myDataSerialPort, setMyDataSerialPort] = useState('');
   const [myDataBaudRate, setMyDataBaudRate] = useState('9600');
   const [myDataBluetoothAddress, setMyDataBluetoothAddress] = useState('');
+  const [myDataNetworkHost, setMyDataNetworkHost] = useState('');
+  const [myDataNetworkPort, setMyDataNetworkPort] = useState('');
+  const [myDataDeviceBrand, setMyDataDeviceBrand] = useState('');
+  const [myDataDeviceModel, setMyDataDeviceModel] = useState('');
+  const [myDataProtocolProfile, setMyDataProtocolProfile] = useState('');
+  const [myDataDepartmentMap, setMyDataDepartmentMap] = useState<Record<string, string>>({
+    A: '',
+    B: '',
+    C: '',
+    D: '',
+  });
   const [pluginModalOpen, setPluginModalOpen] = useState(false);
   const [activePlugin, setActivePlugin] = useState<IntegrationWithStatus | null>(null);
   const [pluginSaving, setPluginSaving] = useState(false);
@@ -877,7 +901,11 @@ export const IntegrationsPage: React.FC = () => {
   const [terminalsLoading, setTerminalsLoading] = useState(false);
   const [terminalsError, setTerminalsError] = useState<string | null>(null);
   const isMyDataMissing = myDataConfigError === 'MyData not configured';
-  const canSaveMyData = !myDataSaving && (!myDataConfigError || isMyDataMissing);
+  const isMyDataFiscalDeviceMode = myDataConfig?.mode === 'fiscal_device';
+  const canSaveMyData =
+    isMyDataFiscalDeviceMode &&
+    !myDataSaving &&
+    (!myDataConfigError || isMyDataMissing);
   const toggleAction = getOfflineActionState('integrations', 'toggle', isOnline);
   const saveAction = getOfflineActionState('integrations', 'save', isOnline);
   const saveMyDataAction = getOfflineActionState('integrations', 'mydata.save', isOnline);
@@ -902,12 +930,57 @@ export const IntegrationsPage: React.FC = () => {
     if (connection.type === 'bluetooth') {
       setMyDataConnectionType('bluetooth');
       setMyDataBluetoothAddress(connection.address || '');
+    } else if (connection.type === 'network') {
+      setMyDataConnectionType('network');
+      setMyDataNetworkHost(connection.host || '');
+      setMyDataNetworkPort(connection.port ? String(connection.port) : '');
     } else if (connection.type === 'usb_serial') {
       setMyDataConnectionType('usb_serial');
-      setMyDataSerialPort(connection.port || '');
+      setMyDataSerialPort(connection.serial_port || connection.port || '');
       setMyDataBaudRate(String(connection.baud_rate || '9600'));
     }
+    setMyDataDeviceBrand(connection.brand || '');
+    setMyDataDeviceModel(connection.model || '');
+    setMyDataProtocolProfile(connection.protocol || '');
+    const departmentMap =
+      connection.department_map && typeof connection.department_map === 'object'
+        ? connection.department_map
+        : {};
+    setMyDataDepartmentMap({
+      A: departmentMap.A ? String(departmentMap.A) : '',
+      B: departmentMap.B ? String(departmentMap.B) : '',
+      C: departmentMap.C ? String(departmentMap.C) : '',
+      D: departmentMap.D ? String(departmentMap.D) : '',
+    });
   }, [myDataConfig]);
+
+  // A branch switched to provider/direct mode must not retain an enabled
+  // locally-managed cashier from its former fiscal-device setup. Otherwise
+  // checkout would still enter the hardware approval gate even though the
+  // active reporting mode no longer uses that device.
+  useEffect(() => {
+    if (!myDataConfig?.mode || myDataConfig.mode === 'fiscal_device') return;
+
+    void (async () => {
+      const bridge = getBridge();
+      const result: any = await bridge.ecr.getDevices();
+      const devices = Array.isArray(result)
+        ? result
+        : Array.isArray(result?.devices)
+          ? result.devices
+          : [];
+      if (!devices.some((device: any) => device?.id === MYDATA_FISCAL_DEVICE_ID)) {
+        return;
+      }
+      await bridge.ecr.updateDevice(MYDATA_FISCAL_DEVICE_ID, {
+        enabled: false,
+        isDefault: false,
+      });
+      await bridge.ecr.disconnectDevice(MYDATA_FISCAL_DEVICE_ID);
+    })().catch((error) => {
+      console.warn('Failed to disable inactive MyData fiscal device', error);
+    });
+  }, [myDataConfig?.mode]);
 
   // Quietly refresh the card-level reporting flag (provider_status.is_enabled).
   // Never throws and never surfaces an error: on failure the flag goes to null
@@ -915,6 +988,10 @@ export const IntegrationsPage: React.FC = () => {
   const refreshMyDataReportingFlag = useCallback(async () => {
     const result = await fetchMyDataConfigQuietly();
     setMyDataReportingEnabled(deriveMyDataReportingEnabled(result));
+    if (result.ok && result.config) {
+      setMyDataConfig(result.config);
+      setMyDataConfigError(null);
+    }
   }, []);
 
   const fetchMyDataConfig = useCallback(async () => {
@@ -1162,6 +1239,15 @@ export const IntegrationsPage: React.FC = () => {
   }, [t]);
 
   const handleSaveMyDataConfig = useCallback(async () => {
+    if (!isMyDataFiscalDeviceMode) {
+      toast.error(
+        t(
+          'integrations.mydata.deviceSettingsHelp',
+          'Device connection settings are required only when using a fiscal device.'
+        )
+      );
+      return;
+    }
     if (saveMyDataAction.disabled) {
       toast.error(saveMyDataAction.message || t('common.requiresOnline', 'This action requires an online connection.'));
       return;
@@ -1176,13 +1262,153 @@ export const IntegrationsPage: React.FC = () => {
       toast.error(t('integrations.mydata.bluetoothAddressRequired', 'Bluetooth address is required'));
       return;
     }
+    if (
+      myDataConnectionType === 'network' &&
+      (!myDataNetworkHost.trim() ||
+        !Number.isInteger(Number(myDataNetworkPort)) ||
+        Number(myDataNetworkPort) < 1 ||
+        Number(myDataNetworkPort) > 65535)
+    ) {
+      toast.error(t('integrations.mydata.networkTargetRequired', 'A valid device IP/host and ERP port are required'));
+      return;
+    }
+    if (
+      !myDataDeviceBrand.trim() ||
+      !myDataDeviceModel.trim() ||
+      !myDataProtocolProfile.trim()
+    ) {
+      toast.error(t('integrations.mydata.driverIdentityRequired', 'Brand, exact model, and protocol profile are required'));
+      return;
+    }
+    if (
+      myDataProtocolProfile === 'cap_driver' &&
+      MYDATA_FISCAL_TAX_RATES.some(({ code }) => {
+        const department = Number(myDataDepartmentMap[code]);
+        return !Number.isInteger(department) || department < 1 || department > 99;
+      })
+    ) {
+      toast.error(
+        t(
+          'integrations.mydata.capDepartmentRequired',
+          'Enter the cashier department (1–99) for every VAT rate'
+        )
+      );
+      return;
+    }
 
     setMyDataSaving(true);
     try {
-      const deviceConnection =
+      const deviceConnection: Record<string, any> =
         myDataConnectionType === 'bluetooth'
           ? { type: 'bluetooth', address: myDataBluetoothAddress.trim() }
-          : { type: 'usb_serial', port: myDataSerialPort.trim(), baud_rate: Number(myDataBaudRate) || 9600 };
+          : myDataConnectionType === 'network'
+            ? {
+                type: 'network',
+                host: myDataNetworkHost.trim(),
+                port: Number(myDataNetworkPort),
+              }
+            : {
+                type: 'usb_serial',
+                serial_port: myDataSerialPort.trim(),
+                baud_rate: Number(myDataBaudRate) || 9600,
+              };
+      deviceConnection.brand = myDataDeviceBrand.trim();
+      deviceConnection.model = myDataDeviceModel.trim();
+      deviceConnection.protocol = myDataProtocolProfile.trim();
+      if (myDataProtocolProfile === 'cap_driver') {
+        deviceConnection.department_map = Object.fromEntries(
+          MYDATA_FISCAL_TAX_RATES.map(({ code }) => [
+            code,
+            Number(myDataDepartmentMap[code]),
+          ])
+        );
+      }
+
+      const bridge = getBridge();
+      const managedDeviceId = MYDATA_FISCAL_DEVICE_ID;
+      const nativeConnectionType =
+        myDataConnectionType === 'usb_serial' ? 'serial_usb' : myDataConnectionType;
+      const connectionDetails =
+        myDataConnectionType === 'bluetooth'
+          ? { address: myDataBluetoothAddress.trim() }
+          : myDataConnectionType === 'network'
+            ? { ip: myDataNetworkHost.trim(), port: Number(myDataNetworkPort) }
+            : {
+                port: myDataSerialPort.trim(),
+                baudRate: Number(myDataBaudRate) || 9600,
+              };
+      const nativeDevice = {
+        id: managedDeviceId,
+        name: `${myDataDeviceBrand.trim()} ${myDataDeviceModel.trim()}`,
+        deviceType: 'cash_register',
+        brand: myDataDeviceBrand.trim(),
+        protocol: myDataProtocolProfile.trim(),
+        connectionType: nativeConnectionType,
+        connectionDetails,
+        printMode: 'register_prints',
+        taxRates: MYDATA_FISCAL_TAX_RATES.map((rate) => ({
+          ...rate,
+          department:
+            myDataProtocolProfile === 'cap_driver'
+              ? Number(myDataDepartmentMap[rate.code])
+              : null,
+        })),
+        isDefault: true,
+        enabled: true,
+        settings: {
+          mydataManaged: true,
+          model: myDataDeviceModel.trim(),
+          protocolProfile: myDataProtocolProfile.trim(),
+          ...(myDataProtocolProfile === 'cap_driver'
+            ? {
+                capturePath: 'C:\\Capture',
+                outputPath: 'C:\\Capture\\Output',
+                serviceName: 'CapDriverSVC',
+                transactionTimeoutMs: 120000,
+                cashPaymentCode: 1,
+                cardPaymentCode: 2,
+                eftPosIndex: 1,
+              }
+            : {}),
+        },
+      };
+
+      const devicesResult: any = await bridge.ecr.getDevices();
+      const devices = Array.isArray(devicesResult)
+        ? devicesResult
+        : Array.isArray(devicesResult?.devices)
+          ? devicesResult.devices
+          : [];
+      const existing = devices.find((device: any) => device?.id === managedDeviceId);
+      const saveDeviceResult: any = existing
+        ? await bridge.ecr.updateDevice(managedDeviceId, nativeDevice)
+        : await bridge.ecr.addDevice(nativeDevice);
+      if (saveDeviceResult?.success !== true) {
+        throw new Error(saveDeviceResult?.error || 'Failed to save fiscal device locally');
+      }
+
+      const connectResult: any = await bridge.ecr.connectDevice(managedDeviceId);
+      if (connectResult?.success !== true) {
+        throw new Error(connectResult?.error || 'Fiscal device connection failed');
+      }
+      const testResult: any = await bridge.ecr.testConnection(managedDeviceId);
+      if (testResult?.success !== true || testResult?.connected !== true) {
+        throw new Error(testResult?.error || 'Fiscal protocol handshake failed');
+      }
+
+      const terminalId =
+        getCachedTerminalCredentials().terminalId ||
+        String(getSetting('terminal', 'terminal_id') || '').trim();
+      if (!terminalId) {
+        throw new Error('Terminal identity is unavailable; pair this POS again before verification');
+      }
+      deviceConnection.verification = {
+        status: 'verified',
+        terminal_id: terminalId,
+        device_id: managedDeviceId,
+        verified_at: new Date().toISOString(),
+        protocol_handshake: true,
+      };
 
       const result = await posApiPost<{ config?: Record<string, any> }>(
         '/pos/mydata/config',
@@ -1215,7 +1441,15 @@ export const IntegrationsPage: React.FC = () => {
     myDataBaudRate,
     myDataBluetoothAddress,
     myDataConnectionType,
+    myDataDeviceBrand,
+    myDataDeviceModel,
+    myDataNetworkHost,
+    myDataNetworkPort,
+    myDataProtocolProfile,
+    myDataDepartmentMap,
     myDataSerialPort,
+    isMyDataFiscalDeviceMode,
+    getSetting,
     refreshMyDataReportingFlag,
     saveMyDataAction.disabled,
     saveMyDataAction.message,
@@ -1523,11 +1757,11 @@ export const IntegrationsPage: React.FC = () => {
           onClose={() => setMyDataModalOpen(false)}
           title={t('integrations.mydata.title', 'MyData Configuration')}
           size="md"
-          className="!max-w-lg"
+          className="plugin-setup-modal !max-w-lg"
           closeOnBackdrop={!myDataSaving}
           closeOnEscape={!myDataSaving}
         >
-        <div className="space-y-4">
+        <div className="plugin-setup-modal-body space-y-4 text-zinc-900 dark:text-zinc-100">
             <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
               <div className="font-medium">
                 {t('integrations.mydata.dashboardBanner.title', 'myDATA setup happens in the Admin Dashboard')}
@@ -1564,7 +1798,7 @@ export const IntegrationsPage: React.FC = () => {
                 {myDataConfigError}
                 {isMyDataMissing && (
                   <div className={`mt-1 text-xs ${isDark ? 'text-amber-200/70' : 'text-amber-600'}`}>
-                    {t('integrations.mydata.saveToCreate', 'Save settings to create MyData configuration for this branch.')}
+                    {t('integrations.mydata.saveToCreate', 'Create the MyData configuration in Admin Dashboard first.')}
                   </div>
                 )}
               </div>
@@ -1593,6 +1827,8 @@ export const IntegrationsPage: React.FC = () => {
             </div>
           )}
 
+          {isMyDataFiscalDeviceMode && (
+            <>
           <div className="space-y-3">
             <div className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('integrations.mydata.fiscalDeviceConnection', 'Fiscal device connection')}
@@ -1605,12 +1841,13 @@ export const IntegrationsPage: React.FC = () => {
                 </label>
                 <select
                   value={myDataConnectionType}
-                  onChange={(event) => setMyDataConnectionType(event.target.value as 'usb_serial' | 'bluetooth')}
+                  onChange={(event) => setMyDataConnectionType(event.target.value as 'usb_serial' | 'bluetooth' | 'network')}
                   className="liquid-glass-modal-input"
                   disabled={!canSaveMyData || saveMyDataAction.disabled}
                 >
                   <option value="usb_serial">{t('integrations.mydata.connectionTypes.usbSerial', 'USB serial')}</option>
                   <option value="bluetooth">{t('integrations.mydata.connectionTypes.bluetooth', 'Bluetooth')}</option>
+                  <option value="network">{t('integrations.mydata.connectionTypes.network', 'Network (LAN)')}</option>
                 </select>
               </div>
 
@@ -1622,7 +1859,7 @@ export const IntegrationsPage: React.FC = () => {
                   placeholder="COM3 or /dev/ttyUSB0"
                   disabled={saveMyDataAction.disabled}
                 />
-              ) : (
+              ) : myDataConnectionType === 'bluetooth' ? (
                 <POSGlassInput
                   label={t('integrations.mydata.bluetoothAddress', 'Bluetooth address')}
                   value={myDataBluetoothAddress}
@@ -1630,6 +1867,26 @@ export const IntegrationsPage: React.FC = () => {
                   placeholder="00:11:22:33:44:55"
                   disabled={saveMyDataAction.disabled}
                 />
+              ) : (
+                <>
+                  <POSGlassInput
+                    label={t('integrations.mydata.networkHost', 'Device IP address or host')}
+                    value={myDataNetworkHost}
+                    onChange={(event) => setMyDataNetworkHost(event.target.value)}
+                    placeholder="192.168.1.50"
+                    disabled={saveMyDataAction.disabled}
+                  />
+                  <POSGlassInput
+                    label={t('integrations.mydata.networkPort', 'Device ERP port')}
+                    value={myDataNetworkPort}
+                    onChange={(event) => setMyDataNetworkPort(event.target.value)}
+                    placeholder={t(
+                      'integrations.mydata.networkPortPlaceholder',
+                      'From the vendor ERP manual'
+                    )}
+                    disabled={saveMyDataAction.disabled}
+                  />
+                </>
               )}
 
               {myDataConnectionType === 'usb_serial' && (
@@ -1640,6 +1897,84 @@ export const IntegrationsPage: React.FC = () => {
                   placeholder="9600"
                   disabled={saveMyDataAction.disabled}
                 />
+              )}
+              <POSGlassInput
+                label={t('integrations.mydata.deviceBrand', 'Device brand')}
+                value={myDataDeviceBrand}
+                onChange={(event) => setMyDataDeviceBrand(event.target.value)}
+                placeholder="RBS, Datecs, Elcom…"
+                disabled={saveMyDataAction.disabled}
+              />
+              <POSGlassInput
+                label={t('integrations.mydata.deviceModel', 'Exact device model')}
+                value={myDataDeviceModel}
+                onChange={(event) => setMyDataDeviceModel(event.target.value)}
+                placeholder="ELIO CR"
+                disabled={saveMyDataAction.disabled}
+              />
+              <div className="md:col-span-2">
+                <label className={`text-sm font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+                  {t('integrations.mydata.protocolProfile', 'Vendor ERP protocol profile')}
+                </label>
+                <select
+                  value={myDataProtocolProfile}
+                  onChange={(event) => setMyDataProtocolProfile(event.target.value)}
+                  className="liquid-glass-modal-input mt-2"
+                  disabled={saveMyDataAction.disabled}
+                >
+                  <option value="">
+                    {t('integrations.mydata.protocolChoose', 'Choose a verified protocol…')}
+                  </option>
+                  <option value="cap_driver">
+                    {t('integrations.mydata.capDriverProtocol', 'CAP Driver (RBS/MAT)')}
+                  </option>
+                  <option value="generic">
+                    {t('integrations.mydata.legacyDatecsProtocol', 'Legacy Datecs-style STX/ETX')}
+                  </option>
+                  <option value="zvt">ZVT</option>
+                  <option value="pax">PAX</option>
+                </select>
+                <p className={`mt-2 text-xs ${isDark ? 'text-amber-200/80' : 'text-amber-700'}`}>
+                  {t(
+                    myDataProtocolProfile === 'cap_driver'
+                      ? 'integrations.mydata.capConnectionTestHelp'
+                      : 'integrations.mydata.verificationRequired',
+                    myDataProtocolProfile === 'cap_driver'
+                      ? 'Connect & save prints a non-closing X report to prove the CAP Driver service and cashier protocol.'
+                      : 'Save performs a local connect and protocol handshake. The setup is activated only after the fiscal device answers.'
+                  )}
+                </p>
+              </div>
+              {myDataProtocolProfile === 'cap_driver' && (
+                <div className="md:col-span-2 rounded-2xl border border-purple-500/20 bg-purple-500/10 p-3">
+                  <div className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                    {t('integrations.mydata.capDepartmentTitle', 'Fiscal VAT departments')}
+                  </div>
+                  <p className={`mt-1 text-xs ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+                    {t(
+                      'integrations.mydata.capDepartmentHelp',
+                      'Enter the department programmed on the cashier for each VAT rate. Do not guess these numbers.'
+                    )}
+                  </p>
+                  <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+                    {MYDATA_FISCAL_TAX_RATES.map(({ code, rate }) => (
+                      <POSGlassInput
+                        key={code}
+                        label={`${rate}%`}
+                        value={myDataDepartmentMap[code] || ''}
+                        onChange={(event) =>
+                          setMyDataDepartmentMap((previous) => ({
+                            ...previous,
+                            [code]: event.target.value,
+                          }))
+                        }
+                        placeholder={t('integrations.mydata.capDepartmentPlaceholder', 'Department')}
+                        type="number"
+                        disabled={saveMyDataAction.disabled}
+                      />
+                    ))}
+                  </div>
+                </div>
               )}
             </div>
           </div>
@@ -1653,9 +1988,11 @@ export const IntegrationsPage: React.FC = () => {
               loading={myDataSaving}
               disabled={!canSaveMyData || myDataSaving || saveMyDataAction.disabled}
             >
-              {t('common.actions.save', 'Save')}
+              {t('integrations.mydata.testingLocally', 'Connect, test & save')}
             </POSGlassButton>
           </div>
+            </>
+          )}
         </div>
         </LiquidGlassModal>
 
@@ -1670,11 +2007,11 @@ export const IntegrationsPage: React.FC = () => {
           }}
           title={activePlugin ? `${activePlugin.name} ${t('integrations.configuration', 'Configuration')}` : t('integrations.pluginConfiguration', 'Plugin configuration')}
           size="lg"
-          className="!max-w-2xl"
+          className="plugin-setup-modal !max-w-2xl"
           closeOnBackdrop={!pluginSaving}
           closeOnEscape={!pluginSaving}
         >
-          <div className="space-y-4">
+          <div className="plugin-setup-modal-body space-y-4 text-zinc-900 dark:text-zinc-100">
             {activePlugin && (
               <>
                 {saveAction.disabled && (
@@ -1777,7 +2114,7 @@ export const IntegrationsPage: React.FC = () => {
                       {(config.supportsAutoAccept || config.supportsPrepMinutes) && (
                         <div className={`rounded-2xl p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
                           <div className="flex items-center justify-between mb-3">
-                            <div className="text-sm font-medium">
+                            <div className={`text-sm font-medium ${isDark ? 'text-gray-100' : 'text-gray-900'}`}>
                               {t('integrations.autoAccept', 'Auto-accept orders')}
                             </div>
                             <input
@@ -1802,7 +2139,7 @@ export const IntegrationsPage: React.FC = () => {
 
                       <div className={`rounded-2xl p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
                         <div className="space-y-1 mb-3">
-                          <div className="text-sm font-medium">
+                          <div className={`text-sm font-medium ${isDark ? 'text-gray-100' : 'text-gray-900'}`}>
                             {t('integrations.routingTitle', 'Order routing')}
                           </div>
                           <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -1852,9 +2189,11 @@ export const IntegrationsPage: React.FC = () => {
 
                       {(config.supportsMenuSync || config.supportsAvailabilitySync || config.supportsProductSync || config.supportsOrderSync || config.supportsInventorySync) && (
                         <div className={`rounded-2xl p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
-                          <div className="text-sm font-medium mb-2">{t('integrations.syncOptions', 'Sync Options')}</div>
+                          <div className={`text-sm font-medium mb-2 ${isDark ? 'text-gray-100' : 'text-gray-900'}`}>
+                            {t('integrations.syncOptions', 'Sync Options')}
+                          </div>
                           {config.supportsMenuSync && (
-                            <label className="flex items-center gap-2 text-xs mb-2">
+                            <label className={`flex items-center gap-2 text-xs mb-2 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
                               <input
                                 type="checkbox"
                                 checked={pluginForm.sync_menu}
@@ -1865,7 +2204,7 @@ export const IntegrationsPage: React.FC = () => {
                             </label>
                           )}
                           {config.supportsAvailabilitySync && (
-                            <label className="flex items-center gap-2 text-xs mb-2">
+                            <label className={`flex items-center gap-2 text-xs mb-2 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
                               <input
                                 type="checkbox"
                                 checked={pluginForm.sync_availability}
@@ -1876,7 +2215,7 @@ export const IntegrationsPage: React.FC = () => {
                             </label>
                           )}
                           {config.supportsProductSync && (
-                            <label className="flex items-center gap-2 text-xs mb-2">
+                            <label className={`flex items-center gap-2 text-xs mb-2 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
                               <input
                                 type="checkbox"
                                 checked={pluginForm.sync_products}
@@ -1887,7 +2226,7 @@ export const IntegrationsPage: React.FC = () => {
                             </label>
                           )}
                           {config.supportsOrderSync && (
-                            <label className="flex items-center gap-2 text-xs mb-2">
+                            <label className={`flex items-center gap-2 text-xs mb-2 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
                               <input
                                 type="checkbox"
                                 checked={pluginForm.sync_orders}
@@ -1898,7 +2237,7 @@ export const IntegrationsPage: React.FC = () => {
                             </label>
                           )}
                           {config.supportsInventorySync && (
-                            <label className="flex items-center gap-2 text-xs">
+                            <label className={`flex items-center gap-2 text-xs ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
                               <input
                                 type="checkbox"
                                 checked={pluginForm.sync_inventory}

@@ -82,19 +82,26 @@ pub fn build_fiscal_data(
         // Determine tax code: use item's taxRate if present, otherwise default to "A"
         let item_tax_rate = item.get("taxRate").and_then(|v| v.as_f64());
 
-        let tax_code = if let Some(rate) = item_tax_rate {
+        let tax = if let Some(rate) = item_tax_rate {
             // Find matching tax code by rate
             tax_rates
                 .iter()
                 .find(|tc| (tc.rate - rate).abs() < 0.01)
-                .map(|tc| tc.code.clone())
-                .unwrap_or_else(|| "A".to_string())
+                .cloned()
+                .unwrap_or(TaxRateConfig {
+                    code: "A".to_string(),
+                    rate,
+                    label: "Default".to_string(),
+                    department: None,
+                })
         } else {
             // Default to first tax rate or "A"
-            tax_rates
-                .first()
-                .map(|tc| tc.code.clone())
-                .unwrap_or_else(|| "A".to_string())
+            tax_rates.first().cloned().unwrap_or(TaxRateConfig {
+                code: "A".to_string(),
+                rate: 24.0,
+                label: "Default".to_string(),
+                department: None,
+            })
         };
 
         // Item-level discount
@@ -104,7 +111,9 @@ pub fn build_fiscal_data(
             description: name.to_string(),
             quantity: qty,
             unit_price,
-            tax_code,
+            tax_code: tax.code,
+            tax_rate: tax.rate,
+            department: tax.department,
             discount,
         });
     }
@@ -148,6 +157,24 @@ pub fn build_fiscal_data(
         operator_id: operator_id.map(|s| s.to_string()),
         receipt_comment: None,
     })
+}
+
+/// Build a fiscal receipt for an atomic checkout before the payment row exists.
+///
+/// The intended payment is explicit so a card checkout can never silently
+/// fall back to cash while the fiscal device is waiting on its paired EFT POS.
+pub fn build_fiscal_data_for_checkout(
+    order: &serde_json::Value,
+    intended_payment: &serde_json::Value,
+    tax_rates: &[TaxRateConfig],
+    operator_id: Option<&str>,
+) -> Result<FiscalReceiptData, String> {
+    build_fiscal_data(
+        order,
+        std::slice::from_ref(intended_payment),
+        tax_rates,
+        operator_id,
+    )
 }
 
 /// Format fiscal receipt data as ESC/POS binary for direct printing.
@@ -262,16 +289,19 @@ mod tests {
                 code: "A".into(),
                 rate: 24.0,
                 label: "Standard".into(),
+                department: Some(3),
             },
             TaxRateConfig {
                 code: "B".into(),
                 rate: 13.0,
                 label: "Reduced".into(),
+                department: Some(2),
             },
             TaxRateConfig {
                 code: "C".into(),
                 rate: 6.0,
                 label: "Super-reduced".into(),
+                department: Some(1),
             },
         ]
     }
@@ -309,6 +339,23 @@ mod tests {
         let data = build_fiscal_data(&order, &[], &sample_tax_rates(), None).unwrap();
         assert_eq!(data.payments.len(), 1);
         assert_eq!(data.payments[0].method, "cash");
+        assert_eq!(data.payments[0].amount, 500);
+    }
+
+    #[test]
+    fn checkout_builder_uses_the_intended_card_payment_before_it_is_persisted() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 5.00}],
+            "total_amount": 5.00
+        });
+        let intended_payment = json!({"method": "card", "amount": 5.00});
+
+        let data =
+            build_fiscal_data_for_checkout(&order, &intended_payment, &sample_tax_rates(), None)
+                .unwrap();
+
+        assert_eq!(data.payments.len(), 1);
+        assert_eq!(data.payments[0].method, "card");
         assert_eq!(data.payments[0].amount, 500);
     }
 
@@ -367,6 +414,8 @@ mod tests {
                 quantity: 1.0,
                 unit_price: 500,
                 tax_code: "A".into(),
+                tax_rate: 24.0,
+                department: Some(3),
                 discount: None,
             }],
             payments: vec![FiscalPayment {

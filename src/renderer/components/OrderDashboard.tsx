@@ -942,6 +942,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [showEditPaymentModal, setShowEditPaymentModal] = useState(false);
     const [isUpdatingPaymentMethod, setIsUpdatingPaymentMethod] =
       useState(false);
+    const [isCheckingPaymentMethodEdit, setIsCheckingPaymentMethodEdit] =
+      useState(false);
+    const paymentMethodEditRequestRef = useRef(false);
     const [editPaymentTarget, setEditPaymentTarget] = useState<{
       orderId: string;
       orderNumber?: string;
@@ -5245,9 +5248,32 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const canEditPaymentMethod = !paymentEditIneligibilityReason;
 
-    const handleEditPayment = () => {
+    const showPaymentMethodEditError = (message: string) => {
+      toast.error(message, { id: "payment-method-edit-error" });
+    };
+
+    const localizePaymentMethodEditError = (error: unknown) => {
+      const rawMessage = extractOrderDashboardErrorMessage(error) || "";
+      if (
+        rawMessage.includes(
+          "PAYMENT_METHOD_EDIT_REQUIRES_SINGLE_COMPLETED_PAYMENT",
+        ) ||
+        rawMessage.includes(
+          "Payment method can only be edited for orders with exactly one completed payment",
+        )
+      ) {
+        return t(
+          "orderDashboard.paymentMethodEditRequiresSingleCompletedPayment",
+        );
+      }
+      return t("orderDashboard.paymentMethodUpdateFailed");
+    };
+
+    const handleEditPayment = async () => {
+      if (paymentMethodEditRequestRef.current) return;
+
       if (!canEditPaymentMethod) {
-        toast.error(
+        showPaymentMethodEditError(
           paymentEditIneligibilityReason ||
             t("orderDashboard.paymentMethodEditUnavailable"),
         );
@@ -5255,28 +5281,71 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
 
       if (!editablePaymentOrder || !editablePaymentMethod) {
-        toast.error(t("orderDashboard.paymentMethodEditUnavailable"));
+        showPaymentMethodEditError(
+          t("orderDashboard.paymentMethodEditUnavailable"),
+        );
         return;
       }
 
-      const paymentStatus =
-        String(
-          editablePaymentOrder.payment_status ||
-            editablePaymentOrder.paymentStatus ||
-            "pending",
-        )
-          .trim()
-          .toLowerCase() || "pending";
+      paymentMethodEditRequestRef.current = true;
+      setIsCheckingPaymentMethodEdit(true);
+      try {
+        const orderPayments = await bridge.payments.getOrderPayments(
+          editablePaymentOrder.id,
+        );
+        const paymentRows = Array.isArray(orderPayments)
+          ? (orderPayments as Array<{ method?: unknown; status?: unknown }>)
+          : [];
+        const completedPayments = paymentRows.filter(
+          (payment) =>
+            String(payment?.status || "").trim().toLowerCase() === "completed",
+        );
 
-      setEditPaymentTarget({
-        orderId: editablePaymentOrder.id,
-        orderNumber:
-          editablePaymentOrder.order_number || editablePaymentOrder.orderNumber,
-        currentMethod: editablePaymentMethod,
-        paymentStatus,
-      });
-      setShowEditOptionsModal(false);
-      setShowEditPaymentModal(true);
+        if (completedPayments.length > 1) {
+          showPaymentMethodEditError(
+            t(
+              "orderDashboard.paymentMethodEditRequiresSingleCompletedPayment",
+            ),
+          );
+          return;
+        }
+
+        const completedPaymentMethod =
+          completedPayments.length === 1
+            ? String(completedPayments[0]?.method || "")
+                .trim()
+                .toLowerCase()
+            : "";
+        const currentMethod =
+          completedPaymentMethod === "cash" || completedPaymentMethod === "card"
+            ? completedPaymentMethod
+            : editablePaymentMethod;
+        const paymentStatus =
+          String(
+            editablePaymentOrder.payment_status ||
+              editablePaymentOrder.paymentStatus ||
+              "pending",
+          )
+            .trim()
+            .toLowerCase() || "pending";
+
+        setEditPaymentTarget({
+          orderId: editablePaymentOrder.id,
+          orderNumber:
+            editablePaymentOrder.order_number ||
+            editablePaymentOrder.orderNumber,
+          currentMethod,
+          paymentStatus,
+        });
+        setShowEditOptionsModal(false);
+        setShowEditPaymentModal(true);
+      } catch (error) {
+        console.error("Failed to check payment method edit eligibility:", error);
+        showPaymentMethodEditError(localizePaymentMethodEditError(error));
+      } finally {
+        paymentMethodEditRequestRef.current = false;
+        setIsCheckingPaymentMethodEdit(false);
+      }
     };
 
     // Used when the operator changes order type FROM delivery TO pickup or
@@ -5503,10 +5572,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         clearBulkSelection();
       } catch (error) {
         console.error("Failed to update payment method:", error);
-        const message =
-          extractOrderDashboardErrorMessage(error) ||
-          t("orderDashboard.paymentMethodUpdateFailed");
-        toast.error(message);
+        const message = localizePaymentMethodEditError(error);
+        toast.error(message, { id: "payment-method-edit-error" });
       } finally {
         setIsUpdatingPaymentMethod(false);
       }
@@ -7240,8 +7307,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               : "pickup"
           }
           onEditPayment={handleEditPayment}
-          canEditPayment={canEditPaymentMethod}
-          paymentEditHint={paymentEditIneligibilityReason}
+          canEditPayment={
+            canEditPaymentMethod && !isCheckingPaymentMethodEdit
+          }
+          paymentEditHint={
+            isCheckingPaymentMethodEdit
+              ? t("orderDashboard.paymentMethodEditChecking")
+              : paymentEditIneligibilityReason
+          }
           onClose={handleEditOptionsClose}
         />
 

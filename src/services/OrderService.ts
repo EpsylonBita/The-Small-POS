@@ -1063,6 +1063,7 @@ export class OrderService {
       };
 
       let bridgeCreateError: Error | null = null;
+      let bridgeCreateHardFailure = false;
 
       // 1) Try local-first via IPC (native Rust backend)
       const bridge = this.getBridge();
@@ -1111,7 +1112,15 @@ export class OrderService {
           }
           // Bridge returned a non-success response
           const ipcError = resp?.error || 'Bridge create returned unexpected response';
-          if (!this.allowAdminApiFallback()) {
+          if (resp?.errorCode === 'FISCAL_CHECKOUT_NOT_APPROVED') {
+            bridgeCreateHardFailure = true;
+            bridgeCreateError = Object.assign(
+              ErrorFactory.system(
+                typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
+              ),
+              { code: 'FISCAL_CHECKOUT_NOT_APPROVED', retryable: false },
+            );
+          } else if (!this.allowAdminApiFallback()) {
             bridgeCreateError = ErrorFactory.system(
               typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
             );
@@ -1331,6 +1340,12 @@ export class OrderService {
         console.warn('[OrderService] organization_id not configured. Order may fail organization validation on the server.');
       }
 
+      // A fiscal cashier decline/timeout is a definitive checkout result.
+      // It must never become an Admin API create or an offline retry record,
+      // because that would persist an unpaid/unfiscalized order.
+      if (bridgeCreateHardFailure && bridgeCreateError) {
+        throw bridgeCreateError;
+      }
       if (bridgeCreateError && !this.allowAdminApiFallback()) {
         return await this.persistOrderForRetry({
           normalizedPayload: queuedFallbackContext.normalizedPayload,
@@ -1398,6 +1413,10 @@ export class OrderService {
 
       return newOrder;
     } catch (error) {
+      if ((error as { code?: string } | null)?.code === 'FISCAL_CHECKOUT_NOT_APPROVED') {
+        debugLogger.error('Fiscal checkout rejected order creation', error, 'OrderService');
+        throw error;
+      }
       if (queuedFallbackContext && this.shouldQueueOrderCreate(error)) {
         try {
           if (!this.allowAdminApiFallback() && this.getBridge()) {

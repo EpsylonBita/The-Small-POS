@@ -3784,10 +3784,135 @@ pub async fn order_create(
 pub async fn order_create_with_initial_payment(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    mgr: tauri::State<'_, crate::ecr::DeviceManager>,
     _app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
-    let normalized = payload.get("orderData").cloned().unwrap_or(payload);
+    let mut normalized = payload.get("orderData").cloned().unwrap_or(payload);
+    let initial_payment = normalized
+        .get("initialPayment")
+        .or_else(|| normalized.get("initial_payment"))
+        .cloned()
+        .ok_or("Missing initial payment")?;
+    let client_request_id = normalized
+        .get("clientRequestId")
+        .or_else(|| normalized.get("client_request_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if let Some(order) = normalized.as_object_mut() {
+        order.insert(
+            "clientRequestId".to_string(),
+            serde_json::Value::String(client_request_id.clone()),
+        );
+        order.insert(
+            "client_request_id".to_string(),
+            serde_json::Value::String(client_request_id.clone()),
+        );
+    }
+
+    let existing_order_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id FROM orders WHERE client_request_id = ?1 LIMIT 1",
+            rusqlite::params![client_request_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("query existing checkout order: {e}"))?
+    };
+
+    if existing_order_id.is_none() {
+        let checkout = match crate::commands::ecr::fiscal_checkout_for_order_payload(
+            &db,
+            &mgr,
+            &client_request_id,
+            &normalized,
+            &initial_payment,
+        )
+        .await
+        {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "errorCode": "FISCAL_CHECKOUT_NOT_APPROVED",
+                    "paymentApproved": false,
+                    "orderPersisted": false,
+                    "error": error,
+                }));
+            }
+        };
+
+        if checkout.get("success").and_then(|value| value.as_bool()) != Some(true)
+            || checkout.get("approved").and_then(|value| value.as_bool()) != Some(true)
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "errorCode": "FISCAL_CHECKOUT_NOT_APPROVED",
+                "paymentApproved": false,
+                "orderPersisted": false,
+                "error": checkout
+                    .get("error")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!("Fiscal checkout was not approved")),
+                "fiscalCheckout": checkout,
+            }));
+        }
+
+        if checkout.get("skipped").and_then(|value| value.as_bool()) != Some(true) {
+            let transaction = checkout
+                .get("transaction")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let method = initial_payment
+                .get("method")
+                .or_else(|| initial_payment.get("paymentMethod"))
+                .or_else(|| initial_payment.get("payment_method"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            let mut approved_payment = initial_payment.clone();
+            if let Some(payment) = approved_payment.as_object_mut() {
+                if let Some(transaction_id) = transaction
+                    .get("transactionId")
+                    .and_then(|value| value.as_str())
+                {
+                    payment.insert(
+                        "transactionRef".to_string(),
+                        serde_json::Value::String(transaction_id.to_string()),
+                    );
+                }
+                if method == "card" {
+                    payment.insert("terminalApproved".to_string(), serde_json::json!(true));
+                    payment.insert("paymentOrigin".to_string(), serde_json::json!("terminal"));
+                    if let Some(device_id) =
+                        transaction.get("deviceId").and_then(|value| value.as_str())
+                    {
+                        payment.insert(
+                            "terminalDeviceId".to_string(),
+                            serde_json::Value::String(device_id.to_string()),
+                        );
+                    }
+                }
+                payment.insert(
+                    "fiscalReceiptNumber".to_string(),
+                    transaction
+                        .get("fiscalReceiptNumber")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            if let Some(order) = normalized.as_object_mut() {
+                order.insert("initialPayment".to_string(), approved_payment.clone());
+                order.insert("initial_payment".to_string(), approved_payment);
+            }
+        }
+    }
+
     let mut resp = sync::create_order(&db, &normalized)?;
     let order_id = resp
         .get("orderId")
@@ -3806,6 +3931,15 @@ pub async fn order_create_with_initial_payment(
                 .or_insert_with(|| serde_json::Value::String(order_id.clone()));
             obj.entry("data".to_string())
                 .or_insert_with(|| serde_json::json!({ "orderId": order_id.clone() }));
+        }
+
+        if let Ok(conn) = db.conn.lock() {
+            if let Err(fiscal_err) = crate::fiscal::dispatcher::enqueue_for_order(&conn, &order_id)
+            {
+                tracing::warn!(
+                    "[order_create_with_initial_payment] fiscal enqueue best-effort failed for order {order_id}: {fiscal_err}"
+                );
+            }
         }
     }
 

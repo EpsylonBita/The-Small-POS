@@ -4836,15 +4836,7 @@ pub fn ecr_list_transactions(
             let mut obj = serde_json::Map::new();
             for (i, col) in column_names.iter().enumerate() {
                 let val: rusqlite::types::Value = row.get(i)?;
-                let json_val = match val {
-                    rusqlite::types::Value::Null => serde_json::Value::Null,
-                    rusqlite::types::Value::Integer(n) => serde_json::json!(n),
-                    rusqlite::types::Value::Real(f) => serde_json::json!(f),
-                    rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
-                    rusqlite::types::Value::Blob(b) => serde_json::Value::String(
-                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b),
-                    ),
-                };
+                let json_val = ecr_sql_value_to_json(col, val);
                 // Convert snake_case to camelCase for the frontend
                 let camel = to_camel_case(col);
                 obj.insert(camel, json_val);
@@ -4870,15 +4862,7 @@ fn ecr_query_one<P: rusqlite::Params>(
         let mut obj = serde_json::Map::new();
         for (i, col) in column_names.iter().enumerate() {
             let val: rusqlite::types::Value = row.get(i)?;
-            let json_val = match val {
-                rusqlite::types::Value::Null => serde_json::Value::Null,
-                rusqlite::types::Value::Integer(n) => serde_json::json!(n),
-                rusqlite::types::Value::Real(f) => serde_json::json!(f),
-                rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
-                rusqlite::types::Value::Blob(b) => serde_json::Value::String(
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b),
-                ),
-            };
+            let json_val = ecr_sql_value_to_json(col, val);
             let camel = to_camel_case(col);
             obj.insert(camel, json_val);
         }
@@ -4904,15 +4888,7 @@ fn ecr_query_many<P: rusqlite::Params>(
             let mut obj = serde_json::Map::new();
             for (i, col) in column_names.iter().enumerate() {
                 let val: rusqlite::types::Value = row.get(i)?;
-                let json_val = match val {
-                    rusqlite::types::Value::Null => serde_json::Value::Null,
-                    rusqlite::types::Value::Integer(n) => serde_json::json!(n),
-                    rusqlite::types::Value::Real(f) => serde_json::json!(f),
-                    rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
-                    rusqlite::types::Value::Blob(b) => serde_json::Value::String(
-                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b),
-                    ),
-                };
+                let json_val = ecr_sql_value_to_json(col, val);
                 let camel = to_camel_case(col);
                 obj.insert(camel, json_val);
             }
@@ -4939,6 +4915,31 @@ fn to_camel_case(s: &str) -> String {
         }
     }
     result
+}
+
+/// Decode JSON-backed ECR columns before returning them to protocol and UI
+/// callers. Leaving these columns as JSON strings made connectionDetails look
+/// empty to `create_transport`, so saved network/serial devices could never
+/// reconnect after being read from SQLite.
+fn ecr_sql_value_to_json(column: &str, value: rusqlite::types::Value) -> serde_json::Value {
+    match value {
+        rusqlite::types::Value::Null => serde_json::Value::Null,
+        rusqlite::types::Value::Integer(number) => serde_json::json!(number),
+        rusqlite::types::Value::Real(number) => serde_json::json!(number),
+        rusqlite::types::Value::Text(text)
+            if matches!(
+                column,
+                "connection_details" | "tax_rates" | "settings" | "receipt_data" | "raw_response"
+            ) =>
+        {
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text))
+        }
+        rusqlite::types::Value::Text(text) => serde_json::Value::String(text),
+        rusqlite::types::Value::Blob(bytes) => serde_json::Value::String(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &bytes,
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6899,6 +6900,37 @@ mod tests {
         delete_all_settings(&conn, "terminal").expect("delete");
         let val = get_setting(&conn, "terminal", "language");
         assert!(val.is_none());
+    }
+
+    #[test]
+    fn ecr_device_json_columns_round_trip_as_structured_values() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        let device = serde_json::json!({
+            "id": "cap-device-1",
+            "name": "Fiscal Cashier",
+            "deviceType": "cash_register",
+            "brand": "RBS",
+            "protocol": "cap_driver",
+            "connectionType": "network",
+            "connectionDetails": {"ip": "192.0.2.169", "port": 9101},
+            "printMode": "register_prints",
+            "taxRates": [
+                {"code": "A", "rate": 24.0, "label": "Standard", "department": 3}
+            ],
+            "isDefault": true,
+            "enabled": true,
+            "settings": {"capturePath": "C:\\Capture", "eftPosIndex": 1}
+        });
+
+        ecr_insert_device(&conn, &device).expect("insert ecr device");
+        let saved = ecr_get_device(&conn, "cap-device-1").expect("read ecr device");
+
+        assert_eq!(saved["connectionDetails"]["ip"], "192.0.2.169");
+        assert_eq!(saved["connectionDetails"]["port"], 9101);
+        assert_eq!(saved["taxRates"][0]["department"], 3);
+        assert_eq!(saved["settings"]["capturePath"], r"C:\Capture");
     }
 
     // ----------------------------------------------------------------------

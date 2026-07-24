@@ -198,6 +198,25 @@ fn parse_payment_id_payload(arg0: Option<serde_json::Value>) -> Result<String, S
         .ok_or("Missing paymentId".into())
 }
 
+fn payment_payload_has_terminal_approval(payload: &serde_json::Value) -> bool {
+    payload
+        .get("terminalApproved")
+        .or_else(|| payload.get("terminal_approved"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn should_fiscalize_full_balance_before_record(
+    input: &payments::PaymentRecordInput,
+    terminal_approved: bool,
+    balance: payments::OrderPaymentBalanceSnapshot,
+) -> bool {
+    !terminal_approved
+        && matches!(input.method.as_str(), "cash" | "card")
+        && balance.net_paid <= 0.01
+        && (input.amount - balance.outstanding_amount).abs() <= 0.01
+}
+
 #[tauri::command]
 pub async fn payment_update_payment_status(
     arg0: Option<serde_json::Value>,
@@ -320,8 +339,95 @@ pub async fn payment_update_payment_method(
 pub async fn payment_record(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    mgr: tauri::State<'_, crate::ecr::DeviceManager>,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing payment payload")?;
+    let mut payload = arg0.ok_or("Missing payment payload")?;
+    let input = payments::build_payment_record_input(&payload)?;
+    let terminal_approved = payment_payload_has_terminal_approval(&payload);
+    let (order_id, balance) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let order_id = resolve_order_id(&conn, &input.order_id).ok_or("Order not found")?;
+        let balance = payments::load_order_payment_balance_snapshot(&conn, &order_id)?;
+        (order_id, balance)
+    };
+
+    // A normal pay-later order with one full-balance cash/card collection must
+    // use the same cashier-first flow as initial checkout. Split payments and
+    // a card payment already approved by a directly integrated EFT terminal
+    // retain their existing collection paths.
+    if should_fiscalize_full_balance_before_record(&input, terminal_approved, balance) {
+        let order = crate::sync::get_order_by_id(&db, &order_id)?;
+        let checkout = match crate::commands::ecr::fiscal_checkout_for_order_payload(
+            &db, &mgr, &order_id, &order, &payload,
+        )
+        .await
+        {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "errorCode": "FISCAL_CHECKOUT_NOT_APPROVED",
+                    "paymentApproved": false,
+                    "paymentPersisted": false,
+                    "error": error,
+                }));
+            }
+        };
+
+        if checkout.get("success").and_then(|value| value.as_bool()) != Some(true)
+            || checkout.get("approved").and_then(|value| value.as_bool()) != Some(true)
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "errorCode": "FISCAL_CHECKOUT_NOT_APPROVED",
+                "paymentApproved": false,
+                "paymentPersisted": false,
+                "error": checkout
+                    .get("error")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!("Fiscal checkout was not approved")),
+                "fiscalCheckout": checkout,
+            }));
+        }
+
+        if checkout.get("skipped").and_then(|value| value.as_bool()) != Some(true) {
+            let transaction = checkout
+                .get("transaction")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(payment) = payload.as_object_mut() {
+                if let Some(transaction_id) = transaction
+                    .get("transactionId")
+                    .and_then(|value| value.as_str())
+                {
+                    payment.insert(
+                        "transactionRef".to_string(),
+                        serde_json::Value::String(transaction_id.to_string()),
+                    );
+                }
+                payment.insert(
+                    "fiscalReceiptNumber".to_string(),
+                    transaction
+                        .get("fiscalReceiptNumber")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                if input.method == "card" {
+                    payment.insert("terminalApproved".to_string(), serde_json::json!(true));
+                    payment.insert("paymentOrigin".to_string(), serde_json::json!("terminal"));
+                    if let Some(device_id) =
+                        transaction.get("deviceId").and_then(|value| value.as_str())
+                    {
+                        payment.insert(
+                            "terminalDeviceId".to_string(),
+                            serde_json::Value::String(device_id.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     payments::record_payment(&db, &payload)
 }
 
@@ -514,5 +620,55 @@ mod dto_tests {
             .expect("string order id should parse");
         assert_eq!(from_obj, "order-3");
         assert_eq!(from_str, "order-4");
+    }
+
+    #[test]
+    fn full_unpaid_card_balance_requires_cashier_fiscal_checkout() {
+        let input = payments::build_payment_record_input(&serde_json::json!({
+            "orderId": "order-5",
+            "method": "card",
+            "amount": 42.50
+        }))
+        .expect("payment should parse");
+        let balance = payments::OrderPaymentBalanceSnapshot {
+            order_total: 42.50,
+            net_paid: 0.0,
+            outstanding_amount: 42.50,
+        };
+
+        assert!(should_fiscalize_full_balance_before_record(
+            &input, false, balance
+        ));
+        assert!(!should_fiscalize_full_balance_before_record(
+            &input, true, balance
+        ));
+    }
+
+    #[test]
+    fn split_or_partially_paid_collection_does_not_issue_full_receipt_early() {
+        let split_input = payments::build_payment_record_input(&serde_json::json!({
+            "orderId": "order-6",
+            "method": "cash",
+            "amount": 20.00
+        }))
+        .expect("payment should parse");
+        assert!(!should_fiscalize_full_balance_before_record(
+            &split_input,
+            false,
+            payments::OrderPaymentBalanceSnapshot {
+                order_total: 40.00,
+                net_paid: 0.0,
+                outstanding_amount: 40.00,
+            }
+        ));
+        assert!(!should_fiscalize_full_balance_before_record(
+            &split_input,
+            false,
+            payments::OrderPaymentBalanceSnapshot {
+                order_total: 40.00,
+                net_paid: 20.00,
+                outstanding_amount: 20.00,
+            }
+        ));
     }
 }

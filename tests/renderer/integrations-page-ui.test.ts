@@ -7,6 +7,10 @@ const source = readFileSync(
   path.join(process.cwd(), 'src', 'renderer', 'pages', 'IntegrationsPage.tsx'),
   'utf8',
 );
+const glassStyles = readFileSync(
+  path.join(process.cwd(), 'src', 'renderer', 'styles', 'glassmorphism.css'),
+  'utf8',
+);
 
 // Round 286 (live QA, Greek/light): the IntegrationsPage header refresh button was a stark solid-black
 // square in light mode, and several touch controls (logo, configure, toggle, refresh) carried native DOM
@@ -166,4 +170,34 @@ test('Round 439: IntegrationsPage uses smooth rounded surfaces without stripping
 
   const titleAttrs = source.match(/\btitle=/g) ?? [];
   assert.equal(titleAttrs.length, 2, 'modal heading title props should remain the only title props');
+});
+
+test('Plugin setup modals keep light-theme text and controls readable', () => {
+  const pluginModalClasses = source.match(/className="plugin-setup-modal !max-w-(?:lg|2xl)"/g) ?? [];
+  assert.equal(
+    pluginModalClasses.length,
+    2,
+    'both the MyData and general plugin setup modals must use the scoped readable theme',
+  );
+  assert.match(
+    source,
+    /className="plugin-setup-modal-body space-y-4 text-zinc-900 dark:text-zinc-100"/,
+  );
+
+  assert.match(
+    glassStyles,
+    /html:not\(\.dark\) \.plugin-setup-modal\.liquid-glass-modal-shell\s*\{[\s\S]*?background:\s*rgba\(250,\s*250,\s*250,\s*0\.96\)/,
+  );
+  assert.match(
+    glassStyles,
+    /html:not\(\.dark\) \.plugin-setup-modal \.liquid-glass-modal-input\s*\{[\s\S]*?background:\s*rgba\(255,\s*255,\s*255,\s*0\.92\)[\s\S]*?color:\s*#18181b/,
+  );
+  assert.match(
+    glassStyles,
+    /html:not\(\.dark\) \.plugin-setup-modal \.liquid-glass-modal-input::placeholder\s*\{[\s\S]*?color:\s*#71717a/,
+  );
+  assert.match(
+    glassStyles,
+    /html:not\(\.dark\) \.plugin-setup-modal \.liquid-glass-modal-secondary\s*\{[\s\S]*?color:\s*#27272a/,
+  );
 });

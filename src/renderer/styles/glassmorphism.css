@@ -1069,6 +1069,59 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
+/* Plugin configuration forms contain dense credential and device controls.
+   Give those two modals an opaque, high-contrast light surface so text,
+   inputs and secondary actions cannot disappear into the page behind them. */
+html:not(.dark) .plugin-setup-modal.liquid-glass-modal-shell {
+  background: rgba(250, 250, 250, 0.96);
+  border-color: rgba(24, 24, 27, 0.16);
+  box-shadow:
+    0 24px 70px rgba(24, 24, 27, 0.22),
+    0 8px 24px rgba(24, 24, 27, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-content {
+  background: rgba(250, 250, 250, 0.72);
+  color: #18181b;
+}
+
+html:not(.dark) .plugin-setup-modal .pos-glass-text-primary {
+  color: #27272a;
+}
+
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-input {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(113, 113, 122, 0.35);
+  color: #18181b;
+  box-shadow: inset 0 1px 2px rgba(24, 24, 27, 0.08);
+}
+
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-input:focus {
+  background: #ffffff;
+  border-color: #ca8a04;
+}
+
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-input::placeholder {
+  color: #71717a;
+  opacity: 1;
+}
+
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-input option {
+  background: #ffffff;
+  color: #18181b;
+}
+
+html:not(.dark) .plugin-setup-modal input[type="checkbox"] {
+  accent-color: #ca8a04;
+}
+
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
+  background: rgba(244, 244, 245, 0.94);
+  border-color: #d4d4d8;
+  color: #27272a;
+}
+
 /* Trial: New Order chooser as a transparent command palette. */
 .liquid-glass-modal-viewport:has(.order-type-transparent-modal) .liquid-glass-modal-backdrop {
   background: rgba(0, 0, 0, 0.2) !important;

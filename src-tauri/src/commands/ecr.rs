@@ -2219,13 +2219,10 @@ pub async fn ecr_test_print(
             let data = b.build();
             mgr.send_raw_offloaded(&device_id, data).await?;
         } else {
-            // For register_prints mode, send a status inquiry
-            let _ = mgr
-                .send_raw_offloaded(
-                    &device_id,
-                    vec![0x02, 0x01, 0x21, 0x4A, 0x05, 0x6A, 0x03], // STATUS frame
-                )
-                .await;
+            // A fiscal cashier must print a real, non-closing test document.
+            // The old path sent a Datecs status frame to every protocol,
+            // ignored errors, and then falsely reported "printed".
+            mgr.x_report_offloaded(&device_id).await?;
         }
 
         return Ok(serde_json::json!({ "success": true, "printed": true }));
@@ -2234,6 +2231,327 @@ pub async fn ecr_test_print(
     Ok(serde_json::json!({
         "success": false,
         "error": "Device not connected"
+    }))
+}
+
+fn find_approved_fiscal_transaction(
+    conn: &rusqlite::Connection,
+    order_reference: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let persisted = conn
+        .query_row(
+            "SELECT id, device_id, authorization_code, terminal_reference,
+                fiscal_receipt_number, card_type, card_last_four, entry_method
+         FROM ecr_transactions
+         WHERE order_id = ?1
+           AND transaction_type = 'fiscal_receipt'
+           AND status = 'approved'
+         ORDER BY created_at DESC
+         LIMIT 1",
+            rusqlite::params![order_reference],
+            |row| {
+                Ok(serde_json::json!({
+                    "transactionId": row.get::<_, String>(0)?,
+                    "deviceId": row.get::<_, String>(1)?,
+                    "authorizationCode": row.get::<_, Option<String>>(2)?,
+                    "terminalReference": row.get::<_, Option<String>>(3)?,
+                    "fiscalReceiptNumber": row.get::<_, Option<String>>(4)?,
+                    "cardType": row.get::<_, Option<String>>(5)?,
+                    "cardLastFour": row.get::<_, Option<String>>(6)?,
+                    "entryMethod": row.get::<_, Option<String>>(7)?,
+                }))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("find approved fiscal transaction: {e}"))?;
+    if persisted.is_some() {
+        return Ok(persisted);
+    }
+
+    // If the fiscal device committed but the relational ECR audit INSERT
+    // failed, the checkout stores a minimal recovery marker in local_settings.
+    // Consult it before contacting hardware again so a retry cannot issue a
+    // duplicate fiscal receipt.
+    let orphan = db::get_setting(conn, "ecr_orphaned_receipts", order_reference)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .filter(|value| value.get("status").and_then(|status| status.as_str()) == Some("approved"))
+        .map(|value| {
+            serde_json::json!({
+                "transactionId": value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "deviceId": value.get("deviceId").cloned().unwrap_or(serde_json::Value::Null),
+                "authorizationCode": value.get("authorizationCode").cloned().unwrap_or(serde_json::Value::Null),
+                "terminalReference": value.get("terminalReference").cloned().unwrap_or(serde_json::Value::Null),
+                "fiscalReceiptNumber": value.get("fiscalReceiptNumber").cloned().unwrap_or(serde_json::Value::Null),
+                "cardType": value.get("cardType").cloned().unwrap_or(serde_json::Value::Null),
+                "cardLastFour": value.get("cardLastFour").cloned().unwrap_or(serde_json::Value::Null),
+                "entryMethod": value.get("entryMethod").cloned().unwrap_or(serde_json::Value::Null),
+                "orphanedLocally": true,
+            })
+        });
+    Ok(orphan)
+}
+
+fn find_ambiguous_fiscal_transaction(
+    conn: &rusqlite::Connection,
+    order_reference: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    conn.query_row(
+        "SELECT id, device_id, status, terminal_reference, error_message, raw_response
+         FROM ecr_transactions
+         WHERE order_id = ?1
+           AND transaction_type = 'fiscal_receipt'
+           AND status IN ('pending', 'processing', 'timeout')
+         ORDER BY created_at DESC
+         LIMIT 1",
+        rusqlite::params![order_reference],
+        |row| {
+            let raw: Option<String> = row.get(5)?;
+            Ok(serde_json::json!({
+                "transactionId": row.get::<_, String>(0)?,
+                "deviceId": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "terminalReference": row.get::<_, Option<String>>(3)?,
+                "errorMessage": row.get::<_, Option<String>>(4)?,
+                "rawResponse": raw.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok()),
+            }))
+        },
+    )
+    .optional()
+    .map_err(|error| format!("find ambiguous fiscal transaction: {error}"))
+}
+
+/// Execute the fiscal cashier transaction before a payment is persisted.
+///
+/// A card payment is therefore only recorded after the cashier's protocol
+/// returns `Approved` (which, for an integrated ECR driver, is after its paired
+/// EFT POS approves and the fiscal receipt is committed). The stable
+/// `order_reference` makes retries idempotent when the device succeeded but
+/// local order persistence was interrupted.
+pub(crate) async fn fiscal_checkout_for_order_payload(
+    db: &db::DbState,
+    mgr: &ecr::DeviceManager,
+    order_reference: &str,
+    order: &serde_json::Value,
+    intended_payment: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (device, existing_approval, existing_ambiguous) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let device = db::ecr_get_default_device(&conn, Some("cash_register"));
+        let existing = find_approved_fiscal_transaction(&conn, order_reference)?;
+        let ambiguous = find_ambiguous_fiscal_transaction(&conn, order_reference)?;
+        (device, existing, ambiguous)
+    };
+
+    if let Some(existing) = existing_approval {
+        return Ok(serde_json::json!({
+            "success": true,
+            "approved": true,
+            "deduplicated": true,
+            "transaction": existing,
+        }));
+    }
+
+    if let Some(existing) = existing_ambiguous {
+        return Ok(serde_json::json!({
+            "success": false,
+            "approved": false,
+            "requiresReconciliation": true,
+            "error": "A previous fiscal attempt has an unknown result. Check the cashier/CAP Driver log before retrying.",
+            "transaction": existing,
+        }));
+    }
+
+    let Some(device) = device else {
+        return Ok(serde_json::json!({
+            "success": true,
+            "approved": true,
+            "skipped": true,
+        }));
+    };
+
+    let device_id = device
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("Fiscal device has no id")?
+        .to_string();
+    let print_mode = device
+        .get("printMode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("register_prints");
+    if print_mode != "register_prints" {
+        return Ok(serde_json::json!({
+            "success": false,
+            "approved": false,
+            "error": "Fiscal checkout requires register_prints mode and a verified fiscal protocol"
+        }));
+    }
+    if !mgr.is_connected(&device_id) {
+        return Ok(serde_json::json!({
+            "success": false,
+            "approved": false,
+            "error": "Cash register not connected"
+        }));
+    }
+
+    let tax_rates: Vec<ecr::protocol::TaxRateConfig> = serde_json::from_value(
+        device
+            .get("taxRates")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .unwrap_or_default();
+    let operator_id = device.get("operatorId").and_then(|value| value.as_str());
+    let fiscal_data = ecr::fiscal::build_fiscal_data_for_checkout(
+        order,
+        intended_payment,
+        &tax_rates,
+        operator_id,
+    )?;
+    let amount = fiscal_data
+        .payments
+        .iter()
+        .map(|payment| payment.amount)
+        .sum();
+    let tx_id = format!("fiscal-{}", uuid::Uuid::new_v4());
+    let started = chrono::Utc::now().to_rfc3339();
+    let request = ecr::protocol::TransactionRequest {
+        transaction_id: tx_id.clone(),
+        transaction_type: ecr::protocol::TransactionType::FiscalReceipt,
+        amount,
+        currency: "EUR".into(),
+        order_id: Some(order_reference.to_string()),
+        tip_amount: None,
+        original_transaction_id: None,
+        fiscal_data: Some(fiscal_data),
+    };
+
+    let response = match mgr.process_transaction_offloaded(&device_id, request).await {
+        Ok(response) => response,
+        Err(error) => {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let _ = db::ecr_insert_transaction(
+                &conn,
+                &serde_json::json!({
+                    "id": tx_id,
+                    "deviceId": device_id,
+                    "orderId": order_reference,
+                    "transactionType": "fiscal_receipt",
+                    "amount": amount,
+                    "currency": "EUR",
+                    "status": "error",
+                    "errorMessage": error,
+                    "startedAt": started,
+                    "completedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+            return Ok(serde_json::json!({
+                "success": false,
+                "approved": false,
+                "error": error
+            }));
+        }
+    };
+
+    let approved = response.status == ecr::protocol::TransactionStatus::Approved;
+    let status = format!("{:?}", response.status).to_lowercase();
+    let transaction = serde_json::json!({
+        "id": response.transaction_id,
+        "deviceId": device_id,
+        "orderId": order_reference,
+        "transactionType": "fiscal_receipt",
+        "amount": amount,
+        "currency": "EUR",
+        "status": status,
+        "authorizationCode": response.authorization_code,
+        "terminalReference": response.terminal_reference,
+        "fiscalReceiptNumber": response.fiscal_receipt_number,
+        "cardType": response.card_type,
+        "cardLastFour": response.card_last_four,
+        "entryMethod": response.entry_method,
+        "errorMessage": response.error_message,
+        "rawResponse": response.raw_response,
+        "startedAt": response.started_at,
+        "completedAt": response.completed_at,
+    });
+    let persist_error = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        match db::ecr_insert_transaction(&conn, &transaction) {
+            Ok(()) => {
+                let _ = db::delete_setting(&conn, "ecr_orphaned_receipts", order_reference);
+                None
+            }
+            Err(error) => {
+                if approved {
+                    if let Err(marker_error) = db::set_setting(
+                        &conn,
+                        "ecr_orphaned_receipts",
+                        order_reference,
+                        &transaction.to_string(),
+                    ) {
+                        tracing::error!(
+                            target: "ecr.orphaned_receipt",
+                            order_reference = %order_reference,
+                            transaction_id = %transaction["id"],
+                            error = %marker_error,
+                            "Failed to persist fiscal orphan recovery marker"
+                        );
+                    }
+                }
+                Some(error)
+            }
+        }
+    };
+
+    if !approved {
+        if let Some(error) = persist_error.as_deref() {
+            tracing::warn!(
+                target: "ecr",
+                order_reference = %order_reference,
+                device_id = %device_id,
+                transaction_id = %transaction["id"],
+                error = %error,
+                "Failed to persist declined fiscal transaction"
+            );
+        }
+        return Ok(serde_json::json!({
+            "success": false,
+            "approved": false,
+            "error": transaction.get("errorMessage").cloned().unwrap_or_else(|| serde_json::json!("Payment was not approved")),
+            "transaction": transaction,
+        }));
+    }
+
+    if let Some(error) = persist_error.as_deref() {
+        // The device has already committed the receipt. Treat the checkout as
+        // approved so the order/payment can be recorded, but flag the missing
+        // audit row. The payment's fiscal-* transaction reference is also
+        // persisted and is used by ecr_fiscal_print as a duplicate guard.
+        tracing::error!(
+            target: "ecr.orphaned_receipt",
+            order_reference = %order_reference,
+            device_id = %device_id,
+            transaction_id = %transaction["id"],
+            fiscal_receipt_number = %transaction["fiscalReceiptNumber"],
+            error = %error,
+            "Fiscal receipt committed at device but local ECR transaction INSERT failed"
+        );
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "approved": true,
+        "orphanedLocally": persist_error.is_some(),
+        "transaction": {
+            "transactionId": transaction["id"],
+            "deviceId": transaction["deviceId"],
+            "authorizationCode": transaction["authorizationCode"],
+            "terminalReference": transaction["terminalReference"],
+            "fiscalReceiptNumber": transaction["fiscalReceiptNumber"],
+            "cardType": transaction["cardType"],
+            "cardLastFour": transaction["cardLastFour"],
+            "entryMethod": transaction["entryMethod"],
+        }
     }))
 }
 
@@ -2252,7 +2570,7 @@ pub async fn ecr_fiscal_print(
     // in Phase 3. Previously the lock was held across the entire function,
     // which froze every other SQLite write in the POS for the duration of
     // each fiscal print.
-    let (device, order, payments) = {
+    let (device, client_request_id) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
         let device = match db::ecr_get_default_device(&conn, Some("cash_register")) {
@@ -2279,35 +2597,27 @@ pub async fn ecr_fiscal_print(
             return Ok(serde_json::json!({ "success": true, "skipped": true }));
         }
 
-        let order_json_str: Option<String> = conn
-            .prepare("SELECT data FROM orders WHERE id = ?1")
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_row(rusqlite::params![order_id], |row| row.get(0))
-                    .ok()
-            });
-        let order: serde_json::Value = match order_json_str {
-            Some(s) => serde_json::from_str(&s).unwrap_or(serde_json::json!({})),
-            None => return Err(format!("Order {order_id} not found")),
-        };
+        let client_request_id: Option<String> = conn
+            .query_row(
+                "SELECT client_request_id FROM orders WHERE id = ?1",
+                rusqlite::params![order_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("load order client request id: {e}"))?
+            .flatten();
 
-        let payments: Vec<serde_json::Value> = conn
-            .prepare("SELECT data FROM order_payments WHERE order_id = ?1")
-            .ok()
-            .map(|mut stmt| {
-                stmt.query_map(rusqlite::params![order_id], |row| {
-                    let s: String = row.get(0)?;
-                    Ok(serde_json::from_str::<serde_json::Value>(&s).unwrap_or_default())
-                })
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-            })
-            .unwrap_or_default();
-
-        (device, order, payments)
+        (device, client_request_id)
         // MutexGuard drops here; DB lock released.
     };
+
+    // Orders and payments are normalized relational rows; neither table has a
+    // `data` JSON column. Use the canonical readers after dropping the device
+    // query lock. The old `SELECT data ...` path made every fiscal print report
+    // "Order not found" on the production schema.
+    let order = crate::sync::get_order_by_id(&db, &order_id)?;
+    let payments_value = crate::payments::get_order_payments(&db, &order_id)?;
+    let payments = payments_value.as_array().cloned().unwrap_or_default();
 
     // Phase 2 — derive config + build fiscal data (no DB access).
     let device_id = device
@@ -2315,6 +2625,33 @@ pub async fn ecr_fiscal_print(
         .and_then(|v| v.as_str())
         .ok_or("Device has no id")?
         .to_string();
+
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let payment_has_fiscal_checkout_reference = payments.iter().any(|payment| {
+            payment
+                .get("transactionRef")
+                .or_else(|| payment.get("transaction_ref"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.starts_with("fiscal-"))
+                && payment.get("status").and_then(|value| value.as_str()) == Some("completed")
+        });
+        let already_issued = payment_has_fiscal_checkout_reference
+            || find_approved_fiscal_transaction(&conn, &order_id)?.is_some()
+            || client_request_id
+                .as_deref()
+                .map(|reference| find_approved_fiscal_transaction(&conn, reference))
+                .transpose()?
+                .flatten()
+                .is_some();
+        if already_issued {
+            return Ok(serde_json::json!({
+                "success": true,
+                "skipped": true,
+                "alreadyIssued": true
+            }));
+        }
+    }
 
     let tax_rates_json = device
         .get("taxRates")
@@ -2824,6 +3161,47 @@ mod dto_tests {
             parsed.get("deviceId").and_then(|v| v.as_str()),
             Some("device-11")
         );
+    }
+
+    #[test]
+    fn ambiguous_fiscal_timeout_is_found_before_hardware_retry() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO ecr_devices (
+                id, name, device_type, brand, protocol, connection_type,
+                connection_details
+             ) VALUES (
+                'device-1', 'CAP Cashier', 'cash_register', 'RBS',
+                'cap_driver', 'network', '{}'
+             )",
+            [],
+        )
+        .expect("seed fiscal device");
+        conn.execute(
+            "INSERT INTO ecr_transactions (
+                id, device_id, order_id, transaction_type, amount, currency,
+                status, terminal_reference, error_message, raw_response,
+                started_at, completed_at
+             ) VALUES (
+                'tx-timeout-1', 'device-1', 'order-stable-1', 'fiscal_receipt',
+                1, 'EUR', 'timeout', 'pos-tauri-tx-timeout-1.txt',
+                'Completion unknown', '{\"requiresReconciliation\":true}',
+                '2026-07-24T12:00:00Z', '2026-07-24T12:02:00Z'
+             )",
+            [],
+        )
+        .expect("seed ambiguous transaction");
+
+        let found = find_ambiguous_fiscal_transaction(&conn, "order-stable-1")
+            .expect("query ambiguous transaction")
+            .expect("timeout must block retry");
+        assert_eq!(found["transactionId"], "tx-timeout-1");
+        assert_eq!(found["status"], "timeout");
+        assert_eq!(found["rawResponse"]["requiresReconciliation"], true);
+        assert!(find_ambiguous_fiscal_transaction(&conn, "another-order")
+            .expect("query other order")
+            .is_none());
     }
 
     #[test]

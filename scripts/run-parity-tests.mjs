@@ -50,6 +50,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'expense-modal-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'menu-item-modal-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'payment-method-cards-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'payment-method-edit-guard.test.ts'),
   path.join(testsRoot, 'renderer', 'payment-modal-terminal-i18n.test.ts'),
   path.join(testsRoot, 'renderer', 'pos-greek-flow-i18n.test.ts'),
   path.join(testsRoot, 'renderer', 'tables-cleaning-card-ui.test.ts'),
@@ -136,6 +137,7 @@ const entryPoints = [
   // runner (same gap recovery-panel-ui.test.ts had).
   path.join(testsRoot, 'renderer', 'integrations-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'fiscal-integration-entitlement.test.ts'),
+  path.join(testsRoot, 'renderer', 'mydata-fiscal-device-contract.test.ts'),
 ];
 
 await fs.mkdir(outDir, { recursive: true });

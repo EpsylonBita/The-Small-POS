@@ -2037,10 +2037,7 @@ pub fn update_payment_method(
     }
 
     if completed_payments.len() != 1 {
-        return Err(
-            "Payment method can only be edited for orders with exactly one completed payment"
-                .into(),
-        );
+        return Err("PAYMENT_METHOD_EDIT_REQUIRES_SINGLE_COMPLETED_PAYMENT".into());
     }
 
     let (payment_id, current_method, _item_assignment_count): CompletedPaymentRow =
@@ -3202,6 +3199,77 @@ mod tests {
                 .unwrap_or(false),
             "payment payload should include persisted local idempotency identity"
         );
+    }
+
+    #[test]
+    fn test_update_payment_method_rejects_multiple_completed_payments_with_stable_code() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, total_amount_cents, status, sync_status, payment_status,
+                created_at, updated_at
+             ) VALUES (
+                'ord-method-split',
+                '[]',
+                10.0,
+                1000,
+                'completed',
+                'pending',
+                'pending',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .expect("insert split order for payment method edit");
+        drop(conn);
+
+        record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-method-split",
+                "method": "cash",
+                "amount": 4.0,
+                "cashReceived": 4.0,
+                "changeGiven": 0.0,
+                "transactionRef": "SPLIT-METHOD-CASH-1",
+            }),
+        )
+        .expect("record first split payment");
+        record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-method-split",
+                "method": "card",
+                "amount": 6.0,
+                "transactionRef": "SPLIT-METHOD-CARD-2",
+            }),
+        )
+        .expect("record second split payment");
+
+        let error = update_payment_method(&db, "ord-method-split", "card")
+            .expect_err("split payments must not be rewritten as one payment");
+        assert_eq!(
+            error,
+            "PAYMENT_METHOD_EDIT_REQUIRES_SINGLE_COMPLETED_PAYMENT"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let methods: Vec<String> = conn
+            .prepare(
+                "SELECT method
+                 FROM order_payments
+                 WHERE order_id = 'ord-method-split'
+                   AND status = 'completed'
+                 ORDER BY created_at ASC",
+            )
+            .expect("prepare split payment method query")
+            .query_map([], |row| row.get(0))
+            .expect("query split payment methods")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read split payment methods");
+        assert_eq!(methods, vec!["cash".to_string(), "card".to_string()]);
     }
 
     #[test]

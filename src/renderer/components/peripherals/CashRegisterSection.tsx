@@ -27,7 +27,7 @@ import { POSGlassSwitch } from '../ui/pos-glass-components'
 
 type DeviceType = 'cash_register' | 'payment_terminal'
 type ConnectionType = 'serial_usb' | 'network' | 'bluetooth'
-type Protocol = 'generic' | 'zvt' | 'pax'
+type Protocol = string
 type PrintMode = 'register_prints' | 'pos_sends_receipt'
 
 // Round 295: the cash-register switches (Auto Fiscal Print, Set-as-default, Enabled) now use the shared
@@ -40,6 +40,17 @@ interface TaxRate {
   code: string
   rate: string
   label: string
+  department: string
+}
+
+interface CapDriverSettings {
+  capturePath: string
+  outputPath: string
+  serviceName: string
+  transactionTimeoutMs: number
+  cashPaymentCode: number
+  cardPaymentCode: number
+  eftPosIndex: number
 }
 
 interface ECRCashDevice {
@@ -57,6 +68,7 @@ interface ECRCashDevice {
   print_mode: PrintMode
   tax_rates: TaxRate[]
   operator_id?: string
+  settings: CapDriverSettings
   is_default: boolean
   enabled: boolean
   status?: DeviceStatus
@@ -86,51 +98,46 @@ const BRANDS = [
   'PAX',
 ] as const
 
-const BRAND_PROTOCOL_MAP: Record<string, Protocol> = {
-  Generic: 'generic',
-  Datecs: 'generic',
-  Elcom: 'generic',
-  Casio: 'generic',
-  RBS: 'generic',
-  Bixolon: 'generic',
-  Star: 'generic',
-  'Epson Fiscal': 'generic',
-  Sam4s: 'generic',
-  Custom: 'generic',
-  Ingenico: 'zvt',
-  Verifone: 'zvt',
-  PAX: 'pax',
-}
-
 const BAUD_RATES = [9600, 19200, 38400, 57600, 115200] as const
 
 const DEFAULT_TAX_RATES: TaxRate[] = [
-  { code: 'A', rate: '24', label: 'Standard' },
-  { code: 'B', rate: '13', label: 'Reduced' },
-  { code: 'C', rate: '6', label: 'Super Reduced' },
-  { code: 'D', rate: '0', label: 'Zero' },
+  { code: 'A', rate: '24', label: 'Standard', department: '' },
+  { code: 'B', rate: '13', label: 'Reduced', department: '' },
+  { code: 'C', rate: '6', label: 'Super Reduced', department: '' },
+  { code: 'D', rate: '0', label: 'Zero', department: '' },
 ]
+
+const DEFAULT_CAP_DRIVER_SETTINGS: CapDriverSettings = {
+  capturePath: 'C:\\Capture',
+  outputPath: 'C:\\Capture\\Output',
+  serviceName: 'CapDriverSVC',
+  transactionTimeoutMs: 120000,
+  cashPaymentCode: 1,
+  cardPaymentCode: 2,
+  eftPosIndex: 1,
+}
 
 const cloneTaxRates = (taxRates: TaxRate[]): TaxRate[] =>
   taxRates.map((taxRate) => ({ ...taxRate }))
 
 const defaultNetworkPortForDevice = (deviceType: DeviceType): number =>
-  deviceType === 'payment_terminal' ? 20007 : 9100
+  deviceType === 'payment_terminal' ? 20007 : 0
 
 const EMPTY_FORM: FormData = {
   name: '',
   device_type: 'cash_register',
   brand: 'Generic',
-  protocol: 'generic',
+  protocol: 'unconfigured',
   connection_type: 'serial_usb',
   com_port: '',
   baud_rate: 9600,
   ip_address: '',
-  tcp_port: 9100,
+  tcp_port: 0,
   mac_address: '',
   print_mode: 'register_prints',
   tax_rates: DEFAULT_TAX_RATES,
   operator_id: '',
+  settings: { ...DEFAULT_CAP_DRIVER_SETTINGS },
   is_default: false,
   enabled: true,
 }
@@ -138,16 +145,66 @@ const EMPTY_FORM: FormData = {
 const buildEmptyForm = (): FormData => ({
   ...EMPTY_FORM,
   tax_rates: cloneTaxRates(DEFAULT_TAX_RATES),
+  settings: { ...DEFAULT_CAP_DRIVER_SETTINGS },
 })
 
 const buildRbsNetworkPreset = (): FormData => ({
   ...buildEmptyForm(),
   name: 'RBS ELIO CR',
   brand: 'RBS',
-  protocol: 'generic',
+  protocol: 'cap_driver',
   connection_type: 'network',
-  tcp_port: defaultNetworkPortForDevice('cash_register'),
+  tcp_port: 9101,
 })
+
+const asRecord = (value: unknown): Record<string, any> => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, any>
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+const asCapDriverSettings = (value: unknown): CapDriverSettings => {
+  const settings = asRecord(value)
+  return {
+    capturePath:
+      typeof settings.capturePath === 'string' && settings.capturePath.trim()
+        ? settings.capturePath
+        : DEFAULT_CAP_DRIVER_SETTINGS.capturePath,
+    outputPath:
+      typeof settings.outputPath === 'string' && settings.outputPath.trim()
+        ? settings.outputPath
+        : DEFAULT_CAP_DRIVER_SETTINGS.outputPath,
+    serviceName:
+      typeof settings.serviceName === 'string' && settings.serviceName.trim()
+        ? settings.serviceName
+        : DEFAULT_CAP_DRIVER_SETTINGS.serviceName,
+    transactionTimeoutMs:
+      Number.isInteger(settings.transactionTimeoutMs)
+        ? settings.transactionTimeoutMs
+        : DEFAULT_CAP_DRIVER_SETTINGS.transactionTimeoutMs,
+    cashPaymentCode:
+      Number.isInteger(settings.cashPaymentCode)
+        ? settings.cashPaymentCode
+        : DEFAULT_CAP_DRIVER_SETTINGS.cashPaymentCode,
+    cardPaymentCode:
+      Number.isInteger(settings.cardPaymentCode)
+        ? settings.cardPaymentCode
+        : DEFAULT_CAP_DRIVER_SETTINGS.cardPaymentCode,
+    eftPosIndex:
+      Number.isInteger(settings.eftPosIndex)
+        ? settings.eftPosIndex
+        : DEFAULT_CAP_DRIVER_SETTINGS.eftPosIndex,
+  }
+}
 
 const asDeviceType = (payload: any): DeviceType => {
   const normalized = String(payload?.device_type ?? payload?.deviceType ?? '').toLowerCase()
@@ -176,10 +233,7 @@ const asConnectionType = (value: unknown): ConnectionType => {
 
 const asProtocol = (value: unknown): Protocol => {
   const normalized = String(value || '').toLowerCase()
-  if (normalized === 'generic' || normalized === 'zvt' || normalized === 'pax') {
-    return normalized
-  }
-  return 'generic'
+  return normalized || 'unconfigured'
 }
 
 const asDeviceStatus = (value: unknown): DeviceStatus | undefined => {
@@ -255,9 +309,9 @@ const normalizeCashRegisterDevice = (payload: any): ECRCashDevice => {
         ? 'pos_sends_receipt'
         : 'register_prints',
     tax_rates: Array.isArray(payload?.tax_rates)
-      ? cloneTaxRates(payload.tax_rates as TaxRate[])
+      ? cloneTaxRates((payload.tax_rates as TaxRate[]).map((rate) => ({ ...rate, department: String(rate.department ?? '') })))
       : Array.isArray(payload?.taxRates)
-        ? cloneTaxRates(payload.taxRates as TaxRate[])
+        ? cloneTaxRates((payload.taxRates as TaxRate[]).map((rate) => ({ ...rate, department: String(rate.department ?? '') })))
         : cloneTaxRates(DEFAULT_TAX_RATES),
     operator_id:
       typeof payload?.operator_id === 'string'
@@ -265,6 +319,7 @@ const normalizeCashRegisterDevice = (payload: any): ECRCashDevice => {
         : typeof payload?.operatorId === 'string'
           ? payload.operatorId
           : '',
+    settings: asCapDriverSettings(payload?.settings),
     is_default: payload?.is_default === true || payload?.isDefault === true,
     enabled: payload?.enabled !== false,
     status: asDeviceStatus(payload?.status),
@@ -274,6 +329,35 @@ const normalizeCashRegisterDevice = (payload: any): ECRCashDevice => {
         : typeof payload?.errorMessage === 'string'
           ? payload.errorMessage
           : undefined,
+  }
+}
+
+const buildCashRegisterDevicePayload = (form: FormData): Record<string, unknown> => {
+  const connectionDetails =
+    form.connection_type === 'serial_usb'
+      ? { port: form.com_port?.trim() || '', baudRate: form.baud_rate || 9600 }
+      : form.connection_type === 'bluetooth'
+        ? { address: form.mac_address?.trim() || '' }
+        : { ip: form.ip_address?.trim() || '', port: Number(form.tcp_port) }
+
+  return {
+    name: form.name.trim(),
+    deviceType: form.device_type,
+    brand: form.brand,
+    protocol: form.protocol,
+    connectionType: form.connection_type,
+    connectionDetails,
+    operatorId: form.operator_id?.trim() || null,
+    printMode: form.print_mode,
+    taxRates: form.tax_rates.map((rate) => ({
+      code: rate.code.trim(),
+      rate: Number(rate.rate),
+      label: rate.label.trim(),
+      department: rate.department.trim() ? Number(rate.department) : null,
+    })),
+    isDefault: form.is_default,
+    enabled: form.enabled,
+    settings: { ...form.settings },
   }
 }
 
@@ -422,8 +506,9 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   }
 
   const handleBrandChange = (brand: string) => {
-    const protocol = BRAND_PROTOCOL_MAP[brand] || 'generic'
-    updateForm({ brand, protocol })
+    // Brand alone never proves a wire protocol. Reset the profile and require
+    // the exact vendor/model ERP protocol to be chosen and handshaken.
+    updateForm({ brand, protocol: 'unconfigured' })
   }
 
   const handleConnectionTypeChange = (connectionType: ConnectionType) => {
@@ -490,11 +575,12 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       com_port: device.com_port || '',
       baud_rate: device.baud_rate || 9600,
       ip_address: device.ip_address || '',
-      tcp_port: device.tcp_port || 9100,
+      tcp_port: device.tcp_port ?? 0,
       mac_address: device.mac_address || '',
       print_mode: device.print_mode,
       tax_rates: device.tax_rates?.length ? device.tax_rates : DEFAULT_TAX_RATES,
       operator_id: device.operator_id || '',
+      settings: { ...device.settings },
       is_default: device.is_default,
       enabled: device.enabled,
     })
@@ -507,6 +593,15 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       toast.error(t('settings.peripherals.cashRegister.nameRequired', 'Device name is required'))
       return
     }
+    if (!form.protocol.trim() || form.protocol === 'unconfigured') {
+      toast.error(
+        t(
+          'settings.peripherals.cashRegister.protocolRequired',
+          'Choose the exact vendor/model protocol before saving'
+        )
+      )
+      return
+    }
 
     if (form.connection_type === 'serial_usb' && !form.com_port?.trim()) {
       toast.error(t('settings.peripherals.cashRegister.comPortRequired', 'COM port is required'))
@@ -516,18 +611,73 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       toast.error(t('settings.peripherals.cashRegister.ipRequired', 'IP address is required'))
       return
     }
+    if (
+      form.connection_type === 'network' &&
+      (!Number.isInteger(form.tcp_port) || Number(form.tcp_port) <= 0 || Number(form.tcp_port) > 65535)
+    ) {
+      toast.error(
+        t('settings.peripherals.cashRegister.tcpPortRequired', 'A valid vendor ERP TCP port is required')
+      )
+      return
+    }
     if (form.connection_type === 'bluetooth' && !form.mac_address?.trim()) {
       toast.error(t('settings.peripherals.cashRegister.macRequired', 'MAC address is required'))
       return
     }
+    if (form.protocol === 'cap_driver') {
+      const invalidDepartment = form.tax_rates.some(
+        (rate) =>
+          !Number.isInteger(Number(rate.department)) ||
+          Number(rate.department) < 1 ||
+          Number(rate.department) > 99
+      )
+      if (invalidDepartment) {
+        toast.error(
+          t(
+            'settings.peripherals.cashRegister.capDepartmentRequired',
+            'Enter the cashier department (1–99) for every VAT rate'
+          )
+        )
+        return
+      }
+      if (!form.settings.capturePath.trim() || !form.settings.outputPath.trim()) {
+        toast.error(
+          t(
+            'settings.peripherals.cashRegister.capFoldersRequired',
+            'CAP Driver capture and output folders are required'
+          )
+        )
+        return
+      }
+      if (
+        !Number.isInteger(form.settings.eftPosIndex) ||
+        form.settings.eftPosIndex < 1 ||
+        form.settings.eftPosIndex > 99 ||
+        !Number.isInteger(form.settings.cashPaymentCode) ||
+        form.settings.cashPaymentCode < 1 ||
+        form.settings.cashPaymentCode > 20 ||
+        !Number.isInteger(form.settings.cardPaymentCode) ||
+        form.settings.cardPaymentCode < 1 ||
+        form.settings.cardPaymentCode > 20
+      ) {
+        toast.error(
+          t(
+            'settings.peripherals.cashRegister.capCodesInvalid',
+            'CAP payment codes must be 1–20 and the EFT POS number must be 1–99'
+          )
+        )
+        return
+      }
+    }
 
     setIsSaving(true)
     try {
+      const nativePayload = buildCashRegisterDevicePayload(form)
       if (viewMode === 'edit' && editingDeviceId) {
-        await invokeIPC('ecr_update_device', { device_id: editingDeviceId, ...form })
+        await invokeIPC('ecr_update_device', { device_id: editingDeviceId, ...nativePayload })
         toast.success(t('settings.peripherals.cashRegister.updated', 'Device updated'))
       } else {
-        await invokeIPC('ecr_add_device', form)
+        await invokeIPC('ecr_add_device', nativePayload)
         toast.success(t('settings.peripherals.cashRegister.added', 'Device added'))
       }
       await loadDevices()
@@ -890,7 +1040,27 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             onChange={(e) => updateForm({ protocol: e.target.value as Protocol })}
             className="liquid-glass-modal-input"
           >
-            <option value="generic">Generic</option>
+            {!['unconfigured', 'cap_driver', 'generic', 'zvt', 'pax'].includes(form.protocol) && (
+              <option value={form.protocol}>{form.protocol}</option>
+            )}
+            <option value="unconfigured">
+              {t(
+                'settings.peripherals.cashRegister.protocolUnconfigured',
+                'Choose verified protocol…'
+              )}
+            </option>
+            <option value="generic">
+              {t(
+                'settings.peripherals.cashRegister.legacyDatecsProtocol',
+                'Legacy Datecs-style STX/ETX'
+              )}
+            </option>
+            <option value="cap_driver">
+              {t(
+                'settings.peripherals.cashRegister.capDriverProtocol',
+                'CAP Driver (RBS/MAT)'
+              )}
+            </option>
             <option value="zvt">ZVT (Ingenico/Verifone)</option>
             <option value="pax">PAX</option>
           </select>
@@ -970,22 +1140,21 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             </label>
             <input
               type="number"
-              value={form.tcp_port || defaultNetworkPortForDevice('cash_register')}
+              value={form.tcp_port ?? ''}
               onChange={(e) =>
                 updateForm({
-                  tcp_port:
-                    parseInt(e.target.value, 10) || defaultNetworkPortForDevice('cash_register'),
+                  tcp_port: e.target.value === '' ? 0 : parseInt(e.target.value, 10),
                 })
               }
               className="liquid-glass-modal-input"
-              placeholder={form.protocol === 'zvt' ? '20007' : '9100'}
+              placeholder={form.protocol === 'zvt' ? '20007' : ''}
             />
           </div>
           {form.brand === 'RBS' && (
             <div className="col-span-2 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               {t(
                 'settings.peripherals.cashRegister.rbsNetworkHint',
-                'Use the IP address and TCP port configured on the RBS device or by your installer. POS does not auto-discover RBS fiscal registers yet.'
+                'For ELIO/EDO devices using the vendor CAP Driver, use the cashier ERP IP/port and select CAP Driver. The Windows service owns the authenticated device connection.'
               )}
             </div>
           )}
@@ -1004,6 +1173,116 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             className="liquid-glass-modal-input font-mono"
             placeholder="00:11:22:33:44:55"
           />
+        </div>
+      )}
+
+      {form.protocol === 'cap_driver' && (
+        <div className="space-y-3 rounded-2xl border border-purple-500/20 bg-purple-500/10 p-3">
+          <div>
+            <div className="text-sm font-medium liquid-glass-modal-text">
+              {t('settings.peripherals.cashRegister.capDriverSettings', 'CAP Driver service')}
+            </div>
+            <p className="mt-1 text-xs liquid-glass-modal-text-muted">
+              {t(
+                'settings.peripherals.cashRegister.capDriverHelp',
+                'Install and configure the vendor service on this Windows PC. The cashier serial number and unlock key stay only in that service. Test Connection prints a non-closing X report.'
+              )}
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div>
+              <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                {t('settings.peripherals.cashRegister.capCapturePath', 'Capture folder')}
+              </label>
+              <input
+                value={form.settings.capturePath}
+                onChange={(event) =>
+                  updateForm({
+                    settings: { ...form.settings, capturePath: event.target.value },
+                  })
+                }
+                className="liquid-glass-modal-input"
+                placeholder="C:\Capture"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                {t('settings.peripherals.cashRegister.capOutputPath', 'Output folder')}
+              </label>
+              <input
+                value={form.settings.outputPath}
+                onChange={(event) =>
+                  updateForm({
+                    settings: { ...form.settings, outputPath: event.target.value },
+                  })
+                }
+                className="liquid-glass-modal-input"
+                placeholder="C:\Capture\Output"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                {t('settings.peripherals.cashRegister.capEftIndex', 'Paired EFT POS number')}
+              </label>
+              <input
+                type="number"
+                min="1"
+                max="99"
+                value={form.settings.eftPosIndex}
+                onChange={(event) =>
+                  updateForm({
+                    settings: {
+                      ...form.settings,
+                      eftPosIndex: Number(event.target.value),
+                    },
+                  })
+                }
+                className="liquid-glass-modal-input"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                  {t('settings.peripherals.cashRegister.capCashCode', 'Cash code')}
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={form.settings.cashPaymentCode}
+                  onChange={(event) =>
+                    updateForm({
+                      settings: {
+                        ...form.settings,
+                        cashPaymentCode: Number(event.target.value),
+                      },
+                    })
+                  }
+                  className="liquid-glass-modal-input"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                  {t('settings.peripherals.cashRegister.capCardCode', 'Card code')}
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={form.settings.cardPaymentCode}
+                  onChange={(event) =>
+                    updateForm({
+                      settings: {
+                        ...form.settings,
+                        cardPaymentCode: Number(event.target.value),
+                      },
+                    })
+                  }
+                  className="liquid-glass-modal-input"
+                />
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1058,6 +1337,9 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                 <th className="px-3 py-1.5 text-left text-xs font-medium liquid-glass-modal-text-muted">
                   {t('settings.peripherals.cashRegister.taxLabel', 'Label')}
                 </th>
+                <th className="px-3 py-1.5 text-left text-xs font-medium liquid-glass-modal-text-muted">
+                  {t('settings.peripherals.cashRegister.taxDepartment', 'Department')}
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -1087,6 +1369,17 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       value={row.label}
                       onChange={(e) => updateTaxRate(i, 'label', e.target.value)}
                       className="w-full px-1.5 py-1 rounded bg-white/5 border border-white/10 liquid-glass-modal-text text-xs"
+                    />
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <input
+                      value={row.department}
+                      onChange={(e) => updateTaxRate(i, 'department', e.target.value)}
+                      className="w-16 px-1.5 py-1 rounded bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
+                      type="number"
+                      min="1"
+                      max="99"
+                      placeholder={form.protocol === 'cap_driver' ? '1–99' : '—'}
                     />
                   </td>
                 </tr>
