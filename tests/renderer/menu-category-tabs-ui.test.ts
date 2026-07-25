@@ -106,7 +106,7 @@ test('flavor tab copy and selected styling avoid clipped glow artifacts', () => 
   assert.match(itemModalSource, /border-slate-300\/70 bg-slate-500/);
   assert.doesNotMatch(itemModalSource, /border-pink-400\/70 bg-pink-500/);
   assert.match(itemModalSource, /overflow-x-auto overflow-y-hidden scrollbar-hide touch-pan-x/);
-  assert.match(itemModalSource, /<Minus className="h-5 w-5 text-white drop-shadow-\[0_1px_2px_rgba\(0,0,0,0\.7\)\]" strokeWidth=\{3\.5\}/);
+  assert.match(itemModalSource, /<Minus className="h-5 w-5" strokeWidth=\{3\.5\}/);
   assert.doesNotMatch(itemModalSource, /activeFlavorType === 'savory'[\s\S]{0,160}liquid-glass-modal-button/);
   assert.doesNotMatch(itemModalSource, /activeFlavorType === 'sweet'[\s\S]{0,160}liquid-glass-modal-button/);
   assert.doesNotMatch(itemModalSource, /overflow-x-auto overflow-y-hidden pos-scrollbar-glass/);

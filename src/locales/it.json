@@ -1974,7 +1974,7 @@
     },
     "printQueue": {
       "title": "Coda di stampa",
-      "helpText": "I lavori già inviati alla stampante LAN non possono essere richiamati dal dispositivo. Questi controlli fermano o ritentano solo i lavori ancora in coda localmente su questo POS.",
+      "helpText": "Pausa blocca i nuovi invii e richiede l'arresto del trasferimento attivo. I dati già ricevuti dalla stampante non possono essere richiamati. Usa Pausa, poi Annulla in sospeso.",
       "pausedProfiles": "Pause attive per le stampanti configurate",
       "stuckWarning": "[NEEDS TRANSLATION] {{count}} print job(s) need attention — check the queue below.",
       "workerAlert": "[NEEDS TRANSLATION] Printing is failing — check the print queue.",
@@ -3506,7 +3506,7 @@
       "totalDeliveries": "Consegne totali",
       "cashCollected": "Contanti incassati",
       "driverPayment": "Pagamento fattorino",
-      "amountToReturn": "Importo da restituire al cassetto",
+      "amountToReturn": "Restituzione",
       "driverSummary": "Riepilogo fattorino",
       "driversCheckout": "Fine turno fattorini",
       "startingAmountGiven": "Importo iniziale dato",
@@ -4729,6 +4729,7 @@
     "delivered": "Consegnato",
     "view": "Visualizza",
     "clear": "Cancella",
+    "reset": "RIPRISTINA",
     "return": "Torna agli ordini",
     "restore": "Ripristina",
     "reassign": "Riassegna fattorino"

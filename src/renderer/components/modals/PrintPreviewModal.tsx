@@ -60,24 +60,24 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
         >
             <div className="flex flex-col h-full gap-4">
                 {/* Toolbar */}
-                <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-black/24 p-2 backdrop-blur-xl">
+                <div className="liquid-glass-modal-inset flex items-center justify-between rounded-2xl p-2 backdrop-blur-xl">
                     <div className="flex items-center gap-2">
                         <button
                             type="button"
                             onClick={handleZoomOut}
                             aria-label={zoomOutLabel}
-                            className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-white/80 transition-transform duration-150 active:scale-95 active:bg-white/18"
+                            className="liquid-glass-modal-icon-button inline-flex h-11 w-11 items-center justify-center rounded-2xl"
                         >
                             <ZoomOut className="w-5 h-5" />
                         </button>
-                        <span className="w-14 text-center font-mono text-sm font-semibold tabular-nums text-white/68">
+                        <span className="liquid-glass-modal-text-muted w-14 text-center font-mono text-sm font-semibold tabular-nums">
                             {Math.round(zoom * 100)}%
                         </span>
                         <button
                             type="button"
                             onClick={handleZoomIn}
                             aria-label={zoomInLabel}
-                            className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-white/80 transition-transform duration-150 active:scale-95 active:bg-white/18"
+                            className="liquid-glass-modal-icon-button inline-flex h-11 w-11 items-center justify-center rounded-2xl"
                         >
                             <ZoomIn className="w-5 h-5" />
                         </button>
@@ -99,7 +99,7 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
                 </div>
 
                 {/* Preview Area - Simulated 80mm Receipt */}
-                <div className="relative flex flex-1 justify-center overflow-auto rounded-3xl border border-white/10 bg-black/42 p-8 scrollbar-hide">
+                <div className="relative flex flex-1 justify-center overflow-auto rounded-3xl border border-slate-900/10 bg-slate-200/70 p-8 scrollbar-hide dark:border-white/10 dark:bg-black/42">
                     <div
                         className="transition-transform origin-top duration-200 ease-out"
                         style={{
@@ -131,8 +131,8 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
                 </div>
 
                 {/* Action Footer */}
-                <div className="flex justify-between items-center pt-4 border-t border-white/10 mt-auto">
-                    <span className="text-sm text-white/40">
+                <div className="liquid-glass-modal-border flex justify-between items-center pt-4 border-t mt-auto">
+                    <span className="liquid-glass-modal-text-muted text-sm">
                         {t('modals.printPreview.defaultPrinter', { defaultValue: 'Default receipt printer' })}
                     </span>
                     <div className="flex gap-3">

@@ -380,12 +380,12 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           value={ingredientSearch}
           onChange={(e) => setIngredientSearch(e.target.value)}
           placeholder={t('menu.itemModal.searchIngredients', 'Search ingredients...')}
-          className="w-full pl-9 pr-8 py-1.5 rounded-lg bg-white/10 border border-white/20 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+          className="liquid-glass-modal-input w-full pl-9 pr-8 py-1.5 rounded-xl text-sm focus:ring-1 focus:ring-amber-400"
         />
         {ingredientSearch && (
           <button
             onClick={() => setIngredientSearch('')}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 active:text-white"
+            className="absolute right-2 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted active:opacity-70"
           >
             <X className="w-4 h-4" />
           </button>
@@ -397,7 +397,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           onClick={() => setActiveFlavorType('savory')}
           className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'savory'
               ? 'border-orange-400/70 bg-orange-500 text-white shadow-[0_8px_18px_rgba(245,158,11,0.22)]'
-              : 'border-white/20 bg-white/[0.05] liquid-glass-modal-text active:border-white/35 active:bg-white/[0.08]'
+              : 'liquid-glass-modal-icon-button liquid-glass-modal-text active:opacity-80'
             }`}
         >
           {t('menu.itemModal.savory')}
@@ -406,7 +406,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           onClick={() => setActiveFlavorType('sweet')}
           className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'sweet'
               ? 'border-slate-300/70 bg-slate-500 text-white shadow-[0_8px_18px_rgba(82,82,91,0.22)]'
-              : 'border-white/20 bg-white/[0.05] liquid-glass-modal-text active:border-white/35 active:bg-white/[0.08]'
+              : 'liquid-glass-modal-icon-button liquid-glass-modal-text active:opacity-80'
             }`}
         >
           {t('menu.itemModal.sweet')}
@@ -416,9 +416,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   );
 
   const modalFooter = (
-    <div className="flex-shrink-0 border-t liquid-glass-modal-border px-5 py-2 space-y-2 bg-black/40 backdrop-blur-sm relative z-10">
+    <div className="liquid-glass-modal-footer flex-shrink-0 border-t px-5 py-2 space-y-2 relative z-10">
       {selectedIngredients.length > 0 && (
-        <div className="rounded-xl border border-white/10 bg-black/25 px-2.5 py-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
+        <div className="liquid-glass-modal-inset rounded-xl px-2.5 py-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
           <div className="flex items-center gap-2 min-w-0">
             <div className="flex items-center gap-2 shrink-0 whitespace-nowrap">
               <span className="text-[10px] font-semibold uppercase tracking-[0.18em] liquid-glass-modal-text-muted">
@@ -516,20 +516,20 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={() => setQuantity(Math.max(1, quantity - 1))}
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-white/45 bg-white/20 text-white shadow-[0_0_0_1px_rgba(255,255,255,0.12)] transition-colors active:bg-white/35"
+            className="liquid-glass-modal-icon-button flex h-9 w-9 items-center justify-center rounded-full"
             aria-label={t('common.actions.decrease', { defaultValue: 'Decrease quantity' })}
           >
-            <Minus className="h-5 w-5 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]" strokeWidth={3.5} aria-hidden="true" />
+            <Minus className="h-5 w-5" strokeWidth={3.5} aria-hidden="true" />
           </button>
           <span className="text-lg font-bold liquid-glass-modal-text min-w-[1.75rem] text-center">
             {quantity}
           </span>
           <button
             onClick={() => setQuantity(quantity + 1)}
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-white/45 bg-white/20 text-white shadow-[0_0_0_1px_rgba(255,255,255,0.12)] transition-colors active:bg-white/35"
+            className="liquid-glass-modal-icon-button flex h-9 w-9 items-center justify-center rounded-full"
             aria-label={t('common.actions.increase', { defaultValue: 'Increase quantity' })}
           >
-            <Plus className="h-5 w-5 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]" strokeWidth={3.5} aria-hidden="true" />
+            <Plus className="h-5 w-5" strokeWidth={3.5} aria-hidden="true" />
           </button>
         </div>
 
@@ -578,7 +578,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       header={modalHeader}
       footer={modalFooter}
       size="lg"
-      className="max-w-5xl max-h-[98vh]"
+      className="menu-item-customizer-modal max-w-5xl max-h-[98vh]"
       contentClassName="p-0 relative flex-1 overflow-hidden"
       initialFocusRef={ingredientSearchRef}
       ariaLabel={menuItem.name}
@@ -640,9 +640,11 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                 style={{
                                   backgroundColor: isSelected
                                     ? isWithout
-                                      ? 'rgba(239, 68, 68, 0.5)' // Vivid red for "without"
-                                      : hexToVividRgba(color, 0.7) // Strong color when selected
-                                    : hexToVividRgba(color, 0.45), // Vivid base color
+                                      ? resolvedTheme === 'dark'
+                                        ? 'rgba(239, 68, 68, 0.5)'
+                                        : 'rgba(239, 68, 68, 0.24)'
+                                      : hexToVividRgba(color, resolvedTheme === 'dark' ? 0.7 : 0.42)
+                                    : hexToVividRgba(color, resolvedTheme === 'dark' ? 0.45 : 0.22),
                                   borderColor: isSelected && !isWithout
                                     ? hexToVividRgba(color, 1)
                                     : hexToVividRgba(color, 0.6),
@@ -658,7 +660,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                 >
                                   <div className="flex flex-col gap-1 pr-8">
                                     <span
-                                      className={`font-semibold text-sm line-clamp-2 ${isWithout ? 'line-through text-red-400' : ''}`}
+                                      className={`ingredient-text-crisp font-semibold text-sm line-clamp-2 ${isWithout ? 'line-through text-red-400' : ''}`}
                                       style={{
                                         color: isWithout ? undefined : (resolvedTheme === 'dark' ? '#f1f5f9' : '#1e293b'),
                                         textRendering: 'geometricPrecision',
@@ -776,9 +778,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
         {/* Notes overlay */}
         {showNotesOverlay && renderModalPortal(
-          <div className="fixed inset-0 z-[20050] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-            <div className="bg-black/40 backdrop-blur-2xl border border-white/20 rounded-3xl p-5 mx-6 max-w-md w-full shadow-2xl">
-              <h3 className="text-sm font-semibold text-white mb-3">
+          <div className="fixed inset-0 z-[20050] flex items-center justify-center bg-slate-950/45 backdrop-blur-sm p-4">
+            <div className="liquid-glass-modal-inset rounded-3xl p-5 mx-6 max-w-md w-full shadow-2xl backdrop-blur-2xl">
+              <h3 className="text-sm font-semibold liquid-glass-modal-text mb-3">
                 {t('menu.itemModal.specialInstructions')}
               </h3>
               <textarea
@@ -801,7 +803,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                 }}
                 onKeyUp={(e) => e.stopPropagation()}
                 onKeyPress={(e) => e.stopPropagation()}
-                className="w-full p-3 rounded-xl bg-black/30 border border-white/10 focus:ring-2 focus:ring-amber-400 transition-all resize-none text-sm text-white placeholder:text-gray-500 pointer-events-auto cursor-text"
+                className="liquid-glass-modal-input w-full p-3 rounded-xl focus:ring-2 focus:ring-amber-400 transition-all resize-none text-sm pointer-events-auto cursor-text"
                 rows={3}
                 placeholder={t('menu.itemModal.specialInstructionsPlaceholder')}
                 autoFocus

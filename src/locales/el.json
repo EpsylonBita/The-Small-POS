@@ -1974,7 +1974,7 @@
     },
     "printQueue": {
       "title": "Ουρά Εκτύπωσης",
-      "helpText": "Οι εργασίες που έχουν ήδη σταλεί στον εκτυπωτή LAN δεν μπορούν να ανακληθούν από τη συσκευή. Αυτά τα χειριστήρια σταματούν ή επαναλαμβάνουν μόνο εργασίες που παραμένουν τοπικά στην ουρά αυτού του POS.",
+      "helpText": "Η Παύση μπλοκάρει νέες αποστολές και ζητά να σταματήσει η ενεργή μεταφορά. Τα δεδομένα που έχει ήδη λάβει ο εκτυπωτής δεν ανακαλούνται. Πατήστε Παύση και μετά Ακύρωση εκκρεμών.",
       "pausedProfiles": "Ενεργές παύσεις για ρυθμισμένους εκτυπωτές",
       "stuckWarning": "[NEEDS TRANSLATION] {{count}} print job(s) need attention — check the queue below.",
       "workerAlert": "[NEEDS TRANSLATION] Printing is failing — check the print queue.",
@@ -3509,7 +3509,7 @@
       "totalDeliveries": "Σύνολο Παραδόσεων",
       "cashCollected": "Μετρητά που Συλλέχθηκαν",
       "driverPayment": "Πληρωμή Οδηγού",
-      "amountToReturn": "Ποσό που Θα Επιστραφεί στο Ταμείο",
+      "amountToReturn": "Επιστροφή",
       "driverSummary": "Περίληψη Οδηγών",
       "driversCheckout": "Λήξη Βάρδιας Οδηγών",
       "startingAmountGiven": "Αρχικό Ποσό που Δόθηκε",
@@ -4729,6 +4729,7 @@
     "delivered": "Παραδόθηκε",
     "view": "Προβολή",
     "clear": "Καθαρισμός",
+    "reset": "ΕΠΑΝΑΦΟΡΑ",
     "return": "Επιστροφή στις Παραγγελίες",
     "restore": "Επαναφορά",
     "reassign": "Επανανάθεση Οδηγού"

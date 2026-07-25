@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { requireSuccessfulPrintQueueMutation } from '../../src/renderer/utils/print-queue-mutation';
 
 const projectRoot = process.cwd();
 const read = (...segments: string[]) =>
@@ -120,6 +121,28 @@ test('the stuck-jobs banner counts only the visible, rendered jobs', () => {
     source,
     /visibleJobs\.filter\(/,
     'failedCount must be derived from the rendered slice so the banner is not misleading',
+  );
+});
+
+test('queue controls reject backend success:false responses instead of showing a false success toast', () => {
+  assert.throws(
+    () =>
+      requireSuccessfulPrintQueueMutation(
+        { success: false, error: 'queue state was not changed' },
+        'fallback',
+      ),
+    /queue state was not changed/,
+  );
+  assert.throws(
+    () => requireSuccessfulPrintQueueMutation(undefined, 'queue command failed'),
+    /queue command failed/,
+  );
+  assert.deepEqual(
+    requireSuccessfulPrintQueueMutation(
+      { success: true, affected: 1, activeStopsRequested: 1 },
+      'fallback',
+    ),
+    { success: true, affected: 1, activeStopsRequested: 1 },
   );
 });
 

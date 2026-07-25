@@ -1974,7 +1974,7 @@
     },
     "printQueue": {
       "title": "File d'impression",
-      "helpText": "Les tâches déjà envoyées à l'imprimante LAN ne peuvent pas être rappelées depuis l'appareil. Ces contrôles arrêtent ou relancent uniquement les tâches encore en file d'attente localement sur ce POS.",
+      "helpText": "Pause bloque les nouveaux envois et demande l'arrêt du transfert actif. Les données déjà reçues par l'imprimante ne peuvent pas être rappelées. Utilisez Pause, puis Annuler en attente.",
       "pausedProfiles": "Pauses actives pour les imprimantes configurées",
       "stuckWarning": "[NEEDS TRANSLATION] {{count}} print job(s) need attention — check the queue below.",
       "workerAlert": "[NEEDS TRANSLATION] Printing is failing — check the print queue.",
@@ -3506,7 +3506,7 @@
       "totalDeliveries": "Total des livraisons",
       "cashCollected": "Espèces collectées",
       "driverPayment": "Paiement livreur",
-      "amountToReturn": "Montant à rendre au tiroir",
+      "amountToReturn": "Retour",
       "driverSummary": "Résumé livreur",
       "driversCheckout": "Clôture des livreurs",
       "startingAmountGiven": "Montant de départ donné",
@@ -4729,6 +4729,7 @@
     "delivered": "Livré",
     "view": "Voir",
     "clear": "Effacer",
+    "reset": "RÉINITIALISER",
     "return": "Retour aux commandes",
     "restore": "Restaurer",
     "reassign": "Réattribuer le livreur"

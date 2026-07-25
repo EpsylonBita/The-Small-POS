@@ -178,13 +178,9 @@ test('Round 252/316: receipt-mode selected segments use the yellow/black accent 
 
 // --- Round 316 (live QA, Greek/dark): the Split Payment selected segmented controls (top split-mode
 // "By Amount"/"By Items" and footer receipt-mode "All Together"/"Separate") rendered pale/white text on
-// yellow instead of high-contrast black. Root cause: those selected buttons carry `font-medium`, so the
-// broad `.liquid-glass-modal-shell .font-medium` glass override (slate-800 light / slate-100 dark, both
-// !important) out-specified their `text-black` utility. The fix is a SCOPED contrast class
-// (`split-payment-segment-selected`) whose glassmorphism.css rule wins by HIGHER specificity
-// (`button.<class>`) AND later source order, and also forces the lucide icon black (child <svg>
-// currentColor). Payment behavior, handlers, and semantic green/emerald/slate are untouched. ---
-test('Round 316: selected yellow segments carry a scoped class that forces black text + icon over the glass font override', () => {
+// yellow instead of high-contrast black. Ingredient typography is now scoped to the menu customizer,
+// but the explicit split-payment class remains as a durable contrast contract for both themes.
+test('Round 316: selected yellow segments carry a scoped class that forces black text + icon', () => {
   // The contrast class rides ONLY the yellow/black selected slabs (2 split-mode + 2 receipt-mode = 4),
   // never an unselected branch.
   const taggedCount = (modalSource.match(/split-payment-segment-selected/g) ?? []).length;
@@ -204,17 +200,10 @@ test('Round 316: selected yellow segments carry a scoped class that forces black
     'the override must force #000 with !important',
   );
 
-  // It must out-rank the broad `.font-medium` override two ways, so a future reorder cannot regress it:
-  //   (1) HIGHER specificity -- `button.split-payment-segment-selected` (element+class) beats the bare
-  //       `.liquid-glass-modal-shell .font-medium` class selector in both light and dark.
-  //   (2) LATER in source order -- placed after the .font-medium block as a tiebreak.
-  const fontMediumAt = glassCss.indexOf('.liquid-glass-modal-shell .font-medium');
-  const overrideAt = glassCss.indexOf('button.split-payment-segment-selected');
-  assert.ok(fontMediumAt >= 0, 'the broad .font-medium glass override still exists (we override, not delete it)');
-  assert.ok(overrideAt > fontMediumAt, 'the split-segment override must come AFTER the .font-medium rule');
-  // The broad rule itself is NOT narrowed/deleted (avoids broad regressions in other modals).
-  assert.match(glassCss, /\.liquid-glass-modal-shell \.font-medium \{\s*color: #1e293b !important;/);
-  assert.match(glassCss, /\.dark \.liquid-glass-modal-shell \.font-medium \{\s*color: #f1f5f9 !important;/);
+  // Feature-specific ingredient typography must not leak into payment or any other modal.
+  assert.doesNotMatch(glassCss, /\.liquid-glass-modal-shell \.font-medium/);
+  assert.match(glassCss, /\.menu-item-customizer-modal \.font-medium \{\s*color: #1e293b !important;/);
+  assert.match(glassCss, /\.dark \.menu-item-customizer-modal \.font-medium \{\s*color: #f1f5f9 !important;/);
 });
 
 test('Round 252: payment semantics stay green and no hover/native title tooltips are introduced', () => {

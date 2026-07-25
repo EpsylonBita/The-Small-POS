@@ -334,7 +334,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   return (
     <div className="relative">
       <div className="relative">
-        <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
+        <MapPin className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
         <input
           type="text"
           value={value}
@@ -1271,7 +1271,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.phoneLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
-            <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
+            <Phone className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
               type="tel"
               value={formData.phone}
@@ -1448,7 +1448,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.cityLabel')}
           </label>
           <div className="relative">
-            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
+            <Building className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
               type="text"
               value={formData.city}
@@ -1465,7 +1465,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.postcodeLabel')}
           </label>
           <div className="relative">
-            <Hash className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
+            <Hash className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
               type="text"
               value={formData.postalCode}
@@ -1482,7 +1482,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.nameLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
-            <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
+            <User className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
               type="text"
               value={formData.name}
@@ -1504,7 +1504,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.emailLabel')}
           </label>
           <div className="relative">
-            <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
+            <Mail className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
               type="email"
               value={formData.email}
@@ -1526,7 +1526,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.nameOnRingerLabel')}
           </label>
           <div className="relative">
-            <Users className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500 dark:text-gray-400" />
+            <Users className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
               type="text"
               value={formData.nameOnRinger}
@@ -1569,7 +1569,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.notesLabel')}
           </label>
           <div className="relative">
-            <FileText className="absolute left-3 top-3 w-5 h-5 text-gray-500 dark:text-gray-400" />
+            <FileText className="liquid-glass-modal-field-icon absolute left-3 top-3 w-5 h-5" />
             <textarea
               value={formData.notes}
               onChange={(e) => handleInputChange('notes', e.target.value)}

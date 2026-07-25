@@ -892,6 +892,7 @@ pub fn run() {
             commands::orders::order_approve,
             commands::orders::order_decline,
             commands::orders::order_assign_driver,
+            commands::orders::order_reset_to_active,
             commands::orders::order_delete,
             commands::orders::order_save_from_remote,
             commands::orders::order_fetch_items_from_supabase,

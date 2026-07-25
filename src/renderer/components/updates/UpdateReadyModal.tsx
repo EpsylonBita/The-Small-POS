@@ -37,18 +37,18 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
                     </div>
                 </div>
 
-                <h3 className="text-xl font-bold text-white">
+                <h3 className="liquid-glass-modal-text text-xl font-bold">
                     {version
                         ? t('updates.downloaded.ready', { version })
                         : t('updates.downloaded.readyGeneric')}
                 </h3>
 
-                <p className="text-gray-300">
+                <p className="liquid-glass-modal-text-muted">
                     {t('updates.downloaded.description')}
                 </p>
 
-                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-3 text-sm text-yellow-200 flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 mt-0.5 text-yellow-300" />
+                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-3 text-sm text-amber-800 dark:text-yellow-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 mt-0.5 text-amber-700 dark:text-yellow-300" />
                     <span>{t('updates.downloaded.warning')}</span>
                 </div>
 

@@ -989,6 +989,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // State for new order flow
     const [showOrderTypeModal, setShowOrderTypeModal] = useState(false);
     const [showMenuModal, setShowMenuModal] = useState(false);
+    // A fresh order is a fresh draft. Remount MenuModal for every New Order
+    // session so its internal cart and pickup-customer fields cannot leak
+    // from the previous order.
+    const [menuSessionKey, setMenuSessionKey] = useState(0);
     // Round 236 (Orders hub IA migration) — Room/Service flow state.
     // roomChargeContext, when set, flows into MenuModal/PaymentModal so a dine-in order can be
     // charged to the room folio (reuses the existing room-charge payment path; no second cart).
@@ -1809,6 +1813,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Handle new order FAB click
     const handleNewOrderClick = () => {
+      setMenuSessionKey((session) => session + 1);
+      setExistingCustomer(null);
+      setCustomerInfo(null);
+      setPhoneNumber("");
+      setSelectedOrderType(null);
+      setOrderType("pickup");
+      setDeliveryZoneInfo(null);
+      setRoomChargeContext(null);
       setShowOrderTypeModal(true);
     };
 
@@ -4961,6 +4973,41 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             // If only pickup orders, clear selection
             clearBulkSelection();
           }
+        } else if (action === "reset") {
+          const completedOrders = selectedOrderObjects.filter((order) => {
+            const status = String(order.status || "").toLowerCase();
+            return status === "delivered" || status === "completed";
+          });
+
+          if (completedOrders.length === 0) {
+            toast.error(
+              t("orderDashboard.noCompletedOrdersSelected", {
+                defaultValue: "No completed orders selected",
+              }),
+            );
+          } else {
+            for (const order of completedOrders) {
+              const result = await bridge.orders.resetToActive(order.id);
+              if (!result?.success) {
+                toast.error(
+                  result?.error ||
+                    t("orderDashboard.returnToOrdersFailed", {
+                      orderNumber: formatCompactOrderNumberForDisplay(
+                        getVisibleOrderNumber(order),
+                      ),
+                    }),
+                );
+                return;
+              }
+            }
+            toast.success(
+              t("orderDashboard.returnedToOrders", {
+                count: completedOrders.length,
+              }),
+            );
+            clearBulkSelection();
+            await loadOrders();
+          }
         } else if (action === "return" || action === "restore") {
           // Reactivate cancelled orders back to active (pending)
           const cancelledOrders = selectedOrderObjects.filter(
@@ -6585,8 +6632,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           <div className="p-2">
             {isOrderTypeTransitioning ? (
               <div className="flex items-center justify-center py-8">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white/60"></div>
-                <span className="ml-3 text-white/70">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-b-yellow-500 dark:border-white/20 dark:border-b-yellow-400"></div>
+                <span className="ml-3 liquid-glass-modal-text-muted">
                   {t("orderFlow.settingUpOrder") || "Setting up order..."}
                 </span>
               </div>
@@ -7147,6 +7194,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         {/* Menu Modal */}
         <MenuModal
+          key={menuSessionKey}
           isOpen={showMenuModal}
           onClose={handleMenuModalClose}
           selectedCustomer={getCustomerForMenu()}

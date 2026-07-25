@@ -50,25 +50,25 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     const config = {
         info: {
             icon: Info,
-            color: 'text-amber-300',
+            color: 'text-amber-700 dark:text-amber-300',
             bgIcon: 'bg-amber-400/18',
             confirmVariant: 'primary' as const
         },
         warning: {
             icon: AlertTriangle,
-            color: 'text-amber-300',
+            color: 'text-amber-700 dark:text-amber-300',
             bgIcon: 'bg-amber-400/18',
             confirmVariant: 'primary' as const
         },
         error: {
             icon: XCircle,
-            color: 'text-red-400',
+            color: 'text-red-600 dark:text-red-400',
             bgIcon: 'bg-red-500/20',
             confirmVariant: 'error' as const
         },
         success: {
             icon: CheckCircle,
-            color: 'text-emerald-400',
+            color: 'text-emerald-700 dark:text-emerald-400',
             bgIcon: 'bg-emerald-500/20',
             confirmVariant: 'success' as const
         }
@@ -95,20 +95,20 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
                         <Icon className={cn("w-6 h-6", config.color)} />
                     </div>
                     <div>
-                        <h3 className="text-xl font-bold text-white mb-1">{title}</h3>
-                        <p className="text-white/70 leading-relaxed">{message}</p>
+                        <h3 className="liquid-glass-modal-text text-xl font-bold mb-1">{title}</h3>
+                        <p className="liquid-glass-modal-text-muted leading-relaxed">{message}</p>
                     </div>
                 </div>
 
                 {details && (
-                    <div className="bg-black/20 rounded-2xl p-4 text-sm text-white/80 border border-white/5">
+                    <div className="liquid-glass-modal-inset rounded-2xl p-4 text-sm">
                         {details}
                     </div>
                 )}
 
                 {typeToConfirm && (
                     <div className="space-y-2">
-                        <label className="text-sm text-white/60 block">
+                        <label className="liquid-glass-modal-text-muted text-sm block">
                             {t('common.actions.typeToConfirm', { value: typeToConfirm })}
                         </label>
                         <POSGlassInput
@@ -122,15 +122,15 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
                 )}
 
                 {requireCheckbox && (
-                    <label className="flex min-h-[52px] cursor-pointer items-center gap-3 rounded-2xl border border-white/10 bg-white/5 p-3 transition-transform active:scale-[0.99]">
+                    <label className="liquid-glass-modal-inset flex min-h-[52px] cursor-pointer items-center gap-3 rounded-2xl p-3 transition-transform active:scale-[0.99]">
                         <input
                             type="checkbox"
                             checked={isChecked}
                             onChange={(e) => setIsChecked(e.target.checked)}
                             disabled={isLoading}
-                            className="h-5 w-5 rounded-xl border-white/30 bg-black/40 text-amber-400 focus:ring-2 focus:ring-amber-300/80 focus:ring-offset-0"
+                            className="h-5 w-5 rounded-xl border-slate-400 bg-white text-amber-500 focus:ring-2 focus:ring-amber-500/70 focus:ring-offset-0 dark:border-white/30 dark:bg-black/40 dark:text-amber-400"
                         />
-                        <span className="text-sm text-white select-none">{requireCheckbox}</span>
+                        <span className="liquid-glass-modal-text text-sm select-none">{requireCheckbox}</span>
                     </label>
                 )}
 

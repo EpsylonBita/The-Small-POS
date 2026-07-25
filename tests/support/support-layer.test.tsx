@@ -44,6 +44,7 @@ import {
   getPickupToDeliveryValidationAmount,
   resolvePickupToDeliveryAddress,
 } from '../../src/renderer/utils/pickup-to-delivery';
+import { calculateDriverReturn } from '../../src/renderer/utils/driver-checkout';
 import { parseSpecialAddressInput } from '../../src/renderer/utils/specialAddress';
 import { StaffShiftCheckoutFooterActions } from '../../src/renderer/components/modals/StaffShiftCheckoutFooterActions';
 import {
@@ -83,6 +84,18 @@ import { HealthSupportEntryPoint } from '../../src/renderer/components/support/H
 import { PrinterSupportEntryPoint } from '../../src/renderer/components/support/PrinterSupportEntryPoint';
 import type { SyncQueueItem } from '../../../shared/pos/sync-queue-types';
 import i18n from '../../src/lib/i18n';
+
+test('driver return subtracts tips kept by the driver', () => {
+  assert.equal(
+    calculateDriverReturn({
+      openingAmount: 20,
+      cashCollected: 29.9,
+      expenses: 0,
+      tipsReceived: 1.5,
+    }),
+    48.4,
+  );
+});
 
 const createCleanHealthContext = (): HealthSupportContext => ({
   isOnline: true,

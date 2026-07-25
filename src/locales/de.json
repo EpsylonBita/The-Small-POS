@@ -1974,7 +1974,7 @@
     },
     "printQueue": {
       "title": "Druckwarteschlange",
-      "helpText": "Jobs, die bereits an den LAN-Drucker gesendet wurden, können nicht vom Gerät zurückgerufen werden. Diese Steuerelemente stoppen oder wiederholen nur Jobs, die lokal auf diesem POS noch in der Warteschlange stehen.",
+      "helpText": "Pause blockiert neue Sendungen und fordert den Stopp einer aktiven Übertragung an. Bereits vom Drucker empfangene Daten können nicht zurückgerufen werden. Zuerst Pause, dann Ausstehende abbrechen wählen.",
       "pausedProfiles": "Pausen für konfigurierte Drucker aktiv",
       "stuckWarning": "[NEEDS TRANSLATION] {{count}} print job(s) need attention — check the queue below.",
       "workerAlert": "[NEEDS TRANSLATION] Printing is failing — check the print queue.",
@@ -3506,7 +3506,7 @@
       "totalDeliveries": "Lieferungen gesamt",
       "cashCollected": "Bargeld eingesammelt",
       "driverPayment": "Fahrerzahlung",
-      "amountToReturn": "An Kassenlade zurückzugeben",
+      "amountToReturn": "Rückgabe",
       "driverSummary": "Fahrerzusammenfassung",
       "driversCheckout": "Fahrer-Checkout",
       "startingAmountGiven": "Ausgegebener Startbetrag",
@@ -4729,6 +4729,7 @@
     "delivered": "Geliefert",
     "view": "Anzeigen",
     "clear": "Leeren",
+    "reset": "ZURÜCKSETZEN",
     "return": "Zurück zu Bestellungen",
     "restore": "Wiederherstellen",
     "reassign": "Fahrer neu zuweisen"

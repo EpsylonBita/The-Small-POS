@@ -196,12 +196,12 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
           </div>
 
           {/* Title */}
-          <h2 className="text-2xl font-bold text-white mb-2">
+          <h2 className="liquid-glass-modal-text text-2xl font-bold mb-2">
             {displayName} is Locked
           </h2>
 
           {/* Description */}
-          <p className="text-gray-400 mb-6 max-w-md mx-auto">
+          <p className="liquid-glass-modal-text-muted mb-6 max-w-md mx-auto">
             {moduleInfo?.description || `This feature requires the ${displayName} module. Contact your administrator to upgrade and unlock full functionality.`}
           </p>
 
@@ -215,10 +215,10 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
               {/* Pricing badge */}
               {pricing && pricing.monthly > 0 && (
                 <div className={`${liquidGlassModalCard()} inline-flex items-center gap-2 mb-6`}>
-                  <span className="text-gray-400">Starting at</span>
-                  <span className="text-xl font-bold text-white">
+                  <span className="liquid-glass-modal-text-muted">Starting at</span>
+                  <span className="liquid-glass-modal-text text-xl font-bold">
                     {formatUpsellCurrency(pricing.monthly, pricing.currency)}
-                    <span className="text-sm font-normal text-gray-400">/mo</span>
+                    <span className="liquid-glass-modal-text-muted text-sm font-normal">/mo</span>
                   </span>
                   {pricing.savingsPercentage > 0 && (
                     <span className={liquidGlassModalBadge('success')}>
@@ -290,11 +290,11 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
           >
             <div className="space-y-6">
               {/* Description */}
-              <p className="text-gray-300">{moduleInfo.description}</p>
+              <p className="liquid-glass-modal-text-muted">{moduleInfo.description}</p>
 
               {/* Features list */}
               <div>
-                <h5 className="font-medium text-white mb-3 flex items-center gap-2">
+                <h5 className="liquid-glass-modal-text font-medium mb-3 flex items-center gap-2">
                   <Sparkles className="h-4 w-4 text-amber-400" />
                   What's Included
                 </h5>
@@ -303,9 +303,9 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
                     <li key={feature.id} className="flex items-start gap-2">
                       <Check className="h-4 w-4 text-green-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm text-white">{feature.name}</span>
-                        {feature.description && (
-                          <p className="text-xs text-gray-400">{feature.description}</p>
+                      <span className="liquid-glass-modal-text text-sm">{feature.name}</span>
+                      {feature.description && (
+                          <p className="liquid-glass-modal-text-muted text-xs">{feature.description}</p>
                         )}
                       </div>
                     </li>
@@ -316,9 +316,9 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
               {/* Unlocked features */}
               {moduleInfo.unlocked_features && moduleInfo.unlocked_features.length > 0 && (
                 <div className={liquidGlassModalCard()}>
-                  <p className="text-sm text-gray-400">
+                  <p className="liquid-glass-modal-text-muted text-sm">
                     Unlocking this module also enables:{' '}
-                    <span className="text-white">{moduleInfo.unlocked_features.join(', ')}</span>
+                    <span className="liquid-glass-modal-text">{moduleInfo.unlocked_features.join(', ')}</span>
                   </p>
                 </div>
               )}
@@ -328,10 +328,10 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
                 <div className={liquidGlassModalCard()}>
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-sm text-gray-400">Starting at</p>
-                      <p className="text-2xl font-bold text-white">
+                      <p className="liquid-glass-modal-text-muted text-sm">Starting at</p>
+                      <p className="liquid-glass-modal-text text-2xl font-bold">
                         {formatUpsellCurrency(pricing.monthly, pricing.currency)}
-                        <span className="text-sm font-normal text-gray-400">/mo</span>
+                        <span className="liquid-glass-modal-text-muted text-sm font-normal">/mo</span>
                       </p>
                     </div>
                     {pricing.savingsPercentage > 0 && (

@@ -191,7 +191,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
               onCancel();
             }}
             disabled={submitting}
-            className="inline-flex items-center gap-1.5 rounded-2xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white/70 transition-colors active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+            className="liquid-glass-modal-button inline-flex items-center gap-1.5 rounded-2xl px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
           >
             <X className="h-3.5 w-3.5" />
             {t('modals.editSettlementDelta.cancel', { defaultValue: 'Cancel' })}

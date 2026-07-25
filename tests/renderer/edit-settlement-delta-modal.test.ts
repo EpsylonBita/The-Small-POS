@@ -28,7 +28,7 @@ test('EditSettlementDeltaModal uses touch-first rounded settlement controls', ()
 
   assert.match(source, /rounded-2xl border p-5 text-center/);
   assert.match(source, /rounded-2xl border px-4 py-5/);
-  assert.match(source, /rounded-2xl border border-white\/10 bg-white\/5/);
+  assert.match(source, /liquid-glass-modal-button inline-flex items-center gap-1\.5 rounded-2xl/);
   assert.match(source, /active:border-emerald-400\/50 active:bg-emerald-500\/15/);
   assert.match(source, /active:border-orange-400\/50 active:bg-orange-500\/15/);
   assert.match(source, /onConfirm\(method\)/);

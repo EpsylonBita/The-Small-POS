@@ -227,7 +227,7 @@ export const SinglePaymentCollectionModal: React.FC<
       onEnterKey={handleCollect}
       enterKeyEnabled={!isProcessing && amountToCollect > 0.009}
     >
-      <div className="space-y-5 text-white">
+      <div className="liquid-glass-modal-text space-y-5">
         <div className="flex items-start gap-3 rounded-2xl border border-amber-400/20 bg-amber-500/10 p-4">
           <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-300" />
           <div className="space-y-1">
@@ -236,12 +236,12 @@ export const SinglePaymentCollectionModal: React.FC<
                 defaultValue: 'Payment Required',
               })}
             </p>
-            <h3 className="text-lg font-semibold text-white">
+            <h3 className="liquid-glass-modal-text text-lg font-semibold">
               {t('orderDashboard.collectSinglePaymentTitle', {
                 defaultValue: 'Collect the missing payment to continue',
               })}
             </h3>
-            <p className="text-sm text-white/70">
+            <p className="liquid-glass-modal-text-muted text-sm">
               {t('orderDashboard.collectSinglePaymentDescription', {
                 defaultValue:
                   'This order is blocked because the expected payment was not persisted.',
@@ -251,33 +251,33 @@ export const SinglePaymentCollectionModal: React.FC<
         </div>
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-white/45">
+          <div className="liquid-glass-modal-inset rounded-2xl p-4">
+            <p className="liquid-glass-modal-text-muted text-xs uppercase tracking-[0.22em]">
               {t('orderDashboard.order', { defaultValue: 'Order' })}
             </p>
-            <p className="mt-2 text-base font-semibold text-white">
+            <p className="liquid-glass-modal-text mt-2 text-base font-semibold">
               {orderNumber || orderId}
             </p>
           </div>
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-white/45">
+          <div className="liquid-glass-modal-inset rounded-2xl p-4">
+            <p className="liquid-glass-modal-text-muted text-xs uppercase tracking-[0.22em]">
               {t('orderDashboard.outstandingAmount', {
                 defaultValue: 'Outstanding',
               })}
             </p>
-            <p className="mt-2 text-base font-semibold text-white">
+            <p className="liquid-glass-modal-text mt-2 text-base font-semibold">
               EUR {amountToCollect.toFixed(2)}
             </p>
           </div>
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-white/45">
+          <div className="liquid-glass-modal-inset rounded-2xl p-4">
+            <p className="liquid-glass-modal-text-muted text-xs uppercase tracking-[0.22em]">
               {t('orderDashboard.paymentMethod', {
                 defaultValue: 'Payment Method',
               })}
             </p>
-            <p className="mt-2 flex items-center gap-2 text-base font-semibold text-white">
+            <p className="liquid-glass-modal-text mt-2 flex items-center gap-2 text-base font-semibold">
               {method === 'card' ? (
-                <CreditCard className="h-4 w-4 text-slate-300" />
+                <CreditCard className="h-4 w-4 text-slate-600 dark:text-slate-300" />
               ) : (
                 <Banknote className="h-4 w-4 text-emerald-300" />
               )}
@@ -289,7 +289,7 @@ export const SinglePaymentCollectionModal: React.FC<
         </div>
 
         {typeof totalAmount === 'number' ? (
-          <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-white/65">
+          <div className="liquid-glass-modal-inset liquid-glass-modal-text-muted rounded-2xl px-4 py-3 text-sm">
             {t('orderDashboard.paymentProgress', {
               defaultValue:
                 'Recorded {{settled}} of {{total}}. The remaining amount will be collected now.',
@@ -325,7 +325,7 @@ export const SinglePaymentCollectionModal: React.FC<
             type="button"
             onClick={onClose}
             disabled={isProcessing}
-            className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white/80 transition active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+            className="liquid-glass-modal-button inline-flex items-center justify-center rounded-2xl px-4 py-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
           >
             {t('common.cancel', { defaultValue: 'Cancel' })}
           </button>

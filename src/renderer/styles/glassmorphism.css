@@ -77,6 +77,15 @@
   --modal-glass-reflex-dark: 1;
   --modal-glass-reflex-light: 1;
   --modal-saturation: 150%;
+  --modal-surface: rgba(248, 250, 252, 0.72);
+  --modal-surface-elevated: rgba(255, 255, 255, 0.64);
+  --modal-surface-subtle: rgba(241, 245, 249, 0.56);
+  --modal-border: rgba(15, 23, 42, 0.14);
+  --modal-border-strong: rgba(15, 23, 42, 0.22);
+  --modal-control-bg: rgba(255, 255, 255, 0.56);
+  --modal-control-bg-active: rgba(248, 250, 252, 0.78);
+  --modal-backdrop: rgba(15, 23, 42, 0.32);
+  --modal-muted: #475569;
 
   /* Floating action button palette */
   --pos-fab-core: rgba(255, 244, 210, 0.98);
@@ -144,6 +153,15 @@
   --modal-glass-reflex-dark: 2;
   --modal-glass-reflex-light: 0.3;
   --modal-saturation: 150%;
+  --modal-surface: rgba(9, 9, 11, 0.72);
+  --modal-surface-elevated: rgba(24, 24, 27, 0.64);
+  --modal-surface-subtle: rgba(39, 39, 42, 0.5);
+  --modal-border: rgba(255, 255, 255, 0.12);
+  --modal-border-strong: rgba(255, 255, 255, 0.2);
+  --modal-control-bg: rgba(255, 255, 255, 0.055);
+  --modal-control-bg-active: rgba(255, 255, 255, 0.1);
+  --modal-backdrop: rgba(0, 0, 0, 0.62);
+  --modal-muted: #cbd5e1;
 
   --pos-fab-core: rgba(255, 242, 204, 0.98);
   --pos-fab-core-strong: rgba(255, 185, 72, 0.98);
@@ -1013,7 +1031,7 @@
 .liquid-glass-modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--modal-backdrop);
   /* Reduced blur for less blurry effect - only blur the background, not the modal */
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
@@ -1023,7 +1041,7 @@
 }
 
 .dark .liquid-glass-modal-backdrop {
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--modal-backdrop);
 }
 
 .liquid-glass-modal-shell {
@@ -1033,12 +1051,11 @@
   width: 100%;
   padding: 0;
   border-radius: 28px;
-  /* True Liquid Glass Effect - restored */
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--modal-surface);
   backdrop-filter: blur(40px) saturate(200%);
   -webkit-backdrop-filter: blur(40px) saturate(200%);
   /* Glass Border */
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid var(--modal-border);
   /* Simple shadow */
   box-shadow:
     0 20px 60px rgba(0, 0, 0, 0.1),
@@ -1058,11 +1075,10 @@
 
 /* Dark theme - Liquid Glass */
 .dark .liquid-glass-modal-shell {
-  /* True Liquid Glass Effect - Dark Theme */
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--modal-surface);
   backdrop-filter: blur(40px) saturate(180%);
   -webkit-backdrop-filter: blur(40px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid var(--modal-border);
   box-shadow:
     0 20px 60px rgba(0, 0, 0, 0.4),
     0 8px 24px rgba(0, 0, 0, 0.3),
@@ -1088,6 +1104,20 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-content {
 
 html:not(.dark) .plugin-setup-modal .pos-glass-text-primary {
   color: #27272a;
+}
+
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-title {
+  color: #18181b !important;
+}
+
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-close {
+  background: rgba(244, 244, 245, 0.96);
+  border-color: #a1a1aa;
+  color: #3f3f46;
+}
+
+html:not(.dark) .plugin-setup-modal label {
+  color: #3f3f46;
 }
 
 html:not(.dark) .plugin-setup-modal .liquid-glass-modal-input {
@@ -1122,19 +1152,7 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   color: #27272a;
 }
 
-/* Trial: New Order chooser as a transparent command palette. */
-.liquid-glass-modal-viewport:has(.order-type-transparent-modal) .liquid-glass-modal-backdrop {
-  background: rgba(0, 0, 0, 0.2) !important;
-  backdrop-filter: blur(22px) saturate(0.96) brightness(0.82) !important;
-  -webkit-backdrop-filter: blur(22px) saturate(0.96) brightness(0.82) !important;
-}
-
-.dark .liquid-glass-modal-viewport:has(.order-type-transparent-modal) .liquid-glass-modal-backdrop {
-  background: rgba(0, 0, 0, 0.08) !important;
-  backdrop-filter: blur(18px) saturate(1.08) !important;
-  -webkit-backdrop-filter: blur(18px) saturate(1.08) !important;
-}
-
+/* New Order chooser: invisible wrapper with themed order cards. */
 .order-type-transparent-modal.liquid-glass-modal-shell,
 .dark .order-type-transparent-modal.liquid-glass-modal-shell {
   background: transparent !important;
@@ -1171,44 +1189,71 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 .order-type-transparent-modal [data-order-type-card] {
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
   box-shadow:
-    0 24px 60px rgba(0, 0, 0, 0.18),
-    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    0 8px 24px rgba(15, 23, 42, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.86);
 }
 
-.order-type-transparent-modal [data-order-type-card] svg,
-.order-type-transparent-modal [data-order-type-card] [aria-hidden="true"] {
-  color: rgba(24, 24, 27, 0.9) !important;
+html:not(.dark) .order-type-transparent-modal [data-order-type-card] svg,
+html:not(.dark) .order-type-transparent-modal [data-order-type-card] [aria-hidden="true"] {
+  color: #334155 !important;
 }
 
-.order-type-transparent-modal [data-order-type-card] p {
-  color: rgba(24, 24, 27, 0.72) !important;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.22);
+html:not(.dark) .order-type-transparent-modal [data-order-type-card] p {
+  color: #475569 !important;
+  text-shadow: none;
 }
 
-.order-type-transparent-modal [data-order-type-card="delivery"] {
-  background: linear-gradient(135deg, rgba(74, 57, 0, 0.76), rgba(32, 28, 14, 0.64)) !important;
-  border-color: rgba(250, 204, 21, 0.72) !important;
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="delivery"] {
+  background: linear-gradient(135deg, rgba(254, 249, 195, 0.68), rgba(255, 255, 255, 0.42)) !important;
+  border-color: rgba(202, 138, 4, 0.54) !important;
 }
 
-.order-type-transparent-modal [data-order-type-card="pickup"] {
-  background: linear-gradient(135deg, rgba(3, 70, 45, 0.76), rgba(8, 37, 30, 0.64)) !important;
-  border-color: rgba(52, 211, 153, 0.72) !important;
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="delivery"] h3,
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="delivery"] svg {
+  color: #a16207 !important;
 }
 
-.order-type-transparent-modal [data-order-type-card="table"] {
-  background: linear-gradient(135deg, rgba(20, 58, 103, 0.76), rgba(13, 30, 55, 0.64)) !important;
-  border-color: rgba(96, 165, 250, 0.76) !important;
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="pickup"] {
+  background: linear-gradient(135deg, rgba(209, 250, 229, 0.68), rgba(255, 255, 255, 0.42)) !important;
+  border-color: rgba(5, 150, 105, 0.48) !important;
 }
 
-.order-type-transparent-modal [data-order-type-card="room"] {
-  background: linear-gradient(135deg, rgba(70, 28, 104, 0.76), rgba(37, 18, 56, 0.64)) !important;
-  border-color: rgba(168, 85, 247, 0.74) !important;
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="pickup"] h3,
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="pickup"] svg {
+  color: #047857 !important;
 }
 
-.order-type-transparent-modal [data-order-type-card="service"] {
-  background: linear-gradient(135deg, rgba(7, 73, 83, 0.76), rgba(8, 38, 44, 0.64)) !important;
-  border-color: rgba(34, 211, 238, 0.74) !important;
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="table"] {
+  background: linear-gradient(135deg, rgba(219, 234, 254, 0.68), rgba(255, 255, 255, 0.42)) !important;
+  border-color: rgba(37, 99, 235, 0.46) !important;
+}
+
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="table"] h3,
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="table"] svg {
+  color: #1d4ed8 !important;
+}
+
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="room"] {
+  background: linear-gradient(135deg, rgba(243, 232, 255, 0.68), rgba(255, 255, 255, 0.42)) !important;
+  border-color: rgba(147, 51, 234, 0.46) !important;
+}
+
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="room"] h3,
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="room"] svg {
+  color: #7e22ce !important;
+}
+
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] {
+  background: linear-gradient(135deg, rgba(207, 250, 254, 0.68), rgba(255, 255, 255, 0.42)) !important;
+  border-color: rgba(8, 145, 178, 0.46) !important;
+}
+
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] h3,
+html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] svg {
+  color: #0e7490 !important;
 }
 
 .dark .order-type-transparent-modal [data-order-type-card] {
@@ -1327,12 +1372,11 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 .liquid-glass-modal-button {
-  /* Ultra-transparent with blur */
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--modal-control-bg);
   backdrop-filter: blur(10px) saturate(var(--modal-saturation));
   -webkit-backdrop-filter: blur(10px) saturate(var(--modal-saturation));
   /* Crisp Rim Light Border */
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid var(--modal-border);
   border-radius: var(--pos-glass-radius-small);
   padding: 0.75rem 1.5rem;
   color: var(--modal-c-content);
@@ -1356,38 +1400,57 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 
 @media (hover: hover) {
   .liquid-glass-modal-button:hover {
-    background: rgba(255, 255, 255, 0.1);
-    border-color: rgba(255, 255, 255, 0.4);
+    background: var(--modal-control-bg-active);
+    border-color: var(--modal-border-strong);
   }
 }
 
 .liquid-glass-modal-button:active {
   transform: scale(0.98);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--modal-control-bg-active);
 }
 
 /* Dark mode button adjustments */
 .dark .liquid-glass-modal-button {
-  background: rgba(255, 255, 255, 0.03);
-  border-color: rgba(255, 255, 255, 0.15);
+  background: var(--modal-control-bg);
+  border-color: var(--modal-border);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 @media (hover: hover) {
   .dark .liquid-glass-modal-button:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.3);
+    background: var(--modal-control-bg-active);
+    border-color: var(--modal-border-strong);
   }
 }
 
 /* .liquid-glass-modal-input rules moved to globals.css @layer components
    so Tailwind utilities (pl-10, pr-10, etc.) can properly override padding */
 
+/* Field-leading icons are deliberately solid rather than glass: the thin
+   Lucide strokes otherwise become washed out against translucent controls. */
+.liquid-glass-modal-field-icon {
+  z-index: 2 !important;
+  color: #eab308 !important;
+  stroke: #eab308 !important;
+  opacity: 1 !important;
+  stroke-opacity: 1 !important;
+  stroke-width: 3;
+  filter: none !important;
+  mix-blend-mode: normal !important;
+  pointer-events: none;
+}
+
+.dark .liquid-glass-modal-field-icon {
+  color: #facc15 !important;
+  stroke: #facc15 !important;
+}
+
 .liquid-glass-modal-card {
-  background: rgba(241, 245, 249, 0.8);
+  background: var(--modal-surface-subtle);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
-  border: 1px solid rgba(203, 213, 225, 0.5);
+  border: 1px solid var(--modal-border);
   border-radius: var(--pos-glass-radius-medium);
   padding: 1.5rem;
   box-shadow:
@@ -1396,8 +1459,8 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 .dark .liquid-glass-modal-card {
-  background: rgba(30, 41, 59, 0.8);
-  border-color: rgba(255, 255, 255, 0.1);
+  background: var(--modal-surface-subtle);
+  border-color: var(--modal-border);
   box-shadow:
     0 4px 16px rgba(0, 0, 0, 0.3),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -1417,14 +1480,14 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 .liquid-glass-modal-secondary {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: var(--modal-control-bg);
+  border-color: var(--modal-border);
   color: var(--modal-c-content);
 }
 
 .dark .liquid-glass-modal-secondary {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.18);
+  background: var(--modal-control-bg);
+  border-color: var(--modal-border);
   color: var(--modal-c-content);
 }
 
@@ -1525,8 +1588,8 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 .liquid-glass-modal-text-muted {
-  color: var(--modal-c-content);
-  opacity: 0.85;
+  color: var(--modal-muted);
+  opacity: 1;
   text-rendering: geometricPrecision;
   -webkit-font-smoothing: subpixel-antialiased;
   -moz-osx-font-smoothing: auto;
@@ -1536,11 +1599,37 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 .liquid-glass-modal-border {
-  border-color: rgba(255, 255, 255, 0.2);
+  border-color: var(--modal-border);
 }
 
 .dark .liquid-glass-modal-border {
-  border-color: rgba(255, 255, 255, 0.1);
+  border-color: var(--modal-border);
+}
+
+.liquid-glass-modal-footer {
+  background: var(--modal-surface-elevated);
+  border-color: var(--modal-border);
+  color: var(--modal-c-content);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.liquid-glass-modal-inset {
+  background: var(--modal-surface-subtle);
+  border: 1px solid var(--modal-border);
+  color: var(--modal-c-content);
+}
+
+.liquid-glass-modal-icon-button {
+  background: var(--modal-control-bg);
+  border: 1px solid var(--modal-border-strong);
+  color: var(--modal-c-content);
+  transition: transform 150ms ease, background 150ms ease;
+}
+
+.liquid-glass-modal-icon-button:active {
+  background: var(--modal-control-bg-active);
+  transform: scale(0.96);
 }
 
 .liquid-glass-modal-action {
@@ -1557,13 +1646,13 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   align-items: center;
   justify-content: space-between;
   padding: 1.5rem 2rem;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
+  border-bottom: 1px solid var(--modal-border);
   background: transparent !important;
   flex-shrink: 0;
 }
 
 .dark .liquid-glass-modal-header {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  border-bottom: 1px solid var(--modal-border);
   background: transparent !important;
 }
 
@@ -1620,7 +1709,7 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 .liquid-glass-modal-content {
-  color: #0f172a;  /* Slate-900 - extra vivid dark */
+  color: var(--modal-c-content);
   padding: 2rem;
   overflow-y: auto;
   flex: 1;
@@ -2419,7 +2508,7 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 /* ===== CRISP INGREDIENT TEXT STYLES ===== */
 /* Ensures sharp, vivid text for menu ingredient selection */
 
-.ingredient-text-crisp {
+.menu-item-customizer-modal .ingredient-text-crisp {
   color: var(--modal-c-content);
   text-rendering: geometricPrecision;
   -webkit-font-smoothing: subpixel-antialiased;
@@ -2433,26 +2522,19 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 /* Vivid ingredient card text - Light theme */
-.liquid-glass-modal-shell .font-medium {
+.menu-item-customizer-modal .font-medium {
   color: #1e293b !important;  /* Slate-800 - vivid dark */
   text-shadow: 0 0 1px rgba(0, 0, 0, 0.05);
   -webkit-font-smoothing: subpixel-antialiased;
   text-rendering: geometricPrecision;
 }
 
-.dark .liquid-glass-modal-shell .font-medium {
+.dark .menu-item-customizer-modal .font-medium {
   color: #f1f5f9 !important;  /* Slate-100 - vivid light */
   text-shadow: 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
-/* Round 316 (live QA, Greek/dark): Split Payment selected segmented controls must stay BLACK on yellow.
-   The split-mode (By Amount / By Items) and footer receipt-mode (All Together / Separate) selected
-   buttons are yellow slabs that also carry `font-medium`, so the broad `.font-medium` override above
-   (slate-800 light / slate-100 dark, both !important) was stomping their `text-black` utility and
-   rendering pale text/icons on yellow. This scoped rule wins by HIGHER specificity (`button.<class>`
-   beats `.liquid-glass-modal-shell .font-medium` in both themes) AND comes later in source order, and it
-   also forces the lucide icon black via the child <svg> (currentColor). Scoped to the split-payment
-   segments only, so no other modal text changes. */
+/* Selected payment segments stay black on their yellow slab in both themes. */
 .liquid-glass-modal-shell button.split-payment-segment-selected,
 .liquid-glass-modal-shell button.split-payment-segment-selected svg,
 .dark .liquid-glass-modal-shell button.split-payment-segment-selected,
@@ -2462,29 +2544,29 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 /* Ingredient price text - more vivid green */
-.liquid-glass-modal-shell .text-green-500 {
+.menu-item-customizer-modal .text-green-500 {
   color: #22c55e !important;  /* Vivid green-500 */
   font-weight: 600;
   text-shadow: 0 0 1px rgba(34, 197, 94, 0.3);
 }
 
-.dark .liquid-glass-modal-shell .text-green-500 {
+.dark .menu-item-customizer-modal .text-green-500 {
   color: #4ade80 !important;  /* Vivid green-400 for dark */
   text-shadow: 0 0 2px rgba(74, 222, 128, 0.4);
 }
 
 /* Category color dot text - vivid */
-.liquid-glass-modal-shell .liquid-glass-modal-text-muted {
+.menu-item-customizer-modal .liquid-glass-modal-text-muted {
   color: #475569 !important;  /* Slate-600 */
   font-weight: 500;
 }
 
-.dark .liquid-glass-modal-shell .liquid-glass-modal-text-muted {
+.dark .menu-item-customizer-modal .liquid-glass-modal-text-muted {
   color: #cbd5e1 !important;  /* Slate-300 */
 }
 
 /* Ingredient card buttons - crisp white text */
-.liquid-glass-modal-shell button span.text-white {
+.menu-item-customizer-modal button span.text-white {
   color: #ffffff !important;
   font-weight: 700;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
@@ -2492,7 +2574,7 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 /* Quantity display in ingredient cards */
-.liquid-glass-modal-shell .min-w-\[24px\] {
+.menu-item-customizer-modal .min-w-\[24px\] {
   color: #ffffff !important;
   font-weight: 700;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
@@ -2514,44 +2596,44 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 /* Flavor type tabs - vivid active state (on-palette: yellow / amber / grey) */
-.liquid-glass-modal-shell .bg-blue-500 {
+.menu-item-customizer-modal .bg-blue-500 {
   background-color: #eab308 !important;
   box-shadow: 0 4px 14px rgba(234, 179, 8, 0.4);
 }
 
-.liquid-glass-modal-shell .bg-orange-500 {
+.menu-item-customizer-modal .bg-orange-500 {
   background-color: #d97706 !important;
   box-shadow: 0 4px 14px rgba(217, 119, 6, 0.4);
 }
 
-.liquid-glass-modal-shell .bg-pink-500 {
+.menu-item-customizer-modal .bg-pink-500 {
   background-color: #52525b !important;
   box-shadow: 0 4px 14px rgba(82, 82, 91, 0.4);
 }
 
 /* Red text for "without" items - more vivid */
-.liquid-glass-modal-shell .text-red-400 {
+.menu-item-customizer-modal .text-red-400 {
   color: #f87171 !important;
   font-weight: 600;
 }
 
-.dark .liquid-glass-modal-shell .text-red-400 {
+.dark .menu-item-customizer-modal .text-red-400 {
   color: #fb7185 !important;  /* Rose-400 */
 }
 
 /* Neutral text for "little" indicator */
-.liquid-glass-modal-shell .text-blue-400 {
+.menu-item-customizer-modal .text-blue-400 {
   color: #a1a1aa !important;
   font-weight: 500;
 }
 
 /* Ensure ingredient grid items have sharp borders */
-.liquid-glass-modal-shell .rounded-xl.border-2 {
+.menu-item-customizer-modal .rounded-xl.border-2 {
   border-width: 2px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
-.dark .liquid-glass-modal-shell .rounded-xl.border-2 {
+.dark .menu-item-customizer-modal .rounded-xl.border-2 {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
@@ -2600,17 +2682,17 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 /* Z-report uses a heavier dashboard layout, so keep text crisp while allowing
    the modal shell and panels to retain a real blurred glass surface. */
 .liquid-glass-modal-shell.z-report-glass-shell {
-  background: rgba(10, 10, 10, 0.82) !important;
+  background: rgba(248, 250, 252, 0.74) !important;
   backdrop-filter: blur(46px) saturate(145%) !important;
   -webkit-backdrop-filter: blur(46px) saturate(145%) !important;
-  border-color: rgba(250, 204, 21, 0.28);
+  border-color: rgba(202, 138, 4, 0.32);
   box-shadow:
-    0 28px 90px rgba(0, 0, 0, 0.38),
-    inset 0 1px 0 rgba(250, 204, 21, 0.14);
+    0 28px 90px rgba(15, 23, 42, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
 .dark .liquid-glass-modal-shell.z-report-glass-shell {
-  background: rgba(8, 8, 8, 0.88) !important;
+  background: rgba(8, 8, 8, 0.72) !important;
   backdrop-filter: blur(46px) saturate(145%) !important;
   -webkit-backdrop-filter: blur(46px) saturate(145%) !important;
   border-color: rgba(250, 204, 21, 0.26);
@@ -2620,10 +2702,10 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 .liquid-glass-modal-content.z-report-glass-content {
-  background: rgba(0, 0, 0, 0.2) !important;
+  background: rgba(255, 255, 255, 0.42) !important;
   backdrop-filter: blur(42px) saturate(145%) !important;
   -webkit-backdrop-filter: blur(42px) saturate(145%) !important;
-  color: #ffffff;
+  color: #0f172a;
 }
 
 .dark .liquid-glass-modal-content.z-report-glass-content {
@@ -2666,25 +2748,102 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   text-shadow: none !important;
 }
 
-/* Late fallback: transparent New Order chooser must stay readable even if the
-   running desktop window has refreshed CSS before it has refreshed the JSX
-   data-order-type-card hooks. Keep titles accented; change only icons/subtitles. */
-html:not(.dark) .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] svg,
-html:not(.dark) .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] span[aria-hidden="true"] {
-  color: rgba(24, 24, 27, 0.92) !important;
+/* Payment choices intentionally opt out of the global cool-color-to-grey
+   Tailwind palette remap. Keep the glass surface neutral while making the
+   CARD and SPLIT outlines/icons immediately distinguishable in both themes. */
+.liquid-glass-modal-shell button.payment-option-card {
+  border-color: rgba(37, 99, 235, 0.58) !important;
+  background:
+    linear-gradient(135deg, rgba(37, 99, 235, 0.11), rgba(37, 99, 235, 0.035))
+    !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(37, 99, 235, 0.12),
+    0 8px 24px rgba(37, 99, 235, 0.07);
 }
 
-html:not(.dark) .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] p {
-  color: rgba(24, 24, 27, 0.78) !important;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28) !important;
+.liquid-glass-modal-shell .payment-option-card-icon {
+  color: #2563eb !important;
 }
 
-.dark .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] svg,
-.dark .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] span[aria-hidden="true"] {
-  color: #fff !important;
+.liquid-glass-modal-shell button.payment-option-split {
+  border-color: rgba(124, 58, 237, 0.58) !important;
+  background:
+    linear-gradient(135deg, rgba(124, 58, 237, 0.11), rgba(124, 58, 237, 0.035))
+    !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(124, 58, 237, 0.12),
+    0 8px 24px rgba(124, 58, 237, 0.07);
 }
 
-.dark .order-type-transparent-modal .liquid-glass-modal-content button[type="button"] p {
-  color: rgba(255, 255, 255, 0.6) !important;
-  text-shadow: none !important;
+.liquid-glass-modal-shell .payment-option-split-icon {
+  color: #7c3aed !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .liquid-glass-modal-shell button.payment-option-card:hover {
+    border-color: rgba(37, 99, 235, 0.82) !important;
+  }
+
+  .liquid-glass-modal-shell button.payment-option-split:hover {
+    border-color: rgba(124, 58, 237, 0.82) !important;
+  }
+}
+
+.liquid-glass-modal-shell button.payment-option-card:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.42);
+  outline-offset: 3px;
+}
+
+.liquid-glass-modal-shell button.payment-option-split:focus-visible {
+  outline: 3px solid rgba(124, 58, 237, 0.42);
+  outline-offset: 3px;
+}
+
+.dark .liquid-glass-modal-shell button.payment-option-card {
+  border-color: rgba(96, 165, 250, 0.68) !important;
+  background:
+    linear-gradient(135deg, rgba(59, 130, 246, 0.16), rgba(59, 130, 246, 0.05))
+    !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(96, 165, 250, 0.13),
+    0 8px 24px rgba(59, 130, 246, 0.1);
+}
+
+.dark .liquid-glass-modal-shell .payment-option-card-icon {
+  color: #60a5fa !important;
+}
+
+.dark .liquid-glass-modal-shell button.payment-option-split {
+  border-color: rgba(192, 132, 252, 0.68) !important;
+  background:
+    linear-gradient(135deg, rgba(168, 85, 247, 0.16), rgba(168, 85, 247, 0.05))
+    !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(192, 132, 252, 0.13),
+    0 8px 24px rgba(168, 85, 247, 0.1);
+}
+
+.dark .liquid-glass-modal-shell .payment-option-split-icon {
+  color: #c084fc !important;
+}
+.bulk-action-reset {
+  background: #0ea5e9 !important;
+  border-color: #0284c7 !important;
+  color: #ffffff !important;
+  box-shadow: 0 10px 24px rgba(14, 165, 233, 0.28) !important;
+}
+
+.bulk-action-reset:active {
+  background: #0284c7 !important;
+}
+
+.dark .bulk-action-reset {
+  background: #38bdf8 !important;
+  border-color: #7dd3fc !important;
+  color: #082f49 !important;
+  box-shadow: 0 10px 24px rgba(3, 105, 161, 0.34) !important;
+}
+
+.dark .bulk-action-reset:active {
+  background: #7dd3fc !important;
 }

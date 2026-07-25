@@ -5,7 +5,9 @@ import path from 'node:path';
 
 const projectRoot = process.cwd();
 const modalPath = path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'AddCustomerModal.tsx');
+const glassCssPath = path.join(projectRoot, 'src', 'renderer', 'styles', 'glassmorphism.css');
 const source = readFileSync(modalPath, 'utf8');
+const glassCss = readFileSync(glassCssPath, 'utf8');
 
 test('Round 422: AddCustomerModal keeps the shared glass shell and semantic actions', () => {
   assert.match(source, /<LiquidGlassModal/);
@@ -18,9 +20,19 @@ test('Round 422: AddCustomerModal keeps the shared glass shell and semantic acti
   );
 });
 
-test('Round 422: field icons are neutral, suggestions are amber, and validation loading is yellow', () => {
-  const neutralIconMatches = source.match(/text-gray-500 dark:text-gray-400/g) ?? [];
-  assert.ok(neutralIconMatches.length >= 8, 'customer field icons should use neutral grey, not blue');
+test('Round 423: field icons use a solid high-contrast yellow in both themes, suggestions are amber, and validation loading is yellow', () => {
+  const fieldIconMatches = source.match(/liquid-glass-modal-field-icon/g) ?? [];
+  assert.ok(fieldIconMatches.length >= 8, 'every customer field icon should use the shared high-contrast token');
+  assert.match(
+    glassCss,
+    /\.liquid-glass-modal-field-icon\s*\{[\s\S]*?z-index:\s*2\s*!important;[\s\S]*?color:\s*#eab308\s*!important;[\s\S]*?stroke:\s*#eab308\s*!important;[\s\S]*?opacity:\s*1\s*!important;[\s\S]*?stroke-opacity:\s*1\s*!important;[\s\S]*?stroke-width:\s*3;[\s\S]*?filter:\s*none\s*!important;[\s\S]*?mix-blend-mode:\s*normal\s*!important;[\s\S]*?\}/,
+    'light-theme field icons should sit above the glass input and paint a solid true-yellow stroke',
+  );
+  assert.match(
+    glassCss,
+    /\.dark \.liquid-glass-modal-field-icon\s*\{[\s\S]*?color:\s*#facc15\s*!important;[\s\S]*?stroke:\s*#facc15\s*!important;[\s\S]*?\}/,
+    'dark-theme field icons should explicitly paint a solid yellow-400 stroke',
+  );
   assert.match(source, /text-amber-500 dark:text-amber-300 mt-1 flex-shrink-0/);
   assert.match(source, /flex items-center gap-2 text-yellow-600 dark:text-yellow-300/);
 });

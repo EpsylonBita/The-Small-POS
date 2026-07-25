@@ -124,7 +124,7 @@ test('Round 322/355/356: the single next action is a plain Commit Z report butto
     /const canCommitZReport =[\s\S]*?!closeoutHasHardSubmitBlocker[\s\S]*?!submitting[\s\S]*?!Boolean\(resolvingBlockerKey\);/,
     'commit must stay blocked only by hard submit blockers, submit-in-flight, or blocker resolution',
   );
-  assert.match(action, /cursor-not-allowed border-white\/\[0\.14\] bg-white\/\[0\.08\] text-white\/55 opacity-70/);
+  assert.match(action, /cursor-not-allowed border-slate-900\/\[0\.14\] bg-slate-900\/\[0\.05\] text-slate-500 opacity-70 dark:border-white\/\[0\.14\] dark:bg-white\/\[0\.08\] dark:text-white\/55/);
   assert.match(action, /\{submitButtonLabel\}/);
   assert.doesNotMatch(action, /setActiveTab\('review'\)/);
   assert.doesNotMatch(action, /clarity\.fixAction/);
@@ -387,7 +387,7 @@ test('Round 354: active staff disables Z-report commit with an all-staff checkou
 
   const action = slice(source, 'data-z-report-primary-action', 'data-z-report-day-details');
   assert.match(action, /disabled=\{!canCommitZReport\}/);
-  assert.match(action, /cursor-not-allowed border-white\/\[0\.14\] bg-white\/\[0\.08\] text-white\/55 opacity-70/);
+  assert.match(action, /cursor-not-allowed border-slate-900\/\[0\.14\] bg-slate-900\/\[0\.05\] text-slate-500 opacity-70 dark:border-white\/\[0\.14\] dark:bg-white\/\[0\.08\] dark:text-white\/55/);
   assert.doesNotMatch(action, /<ListChecks/);
 
   const staffItem = slice(source, "key: 'staff'", "];");

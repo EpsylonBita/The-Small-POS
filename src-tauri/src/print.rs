@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -42,6 +43,7 @@ const PRINT_QUEUE_SETTINGS_CATEGORY: &str = "printing";
 const PRINT_QUEUE_PAUSED_GLOBAL_KEY: &str = "queue_paused";
 const PRINT_QUEUE_PAUSED_PROFILE_PREFIX: &str = "queue_paused_profile::";
 static PRINT_PROCESSOR_LOCK: Mutex<()> = Mutex::new(());
+static ACTIVE_PRINT_JOBS: OnceLock<Mutex<HashMap<String, ActivePrintEntry>>> = OnceLock::new();
 const STALE_PRINTING_JOB_ERROR: &str = "Print attempt did not finish; it may already have reached the printer. Automatic retry stopped to prevent duplicate or gibberish output. Check the printer, then retry manually if needed.";
 
 /// Hard wall-clock cap on a single hardware dispatch. Kept below the 30s stale
@@ -56,6 +58,83 @@ const DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20)
 /// timed-out job fails closed (no automatic re-send that could duplicate a
 /// receipt that may already have printed).
 const DISPATCH_TIMEOUT_ERROR: &str = "Printer did not respond within the dispatch timeout; the receipt may or may not have printed. Automatic retry stopped to prevent duplicate output. Check the printer, then retry manually if needed.";
+
+#[derive(Clone)]
+struct ActivePrintEntry {
+    printer_profile_id: Option<String>,
+    cancel: Arc<AtomicBool>,
+}
+
+struct ActivePrintGuard {
+    job_id: String,
+    cancel: Arc<AtomicBool>,
+}
+
+impl ActivePrintGuard {
+    fn register(job_id: &str, printer_profile_id: Option<String>) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let entry = ActivePrintEntry {
+            printer_profile_id,
+            cancel: Arc::clone(&cancel),
+        };
+        active_print_jobs()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(job_id.to_string(), entry);
+        Self {
+            job_id: job_id.to_string(),
+            cancel,
+        }
+    }
+
+    fn cancel_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    #[cfg(test)]
+    fn cancel_requested(&self) -> bool {
+        self.cancel.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for ActivePrintGuard {
+    fn drop(&mut self) {
+        let mut active = active_print_jobs()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let should_remove = active
+            .get(&self.job_id)
+            .map(|entry| Arc::ptr_eq(&entry.cancel, &self.cancel))
+            .unwrap_or(false);
+        if should_remove {
+            active.remove(&self.job_id);
+        }
+    }
+}
+
+fn active_print_jobs() -> &'static Mutex<HashMap<String, ActivePrintEntry>> {
+    ACTIVE_PRINT_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn request_active_print_stops(job_id: Option<&str>, printer_profile_id: Option<&str>) -> usize {
+    let active = active_print_jobs()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut requested = 0usize;
+    for (active_job_id, entry) in active.iter() {
+        let matches = match job_id {
+            Some(job_id) => active_job_id == job_id,
+            None => match printer_profile_id {
+                Some(profile_id) => entry.printer_profile_id.as_deref() == Some(profile_id),
+                None => true,
+            },
+        };
+        if matches && !entry.cancel.swap(true, Ordering::AcqRel) {
+            requested += 1;
+        }
+    }
+    requested
+}
 
 fn is_receipt_like_entity_type(entity_type: &str) -> bool {
     matches!(
@@ -403,11 +482,19 @@ pub fn set_print_queue_paused(
         if paused { "true" } else { "false" },
     )?;
     let paused_profiles: Vec<String> = paused_printer_profiles(&conn).into_iter().collect();
+    let queue_paused = is_print_queue_paused_with_conn(&conn, None);
+    drop(conn);
+    let active_stops_requested = if paused {
+        request_active_print_stops(None, printer_profile_id)
+    } else {
+        0
+    };
     Ok(serde_json::json!({
         "success": true,
-        "queuePaused": is_print_queue_paused_with_conn(&conn, None),
+        "queuePaused": queue_paused,
         "pausedPrinterProfileIds": paused_profiles,
         "printerProfileId": printer_profile_id,
+        "activeStopsRequested": active_stops_requested,
     }))
 }
 
@@ -424,7 +511,17 @@ pub fn cancel_print_job(db: &DbState, job_id: &str) -> Result<Value, String> {
             params![job_id],
         )
         .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "success": affected > 0, "affected": affected }))
+    drop(conn);
+    let active_stops_requested = if affected > 0 {
+        request_active_print_stops(Some(job_id), None)
+    } else {
+        0
+    };
+    Ok(serde_json::json!({
+        "success": affected > 0,
+        "affected": affected,
+        "activeStopsRequested": active_stops_requested,
+    }))
 }
 
 pub fn cancel_print_jobs(
@@ -509,11 +606,18 @@ pub fn cancel_print_jobs(
         }
     }
 
+    drop(conn);
+    let active_stops_requested = if statuses.iter().any(|status| status == "printing") {
+        request_active_print_stops(None, printer_profile_id)
+    } else {
+        0
+    };
     Ok(serde_json::json!({
         "success": true,
         "affected": affected,
         "statuses": statuses,
         "printerProfileId": printer_profile_id,
+        "activeStopsRequested": active_stops_requested,
     }))
 }
 
@@ -597,7 +701,7 @@ pub fn mark_print_job_failed(db: &DbState, job_id: &str, error_msg: &str) -> Res
                 ELSE datetime('now', '+' || (5 * (1 << MIN(retry_count, 4))) || ' seconds')
             END,
             updated_at = ?2
-         WHERE id = ?3",
+         WHERE id = ?3 AND status = 'printing'",
         params![error_msg, now, job_id],
     )
     .map_err(|e| format!("mark failed: {e}"))?;
@@ -623,7 +727,7 @@ pub fn mark_print_job_failed_non_retryable(
             last_attempt_at = ?2,
             next_retry_at = NULL,
             updated_at = ?2
-         WHERE id = ?3",
+         WHERE id = ?3 AND status = 'printing'",
         params![error_msg, now, job_id],
     )
     .map_err(|e| format!("mark failed non-retryable: {e}"))?;
@@ -730,7 +834,11 @@ fn select_ready_pending_jobs(
 /// orphaned thread is left to unwind whenever the transport finally returns (or
 /// at process exit) and the caller fails the job closed, so a receipt that may
 /// already have printed is never silently re-sent.
-fn run_dispatch_with_timeout<T, F>(timeout: std::time::Duration, f: F) -> Result<T, String>
+fn run_dispatch_with_timeout<T, F>(
+    timeout: std::time::Duration,
+    cancel: Arc<AtomicBool>,
+    f: F,
+) -> Result<T, String>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -743,8 +851,12 @@ where
     });
     match rx.recv_timeout(timeout) {
         Ok(value) => Ok(value),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(DISPATCH_TIMEOUT_ERROR.to_string()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            cancel.store(true, Ordering::Release);
+            Err(DISPATCH_TIMEOUT_ERROR.to_string())
+        }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            cancel.store(true, Ordering::Release);
             Err("Print dispatch thread ended without a result".to_string())
         }
     }
@@ -848,6 +960,39 @@ pub fn is_print_queue_paused(
 ) -> Result<bool, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     Ok(is_print_queue_paused_with_conn(&conn, printer_profile_id))
+}
+
+/// Revalidate a selected job immediately before hardware I/O.
+///
+/// Queue selection and receipt rendering happen before dispatch. An operator
+/// can pause or cancel during that window, so the earlier eligibility check is
+/// no longer sufficient. A paused job that has not reached hardware is safely
+/// returned to `pending`; a cancelled/non-printing job remains untouched.
+fn prepare_print_job_dispatch(
+    db: &DbState,
+    job_id: &str,
+    printer_profile_id: Option<&str>,
+) -> Result<bool, String> {
+    let conn = lock_conn_recovering(db);
+    if is_print_queue_paused_with_conn(&conn, printer_profile_id) {
+        conn.execute(
+            "UPDATE print_jobs
+             SET status = 'pending', next_retry_at = NULL, updated_at = ?1
+             WHERE id = ?2 AND status = 'printing'",
+            params![Utc::now().to_rfc3339(), job_id],
+        )
+        .map_err(|e| format!("release paused print job before dispatch: {e}"))?;
+        return Ok(false);
+    }
+
+    let status = conn
+        .query_row(
+            "SELECT status FROM print_jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("check print job state before dispatch: {e}"))?;
+    Ok(status == "printing")
 }
 
 fn resolve_header_sources(conn: &rusqlite::Connection) -> (String, String, String, String) {
@@ -1560,6 +1705,9 @@ pub fn resolve_layout_config(
             .emulation
             .as_deref()
             .map(|value| ReceiptEmulationMode::from_value(Some(value)))
+            .or_else(|| {
+                emulation_setting.map(|value| ReceiptEmulationMode::from_value(Some(value)))
+            })
             .unwrap_or_else(|| {
                 if raw_transport_printer {
                     // Star printers need Auto so is_star_line_mode() returns
@@ -1574,6 +1722,13 @@ pub fn resolve_layout_config(
                     ReceiptEmulationMode::from_value(emulation_setting)
                 }
             })
+    } else if let Some(value) = emulation_setting {
+        // A saved operator choice is authoritative even when the printer has
+        // not completed capability verification. Ignoring an explicit
+        // `star_line` choice and falling back to ESC/POS sends incompatible
+        // commands to mC-Print3 queues and can render the raster payload as
+        // pages of gibberish.
+        ReceiptEmulationMode::from_value(Some(value))
     } else if raw_transport_printer {
         // Star printers need Auto so is_star_line_mode() returns true based
         // on detected brand, even when the profile is not yet verified.
@@ -3584,6 +3739,10 @@ fn build_shift_checkout_doc(
                         .and_then(Value::as_str)
                         .unwrap_or("N/A")
                         .to_string(),
+                    delivery_address: text_from_paths(
+                        d,
+                        &["/delivery_address", "/deliveryAddress"],
+                    ),
                     total_amount: total,
                     payment_method: d
                         .get("payment_method")
@@ -3617,7 +3776,12 @@ fn build_shift_checkout_doc(
             doc.total_sells = cash_total + card_total;
             doc.cancelled_or_refunded_total = cancelled_or_refunded_total;
             doc.cancelled_or_refunded_count = cancelled_or_refunded_count;
-            doc.amount_to_return = opening + cash_total - expenses;
+            doc.amount_to_return = crate::shifts::calculate_driver_return(
+                opening,
+                cash_total,
+                expenses,
+                doc.total_tips,
+            );
         }
     }
 
@@ -3760,10 +3924,6 @@ fn z_report_staff_payment_entries(
                 .unwrap_or_else(|| report_name.clone());
             let role = explicit_role.unwrap_or_else(|| report_role.clone());
             let reason = text_from_paths(payment, &["/notes", "/note", "/description", "/reason"])
-                .or_else(|| {
-                    text_from_paths(payment, &["/paymentType", "/payment_type", "/type"])
-                        .map(|value| value.replace(['_', '-'], " "))
-                })
                 .unwrap_or_default();
             let payment_id = text_from_paths(payment, &["/id", "/paymentId", "/payment_id"])
                 .unwrap_or_else(|| {
@@ -3869,6 +4029,8 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         ],
     )
     .unwrap_or(0.0);
+    let drawer_cash_sales =
+        number_from_paths(payload, &["/cashDrawer/cashSales", "/drawerCashSales"]);
     let card_sales = number_from_paths(
         payload,
         &[
@@ -3883,6 +4045,10 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         &["/refunds/total", "/refundsTotal", "/refunds_total"],
     )
     .unwrap_or(0.0);
+    let drawer_refunds_total = number_from_paths(
+        payload,
+        &["/cashDrawer/totalRefunds", "/drawerRefundsTotal"],
+    );
     let voids_total =
         number_from_paths(payload, &["/voids/total", "/voidsTotal", "/voids_total"]).unwrap_or(0.0);
     let discounts_total = number_from_paths(
@@ -3895,6 +4061,10 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         &["/expenses/total", "/expensesTotal", "/expenses_total"],
     )
     .unwrap_or(0.0);
+    let drawer_expenses_total = number_from_paths(
+        payload,
+        &["/cashDrawer/totalExpenses", "/drawerExpensesTotal"],
+    );
     let cash_variance = number_from_paths(
         payload,
         &[
@@ -3995,11 +4165,14 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         gross_sales,
         net_sales,
         cash_sales,
+        drawer_cash_sales,
         card_sales,
         refunds_total,
+        drawer_refunds_total,
         voids_total,
         discounts_total,
         expenses_total,
+        drawer_expenses_total,
         cash_variance,
         tips_total,
         opening_cash,
@@ -4063,6 +4236,10 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
                             .unwrap_or(0.0),
                         staff_payment: s
                             .pointer("/payments/staffPayments")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        tips_received: s
+                            .pointer("/driver/tips")
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
                     })
@@ -4155,6 +4332,28 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
         ],
     )
     .unwrap_or_else(|| staff_payment_lines.iter().map(|entry| entry.amount).sum());
+    // The JSON drawer snapshot is the authoritative physical-till view. Older
+    // scalar columns could include driver wallet opening/closing amounts.
+    let resolved_opening_cash =
+        number_from_paths(&rj, &["/cashDrawer/openingTotal"]).unwrap_or(opening_cash);
+    let resolved_closing_cash = number_from_paths(
+        &rj,
+        &[
+            "/cashDrawer/moneyInDrawer",
+            "/cashDrawer/money_in_drawer",
+            "/cashDrawer/closing",
+        ],
+    )
+    .unwrap_or(closing_cash);
+    let resolved_expected_cash =
+        number_from_paths(&rj, &["/cashDrawer/expected"]).unwrap_or(expected_cash);
+    let resolved_cash_variance = number_from_paths(
+        &rj,
+        &["/cashDrawer/totalVariance", "/cashDrawer/cashVariance"],
+    )
+    .unwrap_or(cash_variance);
+    let resolved_tips_total =
+        number_from_paths(&rj, &["/tips/total", "/tipsTotal"]).unwrap_or(tips_total);
 
     Ok(ZReportDoc {
         report_id,
@@ -4167,16 +4366,19 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
         gross_sales,
         net_sales,
         cash_sales,
+        drawer_cash_sales: number_from_paths(&rj, &["/cashDrawer/cashSales"]),
         card_sales,
         refunds_total,
+        drawer_refunds_total: number_from_paths(&rj, &["/cashDrawer/totalRefunds"]),
         voids_total,
         discounts_total,
         expenses_total,
-        cash_variance,
-        tips_total,
-        opening_cash,
-        closing_cash,
-        expected_cash,
+        drawer_expenses_total: number_from_paths(&rj, &["/cashDrawer/totalExpenses"]),
+        cash_variance: resolved_cash_variance,
+        tips_total: resolved_tips_total,
+        opening_cash: resolved_opening_cash,
+        closing_cash: resolved_closing_cash,
+        expected_cash: resolved_expected_cash,
         cash_drops: rj
             .pointer("/cashDrawer/totalCashDrops")
             .and_then(|v| v.as_f64())
@@ -4262,6 +4464,10 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
                             .unwrap_or(0.0),
                         staff_payment: s
                             .pointer("/payments/staffPayments")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        tips_received: s
+                            .pointer("/driver/tips")
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
                     })
@@ -4571,6 +4777,7 @@ fn dispatch_to_printer(
     entity_type: &str,
     job_profile_id: Option<&str>,
     document: &ReceiptDocument,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(Value, Vec<receipt_renderer::RenderWarning>), String> {
     let role = match entity_type {
         "kitchen_ticket" => "kitchen",
@@ -4715,9 +4922,16 @@ fn dispatch_to_printer(
             let target = printers::resolve_printer_target(&profile)?;
             let bytes = std::mem::take(&mut rendered.bytes);
             let doc = doc_name.to_string();
-            let dispatch_outcome = run_dispatch_with_timeout(DISPATCH_TIMEOUT, move || {
-                printers::print_raw_for_target(&target, &bytes, &doc)
-            });
+            let transport_cancel = Arc::clone(&cancel);
+            let dispatch_outcome =
+                run_dispatch_with_timeout(DISPATCH_TIMEOUT, Arc::clone(&cancel), move || {
+                    printers::print_raw_for_target_cancellable(
+                        &target,
+                        &bytes,
+                        &doc,
+                        &transport_cancel,
+                    )
+                });
             let _dispatch = match dispatch_outcome {
                 Ok(inner) => inner?,
                 Err(timeout_err) => return Err(timeout_err),
@@ -4887,6 +5101,9 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
                     }
                 }
 
+                let active_print = ActivePrintGuard::register(&job_id, profile_id.clone());
+                let dispatch_cancel = active_print.cancel_token();
+
                 let document = match build_document_for_job(
                     db,
                     &entity_type,
@@ -4935,8 +5152,19 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
                     }
                 };
 
+                if !prepare_print_job_dispatch(db, &job_id, profile_id.as_deref())? {
+                    info!(job_id = %job_id, "Print job stopped before hardware dispatch");
+                    return Ok(());
+                }
+
                 // Try to dispatch to hardware printer from structured render path.
-                match dispatch_to_printer(db, &entity_type, profile_id.as_deref(), &document) {
+                match dispatch_to_printer(
+                    db,
+                    &entity_type,
+                    profile_id.as_deref(),
+                    &document,
+                    dispatch_cancel,
+                ) {
                     Ok((resolved_profile, render_warnings)) => {
                         if let Err(e) = mark_print_job_dispatched(db, &job_id, &path) {
                             error!(job_id = %job_id, error = %e, "Failed to mark print job as dispatched");
@@ -5195,6 +5423,15 @@ mod tests {
             conn: Mutex::new(conn),
             db_path: PathBuf::from(":memory:"),
         }
+    }
+
+    fn mark_job_printing_for_test(db: &DbState, job_id: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE print_jobs SET status = 'printing' WHERE id = ?1",
+            params![job_id],
+        )
+        .unwrap();
     }
 
     fn insert_receipt_order(conn: &Connection, order_id: &str, order_number: &str, total: f64) {
@@ -6148,9 +6385,10 @@ mod tests {
                 conn.execute(
                     "INSERT INTO orders (
                         id, order_number, items, total_amount, total_amount_cents, status, order_type,
-                        payment_status, staff_shift_id, sync_status, created_at, updated_at
+                        payment_status, staff_shift_id, delivery_address,
+                        sync_status, created_at, updated_at
                     ) VALUES (?1, ?2, '[]', ?3, ?4, ?5, 'delivery',
-                        'paid', ?6, 'pending', ?7, ?7)",
+                        'paid', ?6, 'Αλεξανδρείας 24', 'pending', ?7, ?7)",
                     params![
                         order_id,
                         order_number,
@@ -6253,7 +6491,11 @@ mod tests {
                 assert!((doc.total_sells - 151.60).abs() < 0.0001);
                 assert_eq!(doc.cancelled_or_refunded_count, 1);
                 assert!((doc.cancelled_or_refunded_total - 9.0).abs() < f64::EPSILON);
-                assert!((doc.amount_to_return - 82.75).abs() < 0.0001);
+                assert!((doc.amount_to_return - 80.25).abs() < 0.0001);
+                assert_eq!(
+                    doc.driver_deliveries[0].delivery_address.as_deref(),
+                    Some("Αλεξανδρείας 24")
+                );
             }
             _ => panic!("expected shift checkout document"),
         }
@@ -6306,6 +6548,69 @@ mod tests {
             }
             _ => panic!("expected z-report document"),
         }
+    }
+
+    #[test]
+    fn test_stored_z_report_prefers_physical_drawer_json_over_legacy_wallet_scalars() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                    check_in_time, check_out_time, opening_cash_amount,
+                    status, calculation_version, sync_status, created_at, updated_at
+                ) VALUES (
+                    'cashier-z-print', 'cashier-1', 'Angeliki', 'cashier',
+                    'branch-1', 'term-1',
+                    '2026-07-24T12:10:39Z', '2026-07-25T12:00:29Z', 137.64,
+                    'closed', 2, 'pending',
+                    '2026-07-24T12:10:39Z', '2026-07-25T12:00:29Z'
+                )",
+                [],
+            )
+            .expect("insert cashier shift");
+
+            let report_json = serde_json::json!({
+                "tips": { "total": 1.50 },
+                "cashDrawer": {
+                    "openingTotal": 137.64,
+                    "cashSales": 170.55,
+                    "totalRefunds": 0.10,
+                    "totalExpenses": 242.00,
+                    "staffPaymentsTotal": 36.00,
+                    "driverCashGiven": 40.00,
+                    "driverCashReturned": 119.55,
+                    "expected": 109.64,
+                    "moneyInDrawer": 131.74,
+                    "totalVariance": 22.10
+                }
+            })
+            .to_string();
+
+            conn.execute(
+                "INSERT INTO z_reports (
+                    id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                    tips_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                    report_json, created_at, updated_at
+                ) VALUES (
+                    'z-print-wallet-bug', 'cashier-z-print', 'branch-1', 'term-1',
+                    '2026-07-24', '2026-07-25T12:04:15Z',
+                    0.0, 22.10, 177.64, 251.29, 229.19,
+                    ?1, '2026-07-25T12:04:15Z', '2026-07-25T12:04:15Z'
+                )",
+                params![report_json],
+            )
+            .expect("insert legacy wallet-summed Z-report");
+        }
+
+        let doc = build_z_report_doc(&db, "z-print-wallet-bug").expect("build stored Z-report");
+        assert_eq!(doc.opening_cash, 137.64);
+        assert_eq!(doc.drawer_cash_sales, Some(170.55));
+        assert_eq!(doc.expected_cash, 109.64);
+        assert_eq!(doc.closing_cash, 131.74);
+        assert_eq!(doc.cash_variance, 22.10);
+        assert_eq!(doc.tips_total, 1.50);
     }
 
     #[test]
@@ -6774,6 +7079,24 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_layout_config_honors_explicit_star_line_without_capability_snapshot() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "printerName": "LAN receipt printer",
+            "printerType": "network",
+            "characterSet": "PC737_GREEK",
+            "connectionJson": "{\"type\":\"network\",\"ip\":\"127.0.0.1:9\",\"emulation\":\"star_line\"}"
+        });
+
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.emulation_mode, ReceiptEmulationMode::StarLine);
+        assert_eq!(layout.escpos_code_page, Some(15));
+    }
+
+    #[test]
     fn test_resolve_layout_config_defaults_unverified_raw_network_to_escpos_text() {
         let db = test_db();
         // Star brand detected from printer name → should use Auto (not Escpos)
@@ -7052,6 +7375,7 @@ mod tests {
         let job_id = result["jobId"].as_str().unwrap();
 
         // First failure — should stay pending (retry_count < max_retries)
+        mark_job_printing_for_test(&db, job_id);
         mark_print_job_failed(&db, job_id, "printer offline").unwrap();
 
         let jobs = list_print_jobs(&db, None).unwrap();
@@ -7061,6 +7385,7 @@ mod tests {
         assert_eq!(arr[0]["lastError"], "printer offline");
 
         // Second failure
+        mark_job_printing_for_test(&db, job_id);
         mark_print_job_failed(&db, job_id, "still offline").unwrap();
         let jobs = list_print_jobs(&db, None).unwrap();
         let arr = jobs.as_array().unwrap();
@@ -7068,11 +7393,111 @@ mod tests {
         assert_eq!(arr[0]["status"], "pending");
 
         // Third failure — should move to failed (max_retries=3)
+        mark_job_printing_for_test(&db, job_id);
         mark_print_job_failed(&db, job_id, "gave up").unwrap();
         let jobs = list_print_jobs(&db, None).unwrap();
         let arr = jobs.as_array().unwrap();
         assert_eq!(arr[0]["retryCount"], 3);
         assert_eq!(arr[0]["status"], "failed");
+    }
+
+    #[test]
+    fn cancelled_job_is_not_resurrected_by_late_retryable_failure() {
+        let db = test_db();
+        let result = enqueue_print_job(&db, "order_receipt", "ord-cancel-race", None).unwrap();
+        let job_id = result["jobId"].as_str().unwrap();
+        mark_job_printing_for_test(&db, job_id);
+
+        assert_eq!(cancel_print_job(&db, job_id).unwrap()["success"], true);
+        mark_print_job_failed(&db, job_id, "network write failed").unwrap();
+
+        let jobs = list_print_jobs(&db, None).unwrap();
+        let job = &jobs.as_array().unwrap()[0];
+        assert_eq!(job["status"], "cancelled");
+        assert_eq!(job["retryCount"], 0);
+    }
+
+    #[test]
+    fn cancelled_job_is_not_overwritten_by_late_non_retryable_failure() {
+        let db = test_db();
+        let result =
+            enqueue_print_job(&db, "order_receipt", "ord-cancel-race-final", None).unwrap();
+        let job_id = result["jobId"].as_str().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE print_jobs SET status = 'printing' WHERE id = ?1",
+                params![job_id],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(cancel_print_job(&db, job_id).unwrap()["success"], true);
+        mark_print_job_failed_non_retryable(&db, job_id, "raw print state is unknown").unwrap();
+
+        let jobs = list_print_jobs(&db, None).unwrap();
+        let job = &jobs.as_array().unwrap()[0];
+        assert_eq!(job["status"], "cancelled");
+        assert_eq!(job["retryCount"], 0);
+    }
+
+    #[test]
+    fn pause_after_job_selection_prevents_hardware_dispatch() {
+        let db = test_db();
+        let result = enqueue_print_job(
+            &db,
+            "order_receipt",
+            "ord-pause-before-send",
+            Some("receipt-printer"),
+        )
+        .unwrap();
+        let job_id = result["jobId"].as_str().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE print_jobs SET status = 'printing' WHERE id = ?1",
+                params![job_id],
+            )
+            .unwrap();
+        }
+
+        set_print_queue_paused(&db, None, true).unwrap();
+        assert!(!prepare_print_job_dispatch(&db, job_id, Some("receipt-printer")).unwrap());
+
+        let jobs = list_print_jobs(&db, None).unwrap();
+        assert_eq!(jobs.as_array().unwrap()[0]["status"], "pending");
+    }
+
+    #[test]
+    fn pausing_queue_requests_stop_for_active_hardware_dispatch() {
+        let db = test_db();
+        let active =
+            ActivePrintGuard::register("active-pause-job", Some("receipt-printer".to_string()));
+
+        let result = set_print_queue_paused(&db, None, true).unwrap();
+
+        assert_eq!(result["activeStopsRequested"], 1);
+        assert!(active.cancel_requested());
+    }
+
+    #[test]
+    fn cancelling_job_requests_stop_for_its_active_hardware_dispatch() {
+        let db = test_db();
+        let result = enqueue_print_job(&db, "order_receipt", "ord-active-cancel", None).unwrap();
+        let job_id = result["jobId"].as_str().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE print_jobs SET status = 'printing' WHERE id = ?1",
+                params![job_id],
+            )
+            .unwrap();
+        }
+        let active = ActivePrintGuard::register(job_id, None);
+
+        assert_eq!(cancel_print_job(&db, job_id).unwrap()["success"], true);
+
+        assert!(active.cancel_requested());
     }
 
     #[test]
@@ -7187,6 +7612,29 @@ mod tests {
     }
 
     #[test]
+    fn test_z_report_staff_payment_type_is_not_printed_as_a_note() {
+        let entries = z_report_staff_payment_entries(&serde_json::json!({
+            "staffReports": [{
+                "staffName": "Gjergji Haxhi",
+                "role": "driver",
+                "payments": {
+                    "list": [{
+                        "id": "staff-payment-1",
+                        "amount": 36.0,
+                        "paymentType": "driver_wage"
+                    }]
+                }
+            }]
+        }));
+
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].reason.is_empty(),
+            "payment type must not become an automatic staff-payment note"
+        );
+    }
+
+    #[test]
     fn test_z_report_staff_payment_entries_support_legacy_aggregate_reports() {
         let entries = z_report_staff_payment_entries(&serde_json::json!({
             "staffReports": [
@@ -7219,6 +7667,7 @@ mod tests {
 
         // Fail it 3 times to exhaust retries
         for _ in 0..3 {
+            mark_job_printing_for_test(&db, &job_id);
             mark_print_job_failed(&db, &job_id, "error").unwrap();
         }
 
@@ -7487,7 +7936,11 @@ mod tests {
     #[test]
     fn test_run_dispatch_with_timeout_passes_through_fast_result() {
         // A dispatch that completes within the timeout returns its value verbatim.
-        let out = run_dispatch_with_timeout(std::time::Duration::from_millis(500), || 42);
+        let out = run_dispatch_with_timeout(
+            std::time::Duration::from_millis(500),
+            Arc::new(AtomicBool::new(false)),
+            || 42,
+        );
         assert_eq!(out, Ok(42));
     }
 
@@ -7495,10 +7948,14 @@ mod tests {
     fn test_run_dispatch_with_timeout_fails_closed_on_hang() {
         // A dispatch slower than the timeout is abandoned and reported as an error,
         // so a hung printer can never hold PRINT_PROCESSOR_LOCK and freeze the queue.
-        let out = run_dispatch_with_timeout(std::time::Duration::from_millis(50), || {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            99
-        });
+        let out = run_dispatch_with_timeout(
+            std::time::Duration::from_millis(50),
+            Arc::new(AtomicBool::new(false)),
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                99
+            },
+        );
         let err = out.expect_err("a dispatch slower than the timeout must fail");
         assert!(
             err.contains("did not respond within the dispatch timeout"),
@@ -7510,6 +7967,22 @@ mod tests {
             is_non_retryable_print_error(&err),
             "dispatch timeout must be classified non-retryable"
         );
+    }
+
+    #[test]
+    fn dispatch_timeout_requests_cooperative_transport_stop() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let out = run_dispatch_with_timeout(
+            std::time::Duration::from_millis(20),
+            Arc::clone(&cancel),
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                99
+            },
+        );
+
+        assert!(out.is_err());
+        assert!(cancel.load(Ordering::Acquire));
     }
 
     #[test]

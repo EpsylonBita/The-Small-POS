@@ -2,11 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import * as paymentModal from '../../src/renderer/components/modals/PaymentModal';
 
 const source = readFileSync(
   path.join(process.cwd(), 'src', 'renderer', 'components', 'modals', 'PaymentModal.tsx'),
   'utf8',
 );
+
+test('card and split options keep distinct visible accents in light and dark themes', () => {
+  const getPaymentOptionVisualClasses = (
+    paymentModal as typeof paymentModal & {
+      getPaymentOptionVisualClasses?: (
+        method: 'card' | 'split',
+        disabled: boolean,
+      ) => { option: string; icon: string; label: string };
+    }
+  ).getPaymentOptionVisualClasses;
+
+  assert.equal(
+    typeof getPaymentOptionVisualClasses,
+    'function',
+    'payment options should expose their visual-state contract',
+  );
+
+  const card = getPaymentOptionVisualClasses!('card', false);
+  assert.match(card.option, /\bpayment-option-card\b/);
+  assert.match(card.icon, /\bpayment-option-card-icon\b/);
+  assert.doesNotMatch(card.label, /\btext-blue-/);
+
+  const split = getPaymentOptionVisualClasses!('split', false);
+  assert.match(split.option, /\bpayment-option-split\b/);
+  assert.match(split.icon, /\bpayment-option-split-icon\b/);
+  assert.doesNotMatch(split.label, /\btext-purple-/);
+});
 
 test('payment method labels fit without clipping or per-letter Greek breaks', () => {
   // Long single-token labels such as the Greek split label need fixed compact text.

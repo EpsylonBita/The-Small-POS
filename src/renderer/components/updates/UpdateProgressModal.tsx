@@ -32,7 +32,7 @@ export const UpdateProgressModal: React.FC<UpdateProgressModalProps> = ({
         >
             <div className="space-y-6 text-center py-4">
                 {/* Progress Circle or Bar */}
-                <div className="relative w-full h-4 bg-gray-700 rounded-full overflow-hidden">
+                <div className="relative w-full h-4 bg-slate-200 dark:bg-gray-700 rounded-full overflow-hidden">
                     <div
                         className="absolute top-0 left-0 h-full bg-amber-400 transition-all duration-300 ease-out"
                         style={{ width: `${percent}%` }}
@@ -40,17 +40,17 @@ export const UpdateProgressModal: React.FC<UpdateProgressModalProps> = ({
                 </div>
 
                 <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div className="bg-white/5 p-3 rounded-2xl">
-                        <span className="block text-gray-400">{t('updates.downloading.progress')}</span>
-                        <span className="block text-xl font-bold text-white">{percent.toFixed(0)}%</span>
+                    <div className="liquid-glass-modal-inset p-3 rounded-2xl">
+                        <span className="liquid-glass-modal-text-muted block">{t('updates.downloading.progress')}</span>
+                        <span className="liquid-glass-modal-text block text-xl font-bold">{percent.toFixed(0)}%</span>
                     </div>
-                    <div className="bg-white/5 p-3 rounded-2xl">
-                        <span className="block text-gray-400">{t('updates.downloading.speed')}</span>
-                        <span className="block text-xl font-bold text-white">{speed.toFixed(1)} MB/s</span>
+                    <div className="liquid-glass-modal-inset p-3 rounded-2xl">
+                        <span className="liquid-glass-modal-text-muted block">{t('updates.downloading.speed')}</span>
+                        <span className="liquid-glass-modal-text block text-xl font-bold">{speed.toFixed(1)} MB/s</span>
                     </div>
-                    <div className="bg-white/5 p-3 rounded-2xl">
-                        <span className="block text-gray-400">{t('updates.downloading.downloaded')}</span>
-                        <span className="block text-xl font-bold text-white">{transferred.toFixed(1)} / {total.toFixed(1)} MB</span>
+                    <div className="liquid-glass-modal-inset p-3 rounded-2xl">
+                        <span className="liquid-glass-modal-text-muted block">{t('updates.downloading.downloaded')}</span>
+                        <span className="liquid-glass-modal-text block text-xl font-bold">{transferred.toFixed(1)} / {total.toFixed(1)} MB</span>
                     </div>
                 </div>
 

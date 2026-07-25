@@ -11,6 +11,20 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 export type Theme = 'light' | 'dark' | 'auto'
 export type ResolvedTheme = 'light' | 'dark'
 
+export const applyThemeToDocument = (
+  targetDocument: Document,
+  resolvedTheme: ResolvedTheme,
+  theme: Theme,
+): void => {
+  const isDark = resolvedTheme === 'dark'
+  const themeRoots = [targetDocument.documentElement, targetDocument.body]
+
+  themeRoots.forEach((element) => {
+    element.classList.toggle('dark', isDark)
+    element.setAttribute('data-theme', theme)
+  })
+}
+
 interface ThemeContextType {
   theme: Theme
   resolvedTheme: ResolvedTheme
@@ -102,15 +116,9 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
   // Apply resolved theme to document root for CSS (.dark selectors)
   useEffect(() => {
     if (typeof document !== 'undefined') {
-      const root = document.documentElement;
-      if (resolvedTheme === 'dark') {
-        root.classList.add('dark');
-      } else {
-        root.classList.remove('dark');
-      }
-      root.setAttribute('data-theme', theme);
+      applyThemeToDocument(document, resolvedTheme, theme)
     }
-  }, [resolvedTheme, theme]);
+  }, [resolvedTheme, theme])
 
   const value = {
     theme,

@@ -239,11 +239,11 @@ html.dark, html.dark body, html.dark #root {
 
   /* Liquid glass modal input — in @layer components so Tailwind utilities
      (pl-10, pr-10, etc.) can override the default padding for icon inputs */
-  .liquid-glass-modal-input {
-    background: rgba(255, 255, 255, 0.03);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    .liquid-glass-modal-input {
+      background: var(--modal-control-bg);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid var(--modal-border);
     border-radius: var(--pos-glass-radius-small);
     padding: 0.75rem 1rem;
     color: var(--modal-c-content);
@@ -253,9 +253,9 @@ html.dark, html.dark body, html.dark #root {
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
   }
 
-  .liquid-glass-modal-input:focus {
-    outline: none;
-    background: rgba(255, 255, 255, 0.08);
+    .liquid-glass-modal-input:focus {
+      outline: none;
+      background: var(--modal-control-bg-active);
     border-color: var(--modal-c-action);
     box-shadow:
       0 0 0 2px color-mix(in srgb, var(--modal-c-action) 30%, transparent),
@@ -263,12 +263,12 @@ html.dark, html.dark body, html.dark #root {
   }
 
   .dark .liquid-glass-modal-input {
-    background: rgba(0, 0, 0, 0.2);
-    border-color: rgba(255, 255, 255, 0.1);
+    background: var(--modal-control-bg);
+    border-color: var(--modal-border);
   }
 
   .dark .liquid-glass-modal-input:focus {
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--modal-control-bg-active);
   }
 
   .customer-search-yellow-input:focus {

@@ -96,6 +96,35 @@ const roundMoney = (value: number): number =>
 const hasMoneyAmount = (amounts: number[], candidate: number): boolean =>
   amounts.some(amount => Math.abs(amount - candidate) < 0.01);
 
+type AccentedPaymentOption = 'card' | 'split';
+
+export const getPaymentOptionVisualClasses = (
+  method: AccentedPaymentOption,
+  disabled: boolean,
+): { option: string; icon: string; label: string } => {
+  if (disabled) {
+    return {
+      option: 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed',
+      icon: 'text-gray-400',
+      label: 'text-gray-400',
+    };
+  }
+
+  if (method === 'card') {
+    return {
+      option: 'payment-option-card active:scale-[0.98]',
+      icon: 'payment-option-card-icon',
+      label: 'liquid-glass-modal-text',
+    };
+  }
+
+  return {
+    option: 'payment-option-split active:scale-[0.98]',
+    icon: 'payment-option-split-icon',
+    label: 'liquid-glass-modal-text',
+  };
+};
+
 export const PaymentModal: React.FC<PaymentModalProps> = ({
   isOpen,
   onClose,
@@ -140,6 +169,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const paymentOptionPaddingClass = paymentOptionCount === 3 ? 'p-4' : 'p-6';
   const paymentMethodLabelBaseClass =
     'w-full text-center text-sm font-bold uppercase leading-tight tracking-normal hyphens-none whitespace-normal transition-colors duration-300';
+  const cardVisualClasses = getPaymentOptionVisualClasses(
+    'card',
+    !canUseCard || isProcessingPayment,
+  );
+  const splitVisualClasses = getPaymentOptionVisualClasses(
+    'split',
+    isProcessingPayment,
+  );
 
   // Check if order is below minimum (only if a minimum is set)
   const isBelowMinimum = minimumOrderAmount > 0 && orderTotal < minimumOrderAmount;
@@ -601,19 +638,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   onClick={() => canUseCard && handlePaymentMethodSelect('card')}
                   disabled={!canUseCard || isProcessingPayment}
                   className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
-                    ${!canUseCard || isProcessingPayment
-                      ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                      : 'border-slate-400/30 bg-gradient-to-br from-slate-500/10 to-slate-600/5 active:scale-[0.98]'
-                    }`}
+                    ${cardVisualClasses.option}`}
                 >
                   <CreditCard
                     className={`w-20 h-20 mb-3 transition-all duration-300
-                      ${!canUseCard || isProcessingPayment ? 'text-gray-400' : 'text-slate-200'}`}
+                      ${cardVisualClasses.icon}`}
                     strokeWidth={1.5}
                   />
 
                   <span className={`${paymentMethodLabelBaseClass}
-                    ${!canUseCard || isProcessingPayment ? 'text-gray-400' : 'text-slate-200'}`}
+                    ${cardVisualClasses.label}`}
                   >
                     {t('modals.payment.cardSimple', 'CARD')}
                   </span>
@@ -660,19 +694,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     onClick={() => { onSplitPayment(tipSelection); }}
                     disabled={isProcessingPayment}
                     className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
-                      ${isProcessingPayment
-                        ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-slate-400/30 bg-gradient-to-br from-slate-500/10 to-slate-600/5 active:scale-[0.98]'
-                      }`}
+                      ${splitVisualClasses.option}`}
                   >
                     <Split
                       className={`w-20 h-20 mb-3 transition-all duration-300
-                        ${isProcessingPayment ? 'text-gray-400' : 'text-slate-200'}`}
+                        ${splitVisualClasses.icon}`}
                       strokeWidth={1.5}
                     />
 
                     <span className={`${paymentMethodLabelBaseClass}
-                      ${isProcessingPayment ? 'text-gray-400' : 'text-slate-200'}`}
+                      ${splitVisualClasses.label}`}
                     >
                       {t('modals.payment.splitSimple', 'SPLIT')}
                     </span>

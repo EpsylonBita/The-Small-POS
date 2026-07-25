@@ -116,14 +116,61 @@
   must not automatically resend an incomplete byte stream, which can duplicate
   receipts or leave thermal printers continuously interpreting corrupted data.
 
-## Z-Report Printed Reconciliation Order (2026-07-23)
+## Queue Emergency Stop and RAW Transport Fail-Closed Rule (2026-07-25)
+
+- Pause is rechecked immediately before hardware I/O and requests cooperative
+  cancellation of an active Windows spool, RAW TCP, or serial transfer. Resume
+  never starts work while the global or matching profile pause remains active.
+- Cancel changes `pending` or `printing` jobs to the terminal `cancelled` state
+  and signals the matching active transfer. A late worker error cannot change a
+  cancelled job back to `pending` or `failed`.
+- The dispatch watchdog signals the transport to stop before it fails the job
+  closed. Bytes already accepted by a printer cannot be recalled, so an
+  interrupted active job always requires operator review and manual retry.
+- Any write or flush failure after a RAW TCP or serial connection is opened is
+  physically ambiguous and non-retryable. The worker does not automatically
+  send the complete receipt again after a partial Star raster stream.
+- `MCP3` queue aliases are recognized as Star mC-Print3 printers. An explicit
+  saved `star_line` emulation choice remains authoritative even before printer
+  capability verification, preventing an ESC/POS payload from being sent to a
+  Star Line profile.
+- Settings > Print Queue checks every mutation response before showing success.
+  The emergency sequence is **Pause queue**, then **Cancel pending**.
+
+## Financial Closeout Receipt Rules (2026-07-25)
 
 - Printed Z reports preserve `expenses.items` from the report payload and list
-  every expense reason and amount before the staff and drawer sections.
-- The drawer is the penultimate section: opening cash, cash sales and returns,
-  outflows, expected cash, variance, then bold `Money In Drawer`.
+  every expense reason and amount after the staff section and before the drawer.
+- Staff payments are a centered subsection inside expense analysis. Each
+  payment is listed once, followed by one combined `Total Expenses` equal to
+  ordinary expenses plus staff payments. The former aggregate `Staff Payouts`
+  row is not repeated at the end of the staff section.
+- Staff-payment notes print only when an operator explicitly records a note.
+  The payment type (`wage`, `salary_advance`, and similar values) must never be
+  converted into a synthetic receipt note.
+- Driver checkout delivery rows use one compact, shared layout in text, HTML,
+  and raster output: three-digit day order number, delivery address, amount,
+  and the same Lucide `Banknote` / `CreditCard` payment symbol used by the POS
+  order grid. Plain-text printer mode keeps localized `[Cash]` / `[Card]`
+  fallbacks. Raw order IDs are not printed.
+- Driver checkout and Z-report staff sections show driver tips. When the
+  auxiliary driver-earnings tip is absent or zero, the order tip is used as a
+  fallback; cancelled/refunded tips are excluded.
+- Driver return uses `Opening + Driver Cash - Driver Expenses - Driver Tips`.
+  The driver keeps the tips, so they are shown as a subtraction and are not
+  included in cash returned to the cashier. The emphasized receipt label is
+  simply `Return` / `Επιστροφή`.
+- The Z-report drawer is the penultimate section and uses one visible equation:
+  `Opening + Till Cash Sales + Net Driver Cash - All Cash Out = Expected`.
+  `Net Driver Cash` is returned minus given. `All Cash Out` includes cash
+  refunds, ordinary expenses, cash drops, and staff/driver wage payouts.
+- Driver starting wallets are not added to the physical till opening, expected,
+  or counted balance. Sequential handoffs on one terminal use the first
+  opening and latest count rather than summing intermediate drawer states.
+- Expected, counted, and variance rows follow the equation. The final daily
+  sales totals remain separate so delivery cash is not counted twice.
 - Final daily totals follow the drawer. Text, HTML, and raster-exact render
-  paths use the same section order.
+  paths use the same `Staff -> Expenses -> Drawer -> Totals` section order.
 
 ## Classic Customer Receipt v2.1 Lock (2026-03-04)
 - Correction pass for screenshot-2 parity on classic customer receipts only.

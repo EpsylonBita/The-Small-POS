@@ -153,7 +153,7 @@ test('ZReportModal renders the closeout workbench with localized labels', () => 
     glassCss.indexOf('.liquid-glass-modal-shell.z-report-glass-shell'),
     glassCss.indexOf('/* Ultra crisp text class', glassCss.indexOf('.liquid-glass-modal-shell.z-report-glass-shell')),
   );
-  assert.match(zReportGlassCss, /rgba\(8, 8, 8, 0\.88\)/);
+  assert.match(zReportGlassCss, /rgba\(8, 8, 8, 0\.72\)/);
   assert.match(zReportGlassCss, /rgba\(250, 204, 21, 0\.26\)/);
   assert.doesNotMatch(zReportGlassCss, /rgba\(2, 6, 23/);
   assert.doesNotMatch(zReportGlassCss, /#f8fafc/);

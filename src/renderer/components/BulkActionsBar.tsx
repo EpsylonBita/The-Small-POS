@@ -19,7 +19,7 @@ interface BulkActionsBarProps {
 interface ActionConfig {
   id: string;
   label: string;
-  variant: 'primary' | 'secondary' | 'warning' | 'danger' | 'success' | 'info' | 'map' | 'neutral';
+  variant: 'primary' | 'secondary' | 'warning' | 'danger' | 'success' | 'reset' | 'info' | 'map' | 'neutral';
   disabled?: boolean;
 }
 
@@ -50,8 +50,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
         ];
       case 'delivered':
         return [
-          { id: 'return', label: t('bulkActions.return'), variant: 'secondary' },
-          { id: 'assign', label: t('bulkActions.reassign'), variant: 'primary' },
+          { id: 'reset', label: t('bulkActions.reset'), variant: 'reset' },
           { id: 'cancel', label: t('bulkActions.cancelOrders'), variant: 'danger' },
         ];
       case 'canceled':
@@ -111,6 +110,12 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
             ? 'bg-red-500 text-white border-red-600 shadow-lg shadow-red-500/25 active:bg-red-600 focus-visible:ring-red-400'
             : 'bg-red-500/90 text-white border-red-300/30 shadow-lg shadow-red-950/30 active:bg-red-400 focus-visible:ring-red-300'
         }`;
+      case 'reset':
+        return `${baseStyles} ${
+          resolvedTheme === 'light'
+            ? 'bg-sky-500 text-white border-sky-600 shadow-lg shadow-sky-500/25 active:bg-sky-600 focus-visible:ring-sky-400'
+            : 'bg-sky-400/90 text-sky-950 border-sky-200/50 shadow-lg shadow-sky-950/30 active:bg-sky-300 focus-visible:ring-sky-200'
+        }`;
       case 'primary':
       case 'secondary':
       case 'info':
@@ -160,12 +165,20 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
 
         {/* Right section - Actions based on selection type */}
         <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+          {activeTab === 'delivered' && (
+            <>
+              <button className={`${getButtonStyles('reset')} bulk-action-reset uppercase`} onClick={(e) => { e.preventDefault(); onBulkAction('reset'); }}><RotateCcw className="w-4 h-4" />{t('bulkActions.reset')}</button>
+              <button className={getButtonStyles('warning')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}><Pencil className="w-4 h-4" />{t('bulkActions.edit')}</button>
+              <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}><X className="w-4 h-4" />{t('bulkActions.cancel')}</button>
+            </>
+          )}
+
           {/* Conditional actions by selectionType */}
           {activeTab === 'canceled' && (
             <button className={getButtonStyles('success')} onClick={(e) => { e.preventDefault(); onBulkAction('restore'); }}><RotateCcw className="w-4 h-4" />{t('bulkActions.restore')}</button>
           )}
 
-          {activeTab !== 'canceled' && selectionType === 'delivery' && (
+          {activeTab === 'orders' && selectionType === 'delivery' && (
             <>
               <button className={getButtonStyles('primary')} onClick={(e) => { e.preventDefault(); onBulkAction('assign'); }}><User className="w-4 h-4" />{t('bulkActions.driver')}</button>
               {/* The "Set as Pickup" (Παραλαβή) shortcut used to live here.
@@ -185,7 +198,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
             </>
           )}
 
-          {activeTab !== 'canceled' && selectionType === 'pickup' && (
+          {activeTab === 'orders' && selectionType === 'pickup' && (
             <>
               <button className={`${getButtonStyles('success')}`} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}><CheckCircle className="w-4 h-4" />{t('bulkActions.delivered')}</button>
               <button className={getButtonStyles('warning')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}><Pencil className="w-4 h-4" />{t('bulkActions.edit')}</button>

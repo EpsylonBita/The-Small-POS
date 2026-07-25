@@ -1903,7 +1903,7 @@ test('Round 346: OrderFlow order-type chooser matches the OrderDashboard respons
   assert.match(source, /const orderTypeGridColsClass =/);
   assert.match(source, /'grid-cols-1 sm:grid-cols-3'/);
 
-  // Modal uses the computed width class plus the transparent-shell trial class; grid uses gap-4
+  // Modal uses the computed width class plus the transparent-shell class; grid uses gap-4
   // sm:gap-5 + the computed cols class.
   assert.match(source, /className=\{`\$\{orderTypeModalWidthClass\} order-type-transparent-modal`\}/);
   assert.match(source, /contentClassName="!p-0 !overflow-visible"/);
@@ -1942,7 +1942,7 @@ test('Round 346: OrderFlow order-type chooser matches the OrderDashboard respons
   assert.match(source, /className=\{!isShiftActive \? 'bg-gray-400 cursor-not-allowed opacity-50' : ''\}/);
 });
 
-test('Round 362: New Order chooser can render as transparent shell with only floating cards visible', () => {
+test('New Order chooser keeps its wrapper invisible and uses light-theme card surfaces', () => {
   const dashboard = orderDashboardSource();
   const flow = orderFlowSource();
   const css = glassmorphismSource();
@@ -1952,17 +1952,17 @@ test('Round 362: New Order chooser can render as transparent shell with only flo
     ['OrderFlow', flow],
   ] as const) {
     const modalIdx = source.indexOf('order-type-transparent-modal');
-    assert.notEqual(modalIdx, -1, `${name} order-type modal must use the transparent trial class`);
+    assert.notEqual(modalIdx, -1, `${name} order-type modal must use the transparent wrapper class`);
     const modalRegion = source.slice(Math.max(0, modalIdx - 260), source.indexOf('>', modalIdx) + 1);
     assert.match(
       modalRegion,
       /className=\{`\$\{orderTypeModalWidthClass\} order-type-transparent-modal`\}/,
-      `${name} must preserve computed width while adding transparent shell styling`,
+      `${name} must preserve its computed width while keeping the wrapper transparent`,
     );
     assert.match(
       source.slice(modalIdx, modalIdx + 220),
       /contentClassName="!p-0 !overflow-visible"/,
-      `${name} must remove the inherited modal content padding for floating cards`,
+      `${name} must remove inherited shell spacing around the floating cards`,
     );
     for (const cardType of ['delivery', 'pickup', 'table']) {
       assert.match(source, new RegExp(`data-order-type-card="${cardType}"`), `${name} must expose ${cardType} card styling hook`);
@@ -1972,51 +1972,29 @@ test('Round 362: New Order chooser can render as transparent shell with only flo
     assert.match(dashboard, new RegExp(`data-order-type-card="${cardType}"`), `OrderDashboard must expose ${cardType} card styling hook`);
   }
 
-  const start = css.indexOf('Trial: New Order chooser as a transparent command palette.');
-  assert.notEqual(start, -1, 'transparent chooser CSS block must exist');
+  const start = css.indexOf('New Order chooser: invisible wrapper with themed order cards.');
+  assert.notEqual(start, -1, 'transparent-wrapper order chooser CSS block must exist');
   const block = css.slice(start, css.indexOf('@keyframes modalEnter', start));
 
-  assert.match(block, /\.liquid-glass-modal-viewport:has\(\.order-type-transparent-modal\) \.liquid-glass-modal-backdrop/);
-  assert.match(block, /background: rgba\(0, 0, 0, 0\.2\) !important;/);
-  assert.match(block, /backdrop-filter: blur\(22px\) saturate\(0\.96\) brightness\(0\.82\) !important;/);
-  assert.match(block, /-webkit-backdrop-filter: blur\(22px\) saturate\(0\.96\) brightness\(0\.82\) !important;/);
-  assert.match(block, /\.dark \.liquid-glass-modal-viewport:has\(\.order-type-transparent-modal\) \.liquid-glass-modal-backdrop/);
-  assert.match(block, /\.dark \.liquid-glass-modal-viewport:has\(\.order-type-transparent-modal\) \.liquid-glass-modal-backdrop \{[\s\S]*?background: rgba\(0, 0, 0, 0\.08\) !important;[\s\S]*?backdrop-filter: blur\(18px\) saturate\(1\.08\) !important;/);
-  assert.match(block, /\.order-type-transparent-modal\.liquid-glass-modal-shell/);
-  assert.match(block, /\.order-type-transparent-modal\.liquid-glass-modal-shell,[\s\S]*?background: transparent !important;/);
-  assert.match(block, /\.order-type-transparent-modal\.liquid-glass-modal-shell,[\s\S]*?backdrop-filter: none !important;/);
-  assert.match(block, /border: 0 !important;/);
-  assert.match(block, /box-shadow: none !important;/);
+  assert.doesNotMatch(block, /liquid-glass-modal-backdrop/);
+  assert.match(block, /\.order-type-transparent-modal\.liquid-glass-modal-shell[\s\S]*?background: transparent !important;/);
+  assert.match(block, /\.order-type-transparent-modal\.liquid-glass-modal-shell[\s\S]*?border: 0 !important;/);
   assert.match(block, /\.order-type-transparent-modal \.liquid-glass-modal-title \{\s*display: none;/);
   assert.match(block, /\.order-type-transparent-modal \.liquid-glass-modal-close \{\s*display: none !important;/);
-  assert.match(block, /\.order-type-transparent-modal \.liquid-glass-modal-content/);
-  assert.match(block, /\[data-order-type-card="delivery"\][\s\S]*?rgba\(74, 57, 0, 0\.76\)/);
-  assert.match(block, /\[data-order-type-card="pickup"\][\s\S]*?rgba\(3, 70, 45, 0\.76\)/);
-  assert.match(block, /\[data-order-type-card="table"\][\s\S]*?rgba\(20, 58, 103, 0\.76\)/);
-  assert.match(block, /\[data-order-type-card\] svg,[\s\S]*?\[data-order-type-card\] \[aria-hidden="true"\] \{[\s\S]*?color: rgba\(24, 24, 27, 0\.9\) !important;/);
-  assert.match(block, /\[data-order-type-card\] p \{[\s\S]*?color: rgba\(24, 24, 27, 0\.72\) !important;/);
+  assert.match(block, /\.order-type-transparent-modal \[data-order-type-card\]/);
+  assert.match(block, /\[data-order-type-card\] \{[\s\S]*?backdrop-filter: blur\(22px\) saturate\(150%\)/);
+  assert.match(block, /\[data-order-type-card="delivery"\][\s\S]*?rgba\(254, 249, 195, 0\.68\)/);
+  assert.match(block, /\[data-order-type-card="pickup"\][\s\S]*?rgba\(209, 250, 229, 0\.68\)/);
+  assert.match(block, /\[data-order-type-card="table"\][\s\S]*?rgba\(219, 234, 254, 0\.68\)/);
+  assert.match(block, /\[data-order-type-card="room"\][\s\S]*?rgba\(243, 232, 255, 0\.68\)/);
+  assert.match(block, /\[data-order-type-card="service"\][\s\S]*?rgba\(207, 250, 254, 0\.68\)/);
+  assert.match(block, /\[data-order-type-card\] p \{[\s\S]*?color: #475569 !important;/);
   assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card="delivery"\][\s\S]*?rgba\(250, 204, 21, 0\.16\)/);
   assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card="pickup"\][\s\S]*?rgba\(52, 211, 153, 0\.16\)/);
   assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card="table"\][\s\S]*?rgba\(96, 165, 250, 0\.16\)/);
   assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card\] svg,[\s\S]*?color: #fff !important;/);
   assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card\] p \{[\s\S]*?color: rgba\(255, 255, 255, 0\.6\) !important;/);
   assert.doesNotMatch(block, /hover:/);
-
-  const fallbackStart = css.indexOf('Late fallback: transparent New Order chooser must stay readable');
-  assert.notEqual(fallbackStart, -1, 'transparent chooser needs a late non-data-attribute fallback for already-running windows');
-  const fallbackBlock = css.slice(fallbackStart);
-  assert.match(
-    fallbackBlock,
-    /html:not\(\.dark\) \.order-type-transparent-modal \.liquid-glass-modal-content button\[type="button"\] svg,[\s\S]*?span\[aria-hidden="true"\] \{[\s\S]*?color: rgba\(24, 24, 27, 0\.92\) !important;/,
-  );
-  assert.match(
-    fallbackBlock,
-    /html:not\(\.dark\) \.order-type-transparent-modal \.liquid-glass-modal-content button\[type="button"\] p \{[\s\S]*?color: rgba\(24, 24, 27, 0\.78\) !important;/,
-  );
-  assert.match(
-    fallbackBlock,
-    /\.dark \.order-type-transparent-modal \.liquid-glass-modal-content button\[type="button"\] svg,[\s\S]*?span\[aria-hidden="true"\] \{[\s\S]*?color: #fff !important;/,
-  );
 });
 
 // Round 345/360 (live QA optical polish): the dine-in/table card must use the founder-supplied
@@ -2811,8 +2789,8 @@ const bulkActionsBarSource = () =>
 test('Round 246: bulk-action bar has no off-theme blue/slate, no hover/title, and 44px touch targets', () => {
   const source = bulkActionsBarSource();
 
-  // No off-theme blue/slate colour CLASSES anywhere (comments may still mention the words).
-  assert.doesNotMatch(source, /(?:bg|text|border|ring|shadow|from|to|via)-(?:slate|blue|indigo|sky|cyan|violet|purple)-\d/);
+  // No legacy blue/slate families. Sky is reserved exclusively for RESET.
+  assert.doesNotMatch(source, /(?:bg|text|border|ring|shadow|from|to|via)-(?:slate|blue|indigo|cyan|violet|purple)-\d/);
 
   // Touch POS: press feedback only, no hover-only utilities, no native title tooltips.
   assert.doesNotMatch(source, /hover:/);
@@ -2938,4 +2916,54 @@ test('Round 348: order-type table card uses TableOrderIcon + blue title (OrderDa
     assert.match(card, /text-\[#60a5fa\]/, `${name} table card title must stay blue`);
     assert.doesNotMatch(card, /Cake|Utensils|Fork|\bStore\b|\bPackage\b/, `${name} table card must not use a food/store glyph`);
   }
+});
+
+test('Delivered selections expose RESET instead of the active-order Delivered action', () => {
+  const source = bulkActionsBarSource();
+  const deliveredBranchStart = source.lastIndexOf("activeTab === 'delivered'");
+
+  assert.notEqual(deliveredBranchStart, -1, 'Delivered tab needs its own action branch');
+  const deliveredBranch = source.slice(
+    deliveredBranchStart,
+    source.indexOf("activeTab === 'canceled'", deliveredBranchStart),
+  );
+
+  assert.match(deliveredBranch, /onBulkAction\('reset'\)/);
+  assert.match(deliveredBranch, /t\('bulkActions\.reset'\)/);
+  assert.match(deliveredBranch, /getButtonStyles\('reset'\)/);
+  assert.match(deliveredBranch, /bulk-action-reset/);
+  assert.doesNotMatch(deliveredBranch, /onBulkAction\('delivered'\)/);
+  assert.match(source, /case 'reset':[\s\S]*?bg-sky-500[\s\S]*?border-sky-600[\s\S]*?bg-sky-400\/90/);
+
+  const css = glassmorphismSource();
+  assert.match(css, /\.bulk-action-reset\s*\{[\s\S]*?background:\s*#0ea5e9\s*!important;/);
+  assert.match(css, /\.bulk-action-reset\s*\{[\s\S]*?border-color:\s*#0284c7\s*!important;/);
+  assert.match(css, /\.dark \.bulk-action-reset\s*\{[\s\S]*?background:\s*#38bdf8\s*!important;/);
+});
+
+test('RESET uses the dedicated local-first order reset command', () => {
+  const dashboard = orderDashboardSource();
+  const branchStart = dashboard.indexOf('action === "reset"');
+
+  assert.notEqual(branchStart, -1, 'OrderDashboard must handle the reset bulk action');
+  const branch = dashboard.slice(branchStart, dashboard.indexOf('} else if (action ===', branchStart + 1));
+
+  assert.match(branch, /bridge\.orders\.resetToActive\(order\.id\)/);
+  assert.match(branch, /clearBulkSelection\(\)/);
+  assert.match(branch, /await loadOrders\(\)/);
+});
+
+test('a fresh New Order remounts MenuModal and clears the previous customer draft', () => {
+  const dashboard = orderDashboardSource();
+  const handlerStart = dashboard.indexOf('const handleNewOrderClick = () => {');
+  const handlerEnd = dashboard.indexOf('};', handlerStart);
+
+  assert.notEqual(handlerStart, -1, 'new-order handler must exist');
+  const handler = dashboard.slice(handlerStart, handlerEnd);
+
+  assert.match(handler, /setMenuSessionKey\(\(session\) => session \+ 1\)/);
+  assert.match(handler, /setExistingCustomer\(null\)/);
+  assert.match(handler, /setCustomerInfo\(null\)/);
+  assert.match(handler, /setPhoneNumber\(""\)/);
+  assert.match(dashboard, /<MenuModal\s+key=\{menuSessionKey\}/);
 });

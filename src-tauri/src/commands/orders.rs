@@ -4284,6 +4284,217 @@ pub async fn order_assign_driver(
     Ok(serde_json::json!({ "success": true, "data": payload }))
 }
 
+fn clear_delivery_tip_recipients_for_reset(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<usize, String> {
+    let payment_ids = {
+        let mut statement = conn
+            .prepare(
+                "SELECT id
+                 FROM order_payments
+                 WHERE order_id = ?1
+                   AND tip_recipient_role = 'driver'
+                   AND COALESCE(
+                         tip_amount_cents,
+                         CAST(ROUND(tip_amount * 100) AS INTEGER),
+                         0
+                       ) > 0",
+            )
+            .map_err(|e| format!("prepare delivery tip reset lookup: {e}"))?;
+        let rows = statement
+            .query_map(rusqlite::params![order_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("load delivery tip reset payments: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read delivery tip reset payment: {e}"))?
+    };
+
+    if payment_ids.is_empty() {
+        return Ok(0);
+    }
+
+    conn.execute(
+        "UPDATE order_payments
+         SET tip_recipient_staff_id = NULL,
+             tip_recipient_staff_shift_id = NULL,
+             sync_status = 'pending',
+             sync_state = CASE
+                 WHEN EXISTS (
+                     SELECT 1
+                     FROM orders
+                     WHERE orders.id = order_payments.order_id
+                       AND COALESCE(orders.supabase_id, '') != ''
+                 ) THEN 'pending'
+                 ELSE 'waiting_parent'
+             END,
+             updated_at = ?1
+         WHERE order_id = ?2
+           AND tip_recipient_role = 'driver'
+           AND COALESCE(
+                 tip_amount_cents,
+                 CAST(ROUND(tip_amount * 100) AS INTEGER),
+                 0
+               ) > 0",
+        rusqlite::params![now, order_id],
+    )
+    .map_err(|e| format!("clear delivery tip recipient for reset: {e}"))?;
+
+    for payment_id in &payment_ids {
+        payments::refresh_payment_sync_queue_entry(conn, payment_id)?;
+    }
+
+    Ok(payment_ids.len())
+}
+
+#[tauri::command]
+pub async fn order_reset_to_active(
+    arg0: Option<String>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let order_id_raw = arg0.ok_or("Missing orderId")?;
+    let now = Utc::now().to_rfc3339();
+    let (order_id, order_type, driver_was_unassigned, removed_driver_earning) = {
+        let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+        let (current_status, order_type, current_driver_id): (String, String, Option<String>) =
+            conn.query_row(
+                "SELECT
+                     COALESCE(status, 'pending'),
+                     COALESCE(order_type, 'pickup'),
+                     driver_id
+                 FROM orders
+                 WHERE id = ?1",
+                rusqlite::params![order_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| format!("load reset order context: {e}"))?;
+        let normalized_status = normalize_status_for_storage(&current_status);
+        if !matches!(normalized_status.as_str(), "delivered" | "completed") {
+            return Err(format!(
+                "Only delivered or completed orders can be reset (current: {normalized_status})"
+            ));
+        }
+
+        let acting_terminal_id = storage::get_credential("terminal_id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                db::get_setting(&conn, "terminal", "terminal_id")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin order reset transaction: {e}"))?;
+
+        // Driver assignment moves the completed payment/drawer ownership to
+        // the driver's shift. RESET must move that attribution back to the
+        // cashier before clearing the driver, while preserving delivery as
+        // the actual order type.
+        if order_type.eq_ignore_ascii_case("delivery") {
+            order_ownership::assign_order_to_cashier_pickup(
+                &tx,
+                &order_id,
+                acting_terminal_id.as_deref(),
+                &now,
+            )?;
+        }
+
+        let removed_driver_earning =
+            order_ownership::remove_driver_earning_for_order(&tx, &order_id)?;
+        if let Some(ref removed) = removed_driver_earning {
+            let _ = crate::sync_queue::clear_unsynced_items(
+                &tx,
+                "driver_earnings",
+                removed.id.as_str(),
+            );
+
+            if removed.supabase_id.is_some() {
+                let driver_sync_payload = serde_json::json!({
+                    "id": removed.id.clone(),
+                    "supabase_id": removed.supabase_id.clone(),
+                    "order_id": order_id.clone(),
+                    "deleted_at": now.clone(),
+                });
+                crate::sync_queue::enqueue_payload_item(
+                    &tx,
+                    "driver_earnings",
+                    &removed.id,
+                    "DELETE",
+                    &driver_sync_payload,
+                    Some(1),
+                    Some("financial"),
+                    Some("manual"),
+                    Some(1),
+                )
+                .map_err(|e| format!("enqueue reset driver earning deletion: {e}"))?;
+            }
+        }
+
+        clear_delivery_tip_recipients_for_reset(&tx, &order_id, &now)?;
+
+        tx.execute(
+            "UPDATE orders
+             SET status = 'pending',
+                 order_type = ?1,
+                 driver_id = NULL,
+                 driver_name = NULL,
+                 completed_at = NULL,
+                 cancellation_reason = NULL,
+                 sync_status = 'pending',
+                 updated_at = ?2
+             WHERE id = ?3",
+            rusqlite::params![order_type, now, order_id],
+        )
+        .map_err(|e| format!("reset order to active: {e}"))?;
+
+        let sync_payload = serde_json::json!({
+            "orderId": order_id,
+            "orderType": order_type,
+            "status": "pending",
+            "driverId": serde_json::Value::Null,
+            "driverName": serde_json::Value::Null,
+            "resetToActive": true,
+        });
+        enqueue_order_sync_payload(&tx, &order_id, &sync_payload)?;
+
+        tx.commit()
+            .map_err(|e| format!("commit order reset transaction: {e}"))?;
+
+        (
+            order_id,
+            order_type,
+            current_driver_id.is_some(),
+            removed_driver_earning.is_some(),
+        )
+    };
+
+    let event_payload = serde_json::json!({
+        "orderId": order_id,
+        "status": "pending",
+        "orderType": order_type,
+        "driverId": serde_json::Value::Null,
+        "driverName": serde_json::Value::Null,
+        "resetToActive": true,
+    });
+    let _ = app.emit("order_status_updated", event_payload.clone());
+    let _ = app.emit("order_realtime_update", event_payload.clone());
+
+    Ok(serde_json::json!({
+        "success": true,
+        "data": {
+            "orderId": order_id_raw,
+            "status": "pending",
+            "orderType": order_type,
+            "driverUnassigned": driver_was_unassigned,
+            "driverEarningRemoved": removed_driver_earning,
+        }
+    }))
+}
+
 #[tauri::command]
 pub async fn order_notify_platform_ready(
     arg0: Option<String>,

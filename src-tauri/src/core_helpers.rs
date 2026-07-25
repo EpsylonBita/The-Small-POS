@@ -229,8 +229,14 @@ pub(crate) fn can_transition_locally(from_status: &str, to_status: &str) -> bool
             "out_for_delivery" | "delivered" | "completed" | "cancelled"
         ),
         "out_for_delivery" => matches!(to.as_str(), "delivered" | "completed" | "cancelled"),
-        "delivered" => matches!(to.as_str(), "completed" | "cancelled" | "refunded"),
-        "completed" => to == "refunded",
+        // A supervisor RESET is an explicit correction path: it reopens the
+        // order in the active queue and the dedicated reset command also
+        // removes any driver ownership/earning atomically.
+        "delivered" => matches!(
+            to.as_str(),
+            "pending" | "completed" | "cancelled" | "refunded"
+        ),
+        "completed" => matches!(to.as_str(), "pending" | "refunded"),
         "cancelled" => to == "pending",
         _ => false,
     }
@@ -473,6 +479,13 @@ pub(crate) fn stats_for_modules(modules: &[serde_json::Value]) -> serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_orders_can_be_reset_to_pending() {
+        assert!(can_transition_locally("delivered", "pending"));
+        assert!(can_transition_locally("completed", "pending"));
+        assert!(!can_transition_locally("refunded", "pending"));
+    }
 
     #[test]
     fn clear_operational_data_removes_parity_and_recovery_rows() {

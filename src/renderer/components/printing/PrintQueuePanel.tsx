@@ -3,6 +3,10 @@ import { PauseCircle, PlayCircle, RefreshCw, Printer, XCircle, RotateCcw } from 
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { getBridge } from '../../../lib';
+import {
+  requireSuccessfulPrintQueueMutation,
+  type PrintQueueMutationResponse,
+} from '../../utils/print-queue-mutation';
 
 type PrintJob = {
   id: string;
@@ -177,10 +181,18 @@ const PrintQueuePanel: React.FC = () => {
     setLoading(true);
     try {
       if (queuePaused) {
-        await bridge.printer.resumeQueue();
+        const result = (await bridge.printer.resumeQueue()) as PrintQueueMutationResponse;
+        requireSuccessfulPrintQueueMutation(
+          result,
+          t('settings.printQueue.updateFailed', 'Failed to update print queue'),
+        );
         toast.success(t('settings.printQueue.resumed', 'Print queue resumed'));
       } else {
-        await bridge.printer.pauseQueue();
+        const result = (await bridge.printer.pauseQueue()) as PrintQueueMutationResponse;
+        requireSuccessfulPrintQueueMutation(
+          result,
+          t('settings.printQueue.updateFailed', 'Failed to update print queue'),
+        );
         toast.success(t('settings.printQueue.paused', 'Print queue paused'));
       }
       await loadQueue();
@@ -194,7 +206,13 @@ const PrintQueuePanel: React.FC = () => {
   const cancelAllPending = async () => {
     setLoading(true);
     try {
-      await bridge.printer.cancelAllJobs({ statuses: ['pending', 'printing'] });
+      const result = (await bridge.printer.cancelAllJobs({
+        statuses: ['pending', 'printing'],
+      })) as PrintQueueMutationResponse;
+      requireSuccessfulPrintQueueMutation(
+        result,
+        t('settings.printQueue.cancelAllFailed', 'Failed to cancel queued print jobs'),
+      );
       toast.success(t('settings.printQueue.cancelledAll', 'Cancelled queued print jobs'));
       await loadQueue();
     } catch (error) {
@@ -209,7 +227,11 @@ const PrintQueuePanel: React.FC = () => {
   const handleCancelJob = async (jobId: string) => {
     setBusyJobId(jobId);
     try {
-      await bridge.printer.cancelJob(jobId);
+      const result = (await bridge.printer.cancelJob(jobId)) as PrintQueueMutationResponse;
+      requireSuccessfulPrintQueueMutation(
+        result,
+        t('settings.printQueue.cancelFailed', 'Failed to cancel print job'),
+      );
       toast.success(t('settings.printQueue.cancelled', 'Print job cancelled'));
       await loadQueue();
     } catch (error) {
@@ -223,7 +245,11 @@ const PrintQueuePanel: React.FC = () => {
   const handleRetryJob = async (jobId: string) => {
     setBusyJobId(jobId);
     try {
-      await bridge.printer.retryJob(jobId);
+      const result = (await bridge.printer.retryJob(jobId)) as PrintQueueMutationResponse;
+      requireSuccessfulPrintQueueMutation(
+        result,
+        t('settings.printQueue.retryFailed', 'Failed to retry print job'),
+      );
       toast.success(t('settings.printQueue.retried', 'Print job re-queued'));
       await loadQueue();
     } catch (error) {
@@ -252,7 +278,7 @@ const PrintQueuePanel: React.FC = () => {
           <p className="mt-1 text-xs liquid-glass-modal-text-muted">
             {t(
               'settings.printQueue.helpText',
-              'Jobs already sent to the LAN printer cannot be recalled from the device. These controls only stop or retry jobs still queued locally on this POS.',
+              'Pause blocks new sends and asks an active transfer to stop. Bytes already accepted by the printer cannot be recalled. Use Pause, then Cancel pending.',
             )}
           </p>
           {pausedPrinterProfileIds.length > 0 && (

@@ -1974,7 +1974,7 @@
     },
     "printQueue": {
       "title": "Print Queue",
-      "helpText": "Jobs already sent to the LAN printer cannot be recalled from the device. These controls only stop or retry jobs still queued locally on this POS.",
+      "helpText": "Pause blocks new sends and asks an active transfer to stop. Bytes already accepted by the printer cannot be recalled. Use Pause, then Cancel pending.",
       "pausedProfiles": "Profile pauses active for configured printers",
       "stuckWarning": "{{count}} print job(s) need attention — check the queue below.",
       "workerAlert": "Printing is failing — check the print queue.",
@@ -3510,7 +3510,7 @@
       "totalDeliveries": "Total Deliveries",
       "cashCollected": "Cash Collected",
       "driverPayment": "Driver Payment",
-      "amountToReturn": "Amount to Return to Drawer",
+      "amountToReturn": "Return",
       "driverSummary": "Driver Summary",
       "driversCheckout": "Drivers Checkout",
       "startingAmountGiven": "Starting Amount Given",
@@ -4729,6 +4729,7 @@
     "delivered": "Delivered",
     "view": "View",
     "clear": "Clear",
+    "reset": "RESET",
     "return": "Return to Orders",
     "restore": "Restore",
     "reassign": "Reassign Driver"

@@ -196,8 +196,8 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
             </div>
 
             <div className="flex-1 min-w-0">
-              <h4 className="font-medium text-white truncate">{moduleInfo.display_name}</h4>
-              <p className="text-sm text-gray-400 truncate">{moduleInfo.description}</p>
+              <h4 className="liquid-glass-modal-text font-medium truncate">{moduleInfo.display_name}</h4>
+              <p className="liquid-glass-modal-text-muted text-sm truncate">{moduleInfo.description}</p>
             </div>
 
             <ChevronRight className="h-5 w-5 text-gray-500 flex-shrink-0" />
@@ -294,15 +294,15 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
         </div>
         <div>
           {compact && (
-            <h4 className="font-semibold text-white mb-1">{moduleInfo.display_name}</h4>
+            <h4 className="liquid-glass-modal-text font-semibold mb-1">{moduleInfo.display_name}</h4>
           )}
-          <p className="text-gray-300">{moduleInfo.description}</p>
+          <p className="liquid-glass-modal-text-muted">{moduleInfo.description}</p>
         </div>
       </div>
 
       {/* Features list */}
       <div>
-        <h5 className="font-medium text-white mb-3 flex items-center gap-2">
+        <h5 className="liquid-glass-modal-text font-medium mb-3 flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-amber-400" />
           Included Features
         </h5>
@@ -311,15 +311,15 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
             <li key={feature.id} className="flex items-start gap-2">
               <Check className="h-4 w-4 text-green-400 mt-0.5 flex-shrink-0" />
               <div>
-                <span className="text-sm text-white">{feature.name}</span>
+                <span className="liquid-glass-modal-text text-sm">{feature.name}</span>
                 {!compact && feature.description && (
-                  <p className="text-xs text-gray-400">{feature.description}</p>
+                  <p className="liquid-glass-modal-text-muted text-xs">{feature.description}</p>
                 )}
               </div>
             </li>
           ))}
           {moduleInfo.features.length > (compact ? 3 : 5) && (
-            <li className="text-sm text-gray-400 pl-6">
+            <li className="liquid-glass-modal-text-muted text-sm pl-6">
               +{moduleInfo.features.length - (compact ? 3 : 5)} more features
             </li>
           )}
@@ -331,10 +331,10 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
         <div className={liquidGlassModalCard()}>
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-gray-400">Starting at</p>
-              <p className="text-2xl font-bold text-white">
+              <p className="liquid-glass-modal-text-muted text-sm">Starting at</p>
+              <p className="liquid-glass-modal-text text-2xl font-bold">
                 {formatUpsellCurrency(pricing.monthly, pricing.currency)}
-                <span className="text-sm font-normal text-gray-400">/mo</span>
+                <span className="liquid-glass-modal-text-muted text-sm font-normal">/mo</span>
               </p>
             </div>
             {pricing.savingsPercentage > 0 && (
@@ -347,7 +347,7 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
       )}
 
       {/* Checkout notice */}
-      <div className="flex items-center gap-2 text-sm text-gray-400">
+      <div className="liquid-glass-modal-text-muted flex items-center gap-2 text-sm">
         <ExternalLink className="h-4 w-4" />
         <span>Opens secure checkout in your browser</span>
       </div>

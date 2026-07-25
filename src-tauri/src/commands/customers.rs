@@ -1992,6 +1992,7 @@ pub async fn customer_update_address(
             })
         })
         .ok_or("Customer/address not found")?;
+    let recreates_placeholder = sync_queue::is_local_placeholder_id(&target_id);
 
     let mut queue_payload = build_remote_address_body(&updates);
     if queue_payload
@@ -2006,7 +2007,12 @@ pub async fn customer_update_address(
             "customer_id".to_string(),
             serde_json::json!(customer_id.clone()),
         );
-        if expected_version > 0 {
+        if recreates_placeholder && !obj.contains_key("is_default") {
+            // A legacy fallback represents the customer's former single/default
+            // address. Migrating it to customer_addresses must keep that role.
+            obj.insert("is_default".to_string(), serde_json::json!(true));
+        }
+        if !recreates_placeholder && expected_version > 0 {
             obj.insert(
                 "expected_version".to_string(),
                 serde_json::json!(expected_version),
@@ -2014,17 +2020,25 @@ pub async fn customer_update_address(
         }
     }
 
-    let (address, remote_failure) =
-        match sync_customer_address_update_remote(&db, &customer_id, &target_id, &updates).await {
-            Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
-            Err(error) => {
-                let mut local_payload = queue_payload.clone();
-                if let Some(obj) = local_payload.as_object_mut() {
-                    obj.insert("id".to_string(), serde_json::json!(target_id.clone()));
-                }
-                (normalize_address_for_cache(local_payload), Some(error))
+    let remote_result = if recreates_placeholder {
+        // `legacy:<customer-id>` and `local-*` are renderer/local cache
+        // placeholders, never canonical customer_addresses UUIDs. Sending
+        // either to PATCH guarantees a 404. Materialize the edited address
+        // through POST and replace the placeholder with the returned UUID.
+        sync_customer_address_remote(&db, &customer_id, &queue_payload).await
+    } else {
+        sync_customer_address_update_remote(&db, &customer_id, &target_id, &updates).await
+    };
+    let (address, remote_failure) = match remote_result {
+        Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
+        Err(error) => {
+            let mut local_payload = queue_payload.clone();
+            if let Some(obj) = local_payload.as_object_mut() {
+                obj.insert("id".to_string(), serde_json::json!(target_id.clone()));
             }
-        };
+            (normalize_address_for_cache(local_payload), Some(error))
+        }
+    };
 
     let mut updated_customer: Option<serde_json::Value> = None;
     let mut cache_touched = false;
@@ -2087,7 +2101,11 @@ pub async fn customer_update_address(
             &db,
             "customer_addresses",
             &target_id,
-            "UPDATE",
+            if recreates_placeholder {
+                "INSERT"
+            } else {
+                "UPDATE"
+            },
             &queue_payload,
             version,
         )?;

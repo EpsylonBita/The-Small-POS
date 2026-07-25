@@ -1370,6 +1370,7 @@ export interface PlatformBridge {
       driverId: string,
       notes?: string,
     ): Promise<IpcResult>;
+    resetToActive(orderId: string): Promise<IpcResult>;
     notifyPlatformReady(orderId: string): Promise<IpcResult>;
     updatePreparation(
       orderId: string,
@@ -2180,6 +2181,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "order:approve": "orders.approve",
   "order:decline": "orders.decline",
   "order:assign-driver": "orders.assignDriver",
+  "order:reset-to-active": "orders.resetToActive",
   "order:notify-platform-ready": "orders.notifyPlatformReady",
   "order:update-preparation": "orders.updatePreparation",
   "order:update-type": "orders.updateType",
@@ -2802,6 +2804,7 @@ export class TauriBridge implements PlatformBridge {
     decline: (id: string, r: string) => this.inv("order:decline", id, r),
     assignDriver: (id: string, d: string, n?: string) =>
       this.inv("order:assign-driver", id, d, n),
+    resetToActive: (id: string) => this.inv("order:reset-to-active", id),
     notifyPlatformReady: (id: string) =>
       this.inv("order:notify-platform-ready", id),
     updatePreparation: (id: string, s: string, p: number, m?: string) =>

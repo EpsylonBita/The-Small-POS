@@ -279,7 +279,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                       />
                     </div>
                     <div className="min-w-0">
-                      <p className="font-medium text-white">{device.name}</p>
+                      <p className="liquid-glass-modal-text font-medium">{device.name}</p>
                       <p className="text-sm text-gray-400">
                         {device.manufacturer && `${device.manufacturer} `}
                         {device.model}

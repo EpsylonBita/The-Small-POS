@@ -1085,6 +1085,7 @@ fn preview_response_from_built_date_z_report(
             "cashVariance": report.total_variance,
             "openingCash": report.total_opening,
             "closingCash": report.total_closing,
+            "expectedCash": report.total_expected,
             "paymentsBreakdown": report.payments_breakdown,
             "reportJson": report.report_json,
             "syncState": if preview_only { "preview" } else { "pending" },
@@ -1518,7 +1519,7 @@ fn load_drawer_rows_for_period(
                     COALESCE(cds.driver_cash_returned_cents, CAST(ROUND(cds.driver_cash_returned * 100) AS INTEGER), 0),
                     COALESCE(cds.cash_drops_cents, CAST(ROUND(cds.cash_drops * 100) AS INTEGER), 0),
                     COALESCE(cds.total_staff_payments_cents, CAST(ROUND(cds.total_staff_payments * 100) AS INTEGER), 0),
-                    cds.opened_at, cds.closed_at, cds.reconciled
+                    cds.opened_at, cds.closed_at, cds.reconciled, cds.terminal_id
              FROM cash_drawer_sessions cds
              LEFT JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
              WHERE {opened_at_predicate}
@@ -1547,6 +1548,7 @@ fn load_drawer_rows_for_period(
                 "openedAt": row.get::<_, Option<String>>(13)?,
                 "closedAt": row.get::<_, Option<String>>(14)?,
                 "reconciled": row.get::<_, i64>(15).unwrap_or(0) != 0,
+                "terminalId": row.get::<_, Option<String>>(16)?,
             }))
         })
         .map_err(|e| format!("query drawer rows for period: {e}"))?
@@ -1557,24 +1559,46 @@ fn load_drawer_rows_for_period(
 }
 
 fn money_in_drawer_from_rows(drawer_rows: &[Value]) -> f64 {
-    drawer_rows
-        .iter()
-        .map(|drawer| {
-            drawer
-                .get("closing")
-                .and_then(Value::as_f64)
-                .unwrap_or_else(|| {
-                    drawer
-                        .get("expected")
+    let mut latest_by_terminal = HashMap::<String, f64>::new();
+    for drawer in drawer_rows {
+        let terminal_id = drawer
+            .get("terminalId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("__default_terminal__")
+            .to_string();
+        let amount = drawer
+            .get("closing")
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| {
+                drawer
+                    .get("expected")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+                    + drawer
+                        .get("variance")
                         .and_then(Value::as_f64)
                         .unwrap_or(0.0)
-                        + drawer
-                            .get("variance")
-                            .and_then(Value::as_f64)
-                            .unwrap_or(0.0)
-                })
-        })
-        .sum()
+            });
+        latest_by_terminal.insert(terminal_id, amount);
+    }
+    latest_by_terminal.values().sum()
+}
+
+fn opening_in_drawer_from_rows(drawer_rows: &[Value]) -> f64 {
+    let mut first_by_terminal = HashMap::<String, f64>::new();
+    for drawer in drawer_rows {
+        let terminal_id = drawer
+            .get("terminalId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("__default_terminal__")
+            .to_string();
+        first_by_terminal
+            .entry(terminal_id)
+            .or_insert_with(|| drawer.get("opening").and_then(Value::as_f64).unwrap_or(0.0));
+    }
+    first_by_terminal.values().sum()
 }
 
 fn load_drawer_rows_for_shift(conn: &Connection, shift_id: &str) -> Result<Vec<Value>, String> {
@@ -1852,7 +1876,7 @@ fn load_non_driver_order_totals(
 fn load_driver_order_totals(
     conn: &Connection,
     shift_id: &str,
-) -> Result<(i64, i64, i64, f64, f64, f64, f64), String> {
+) -> Result<(i64, i64, i64, f64, f64, f64, f64, f64), String> {
     // W4b-iii: cents-with-real-fallback shim on 4 monetary SUM cols.
     conn.query_row(
         "SELECT
@@ -1871,6 +1895,19 @@ fn load_driver_order_totals(
             COALESCE(SUM(CASE
                 WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded')
                     THEN COALESCE(de.total_earning_cents, CAST(ROUND(de.total_earning * 100) AS INTEGER))
+                        + MAX(
+                            COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0)
+                                - COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                            0
+                        )
+                ELSE 0
+            END), 0),
+            COALESCE(SUM(CASE
+                WHEN o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded')
+                    THEN MAX(
+                        COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                        COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0)
+                    )
                 ELSE 0
             END), 0),
             COALESCE(SUM(CASE
@@ -1904,6 +1941,7 @@ fn load_driver_order_totals(
                 Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
                 Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
                 Cents::new(row.get::<_, i64>(6)?).to_f64_dp2(),
+                Cents::new(row.get::<_, i64>(7)?).to_f64_dp2(),
             ))
         },
     )
@@ -2143,6 +2181,7 @@ fn build_staff_report(
             completed_deliveries,
             cancelled_deliveries,
             earnings,
+            tips,
             cash_collected,
             card_amount,
             total_amount,
@@ -2181,6 +2220,7 @@ fn build_staff_report(
                 "completedDeliveries": completed_deliveries,
                 "cancelledDeliveries": cancelled_deliveries,
                 "earnings": earnings,
+                "tips": tips,
                 "cashCollected": cash_collected,
                 "cardAmount": card_amount,
                 "cashToReturn": cash_to_return,
@@ -2266,6 +2306,7 @@ fn build_driver_summary(staff_reports: &[Value], unsettled_counts: &HashMap<Stri
         completed_deliveries: i64,
         cancelled_deliveries: i64,
         earnings: f64,
+        tips: f64,
         cash_collected: f64,
         card_amount: f64,
         cash_to_return: f64,
@@ -2311,6 +2352,7 @@ fn build_driver_summary(staff_reports: &[Value], unsettled_counts: &HashMap<Stri
             .get("earnings")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
+        entry.tips += driver.get("tips").and_then(Value::as_f64).unwrap_or(0.0);
         entry.cash_collected += driver
             .get("cashCollected")
             .and_then(Value::as_f64)
@@ -2329,6 +2371,7 @@ fn build_driver_summary(staff_reports: &[Value], unsettled_counts: &HashMap<Stri
     let mut completed_deliveries = 0_i64;
     let mut cancelled_deliveries = 0_i64;
     let mut total_earnings = 0.0_f64;
+    let mut total_tips = 0.0_f64;
     let mut total_cash_collected = 0.0_f64;
     let mut total_card_amount = 0.0_f64;
     let mut total_cash_to_return = 0.0_f64;
@@ -2341,6 +2384,7 @@ fn build_driver_summary(staff_reports: &[Value], unsettled_counts: &HashMap<Stri
             completed_deliveries += aggregate.completed_deliveries;
             cancelled_deliveries += aggregate.cancelled_deliveries;
             total_earnings += aggregate.earnings;
+            total_tips += aggregate.tips;
             total_cash_collected += aggregate.cash_collected;
             total_card_amount += aggregate.card_amount;
             total_cash_to_return += aggregate.cash_to_return;
@@ -2351,6 +2395,7 @@ fn build_driver_summary(staff_reports: &[Value], unsettled_counts: &HashMap<Stri
                 "name": aggregate.name,
                 "deliveries": aggregate.deliveries,
                 "earnings": aggregate.earnings,
+                "tips": aggregate.tips,
                 "unsettled": aggregate.unsettled_count > 0,
                 "cashCollected": aggregate.cash_collected,
                 "cardAmount": aggregate.card_amount,
@@ -2364,6 +2409,7 @@ fn build_driver_summary(staff_reports: &[Value], unsettled_counts: &HashMap<Stri
         "completedDeliveries": completed_deliveries,
         "cancelledDeliveries": cancelled_deliveries,
         "totalEarnings": total_earnings,
+        "totalTips": total_tips,
         "unsettledCount": unsettled_total,
         "cashCollectedTotal": total_cash_collected,
         "cardAmountTotal": total_card_amount,
@@ -3907,11 +3953,29 @@ fn build_z_report_for_date(
     // voids_total does not double-count against payment-level figures.
     let net_sales = gross_sales - refunds_total - voids_total - discounts_total;
 
-    // Sum opening/closing/variance across all cashier shifts
-    let total_opening: f64 = shifts.iter().map(|s| s.opening_cash).sum();
-    let total_closing: f64 = shifts.iter().map(|s| s.closing_cash.unwrap_or(0.0)).sum();
-    let total_expected: f64 = shifts.iter().map(|s| s.expected_cash.unwrap_or(0.0)).sum();
-    let total_variance: f64 = shifts.iter().map(|s| s.cash_variance.unwrap_or(0.0)).sum();
+    // Driver/server amounts are wallets handed out from the till, not extra
+    // physical drawers. These role-filtered values are only the legacy
+    // fallback when no cash_drawer_session snapshots exist.
+    let physical_till_shifts = shifts
+        .iter()
+        .filter(|shift| matches!(shift.role_type.as_str(), "cashier" | "manager"))
+        .collect::<Vec<_>>();
+    let mut total_opening: f64 = physical_till_shifts
+        .iter()
+        .map(|shift| shift.opening_cash)
+        .sum();
+    let mut total_closing: f64 = physical_till_shifts
+        .iter()
+        .map(|shift| shift.closing_cash.unwrap_or(0.0))
+        .sum();
+    let mut total_expected: f64 = physical_till_shifts
+        .iter()
+        .map(|shift| shift.expected_cash.unwrap_or(0.0))
+        .sum();
+    let mut total_variance: f64 = physical_till_shifts
+        .iter()
+        .map(|shift| shift.cash_variance.unwrap_or(0.0))
+        .sum();
 
     if drawer_agg.is_none() {
         drawer_agg = Some(serde_json::json!({
@@ -3962,7 +4026,7 @@ fn build_z_report_for_date(
         lower_bound_mode,
         branch_id.as_str(),
     )?;
-    let money_in_drawer = if drawer_rows.is_empty() {
+    let mut money_in_drawer = if drawer_rows.is_empty() {
         if include_active_shifts {
             total_expected + total_variance
         } else {
@@ -3971,16 +4035,51 @@ fn build_z_report_for_date(
     } else {
         money_in_drawer_from_rows(&drawer_rows)
     };
+
+    if !drawer_rows.is_empty() {
+        total_opening = opening_in_drawer_from_rows(&drawer_rows);
+        total_closing = money_in_drawer;
+
+        let drawer_number = |key: &str| {
+            drawer_agg
+                .as_ref()
+                .and_then(|drawer| drawer.get(key))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+        };
+        let expected_cents = Cents::round_half_even(total_opening).as_i64()
+            + Cents::round_half_even(drawer_number("cashSales")).as_i64()
+            - Cents::round_half_even(drawer_number("totalRefunds")).as_i64()
+            - Cents::round_half_even(drawer_number("totalExpenses")).as_i64()
+            - Cents::round_half_even(drawer_number("staffPaymentsTotal")).as_i64()
+            - Cents::round_half_even(drawer_number("totalCashDrops")).as_i64()
+            - Cents::round_half_even(drawer_number("driverCashGiven")).as_i64()
+            + Cents::round_half_even(drawer_number("driverCashReturned")).as_i64();
+        let closing_cents = Cents::round_half_even(total_closing).as_i64();
+        total_expected = Cents::new(expected_cents).to_f64_dp2();
+        total_variance = Cents::new(closing_cents - expected_cents).to_f64_dp2();
+    } else {
+        // Keep the response and report JSON aligned for legacy days that only
+        // have cashier/manager shift snapshots.
+        total_closing = money_in_drawer;
+    }
+    money_in_drawer = total_closing;
+
     if let Some(ref mut drawer) = drawer_agg {
         if let Some(obj) = drawer.as_object_mut() {
-            obj.insert(
-                "moneyInDrawer".to_string(),
-                serde_json::json!(money_in_drawer),
-            );
-            obj.insert(
-                "moneyInDrawer_cents".to_string(),
-                serde_json::json!(Cents::round_half_even(money_in_drawer).as_i64()),
-            );
+            for (key, value) in [
+                ("openingTotal", total_opening),
+                ("closing", total_closing),
+                ("expected", total_expected),
+                ("totalVariance", total_variance),
+                ("moneyInDrawer", money_in_drawer),
+            ] {
+                obj.insert(key.to_string(), serde_json::json!(value));
+                obj.insert(
+                    format!("{key}_cents"),
+                    serde_json::json!(Cents::round_half_even(value).as_i64()),
+                );
+            }
         }
     }
     let cash_breakdown_lookup = driver_cash_breakdown
@@ -4100,10 +4199,7 @@ fn build_z_report_for_date(
         total_variance,
         total_opening,
         total_closing,
-        total_expected: shifts
-            .iter()
-            .map(|s| s.expected_cash.unwrap_or(0.0))
-            .sum::<f64>(),
+        total_expected,
         payments_breakdown,
         report_json,
     })
@@ -4362,6 +4458,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
             "cashVariance": built.total_variance,
             "openingCash": built.total_opening,
             "closingCash": built.total_closing,
+            "expectedCash": built.total_expected,
             "paymentsBreakdown": built.payments_breakdown,
             "reportJson": built.report_json,
             "syncState": "pending",
@@ -5787,7 +5884,8 @@ mod tests {
         let driver_shift_id = "driver-zr-day";
         let now = "2026-03-06T19:05:40Z";
 
-        // W4e Step 0: dual-populate (100/130/130/0 → 10000/13000/13000/0).
+        // The cashier shift mirrors the physical drawer. Driver float remains
+        // in the driver wallet and must not be added to these closing totals.
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
@@ -5799,7 +5897,7 @@ mod tests {
                 sync_status, created_at, updated_at
              ) VALUES (
                 ?1, 'cashier-11', 'Alexandra Evaggelou', 'branch-1', 'term-1', 'cashier',
-                100.0, 10000, 130.0, 13000, 130.0, 13000, 0.0, 0,
+                100.0, 10000, 144.5, 14450, 144.5, 14450, 0.0, 0,
                 '2026-03-06T12:10:16Z', ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
@@ -5825,7 +5923,7 @@ mod tests {
                 reconciled, opened_at, created_at, updated_at
              ) VALUES (
                 'drawer-zr-day', ?1, 'cashier-11', 'branch-1', 'term-1',
-                100.0, 10000, 182.5, 18250, 182.5, 18250, 0.0, 0,
+                100.0, 10000, 144.5, 14450, 144.5, 14450, 0.0, 0,
                 12.0, 1200, 18.0, 1800, 0.0, 0, 0.0, 0,
                 0.0, 0, 20.0, 2000, 52.5, 5250, 0.0, 0,
                 1, '2026-03-06T12:10:16Z', ?2, ?2
@@ -5882,22 +5980,34 @@ mod tests {
             .unwrap();
         }
 
-        for (suffix, total_amount, cash_collected) in [("1", 13.0, 13.0), ("2", 19.5, 19.5)] {
+        for (suffix, total_amount, cash_collected, order_tip) in
+            [("1", 13.0, 13.0, 1.5), ("2", 19.5, 19.5, 0.0)]
+        {
             let order_id = format!("delivery-order-{suffix}");
             // W4e Step 0: dual-populate via Cents::round_half_even.
             let total_amount_cents = Cents::round_half_even(total_amount).as_i64();
             let cash_collected_cents = Cents::round_half_even(cash_collected).as_i64();
+            let order_tip_cents = Cents::round_half_even(order_tip).as_i64();
             conn.execute(
                 "INSERT INTO orders (
                     id, order_number, items, total_amount, total_amount_cents, status, order_type,
                     payment_status, staff_shift_id, staff_id, driver_id,
+                    tip_amount, tip_amount_cents,
                     sync_status, created_at, updated_at
                  ) VALUES (
                     ?1, ?1, '[]', ?2, ?3, 'completed', 'delivery',
                     'paid', ?4, 'cashier-11', 'driver-11',
+                    ?5, ?6,
                     'pending', '2026-03-06T16:00:00Z', '2026-03-06T16:00:00Z'
                  )",
-                params![order_id, total_amount, total_amount_cents, cashier_shift_id],
+                params![
+                    order_id,
+                    total_amount,
+                    total_amount_cents,
+                    cashier_shift_id,
+                    order_tip,
+                    order_tip_cents
+                ],
             )
             .unwrap();
             conn.execute(
@@ -6576,7 +6686,8 @@ mod tests {
         assert_eq!(cashier["orders"]["totalAmount"], 30.0);
 
         assert_eq!(driver["driver"]["deliveries"], 2);
-        assert_eq!(driver["driver"]["earnings"], 5.0);
+        assert_eq!(driver["driver"]["earnings"], 6.5);
+        assert_eq!(driver["driver"]["tips"], 1.5);
         assert_eq!(driver["driver"]["cashCollected"], 32.5);
         assert_eq!(driver["driver"]["cardAmount"], 0.0);
         assert_eq!(driver["driver"]["cashToReturn"], 52.5);
@@ -6591,7 +6702,9 @@ mod tests {
             32.5
         );
         assert_eq!(report_json["driverEarnings"]["totalDeliveries"], 2);
-        assert_eq!(report_json["driverEarnings"]["totalEarnings"], 5.0);
+        assert_eq!(report_json["driverEarnings"]["totalEarnings"], 6.5);
+        assert_eq!(report_json["driverEarnings"]["totalTips"], 1.5);
+        assert_eq!(report_json["tips"]["total"], 1.5);
         assert_eq!(report_json["driverEarnings"]["cashCollectedTotal"], 32.5);
         assert_eq!(report_json["driverEarnings"]["cashToReturnTotal"], 52.5);
         assert_eq!(
@@ -6602,6 +6715,45 @@ mod tests {
             report_json["cashDrawer"]["driverCashBreakdown"][0]["cashToReturn"],
             52.5
         );
+        assert_eq!(
+            result["report"]["openingCash"], 100.0,
+            "driver starting cash is a driver wallet, not physical till opening"
+        );
+        assert_eq!(
+            result["report"]["expectedCash"], 144.5,
+            "persisted expected cash must match the physical drawer"
+        );
+        assert_eq!(
+            result["report"]["closingCash"], 144.5,
+            "driver checkout cash must not be added to the counted till"
+        );
+        assert_eq!(result["report"]["cashVariance"], 0.0);
+    }
+
+    #[test]
+    fn money_in_drawer_uses_each_terminal_latest_count_instead_of_summing_handoffs() {
+        let drawer_rows = vec![
+            serde_json::json!({
+                "terminalId": "terminal-1",
+                "closing": 200.0,
+                "expected": 198.0,
+                "variance": 2.0
+            }),
+            serde_json::json!({
+                "terminalId": "terminal-1",
+                "closing": 250.0,
+                "expected": 249.0,
+                "variance": 1.0
+            }),
+            serde_json::json!({
+                "terminalId": "terminal-2",
+                "closing": 80.0,
+                "expected": 80.0,
+                "variance": 0.0
+            }),
+        ];
+
+        assert_eq!(money_in_drawer_from_rows(&drawer_rows), 330.0);
     }
 
     #[test]

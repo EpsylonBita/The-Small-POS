@@ -145,7 +145,7 @@ const CheckingState: React.FC = () => {
   return (
     <div className="flex flex-col items-center justify-center py-8 space-y-4">
       <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin" />
-      <p className="text-gray-300 text-center">
+      <p className="liquid-glass-modal-text-muted text-center">
         {t('updates.checking')}
       </p>
     </div>
@@ -182,16 +182,16 @@ const AvailableState: React.FC<AvailableStateProps> = ({
           />
         </svg>
         <div>
-          <h3 className="text-lg font-bold text-white">
+          <h3 className="liquid-glass-modal-text text-lg font-bold">
             {t('updates.available.version', { version: updateInfo?.version || 'Unknown' })}
           </h3>
           {currentVersion && (
-            <p className="text-sm text-gray-400">
+            <p className="liquid-glass-modal-text-muted text-sm">
               {t('updates.available.currentVersion', { current: currentVersion, new: updateInfo?.version })}
             </p>
           )}
           {updateInfo?.releaseDate && (
-            <p className="text-sm text-gray-300">
+            <p className="liquid-glass-modal-text-muted text-sm">
               {t('updates.available.released', { date: formatDate(updateInfo.releaseDate) })}
             </p>
           )}
@@ -200,10 +200,10 @@ const AvailableState: React.FC<AvailableStateProps> = ({
 
       {/* Release notes */}
       {releaseNotes && (
-        <div className="bg-black/20 rounded-2xl p-4 max-h-48 overflow-y-auto">
-          <h4 className="text-sm font-semibold text-gray-300 mb-2">{t('updates.available.whatsNew')}</h4>
+        <div className="liquid-glass-modal-inset rounded-2xl p-4 max-h-48 overflow-y-auto">
+          <h4 className="liquid-glass-modal-text text-sm font-semibold mb-2">{t('updates.available.whatsNew')}</h4>
           <div
-            className="text-sm text-gray-400 prose prose-invert prose-sm"
+            className="liquid-glass-modal-text-muted text-sm prose prose-sm dark:prose-invert"
             dangerouslySetInnerHTML={{
               __html: releaseNotes
             }}
@@ -212,7 +212,7 @@ const AvailableState: React.FC<AvailableStateProps> = ({
       )}
 
       {/* Action buttons */}
-      <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-white/10">
+      <div className="liquid-glass-modal-border flex flex-col sm:flex-row gap-3 pt-4 border-t">
         <POSGlassButton
           variant="primary"
           onClick={onDownload}
@@ -252,7 +252,7 @@ const DownloadingState: React.FC<DownloadingStateProps> = ({
   return (
     <div className="space-y-6 text-center py-4">
       {/* Progress bar */}
-      <div className="relative w-full h-4 bg-gray-700 rounded-full overflow-hidden">
+      <div className="relative w-full h-4 bg-slate-200 dark:bg-gray-700 rounded-full overflow-hidden">
         <div
           className="absolute top-0 left-0 h-full bg-amber-400 transition-all duration-300 ease-out"
           style={{ width: `${percent}%` }}
@@ -261,21 +261,21 @@ const DownloadingState: React.FC<DownloadingStateProps> = ({
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 gap-4 text-sm">
-        <div className="bg-white/5 p-3 rounded-2xl">
-          <span className="block text-gray-400">{t('updates.downloading.progress')}</span>
-          <span className="block text-xl font-bold text-white">
+        <div className="liquid-glass-modal-inset p-3 rounded-2xl">
+          <span className="liquid-glass-modal-text-muted block">{t('updates.downloading.progress')}</span>
+          <span className="liquid-glass-modal-text block text-xl font-bold">
             {percent.toFixed(0)}%
           </span>
         </div>
-        <div className="bg-white/5 p-3 rounded-2xl">
-          <span className="block text-gray-400">{t('updates.downloading.speed')}</span>
-          <span className="block text-xl font-bold text-white">
+        <div className="liquid-glass-modal-inset p-3 rounded-2xl">
+          <span className="liquid-glass-modal-text-muted block">{t('updates.downloading.speed')}</span>
+          <span className="liquid-glass-modal-text block text-xl font-bold">
             {speed.toFixed(1)} MB/s
           </span>
         </div>
-        <div className="col-span-2 bg-white/5 p-3 rounded-2xl">
-          <span className="block text-gray-400">{t('updates.downloading.downloaded')}</span>
-          <span className="block text-xl font-bold text-white">
+        <div className="liquid-glass-modal-inset col-span-2 p-3 rounded-2xl">
+          <span className="liquid-glass-modal-text-muted block">{t('updates.downloading.downloaded')}</span>
+          <span className="liquid-glass-modal-text block text-xl font-bold">
             {transferred.toFixed(1)} / {total.toFixed(1)} MB
           </span>
         </div>
@@ -346,14 +346,14 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
         </div>
       </div>
 
-      <h3 className="text-xl font-bold text-white">{readyTitle}</h3>
+      <h3 className="liquid-glass-modal-text text-xl font-bold">{readyTitle}</h3>
 
-      <p className="text-gray-300">
+      <p className="liquid-glass-modal-text-muted">
         {t('updates.downloaded.description')}
       </p>
 
       {/* Warning note */}
-      <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-3 text-sm text-yellow-200">
+      <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-3 text-sm text-amber-800 dark:text-yellow-200">
         {t('updates.downloaded.warning')}
       </div>
 
@@ -413,13 +413,13 @@ const ErrorState: React.FC<ErrorStateProps> = ({
         </div>
       </div>
 
-      <h3 className="text-xl font-bold text-white">{t('updates.error.title')}</h3>
+      <h3 className="liquid-glass-modal-text text-xl font-bold">{t('updates.error.title')}</h3>
 
-      <p className="text-gray-300">
+      <p className="liquid-glass-modal-text-muted">
         {error || t('updates.error.generic')}
       </p>
 
-      <p className="text-sm text-gray-400">
+      <p className="liquid-glass-modal-text-muted text-sm">
         {isLocalBuildUpdaterError
           ? t(
               'updates.error.localBuild',
@@ -474,16 +474,16 @@ const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion, 
         </div>
       </div>
 
-      <h3 className="text-xl font-bold text-white">{t('updates.upToDate.title')}</h3>
+      <h3 className="liquid-glass-modal-text text-xl font-bold">{t('updates.upToDate.title')}</h3>
 
-      <p className="text-gray-300">
+      <p className="liquid-glass-modal-text-muted">
         {t('updates.upToDate.description')}
       </p>
 
       {/* Current version display */}
       {currentVersion && (
-        <div className="bg-white/5 rounded-2xl p-3">
-          <span className="text-sm text-gray-400">{t('updates.upToDate.currentVersion', { version: currentVersion })}</span>
+        <div className="liquid-glass-modal-inset rounded-2xl p-3">
+          <span className="liquid-glass-modal-text-muted text-sm">{t('updates.upToDate.currentVersion', { version: currentVersion })}</span>
         </div>
       )}
 

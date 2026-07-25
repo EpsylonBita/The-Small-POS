@@ -11,6 +11,7 @@ import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
 import { formatTime, formatCurrency } from '../../utils/format';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { calculateDriverReturn } from '../../utils/driver-checkout';
 import { toLocalDateString } from '../../utils/date';
 import { posApiGet } from '../../utils/api-helpers';
 import { loadFiscalOrderReportingEntitlement } from '../../utils/fiscal-integration-entitlement';
@@ -985,9 +986,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       });
       const collected = completed.reduce((sum: number, d: any) => sum + Number(d?.cash_collected || 0), 0);
       const driverPayment = parseMoneyInputValue(staffPayment) || 0;
+      const tipsReceived = Number(shiftSummary?.tipsReceived || shiftSummary?.tips_received || 0);
+      const returnBeforeLegacyPayment = calculateDriverReturn({
+        openingAmount: opening,
+        cashCollected: collected,
+        expenses: expensesTotal,
+        tipsReceived,
+      });
       return calculationVersion >= 2
-        ? opening + collected - expensesTotal
-        : opening + collected - expensesTotal - driverPayment;
+        ? returnBeforeLegacyPayment
+        : returnBeforeLegacyPayment - driverPayment;
     }
     if (role === 'server') {
       const tables = Array.isArray(shiftSummary?.waiterTables) ? shiftSummary.waiterTables : [];
@@ -2405,7 +2413,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }
 
       // Calculate cash to return using the specified formula:
-      // cashToReturn = openingCash + totalCashCollected - totalExpenses - driverPayment
+      // cashToReturn = openingCash + totalCashCollected - totalExpenses - tips - driverPayment
       // Filter out canceled orders before calculating
       const openingCash = getEffectiveOpeningAmount(effectiveShift, freshSummary);
       const deliveries = freshSummary?.driverDeliveries || [];
@@ -2415,7 +2423,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       });
       const totalCashCollected = completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
       const totalExpenses = freshSummary?.totalExpenses || 0;
-      const expectedReturn = openingCash + totalCashCollected - totalExpenses - driverPayment;
+      const tipsReceived = Number(freshSummary?.tipsReceived || freshSummary?.tips_received || 0);
+      const expectedReturn = calculateDriverReturn({
+        openingAmount: openingCash,
+        cashCollected: totalCashCollected,
+        expenses: totalExpenses,
+        tipsReceived,
+      }) - driverPayment;
 
       // When the expected return is zero (slow shift, nothing collected, etc.),
       // auto-confirm 0 instead of requiring the operator to type "0,00" — the
@@ -2447,6 +2461,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         openingCash,
         totalCashCollected,
         totalExpenses,
+        tipsReceived,
         driverPayment,
         expectedReturn,
         actualEntered: driverActualCash,
@@ -3149,9 +3164,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
       });
       const cashCollected = completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
-      const amountToReturn = openingAmount + cashCollected - (shiftSummary.totalExpenses || 0);
-      primaryLabel = t('modals.staffShift.cashToHandToCashier', {
-        defaultValue: 'Cash To Hand To Cashier',
+      const tipsReceived = Number(shiftSummary?.tipsReceived || shiftSummary?.tips_received || 0);
+      const amountToReturn = calculateDriverReturn({
+        openingAmount,
+        cashCollected,
+        expenses: shiftSummary.totalExpenses || 0,
+        tipsReceived,
+      });
+      primaryLabel = t('modals.staffShift.amountToReturn', {
+        defaultValue: 'Return',
       });
       primaryAmount = Math.abs(amountToReturn);
       helper = t('modals.staffShift.cashReturnHelper', {
@@ -4354,7 +4375,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     });
     const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
     const cashCollected = completedDeliveries.reduce((sum: number, delivery: any) => sum + Number(delivery.cash_collected || 0), 0);
-    const amountToReturn = opening + cashCollected - (shiftSummary.totalExpenses || 0);
+    const tipsReceived = Number(shiftSummary?.tipsReceived || shiftSummary?.tips_received || 0);
+    const amountToReturn = calculateDriverReturn({
+      openingAmount: opening,
+      cashCollected,
+      expenses: shiftSummary.totalExpenses || 0,
+      tipsReceived,
+    });
     const actualReturned = driverActualCash.trim() ? parseMoneyInputValue(driverActualCash) : null;
     const variance = actualReturned === null ? null : actualReturned - amountToReturn;
 
@@ -4366,8 +4393,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           <div className="space-y-6">
             <div className={checkoutSurfaceClass}>
               <div className="text-xs uppercase tracking-[0.22em] text-slate-600 dark:text-slate-300/90">
-                {t('modals.staffShift.cashToHandToCashier', {
-                  defaultValue: 'Cash To Hand To Cashier',
+                {t('modals.staffShift.amountToReturn', {
+                  defaultValue: 'Return',
                 })}
               </div>
               <div className="mt-3 text-4xl font-black tracking-tight text-slate-900 dark:text-white">
@@ -4421,6 +4448,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   { label: t('modals.staffShift.startingAmount', 'Starting Amount'), amount: opening, tone: 'text-slate-600 dark:text-slate-300', prefix: '+' },
                   { label: t('modals.staffShift.cashCollected', 'Cash Collected'), amount: cashCollected, tone: 'text-emerald-600 dark:text-emerald-300', prefix: '+' },
                   { label: t('modals.staffShift.expenses', 'Expenses'), amount: shiftSummary.totalExpenses || 0, tone: 'text-rose-600 dark:text-rose-300', prefix: '-' },
+                  { label: t('modals.staffShift.tipsReceived', 'Tips Received'), amount: tipsReceived, tone: 'text-rose-600 dark:text-rose-300', prefix: '-' },
                 ].map((row) => (
                   <div
                     key={row.label}
@@ -4434,8 +4462,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 ))}
                 <div className="flex items-center justify-between rounded-2xl border border-slate-200/90 bg-slate-50/80 px-4 py-3 dark:border-slate-400/30 dark:bg-slate-500/10">
                   <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                    {t('modals.staffShift.cashToHandToCashier', {
-                      defaultValue: 'Cash To Hand To Cashier',
+                    {t('modals.staffShift.amountToReturn', {
+                      defaultValue: 'Return',
                     })}
                   </span>
                   <span className={`text-xl font-black ${amountToReturn >= 0 ? 'text-slate-700 dark:text-slate-200' : 'text-rose-600 dark:text-rose-300'}`}>
@@ -6933,7 +6961,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         const startingAmount = driver.starting_amount || 0;
                         const earnings = driver.cash_collected || 0;
                         const expenses = driver.expenses || 0;
-                        const returns = driver.amount_to_return ?? (startingAmount + earnings - expenses);
+                        const returns = driver.amount_to_return ?? (
+                          driver.role_type === 'driver'
+                            ? calculateDriverReturn({
+                              openingAmount: startingAmount,
+                              cashCollected: earnings,
+                              expenses,
+                              tipsReceived: Number(driver.tips_received || driver.tipsReceived || 0),
+                            })
+                            : startingAmount + earnings - expenses
+                        );
                         const isPositive = returns >= 0;
                         const roleType = driver.role_type === 'server'
                           ? t('modals.staffShift.serverRole', 'Waiter')
@@ -7376,11 +7413,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                 // Get total expenses
                 const totalExpenses = shiftSummary?.totalExpenses || 0;
+                const tipsReceived = Number(shiftSummary?.tipsReceived || shiftSummary?.tips_received || 0);
 
                 // Calculate amount to return to cashier
-                // Formula: Starting Amount + Cash Collected - Expenses
+                // Formula: Starting Amount + Cash Collected - Expenses - Tips
                 // Payment is not deducted here - it's handled at cashier checkout
-                const amountToReturn = startingAmount + cashCollected - totalExpenses;
+                const amountToReturn = calculateDriverReturn({
+                  openingAmount: startingAmount,
+                  cashCollected,
+                  expenses: totalExpenses,
+                  tipsReceived,
+                });
 
                 return (
                   <div className="space-y-3">
@@ -7414,6 +7457,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         </div>
                       )}
 
+                      {tipsReceived > 0 && (
+                        <div className="flex justify-between items-center p-3 bg-orange-900/30 rounded-2xl border border-orange-600/40">
+                          <span className="text-sm text-orange-200">{t('modals.staffShift.tipsReceived', 'Tips Received')}</span>
+                          <span className="font-bold text-orange-300">-{formatCurrency(tipsReceived)}</span>
+                        </div>
+                      )}
+
                       {/* Separator */}
                       <div className="border-t border-white/20 my-2"></div>
 
@@ -7423,7 +7473,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         : 'bg-red-900/30 border-red-500/50'
                         }`}>
                         <span className={`text-base ${amountToReturn >= 0 ? 'text-yellow-200' : 'text-red-200'}`}>
-                          {t('modals.staffShift.amountToReturn', { defaultValue: 'Amount to collect from drawer' })}
+                          {t('modals.staffShift.amountToReturn', { defaultValue: 'Return' })}
                         </span>
                         <span className={amountToReturn >= 0 ? 'text-xl text-yellow-300' : 'text-xl text-red-300'}>
                           {formatCurrency(amountToReturn)}

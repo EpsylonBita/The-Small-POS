@@ -1296,11 +1296,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         className={`${orderTypeModalWidthClass} order-type-transparent-modal`}
         contentClassName="!p-0 !overflow-visible"
       >
-        <div>
+        <div className="p-2">
           {isTransitioning ? (
             <div className="flex items-center justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white/60"></div>
-              <span className="ml-3 text-white/70">{t('orderFlow.settingUpOrder')}</span>
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-b-yellow-500 dark:border-white/20 dark:border-b-yellow-400"></div>
+              <span className="ml-3 liquid-glass-modal-text-muted">{t('orderFlow.settingUpOrder')}</span>
             </div>
           ) : (
             <div className={`grid gap-4 sm:gap-5 ${orderTypeGridColsClass}`}>

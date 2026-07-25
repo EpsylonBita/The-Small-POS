@@ -170,7 +170,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
       closeOnBackdrop={false}
       closeOnEscape={false}
       footer={(
-        <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-4">
+        <div className="liquid-glass-modal-border flex items-center justify-between gap-3 border-t pt-4">
           <div className="text-sm liquid-glass-modal-text-muted">
             {t('modals.refund.requiredAmount', { defaultValue: 'Required refund' })}:{' '}
             <span className="font-semibold text-orange-300">&euro;{totalRequired.toFixed(2)}</span>
@@ -250,7 +250,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
               return (
                 <div
                   key={payment.id}
-                  className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4"
+                  className="liquid-glass-modal-inset space-y-3 rounded-2xl p-4"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
@@ -264,7 +264,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                     <button
                       type="button"
                       onClick={() => handleFillRemaining(payment.id, Number(payment.remainingRefundable || 0))}
-                      className="rounded-2xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white/70 transition-colors active:bg-white/10"
+                      className="liquid-glass-modal-button rounded-2xl px-3 py-1.5 text-xs font-semibold"
                     >
                       {t('modals.refund.useRemaining', { defaultValue: 'Use Remaining' })}
                     </button>
@@ -276,7 +276,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                         {t('modals.refund.amount', { defaultValue: 'Amount' })}
                       </span>
                       <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/40">&euro;</span>
+                        <span className="liquid-glass-modal-text-muted absolute left-3 top-1/2 -translate-y-1/2 text-sm">&euro;</span>
                         <input
                           type="number"
                           step="0.01"
@@ -284,7 +284,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                           max={payment.remainingRefundable || 0}
                           value={draft.amount}
                           onChange={(event) => setDraft(payment.id, (current) => ({ ...current, amount: event.target.value }))}
-                          className="w-full rounded-2xl border border-white/20 bg-white/10 py-2 pl-7 pr-3 text-sm liquid-glass-modal-text focus:border-orange-400/50 focus:outline-none"
+                          className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-7 pr-3 text-sm focus:border-orange-400/50 focus:outline-none"
                           placeholder="0.00"
                         />
                       </div>
@@ -298,7 +298,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                         rows={2}
                         value={draft.reason}
                         onChange={(event) => setDraft(payment.id, (current) => ({ ...current, reason: event.target.value }))}
-                        className="w-full rounded-2xl border border-white/20 bg-white/10 px-3 py-2 text-sm liquid-glass-modal-text focus:border-orange-400/50 focus:outline-none"
+                        className="liquid-glass-modal-input w-full rounded-2xl px-3 py-2 text-sm focus:border-orange-400/50 focus:outline-none"
                         placeholder={t('modals.refund.reasonPlaceholder', { defaultValue: 'Enter refund reason...' })}
                       />
                     </label>
@@ -314,7 +314,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                       disabled={isSubmitting}
                     />
                   ) : (
-                    <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs liquid-glass-modal-text-muted">
+                    <div className="liquid-glass-modal-inset rounded-2xl px-3 py-2 text-xs liquid-glass-modal-text-muted">
                       <RotateCcw className="mr-2 inline h-3.5 w-3.5" />
                       {t('modals.refund.enterAmountFirst', {
                         defaultValue: 'Enter a refund amount to choose how this payment was settled.',

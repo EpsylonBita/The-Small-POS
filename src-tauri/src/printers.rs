@@ -10,6 +10,7 @@ use rusqlite::params;
 use serde_json::{Map, Value};
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -68,6 +69,7 @@ pub fn detect_printer_brand(printer_name: &str) -> PrinterBrand {
         || lower.starts_with("star_")
         || lower.contains("mcprint")
         || lower.contains("mc-print")
+        || lower.contains("mcp3")
         || lower.contains("mcp31")
         || lower.contains("mcp30")
         || lower.contains("mcp20")
@@ -1190,10 +1192,11 @@ pub fn list_system_printers() -> Vec<String> {
 /// without any rendering.  This is the correct method for thermal receipt
 /// printers which expect ESC/POS binary.
 #[cfg(target_os = "windows")]
-pub fn print_raw_to_windows(
+pub fn print_raw_to_windows_cancellable(
     printer_name: &str,
     data: &[u8],
     doc_name: &str,
+    cancel: &AtomicBool,
 ) -> Result<RawPrintResult, String> {
     use std::ffi::CString;
     use std::ptr;
@@ -1271,28 +1274,58 @@ pub fn print_raw_to_windows(
         return Err(format!("StartPagePrinter failed for \"{printer_name}\""));
     }
 
-    let mut written: u32 = 0;
-    let write_ok =
-        unsafe { WritePrinter(h_printer, data.as_ptr(), data.len() as u32, &mut written) };
-
-    if write_ok == 0 {
-        unsafe {
-            AbortPrinter(h_printer);
-            ClosePrinter(h_printer);
+    // Use bounded chunks so an operator Pause/Cancel request can be observed
+    // between spool writes. A single unbounded WritePrinter call made the UI
+    // controls powerless until the driver returned.
+    const WINDOWS_RAW_CHUNK_SIZE: usize = 4096;
+    let mut written_total = 0usize;
+    for chunk in data.chunks(WINDOWS_RAW_CHUNK_SIZE) {
+        if cancel.load(Ordering::Acquire) {
+            unsafe {
+                AbortPrinter(h_printer);
+                ClosePrinter(h_printer);
+            }
+            return Err(format!(
+                "Print dispatch to \"{printer_name}\" was stopped by the operator after writing {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
+                data.len()
+            ));
         }
-        return Err(format!(
-            "WritePrinter failed for \"{printer_name}\": wrote {written}/{} bytes; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output.",
-            data.len()
-        ));
+
+        let mut written: u32 = 0;
+        let write_ok =
+            unsafe { WritePrinter(h_printer, chunk.as_ptr(), chunk.len() as u32, &mut written) };
+        written_total = written_total.saturating_add(written as usize);
+
+        if write_ok == 0 {
+            unsafe {
+                AbortPrinter(h_printer);
+                ClosePrinter(h_printer);
+            }
+            return Err(format!(
+                "WritePrinter failed for \"{printer_name}\": wrote {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output.",
+                data.len()
+            ));
+        }
+
+        if written as usize != chunk.len() {
+            unsafe {
+                AbortPrinter(h_printer);
+                ClosePrinter(h_printer);
+            }
+            return Err(format!(
+                "Partial spool write for \"{printer_name}\": wrote {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output.",
+                data.len()
+            ));
+        }
     }
 
-    if written as usize != data.len() {
+    if cancel.load(Ordering::Acquire) {
         unsafe {
             AbortPrinter(h_printer);
             ClosePrinter(h_printer);
         }
         return Err(format!(
-            "Partial spool write for \"{printer_name}\": wrote {written}/{} bytes; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output.",
+            "Print dispatch to \"{printer_name}\" was stopped by the operator after writing {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
             data.len()
         ));
     }
@@ -1326,16 +1359,17 @@ pub fn print_raw_to_windows(
     );
     Ok(RawPrintResult {
         bytes_requested: data.len(),
-        bytes_written: written as usize,
+        bytes_written: written_total,
         doc_name: doc_name.to_string(),
     })
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn print_raw_to_windows(
+pub fn print_raw_to_windows_cancellable(
     _printer_name: &str,
     _data: &[u8],
     _doc_name: &str,
+    _cancel: &AtomicBool,
 ) -> Result<RawPrintResult, String> {
     Err("Windows raw printing not available on this platform".into())
 }
@@ -1374,15 +1408,61 @@ fn connect_tcp_socket(
     ))
 }
 
-pub fn print_raw_to_tcp(
+fn write_raw_payload_in_chunks<W: std::io::Write>(
+    writer: &mut W,
+    data: &[u8],
+    chunk_size: usize,
+    chunk_delay: Duration,
+    deadline: Instant,
+    cancel: &AtomicBool,
+    target_label: &str,
+) -> Result<usize, String> {
+    let chunk_size = chunk_size.max(1);
+    let mut written_total = 0usize;
+
+    for chunk in data.chunks(chunk_size) {
+        if cancel.load(Ordering::Acquire) {
+            return Err(format!(
+                "Print dispatch to {target_label} was stopped by the operator after writing {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
+                data.len()
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{target_label} did not accept the receipt within the write deadline after writing {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
+                data.len()
+            ));
+        }
+
+        writer.write_all(chunk).map_err(|error| {
+            format!(
+                "Raw write to {target_label} failed after it wrote {written_total}/{} bytes ({error}); raw print state is unknown. Automatic retry stopped.",
+                data.len()
+            )
+        })?;
+        written_total += chunk.len();
+        writer.flush().map_err(|error| {
+            format!(
+                "Raw flush to {target_label} failed after it wrote {written_total}/{} bytes ({error}); raw print state is unknown. Automatic retry stopped.",
+                data.len()
+            )
+        })?;
+
+        if !chunk_delay.is_zero() && written_total < data.len() {
+            std::thread::sleep(chunk_delay);
+        }
+    }
+
+    Ok(written_total)
+}
+
+pub fn print_raw_to_tcp_cancellable(
     host: &str,
     port: u16,
     data: &[u8],
     doc_name: &str,
+    cancel: &AtomicBool,
 ) -> Result<RawPrintResult, String> {
-    use std::io::Write;
-    use std::time::Duration;
-
     info!(
         host = %host,
         port,
@@ -1410,35 +1490,28 @@ pub fn print_raw_to_tcp(
     // Windows spool), which is out of scope for this fix.
     const TCP_CHUNK_SIZE: usize = 4096;
     const TCP_CHUNK_DELAY_MS: u64 = 20;
-    if data.len() > TCP_CHUNK_SIZE {
-        // SO_SNDTIMEO bounds each write()'s NO-PROGRESS time, not the aggregate: a
-        // half-open peer trickling >=1 byte per <5s window keeps write_all alive
-        // indefinitely. Cap the whole chunked write with a wall-clock deadline so a
-        // degraded printer can't grind for minutes holding the print processor lock.
-        let write_deadline =
-            Instant::now() + Duration::from_millis(RAW_TCP_TOTAL_WRITE_DEADLINE_MS);
-        for chunk in data.chunks(TCP_CHUNK_SIZE) {
-            if Instant::now() >= write_deadline {
-                return Err(format!(
-                    "Network printer {host}:{port} did not accept the receipt within the write deadline; the print may be incomplete. Automatic retry stopped to prevent duplicate output."
-                ));
-            }
-            stream
-                .write_all(chunk)
-                .map_err(|e| format!("Write chunk to network printer {host}:{port}: {e}"))?;
-            stream
-                .flush()
-                .map_err(|e| format!("Flush chunk to network printer {host}:{port}: {e}"))?;
-            std::thread::sleep(Duration::from_millis(TCP_CHUNK_DELAY_MS));
-        }
+    // SO_SNDTIMEO bounds each write()'s NO-PROGRESS time, not the aggregate: a
+    // half-open peer trickling >=1 byte per <5s window keeps write_all alive
+    // indefinitely. Cap the whole write and treat every post-connect failure as
+    // physically ambiguous. A partial Star raster stream can leave the printer
+    // in raster mode; automatically sending the receipt again compounds that
+    // state and is the failure pattern that produces continuous gibberish.
+    let write_deadline = Instant::now() + Duration::from_millis(RAW_TCP_TOTAL_WRITE_DEADLINE_MS);
+    let chunk_delay = if data.len() > TCP_CHUNK_SIZE {
+        Duration::from_millis(TCP_CHUNK_DELAY_MS)
     } else {
-        stream
-            .write_all(data)
-            .map_err(|e| format!("Write to network printer {host}:{port}: {e}"))?;
-        stream
-            .flush()
-            .map_err(|e| format!("Flush network printer {host}:{port}: {e}"))?;
-    }
+        Duration::ZERO
+    };
+    let target_label = format!("network printer {host}:{port}");
+    let written = write_raw_payload_in_chunks(
+        &mut stream,
+        data,
+        TCP_CHUNK_SIZE,
+        chunk_delay,
+        write_deadline,
+        cancel,
+        &target_label,
+    )?;
 
     info!(
         host = %host,
@@ -1450,7 +1523,7 @@ pub fn print_raw_to_tcp(
 
     Ok(RawPrintResult {
         bytes_requested: data.len(),
-        bytes_written: data.len(),
+        bytes_written: written,
         doc_name: doc_name.to_string(),
     })
 }
@@ -1461,23 +1534,28 @@ pub fn probe_printer_tcp(host: &str, port: u16) -> Result<(), String> {
     Ok(())
 }
 
-pub fn print_raw_to_serial(
+pub fn print_raw_to_serial_cancellable(
     port_name: &str,
     baud_rate: u32,
     data: &[u8],
     doc_name: &str,
+    cancel: &AtomicBool,
 ) -> Result<RawPrintResult, String> {
-    use std::io::Write;
-
     let mut port = serialport::new(port_name, baud_rate)
         .timeout(Duration::from_millis(RAW_SERIAL_TIMEOUT_MS))
         .open()
         .map_err(|e| format!("Open serial printer {port_name} @ {baud_rate}: {e}"))?;
 
-    port.write_all(data)
-        .map_err(|e| format!("Write to serial printer {port_name}: {e}"))?;
-    port.flush()
-        .map_err(|e| format!("Flush serial printer {port_name}: {e}"))?;
+    let target_label = format!("serial printer {port_name} @ {baud_rate}");
+    let written = write_raw_payload_in_chunks(
+        &mut port,
+        data,
+        4096,
+        Duration::ZERO,
+        Instant::now() + Duration::from_millis(RAW_TCP_TOTAL_WRITE_DEADLINE_MS),
+        cancel,
+        &target_label,
+    )?;
 
     info!(
         port = %port_name,
@@ -1489,7 +1567,7 @@ pub fn print_raw_to_serial(
 
     Ok(RawPrintResult {
         bytes_requested: data.len(),
-        bytes_written: data.len(),
+        bytes_written: written,
         doc_name: doc_name.to_string(),
     })
 }
@@ -1532,17 +1610,27 @@ pub fn print_raw_for_target(
     data: &[u8],
     doc_name: &str,
 ) -> Result<RawPrintResult, String> {
+    let cancel = AtomicBool::new(false);
+    print_raw_for_target_cancellable(target, data, doc_name, &cancel)
+}
+
+pub fn print_raw_for_target_cancellable(
+    target: &ResolvedPrinterTarget,
+    data: &[u8],
+    doc_name: &str,
+    cancel: &AtomicBool,
+) -> Result<RawPrintResult, String> {
     match target {
         ResolvedPrinterTarget::WindowsQueue { printer_name } => {
-            print_raw_to_windows(printer_name, data, doc_name)
+            print_raw_to_windows_cancellable(printer_name, data, doc_name, cancel)
         }
         ResolvedPrinterTarget::RawTcp { host, port } => {
-            print_raw_to_tcp(host, *port, data, doc_name)
+            print_raw_to_tcp_cancellable(host, *port, data, doc_name, cancel)
         }
         ResolvedPrinterTarget::SerialPort {
             port_name,
             baud_rate,
-        } => print_raw_to_serial(port_name, *baud_rate, data, doc_name),
+        } => print_raw_to_serial_cancellable(port_name, *baud_rate, data, doc_name, cancel),
     }
 }
 
@@ -2587,8 +2675,31 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
     use std::thread;
+
+    struct FailOnSecondWrite {
+        writes: usize,
+    }
+
+    impl Write for FailOnSecondWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            if self.writes == 1 {
+                Ok(buf.len())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "simulated disconnect",
+                ))
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -2603,6 +2714,31 @@ mod tests {
             conn: Mutex::new(conn),
             db_path: PathBuf::from(":memory:"),
         }
+    }
+
+    #[test]
+    fn partial_raw_stream_failure_reports_unknown_state_instead_of_retryable_error() {
+        let mut writer = FailOnSecondWrite { writes: 0 };
+        let cancel = AtomicBool::new(false);
+        let error = write_raw_payload_in_chunks(
+            &mut writer,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            4,
+            Duration::ZERO,
+            Instant::now() + Duration::from_secs(1),
+            &cancel,
+            "network printer 192.168.1.19:9100",
+        )
+        .expect_err("the second chunk must fail");
+
+        assert!(
+            error.contains("wrote 4/8 bytes"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("raw print state is unknown"),
+            "partial streams must be fail-closed: {error}"
+        );
     }
 
     #[test]
@@ -2626,6 +2762,11 @@ mod tests {
             detect_printer_brand("mC-Print3 Network Utility"),
             PrinterBrand::Star
         );
+    }
+
+    #[test]
+    fn test_detect_printer_brand_recognizes_mcp3_queue_alias() {
+        assert_eq!(detect_printer_brand("MCP3"), PrinterBrand::Star);
     }
 
     #[test]

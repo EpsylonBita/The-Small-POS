@@ -765,9 +765,11 @@ fn resolve_request_terminal_id(conn: &Connection, payload: &Value) -> Option<Str
     }
 }
 
-fn is_local_placeholder_id(record_id: &str) -> bool {
+pub(crate) fn is_local_placeholder_id(record_id: &str) -> bool {
     let normalized = record_id.trim().to_ascii_lowercase();
-    normalized == "local-new" || normalized.starts_with("local-")
+    normalized == "local-new"
+        || normalized.starts_with("local-")
+        || normalized.starts_with("legacy:")
 }
 
 fn read_local_json_array_setting(conn: &Connection, key: &str) -> Vec<Value> {
@@ -4811,17 +4813,27 @@ fn prepare_order_request(
         false,
     );
     // Driver ids stored in local delivery rows are staff ids bound to the
-    // driver's local shift lifecycle. Replaying them on a status PATCH after
-    // checkout can make admin reject the whole order update as "Invalid
-    // driver". Keep delivery/status edits flowing and leave driver assignment
-    // validation to the dedicated assignment/create paths.
-    copy_payload_field(
-        &mut body,
-        payload,
-        &["driverName", "driver_name"],
-        "driver_name",
-        false,
-    );
+    // driver's local shift lifecycle. Replaying a non-null id on a status
+    // PATCH after checkout can make admin reject the whole order update as
+    // "Invalid driver". RESET is different: explicit nulls are safe and
+    // required so the remote order is unassigned too.
+    let is_reset_to_active = payload
+        .get("resetToActive")
+        .or_else(|| payload.get("reset_to_active"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if is_reset_to_active {
+        body.insert("driver_id".to_string(), Value::Null);
+        body.insert("driver_name".to_string(), Value::Null);
+    } else {
+        copy_payload_field(
+            &mut body,
+            payload,
+            &["driverName", "driver_name"],
+            "driver_name",
+            false,
+        );
+    }
     for (camel, snake) in [
         ("totalAmount", "total_amount"),
         ("subtotal", "subtotal"),
@@ -7356,6 +7368,17 @@ mod tests {
     }
 
     #[test]
+    fn customer_address_placeholder_ids_include_legacy_fallbacks() {
+        assert!(is_local_placeholder_id(
+            "legacy:08eaf112-25c4-4ae0-93c4-b8acd74d3e67"
+        ));
+        assert!(is_local_placeholder_id("LEGACY:customer-1"));
+        assert!(!is_local_placeholder_id(
+            "2ba6e969-99c7-42c8-a185-19b58e1e4531"
+        ));
+    }
+
+    #[test]
     fn prepare_customer_address_request_recreates_placeholder_updates_from_cache() {
         let conn = test_connection();
         seed_terminal_context(&conn);
@@ -7400,6 +7423,56 @@ mod tests {
         assert_eq!(
             body.get("customer_id").and_then(Value::as_str),
             Some("cust-1")
+        );
+    }
+
+    #[test]
+    fn prepare_customer_address_request_recreates_legacy_fallback_updates() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        seed_customer_cache(
+            &conn,
+            "cust-legacy",
+            json!({
+                "id": "legacy:cust-legacy",
+                "street_address": "I. Kondylaki 10",
+                "city": "Thessaloniki",
+                "postal_code": "542 48",
+                "floor_number": "3"
+            }),
+        );
+
+        let item = queue_item(
+            "customer_addresses",
+            "UPDATE",
+            "legacy:cust-legacy",
+            json!({
+                "customer_id": "cust-legacy",
+                "street_address": "I. Kondylaki 10",
+                "city": "Thessaloniki",
+                "postal_code": "542 48",
+                "floor_number": "3"
+            }),
+        );
+
+        let request = match prepare_request(&conn, &item).expect("prepare request") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+
+        assert_eq!(request.endpoint, "/api/pos/customers/cust-legacy/addresses");
+        assert_eq!(request.method, Method::POST);
+
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+        assert_eq!(
+            body.get("street_address").and_then(Value::as_str),
+            Some("I. Kondylaki 10")
+        );
+        assert_eq!(body.get("id"), None);
+        assert_eq!(
+            body.get("customer_id").and_then(Value::as_str),
+            Some("cust-legacy")
         );
     }
 
@@ -7458,6 +7531,64 @@ mod tests {
         assert_eq!(
             payload.get("street_address").and_then(Value::as_str),
             Some("Main St 42")
+        );
+    }
+
+    #[test]
+    fn retry_failed_customer_address_not_found_items_requeues_legacy_fallback_updates() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        seed_customer_cache(
+            &conn,
+            "cust-legacy",
+            json!({
+                "id": "legacy:cust-legacy",
+                "street_address": "I. Kondylaki 10",
+                "city": "Thessaloniki"
+            }),
+        );
+
+        let queue_id = enqueue_test_item(
+            &conn,
+            "customer_addresses",
+            "UPDATE",
+            "legacy:cust-legacy",
+            json!({
+                "customer_id": "cust-legacy",
+                "street_address": "I. Kondylaki 10",
+                "city": "Thessaloniki"
+            }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 error_message = ?1
+             WHERE id = ?2",
+            params![
+                "HTTP 404: {\"success\":false,\"error\":\"Address not found\"}",
+                queue_id.as_str()
+            ],
+        )
+        .expect("seed failed legacy customer address row");
+
+        let result = retry_failed_customer_address_not_found_items_limited(&conn, 1)
+            .expect("retry failed legacy customer address row");
+
+        assert_eq!(result.retried, 1);
+
+        let (status, payload): (String, String) = conn
+            .query_row(
+                "SELECT status, data FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load repaired queue row");
+        assert_eq!(status, "pending");
+
+        let payload = serde_json::from_str::<Value>(&payload).expect("parse repaired payload");
+        assert_eq!(
+            payload.get("street_address").and_then(Value::as_str),
+            Some("I. Kondylaki 10")
         );
     }
 
@@ -8824,6 +8955,55 @@ mod tests {
         assert_eq!(
             body.get("driver_name").and_then(Value::as_str),
             Some("Driver Name")
+        );
+    }
+
+    #[test]
+    fn prepare_order_reset_request_explicitly_clears_remote_driver() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents,
+                order_type, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'order-reset-driver', 'remote-order-reset-driver',
+                '[]', 9.20, 920, 'delivery', 'pending', 'pending',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed reset delivery order");
+
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-reset-driver",
+            json!({
+                "orderId": "order-reset-driver",
+                "orderType": "delivery",
+                "status": "pending",
+                "driverId": Value::Null,
+                "driverName": Value::Null,
+                "resetToActive": true,
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare reset request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready reset request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse reset request body");
+
+        assert_eq!(body.get("status").and_then(Value::as_str), Some("pending"));
+        assert_eq!(body.get("driver_id"), Some(&Value::Null));
+        assert_eq!(body.get("driver_name"), Some(&Value::Null));
+        assert!(
+            body.get("resetToActive").is_none(),
+            "local reset marker must not leak into the API schema"
         );
     }
 

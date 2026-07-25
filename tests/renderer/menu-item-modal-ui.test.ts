@@ -26,18 +26,18 @@ test('main quantity stepper buttons are accessibly labeled with matching lucide 
   );
   assert.match(
     source,
-    /aria-label=\{t\('common\.actions\.decrease', \{ defaultValue: 'Decrease quantity' \}\)\}[\s\S]*?<Minus className="h-5 w-5 text-white drop-shadow-\[0_1px_2px_rgba\(0,0,0,0\.7\)\]" strokeWidth=\{3\.5\} aria-hidden="true" \/>/,
+    /aria-label=\{t\('common\.actions\.decrease', \{ defaultValue: 'Decrease quantity' \}\)\}[\s\S]*?<Minus className="h-5 w-5" strokeWidth=\{3\.5\} aria-hidden="true" \/>/,
     'the decrement button needs an accessible label and a visible Minus icon',
   );
   assert.match(
     source,
-    /aria-label=\{t\('common\.actions\.increase', \{ defaultValue: 'Increase quantity' \}\)\}[\s\S]*?<Plus className="h-5 w-5 text-white drop-shadow-\[0_1px_2px_rgba\(0,0,0,0\.7\)\]" strokeWidth=\{3\.5\} aria-hidden="true" \/>/,
+    /aria-label=\{t\('common\.actions\.increase', \{ defaultValue: 'Increase quantity' \}\)\}[\s\S]*?<Plus className="h-5 w-5" strokeWidth=\{3\.5\} aria-hidden="true" \/>/,
     'the increment button needs an accessible label and a visible Plus icon',
   );
   assert.match(
     source,
-    /border border-white\/45 bg-white\/20 text-white shadow-\[0_0_0_1px_rgba\(255,255,255,0\.12\)\]/,
-    'the footer stepper buttons need enough contrast to keep the icon glyph visible',
+    /className="liquid-glass-modal-icon-button flex h-9 w-9 items-center justify-center rounded-full"/,
+    'the footer stepper buttons must inherit the shared theme-aware contrast',
   );
 });
 
@@ -69,7 +69,7 @@ test('notes overlay is portaled app-level above the modal, not an in-container a
   assert.match(source, /import \{ renderModalPortal \} from '\.\.\/\.\.\/utils\/render-modal-portal';/);
   assert.match(source, /\{showNotesOverlay && renderModalPortal\(\s*<div/);
   // Full-screen, blurred backdrop above the parent modal layer.
-  assert.match(source, /className="fixed inset-0 z-\[20050\][^"]*bg-black\/60 backdrop-blur-sm/);
+  assert.match(source, /className="fixed inset-0 z-\[20050\][^"]*bg-slate-950\/45 backdrop-blur-sm/);
 
   // The clipped in-container overlay is gone.
   assert.doesNotMatch(source, /\{showNotesOverlay && \(\s*<div/);
@@ -95,7 +95,7 @@ test('notes textarea handles Escape to close only the notes overlay (not the par
   assert.doesNotMatch(source, /onKeyDown=\{\(e\) => e\.stopPropagation\(\)\}/);
   // The overlay stays portaled with the blurred backdrop (no regression).
   assert.match(source, /\{showNotesOverlay && renderModalPortal\(/);
-  assert.match(source, /className="fixed inset-0 z-\[20050\][^"]*bg-black\/60 backdrop-blur-sm/);
+  assert.match(source, /className="fixed inset-0 z-\[20050\][^"]*bg-slate-950\/45 backdrop-blur-sm/);
 });
 
 test('notes overlay action uses a localized key present in every POS locale', () => {

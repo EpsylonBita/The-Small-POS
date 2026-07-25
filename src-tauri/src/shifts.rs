@@ -563,7 +563,8 @@ fn load_cash_drawer_snapshot_for_shift(
 ///
 /// For cashier/manager: expected = opening + cash_sales - refunds - expenses
 ///   - deducted_staff_payments - drops - driver_cash_given + driver_cash_returned
-///     For driver/server: expected = opening + cash_collected - expenses
+///     For driver: expected = opening + cash_collected - expenses - tips
+///     For server: expected = opening + cash_collected - expenses
 ///
 /// For calculation_version >= 2, recorded staff payouts for the cashier shift are
 /// used as the source of truth, with the cash drawer aggregate as a fallback.
@@ -1004,7 +1005,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         } else if is_non_financial_role {
             expected = 0.0;
         } else {
-            // Driver / server: expected = opening + cash collected - expenses
+            // Driver / server cash return. Driver tips are kept by the driver,
+            // so they are removed from the cash handed back to the cashier.
             let cash_collected = if role_type == "driver" {
                 compute_shift_cash_collected(&conn, &shift_id, &role_type)?
             } else {
@@ -1026,7 +1028,17 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 Some(now.as_str()),
             );
             let _legacy_payment_amount = payment_amount.unwrap_or(0.0);
-            expected = opening_cash + cash_collected - expenses;
+            expected = if role_type == "driver" {
+                let tips = compute_driver_shift_tip_total_in_window(
+                    &conn,
+                    &shift_id,
+                    Some(shift_check_in_time.as_str()),
+                    Some(now.as_str()),
+                )?;
+                calculate_driver_return(opening_cash, cash_collected, expenses, tips)
+            } else {
+                opening_cash + cash_collected - expenses
+            };
         }
 
         let variance = if is_non_financial_role {
@@ -1875,6 +1887,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                     "SELECT o.id,
                             COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
                             COALESCE(o.delivery_fee_cents, CAST(ROUND(o.delivery_fee * 100) AS INTEGER), 0),
+                            COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0),
                             o.branch_id
                      FROM orders o
                      WHERE (o.driver_id = ?1 OR o.staff_shift_id = ?2)
@@ -1885,21 +1898,22 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 )
                 .map_err(|e| format!("prepare backfill: {e}"))?;
             let now = chrono::Utc::now().to_rfc3339();
-            let backfill_rows: Vec<(String, f64, f64, String)> = missing_stmt
+            let backfill_rows: Vec<(String, f64, f64, f64, String)> = missing_stmt
                 .query_map(params![driver_staff_id, shift_id, check_in_time], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         // W4b-ii: cents → f64-dp2.
                         Cents::new(row.get::<_, i64>(1).unwrap_or(0)).to_f64_dp2(),
                         Cents::new(row.get::<_, i64>(2).unwrap_or(0)).to_f64_dp2(),
-                        row.get::<_, String>(3).unwrap_or_default(),
+                        Cents::new(row.get::<_, i64>(3).unwrap_or(0)).to_f64_dp2(),
+                        row.get::<_, String>(4).unwrap_or_default(),
                     ))
                 })
                 .map_err(|e| format!("backfill query: {e}"))?
                 .filter_map(|r| r.ok())
                 .collect();
 
-            for (oid, total, del_fee, bid) in &backfill_rows {
+            for (oid, total, del_fee, tip, bid) in &backfill_rows {
                 let (_, cash, card, _total_paid) =
                     compute_shift_payment_totals_for_order(&conn, oid, *total, "cash")?;
                 let payment_method = if cash > 0.0 && card > 0.0 {
@@ -1910,13 +1924,29 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                     "cash".to_string()
                 };
                 let eid = uuid::Uuid::new_v4().to_string();
+                let delivery_fee_cents = Cents::round_half_even(*del_fee).as_i64();
+                let tip_cents = Cents::round_half_even(*tip).as_i64();
+                let total_earning = *del_fee + *tip;
+                let total_earning_cents = Cents::round_half_even(total_earning).as_i64();
+                let cash_cents = Cents::round_half_even(cash).as_i64();
+                let card_cents = Cents::round_half_even(card).as_i64();
                 let _ = conn.execute(
                     "INSERT OR IGNORE INTO driver_earnings (
                         id, driver_id, staff_shift_id, order_id, branch_id,
-                        delivery_fee, tip_amount, total_earning,
-                        payment_method, cash_collected, card_amount, cash_to_return,
+                        delivery_fee, delivery_fee_cents,
+                        tip_amount, tip_amount_cents,
+                        total_earning, total_earning_cents,
+                        payment_method,
+                        cash_collected, cash_collected_cents,
+                        card_amount, card_amount_cents,
+                        cash_to_return, cash_to_return_cents,
                         settled, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?6, ?7, ?8, ?9, ?8, 0, ?10, ?10)",
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5,
+                        ?6, ?7, ?8, ?9, ?10, ?11,
+                        ?12, ?13, ?14, ?15, ?16, ?13, ?14,
+                        0, ?17, ?17
+                    )",
                     params![
                         eid,
                         driver_staff_id,
@@ -1924,9 +1954,16 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                         oid,
                         bid,
                         del_fee,
+                        delivery_fee_cents,
+                        tip,
+                        tip_cents,
+                        total_earning,
+                        total_earning_cents,
                         payment_method,
                         cash,
+                        cash_cents,
                         card,
+                        card_cents,
                         now
                     ],
                 );
@@ -1945,13 +1982,25 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 // W4b-ii: cents-with-real-fallback shim on 7 monetary cols.
                 "SELECT de.id, de.order_id,
                         COALESCE(de.delivery_fee_cents, CAST(ROUND(de.delivery_fee * 100) AS INTEGER), 0),
-                        COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
-                        COALESCE(de.total_earning_cents, CAST(ROUND(de.total_earning * 100) AS INTEGER), 0),
+                        MAX(
+                            COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                            COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0)
+                        ),
+                        COALESCE(de.total_earning_cents, CAST(ROUND(de.total_earning * 100) AS INTEGER), 0)
+                            + MAX(
+                                COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0)
+                                    - COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                                0
+                            ),
                         de.payment_method,
                         COALESCE(de.cash_collected_cents, CAST(ROUND(de.cash_collected * 100) AS INTEGER), 0),
                         COALESCE(de.card_amount_cents, CAST(ROUND(de.card_amount * 100) AS INTEGER), 0),
                         COALESCE(de.cash_to_return_cents, CAST(ROUND(de.cash_to_return * 100) AS INTEGER), 0),
-                        o.order_number, o.delivery_address,
+                        COALESCE(
+                            NULLIF(TRIM(o.display_order_number), ''),
+                            o.order_number
+                        ),
+                        o.delivery_address,
                         COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER)),
                         o.status, o.customer_name, o.customer_phone
                  FROM driver_earnings de
@@ -1997,6 +2046,63 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     let overall = &breakdown["overall"];
     let orders_count = overall["totalCount"].as_i64().unwrap_or(0);
     let sales_amount = overall["totalAmount"].as_f64().unwrap_or(0.0);
+    let resolved_tips_received = if tips_received > 0.0 || role_type != "driver" {
+        tips_received
+    } else {
+        driver_deliveries
+            .iter()
+            .filter(|delivery| {
+                !matches!(
+                    delivery
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "cancelled" | "canceled" | "refunded"
+                )
+            })
+            .map(|delivery| {
+                delivery
+                    .get("tip_amount")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+            })
+            .sum::<f64>()
+    };
+    let amount_to_return = if role_type == "driver" {
+        let opening = shift["opening_cash_amount"].as_f64().unwrap_or(0.0);
+        let cash_collected = driver_deliveries
+            .iter()
+            .filter(|delivery| {
+                !matches!(
+                    delivery
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "cancelled" | "canceled" | "refunded"
+                )
+            })
+            .map(|delivery| {
+                delivery
+                    .get("cash_collected")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+            })
+            .sum::<f64>();
+        Some(calculate_driver_return(
+            opening,
+            cash_collected,
+            total_expenses,
+            resolved_tips_received,
+        ))
+    } else {
+        None
+    };
 
     let mut result = serde_json::json!({
         "shift": shift,
@@ -2009,7 +2115,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         "driverDeliveries": driver_deliveries,
         "waiterTables": waiter_tables,
         "staffPayments": staff_payments,
-        "tipsReceived": tips_received,
+        "tipsReceived": resolved_tips_received,
+        "amountToReturn": amount_to_return,
         "tipAllocations": tip_allocations,
         "ordersCount": orders_count,
         "salesAmount": sales_amount,
@@ -3364,6 +3471,63 @@ fn compute_shift_expenses_total(conn: &rusqlite::Connection, shift_id: &str) -> 
     compute_shift_expenses_total_in_window(conn, shift_id, None, None)
 }
 
+pub(crate) fn calculate_driver_return(
+    opening_amount: f64,
+    cash_collected: f64,
+    expenses: f64,
+    tips_received: f64,
+) -> f64 {
+    (Cents::round_half_even(opening_amount) + Cents::round_half_even(cash_collected)
+        - Cents::round_half_even(expenses)
+        - Cents::round_half_even(tips_received))
+    .to_f64_dp2()
+}
+
+fn compute_driver_shift_tip_total_in_window(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    window_start: Option<&str>,
+    window_end: Option<&str>,
+) -> Result<f64, String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let sql = format!(
+        "SELECT COALESCE(SUM(MAX(
+                    COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0),
+                    COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                    COALESCE((
+                        SELECT SUM(COALESCE(
+                            op.tip_amount_cents,
+                            CAST(ROUND(op.tip_amount * 100) AS INTEGER),
+                            0
+                        ))
+                        FROM order_payments op
+                        WHERE op.order_id = o.id
+                          AND op.tip_recipient_staff_shift_id = ?1
+                          AND op.status = 'completed'
+                    ), 0)
+                )), 0)
+         FROM orders o
+         LEFT JOIN driver_earnings de
+           ON de.order_id = o.id
+          AND de.staff_shift_id = ?1
+         WHERE (de.staff_shift_id IS NOT NULL OR o.staff_shift_id = ?1)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.order_type, 'dine-in') = 'delivery'
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           AND (de.id IS NULL OR (
+                COALESCE(de.settled, 0) = 0
+                AND COALESCE(de.is_transferred, 0) = 0
+           ))
+           AND (?2 IS NULL OR {financial_expr} >= ?2)
+           AND (?3 IS NULL OR {financial_expr} <= ?3)"
+    );
+    conn.query_row(&sql, params![shift_id, window_start, window_end], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|cents| Cents::new(cents).to_f64_dp2())
+    .map_err(|e| format!("query driver tip total: {e}"))
+}
+
 fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
     match role_type {
         "driver" => format!("AND COALESCE({order_alias}.order_type, 'dine-in') = 'delivery'"),
@@ -3739,7 +3903,12 @@ fn compute_inherited_cash_staff_expected_returns(
     for (staff_shift_id, role_type, opening) in &drivers {
         let cash_collected = compute_shift_cash_collected(conn, staff_shift_id, role_type)?;
         let expenses = compute_shift_expenses_total(conn, staff_shift_id);
-        total += opening + cash_collected - expenses;
+        total += if role_type == "driver" {
+            let tips = compute_driver_shift_tip_total_in_window(conn, staff_shift_id, None, None)?;
+            calculate_driver_return(*opening, cash_collected, expenses, tips)
+        } else {
+            opening + cash_collected - expenses
+        };
     }
 
     Ok(total)
@@ -3840,7 +4009,21 @@ pub(crate) fn build_cashier_staff_checkout_rows(
             Some(check_in_time.as_str()),
             check_out_time.as_deref(),
         );
-        let amount_to_return = opening_cash_amount + cash_collected - expenses;
+        let tips_received = if role_type == "driver" {
+            compute_driver_shift_tip_total_in_window(
+                conn,
+                &staff_shift_id,
+                Some(check_in_time.as_str()),
+                check_out_time.as_deref(),
+            )?
+        } else {
+            0.0
+        };
+        let amount_to_return = if role_type == "driver" {
+            calculate_driver_return(opening_cash_amount, cash_collected, expenses, tips_received)
+        } else {
+            opening_cash_amount + cash_collected - expenses
+        };
         let display_name = staff_name.clone().unwrap_or_else(|| staff_id.clone());
 
         result.push(serde_json::json!({
@@ -3858,6 +4041,7 @@ pub(crate) fn build_cashier_staff_checkout_rows(
             "total_amount": total_amount,
             "order_count": order_count,
             "expenses": expenses,
+            "tips_received": tips_received,
             "amount_to_return": amount_to_return,
             "check_in_time": check_in_time,
             "check_out_time": check_out_time,
@@ -4537,38 +4721,45 @@ mod tests {
                 [],
             ).unwrap();
 
-            // Order (30.0 → 3000)
+            // Order (30.0 → 3000) with a 1.50 driver tip.
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-                 VALUES ('ord-d1', '[]', 30.0, 3000, 'completed', 'pending', datetime('now'), datetime('now'))",
+                "INSERT INTO orders (
+                    id, items, order_type, total_amount, total_amount_cents,
+                    tip_amount, tip_amount_cents, status, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-d1', '[]', 'delivery', 30.0, 3000,
+                    1.5, 150, 'completed', 'pending', datetime('now'), datetime('now')
+                 )",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
 
-            // Driver earnings: cash_collected = 30 (30.0 → 3000)
+            // Driver earnings: cash_collected = 30 and tips = 1.50.
             conn.execute(
                 "INSERT INTO driver_earnings (id, driver_id, staff_shift_id, order_id, branch_id,
-                    total_earning, total_earning_cents,
+                    tip_amount, tip_amount_cents, total_earning, total_earning_cents,
                     payment_method,
                     cash_collected, cash_collected_cents,
                     created_at, updated_at)
                  VALUES ('de-1', 'driver-1', 'driver-shift', 'ord-d1', 'branch-1',
-                    30.0, 3000, 'cash', 30.0, 3000, datetime('now'), datetime('now'))",
+                    1.5, 150, 1.5, 150, 'cash', 30.0, 3000, datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
         }
 
-        // Close the driver shift (closingCash = 80 => expected = 50 + 30 - 0 = 80, variance = 0)
+        // The driver keeps the 1.50 tip:
+        // expected return = 50 opening + 30 cash - 1.50 tips = 78.50.
         let payload = serde_json::json!({
             "shiftId": "driver-shift",
-            "closingCash": 80.0,
+            "closingCash": 78.5,
         });
         let result = close_shift(&db, &payload).unwrap();
         assert_eq!(result["success"], true);
-        assert_eq!(result["expected"], 80.0);
+        assert_eq!(result["expected"], 78.5);
         assert_eq!(result["variance"], 0.0);
 
-        // Verify cashier's drawer was updated with driver_cash_returned = 80.0
+        // Verify the cashier drawer records only the cash actually returned.
         let conn = db.conn.lock().unwrap();
         let returned: f64 = conn
             .query_row(
@@ -4578,8 +4769,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            returned, 80.0,
-            "driver_cash_returned should be 80.0 (expected return)"
+            returned, 78.5,
+            "driver_cash_returned should exclude the tip kept by the driver"
         );
     }
 
@@ -5721,11 +5912,12 @@ mod tests {
 
         conn.execute(
             "INSERT INTO orders (
-                id, order_number, items, total_amount, total_amount_cents, status, order_type,
-                payment_status, staff_shift_id, sync_status, created_at, updated_at
+                id, order_number, display_order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id, tip_amount, tip_amount_cents,
+                sync_status, created_at, updated_at
             ) VALUES (
-                'order-delivery', '#D1', '[]', 30.0, 3000, 'completed', 'delivery',
-                'paid', 'driver-shift', 'pending', ?1, ?1
+                'order-delivery', 'ORD-INTERNAL-D1', '00005', '[]', 30.0, 3000, 'completed', 'delivery',
+                'paid', 'driver-shift', 1.5, 150, 'pending', ?1, ?1
             )",
             params![now],
         )
@@ -5795,6 +5987,11 @@ mod tests {
                 .unwrap_or_default(),
             1
         );
+        assert_eq!(summary["driverDeliveries"][0]["order_number"], "00005");
+        assert_eq!(summary["driverDeliveries"][0]["tip_amount"], 1.5);
+        assert_eq!(summary["driverDeliveries"][0]["total_earning"], 1.5);
+        assert_eq!(summary["tipsReceived"], 1.5);
+        assert_eq!(summary["amountToReturn"], 48.5);
     }
 
     #[test]

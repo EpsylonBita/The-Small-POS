@@ -945,9 +945,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             {onAddManualItem && !isSelectionMode && (
               <button
                 onClick={() => setShowManualInput((prev) => !prev)}
-                className={`p-1.5 rounded-lg transition-colors ${
+                className={`flex items-center justify-center p-1.5 rounded-lg transition-colors ${
                   showManualInput
-                    ? 'bg-amber-500 text-black'
+                    ? 'bg-yellow-400 text-black active:bg-yellow-300'
                     : 'liquid-glass-modal-text-muted active:bg-black/5 dark:active:bg-white/10'
                 }`}
                 aria-label={t('menu.cart.addManualItem', 'Manual Item')}
@@ -1446,7 +1446,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   aria-label={appliedCoupon
                     ? t('menu.cart.couponApplied', 'Coupon applied')
                     : t('menu.cart.couponButton', 'Coupon')}
-                  className={`${cartActionIconButtonBaseClass} text-amber-600 focus:ring-amber-400 dark:text-amber-300`}
+                  className={`${cartActionIconButtonBaseClass} text-yellow-500 focus:ring-yellow-400 dark:text-yellow-300`}
                 >
                   {isValidatingCoupon ? (
                     <Loader2 className="h-8 w-8 animate-spin flex-shrink-0" />
@@ -1465,8 +1465,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   aria-label={loyaltyActionTitle}
                   className={`${cartActionIconButtonBaseClass} ${
                     loyaltyRedeemAvailable
-                      ? 'text-amber-600 focus:ring-amber-400 dark:text-amber-300'
-                      : 'cursor-not-allowed text-amber-700/35 dark:text-amber-200/35'
+                      ? 'text-yellow-500 focus:ring-yellow-400 dark:text-yellow-300'
+                      : 'cursor-not-allowed text-yellow-700/35 dark:text-yellow-200/35'
                   }`}
                 >
                   {loyaltyRedeemLoading ? (
@@ -1483,7 +1483,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   type="button"
                   onClick={openDiscountModal}
                   aria-label={discountActionTitle}
-                  className={`${cartActionIconButtonBaseClass} text-amber-600 focus:ring-amber-400 dark:text-amber-300`}
+                  className={`${cartActionIconButtonBaseClass} text-yellow-500 focus:ring-yellow-400 dark:text-yellow-300`}
                 >
                   <Percent className="h-8 w-8 flex-shrink-0" aria-hidden="true" />
                   <span className="sr-only">{t('menu.cart.discountAmount', 'Discount')}</span>

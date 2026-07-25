@@ -96,7 +96,7 @@ export const RoomFloorChips: React.FC<RoomFloorChipsProps> = ({ floors, value, o
 
   const chipClass = (active: boolean): string =>
     `shrink-0 rounded-full px-3.5 py-2 text-sm font-medium transition-transform duration-150 active:scale-95 ${
-      active ? 'bg-yellow-400 text-black' : 'bg-white/10 text-white/70'
+      active ? 'bg-yellow-400 text-black' : 'liquid-glass-modal-button liquid-glass-modal-text'
     }`;
 
   return (
@@ -177,10 +177,10 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
       <div className="p-2">
         {rooms.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-10 text-center">
-            <EmptyIcon className="h-12 w-12 text-white/30" strokeWidth={1.5} />
-            <p className="text-sm text-white/60">{emptyMessage}</p>
+            <EmptyIcon className="h-12 w-12 liquid-glass-modal-text-muted opacity-60" strokeWidth={1.5} />
+            <p className="liquid-glass-modal-text-muted text-sm">{emptyMessage}</p>
             {emptyHelper && (
-              <p className="max-w-sm text-xs leading-relaxed text-white/45">{emptyHelper}</p>
+              <p className="liquid-glass-modal-text-muted max-w-sm text-xs leading-relaxed">{emptyHelper}</p>
             )}
           </div>
         ) : (
@@ -188,8 +188,8 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
             <RoomFloorChips floors={floors} value={floorFilter} onChange={setFloorFilter} />
             {visibleRooms.length === 0 ? (
               <div className="flex flex-col items-center gap-2 py-10 text-center">
-                <EmptyIcon className="h-12 w-12 text-white/30" strokeWidth={1.5} />
-                <p className="text-sm text-white/60">{t('roomsView.noRooms', { defaultValue: 'No rooms found' })}</p>
+                <EmptyIcon className="h-12 w-12 liquid-glass-modal-text-muted opacity-60" strokeWidth={1.5} />
+                <p className="liquid-glass-modal-text-muted text-sm">{t('roomsView.noRooms', { defaultValue: 'No rooms found' })}</p>
               </div>
             ) : (
               <div className="grid max-h-[60vh] grid-cols-1 gap-2 overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -207,17 +207,17 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
                       })}
                       className={`flex flex-col gap-1 rounded-2xl border-2 px-4 py-3 text-left transition-transform duration-150 active:scale-95 ${accentClass}`}
                     >
-                      <span className="text-base font-bold text-white">
+                      <span className="liquid-glass-modal-text text-base font-bold">
                         {t('orderFlow.roomOrderSelectRoom', {
                           room: room.roomNumber,
                           defaultValue: 'Room {{room}}',
                         })}
                       </span>
-                      {typeLabel && <span className="text-xs capitalize text-white/60">{typeLabel}</span>}
+                      {typeLabel && <span className="liquid-glass-modal-text-muted text-xs capitalize">{typeLabel}</span>}
                       {isCheckin
-                        ? guest && <span className="text-sm text-white/70">{guest}</span>
+                        ? guest && <span className="liquid-glass-modal-text-muted text-sm">{guest}</span>
                         : room.ratePerNight != null && (
-                            <span className="text-xs font-semibold text-purple-200">
+                            <span className="text-xs font-semibold text-purple-700 dark:text-purple-200">
                               {formatCurrency(room.ratePerNight || 0)}
                             </span>
                           )}
@@ -238,7 +238,7 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
 // ---------------------------------------------------------------------------------------------
 
 const fieldClass =
-  'w-full rounded-xl border border-white/15 bg-white/10 px-3 py-3 text-base text-white placeholder-white/40 focus:border-white/40 focus:outline-none';
+  'liquid-glass-modal-input w-full rounded-xl px-3 py-3 text-base focus:outline-none';
 
 const GlassInput: React.FC<{
   icon?: React.ReactNode;
@@ -249,12 +249,12 @@ const GlassInput: React.FC<{
   required?: boolean;
 }> = ({ icon, label, value, onChange, type = 'text', required }) => (
   <div>
-    <label className="mb-1.5 block text-sm font-medium text-white/70">
+    <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
       {label} {required && <span className="text-red-400">*</span>}
     </label>
     <div className="relative">
       {icon && (
-        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40">{icon}</span>
+        <span className="liquid-glass-modal-text-muted absolute left-3 top-1/2 -translate-y-1/2">{icon}</span>
       )}
       <input
         type={type}
@@ -269,13 +269,13 @@ const GlassInput: React.FC<{
 const RoomChip: React.FC<{ room: Room; subtitle?: string | null }> = ({ room, subtitle }) => {
   const { t } = useTranslation();
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3">
-      <BedDouble className="h-6 w-6 shrink-0 text-white/70" strokeWidth={1.6} />
+    <div className="liquid-glass-modal-inset flex items-center gap-3 rounded-2xl px-4 py-3">
+      <BedDouble className="liquid-glass-modal-text-muted h-6 w-6 shrink-0" strokeWidth={1.6} />
       <div className="min-w-0">
-        <p className="truncate text-base font-bold text-white">
+        <p className="liquid-glass-modal-text truncate text-base font-bold">
           {t('orderFlow.roomOrderSelectRoom', { room: room.roomNumber, defaultValue: 'Room {{room}}' })}
         </p>
-        {subtitle && <p className="truncate text-xs text-white/60">{subtitle}</p>}
+        {subtitle && <p className="liquid-glass-modal-text-muted truncate text-xs">{subtitle}</p>}
       </div>
     </div>
   );
@@ -498,7 +498,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
         </div>
 
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-white/70">
+          <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
             {t('roomsView.numberOfNights', { defaultValue: 'Number of Nights' })}
           </label>
           <input
@@ -512,7 +512,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
 
         {!hasGuestBilling && hasOrders && (
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-white/70">
+            <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
               {t('roomsView.paymentMethod', { defaultValue: 'Payment Method' })}
             </label>
             <div className="grid grid-cols-3 gap-2">
@@ -524,7 +524,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
                   className={`rounded-xl px-3 py-3 text-sm font-medium capitalize transition-transform duration-150 active:scale-95 ${
                     paymentMethod === method
                       ? 'bg-yellow-400 text-black'
-                      : 'bg-white/10 text-white/70'
+                      : 'liquid-glass-modal-button liquid-glass-modal-text'
                   }`}
                 >
                   {t(`roomsView.paymentMethods.${method}`, { defaultValue: method })}
@@ -534,13 +534,13 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
           </div>
         )}
 
-        <div className="flex items-center justify-between rounded-2xl bg-white/[0.06] p-4">
-          <span className="text-sm text-white/70">
+        <div className="liquid-glass-modal-inset flex items-center justify-between rounded-2xl p-4">
+          <span className="liquid-glass-modal-text-muted text-sm">
             {hasGuestBilling
               ? t('roomsView.estimatedStayCharge', { defaultValue: 'Estimated Stay Charge' })
               : t('roomsView.totalAmount', { defaultValue: 'Total Amount' })}
           </span>
-          <span className="text-2xl font-bold text-white">{formatCurrency(totalAmount)}</span>
+          <span className="liquid-glass-modal-text text-2xl font-bold">{formatCurrency(totalAmount)}</span>
         </div>
 
         <div className="flex gap-3 pt-1">
@@ -670,7 +670,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-white/70">
+            <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
               {t('roomsView.checkInDate', { defaultValue: 'Check-in Date' })}
             </label>
             <input
@@ -681,7 +681,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             />
           </div>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-white/70">
+            <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
               {t('roomsView.checkOutDate', { defaultValue: 'Check-out Date' })}
             </label>
             <input
@@ -694,7 +694,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
         </div>
 
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-white/70">
+          <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
             {t('roomsView.notes', { defaultValue: 'Notes' })}
           </label>
           <textarea

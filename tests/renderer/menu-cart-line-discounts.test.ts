@@ -105,6 +105,44 @@ test('MenuCart keeps manual item entry available while editing an order', () => 
   );
 });
 
+test('MenuCart centers the manual-item plus inside its enlarged touch target', () => {
+  const menuCart = source(menuCartPath);
+  const labelIdx = menuCart.indexOf("aria-label={t('menu.cart.addManualItem'");
+  const buttonIdx = menuCart.lastIndexOf('<button', labelIdx);
+
+  assert.ok(labelIdx > 0 && buttonIdx > 0, 'manual item toggle button should exist');
+  const buttonBlock = menuCart.slice(buttonIdx, labelIdx);
+  assert.match(
+    buttonBlock,
+    /flex items-center justify-center/,
+    'the global touch target may enlarge the button, so its plus icon must be centered explicitly',
+  );
+  assert.match(
+    buttonBlock,
+    /bg-yellow-400 text-black/,
+    'the active manual-item toggle should use the POS yellow accent',
+  );
+  assert.doesNotMatch(
+    buttonBlock,
+    /bg-amber-/,
+    'the active manual-item toggle should not render orange/amber',
+  );
+});
+
+test('MenuCart uses the yellow POS accent for its quick-action icons', () => {
+  const menuCart = source(menuCartPath);
+
+  for (const icon of ['Ticket', 'Award', 'Percent']) {
+    const iconIdx = menuCart.indexOf(`<${icon} className="h-8 w-8 flex-shrink-0"`);
+    const buttonIdx = menuCart.lastIndexOf('<button', iconIdx);
+    assert.ok(iconIdx > 0 && buttonIdx > 0, `${icon} cart action should exist`);
+
+    const buttonBlock = menuCart.slice(buttonIdx, iconIdx);
+    assert.match(buttonBlock, /text-yellow-/, `${icon} should use the yellow POS accent`);
+    assert.doesNotMatch(buttonBlock, /text-amber-|focus:ring-amber-/, `${icon} should not render orange/amber`);
+  }
+});
+
 test('MenuModal passes manual item entry into the cart while editing an order', () => {
   const menuModal = source(menuModalPath);
   const menuCartMatch = menuModal.match(/<MenuCart[\s\S]*?\/>/);
