@@ -2002,8 +2002,8 @@ test('parseFolioCheckoutOutstanding recognizes both transport shapes', () => {
   assert.equal(browser.outstanding, true);
   assert.equal(browser.balance, 84.5);
 
-  // Tauri IPC path: admin_fetch folds the entire JSON body into the error
-  // string and no status survives the bridge.
+  // Legacy Tauri IPC shape: keep parsing folded error text for clients that
+  // predate the bridge's structured status projection.
   const ipc = parseFolioCheckoutOutstanding(
     'Cannot complete checkout with outstanding balance 84.50. (HTTP 409): {"success":false,"error":"Cannot complete checkout with outstanding balance 84.50.","code":"folio_checkout_outstanding","balance":84.5,"reconciliation":{"status":"outstanding","paid":false}}',
     undefined,

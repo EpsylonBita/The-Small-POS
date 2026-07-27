@@ -2,34 +2,38 @@
  * CallerIdPopup — Toast notification for incoming VoIP calls.
  *
  * Shows a non-blocking toast (top-right, 15s auto-dismiss) with caller info.
- * Known customers get "View Customer" + "Start Order" buttons.
- * Unknown callers get "Add Customer" button.
+ * The only explicit action opens the existing customer search with the
+ * normalized caller number; it never starts or mutates operational work.
  */
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 import { toast } from 'react-hot-toast'
-import { PhoneIncoming, User, ShoppingCart, UserPlus, X } from 'lucide-react'
+import { PhoneIncoming, Search, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { CallerIdBroadcastEvent } from '../../services/CallerIdRealtimeService'
 
 /** Duration before auto-dismiss (ms) */
 const TOAST_DURATION = 15_000
 
-interface CallerIdToastContentProps {
+export interface CallerIdToastContentProps {
   event: CallerIdBroadcastEvent
   toastId: string
-  onStartOrder?: (event: CallerIdBroadcastEvent) => void
-  onViewCustomer?: (customerId: string) => void
-  onAddCustomer?: (phone: string) => void
+  onSearchCustomer: () => void
+  onDisplayed?: () => void
 }
 
-function CallerIdToastContent({
+export function CallerIdToastContent({
   event,
   toastId,
-  onStartOrder,
-  onViewCustomer,
-  onAddCustomer,
+  onSearchCustomer,
+  onDisplayed,
 }: CallerIdToastContentProps) {
   const { t } = useTranslation()
+  const displayedRef = useRef(false)
+  useEffect(() => {
+    if (displayedRef.current) return
+    displayedRef.current = true
+    onDisplayed?.()
+  }, [onDisplayed])
   const hasCustomer = event.customer && event.customer.id
   const displayName =
     (hasCustomer && event.customer?.name) ||
@@ -68,44 +72,17 @@ function CallerIdToastContent({
 
       {/* Actions */}
       <div className="flex gap-2 pl-[52px]">
-        {hasCustomer ? (
-          <>
-            <button
-              type="button"
-              onClick={() => {
-                toast.dismiss(toastId)
-                onViewCustomer?.(event.customer!.id)
-              }}
-              className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-white/10 px-3 py-1.5 text-xs font-medium text-zinc-200 transition-transform active:scale-[0.98] active:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
-            >
-              <User className="w-3.5 h-3.5" />
-              {t('callerid.popup.viewCustomer', 'View')}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                toast.dismiss(toastId)
-                onStartOrder?.(event)
-              }}
-              className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white transition-transform active:scale-[0.98] active:bg-green-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300/80"
-            >
-              <ShoppingCart className="w-3.5 h-3.5" />
-              {t('callerid.popup.startOrder', 'Start Order')}
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              toast.dismiss(toastId)
-              onAddCustomer?.(event.callerNumber)
-            }}
-            className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition-transform active:scale-[0.98] active:bg-amber-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200"
-          >
-            <UserPlus className="w-3.5 h-3.5" />
-            {t('callerid.popup.addCustomer', 'Add Customer')}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => {
+            toast.dismiss(toastId)
+            onSearchCustomer()
+          }}
+          className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition-transform active:scale-[0.98] active:bg-amber-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200"
+        >
+          <Search className="w-3.5 h-3.5" />
+          {t('callerid.popup.searchCustomer', 'Search customer')}
+        </button>
       </div>
     </div>
   )
@@ -117,9 +94,8 @@ function CallerIdToastContent({
 export function showCallerIdToast(
   event: CallerIdBroadcastEvent,
   options?: {
-    onStartOrder?: (event: CallerIdBroadcastEvent) => void
-    onViewCustomer?: (customerId: string) => void
-    onAddCustomer?: (phone: string) => void
+    onSearchCustomer: () => void
+    onDisplayed?: () => void
   },
 ) {
   const toastId = `callerid-${event.sipCallId}`
@@ -138,9 +114,8 @@ export function showCallerIdToast(
         <CallerIdToastContent
           event={event}
           toastId={toastId}
-          onStartOrder={options?.onStartOrder}
-          onViewCustomer={options?.onViewCustomer}
-          onAddCustomer={options?.onAddCustomer}
+          onSearchCustomer={options?.onSearchCustomer ?? (() => {})}
+          onDisplayed={options?.onDisplayed}
         />
       </div>
     ),

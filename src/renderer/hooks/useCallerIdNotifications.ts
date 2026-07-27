@@ -1,25 +1,28 @@
 /**
- * useCallerIdNotifications — Combines local Tauri events + Supabase Realtime
- * to show caller ID popup notifications on all terminals.
+ * useCallerIdNotifications — Displays validated Caller ID v2 private Realtime
+ * events. Legacy native SIP events are intentionally outside this hook.
  *
  * Gated by `plugin_integrations`; caller_id itself is a plugin integration.
  */
 import { useEffect, useRef, useCallback } from 'react'
-import { onEvent, offEvent } from '../../lib'
 import { useModules } from '../contexts/module-context'
 import { getCachedTerminalCredentials } from '../services/terminal-credentials'
-import { subscribeToCallerIdEvents, type CallerIdBroadcastEvent } from '../services/CallerIdRealtimeService'
+import {
+  reportCallerIdReceipt,
+  subscribeToCallerIdEvents,
+  type CallerIdBroadcastEvent,
+} from '../services/CallerIdRealtimeService'
 import { showCallerIdToast } from '../components/callerid/CallerIdPopup'
+import { navigateToCallerIdCustomerSearch } from '../services/caller-id-customer-search'
 
 interface CallerIdNotificationsOptions {
-  onStartOrder?: (event: CallerIdBroadcastEvent) => void
-  onViewCustomer?: (customerId: string) => void
-  onAddCustomer?: (phone: string) => void
+  realtimeReady?: boolean
 }
 
 export function useCallerIdNotifications(options?: CallerIdNotificationsOptions) {
   const { isModuleEnabled } = useModules()
   const enabled = isModuleEnabled('plugin_integrations' as any)
+  const realtimeReady = options?.realtimeReady === true
   const callEventsRef = useRef(new Map<string, CallerIdBroadcastEvent>())
   const cleanupTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const optionsRef = useRef(options)
@@ -46,50 +49,75 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
     }, 30_000)
     cleanupTimersRef.current.set(event.sipCallId, cleanupTimer)
 
-    showCallerIdToast(merged, {
-      onStartOrder: optionsRef.current?.onStartOrder,
-      onViewCustomer: optionsRef.current?.onViewCustomer,
-      onAddCustomer: optionsRef.current?.onAddCustomer,
-    })
+    const reportReceipt =
+      merged.reportReceipt ??
+      ((receipt: Parameters<typeof reportCallerIdReceipt>[1]) =>
+        reportCallerIdReceipt(
+          merged.sipCallId,
+          receipt,
+          merged.timestamp,
+        ))
+    let completionReported = false
+    const reportCompletion = (
+      receipt: Parameters<typeof reportCallerIdReceipt>[1],
+    ) => {
+      if (completionReported) return
+      completionReported = true
+      void reportReceipt(receipt)
+    }
+
+    try {
+      showCallerIdToast(merged, {
+        onSearchCustomer: () =>
+          navigateToCallerIdCustomerSearch(merged.callerNumber),
+        onDisplayed: () => reportCompletion({ status: 'displayed' }),
+      })
+    } catch {
+      reportCompletion({
+        status: 'failed',
+        failureCode: 'DISPLAY_FAILED',
+      })
+    }
   }, [])
 
   useEffect(() => {
-    if (!enabled) return
-
-    // Listen for local Tauri events (this terminal detected a call via SIP)
-    const handleLocalEvent = (data: any) => {
-      if (!data?.callerNumber) return
-      handleCallEvent({
-        callerNumber: data.callerNumber,
-        callerName: data.callerName || null,
-        customer: data.customer || null,
-        sipCallId: data.sipCallId || `local-${Date.now()}`,
-        timestamp: data.timestamp || new Date().toISOString(),
-      })
-    }
-
-    onEvent('callerid:incoming-call', handleLocalEvent)
-
-    // Subscribe to Supabase Realtime (events from other terminals)
-    const creds = getCachedTerminalCredentials()
-    let unsubscribeRealtime: (() => void) | null = null
-
-    if (creds.organizationId) {
-      unsubscribeRealtime = subscribeToCallerIdEvents(
-        creds.organizationId,
-        creds.terminalId,
-        handleCallEvent,
-      )
-    }
-
-    return () => {
-      offEvent('callerid:incoming-call', handleLocalEvent)
-      unsubscribeRealtime?.()
+    const clearAcceptedEvents = () => {
       cleanupTimersRef.current.forEach((timer) => clearTimeout(timer))
       cleanupTimersRef.current.clear()
       callEventsRef.current.clear()
     }
-  }, [enabled, handleCallEvent])
+
+    if (!enabled) {
+      clearAcceptedEvents()
+      return
+    }
+
+    return clearAcceptedEvents
+  }, [enabled])
+
+  useEffect(() => {
+    if (!enabled || !realtimeReady) {
+      return
+    }
+
+    const creds = getCachedTerminalCredentials()
+    if (!creds.organizationId) {
+      return
+    }
+
+    return subscribeToCallerIdEvents(
+      creds.organizationId,
+      creds.terminalId,
+      handleCallEvent,
+      () => {
+        const current = getCachedTerminalCredentials()
+        return (
+          current.organizationId === creds.organizationId &&
+          current.terminalId === creds.terminalId
+        )
+      },
+    )
+  }, [enabled, handleCallEvent, realtimeReady])
 }
 
 function mergeCallerIdEvent(
@@ -116,6 +144,7 @@ function mergeCallerIdEvent(
     sipCallId: incoming.sipCallId,
     timestamp: incoming.timestamp || existing?.timestamp || new Date().toISOString(),
     sourceTerminalId: incoming.sourceTerminalId ?? existing?.sourceTerminalId ?? null,
+    reportReceipt: incoming.reportReceipt ?? existing?.reportReceipt,
   }
 }
 

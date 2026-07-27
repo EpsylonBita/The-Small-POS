@@ -3,18 +3,17 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::{
     callerid::{
         self,
-        types::{
-            CallerIdConfig, CallerIdMode, CallerIdStatusReason, CallerIdTransport,
-            ResolvedCallerIdConfig,
-        },
+        types::{CallerIdConfig, CallerIdMode, CallerIdTransport},
     },
-    db, storage, value_str,
+    db, storage,
 };
+
+const LEGACY_CALLER_ID_DISABLED: &str = "Legacy Caller ID disabled";
 
 /// Legacy SIP password key from the abandoned auth-based flow.
 const LEGACY_KEY_SIP_PASSWORD: &str = "sip_password";
@@ -38,96 +37,9 @@ fn parse_transport(value: Option<&str>, default: CallerIdTransport) -> CallerIdT
     }
 }
 
-fn parse_optional_string(
-    payload: &Value,
-    keys: &[&str],
-    current: Option<String>,
-) -> Option<String> {
-    for key in keys {
-        if let Some(value) = payload.get(*key) {
-            if value.is_null() {
-                return None;
-            }
-            if let Some(raw) = value.as_str() {
-                let trimmed = raw.trim();
-                return if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                };
-            }
-        }
-    }
-
-    current
-}
-
-fn parse_u16(payload: &Value, keys: &[&str], current: u16) -> u16 {
-    for key in keys {
-        if let Some(value) = payload.get(*key).and_then(|v| v.as_u64()) {
-            return value as u16;
-        }
-    }
-    current
-}
-
-fn parse_bool(payload: &Value, keys: &[&str], current: bool) -> bool {
-    for key in keys {
-        if let Some(value) = payload.get(*key).and_then(|v| v.as_bool()) {
-            return value;
-        }
-    }
-    current
-}
-
-fn parse_password_override(payload: &Value) -> Option<Option<String>> {
-    for key in ["password", "sipPassword"] {
-        if let Some(value) = payload.get(key) {
-            if value.is_null() {
-                return Some(None);
-            }
-            if let Some(raw) = value.as_str() {
-                let trimmed = raw.trim();
-                return if trimmed.is_empty() {
-                    Some(None)
-                } else {
-                    Some(Some(trimmed.to_string()))
-                };
-            }
-        }
-    }
-
-    None
-}
-
 fn has_stored_password() -> bool {
     storage::has_credential(storage::KEY_CALLERID_SIP_PASSWORD)
         || storage::has_credential(LEGACY_KEY_SIP_PASSWORD)
-}
-
-fn get_stored_password() -> Option<String> {
-    storage::get_credential(storage::KEY_CALLERID_SIP_PASSWORD)
-        .or_else(|| storage::get_credential(LEGACY_KEY_SIP_PASSWORD))
-}
-
-fn set_password(password: Option<&str>) -> Result<(), String> {
-    match password {
-        Some(value) if !value.trim().is_empty() => {
-            storage::set_credential(storage::KEY_CALLERID_SIP_PASSWORD, value.trim())?;
-        }
-        _ => {
-            storage::delete_credential(storage::KEY_CALLERID_SIP_PASSWORD)?;
-        }
-    }
-
-    if let Err(error) = storage::delete_credential(LEGACY_KEY_SIP_PASSWORD) {
-        warn!(
-            error = %error,
-            "Failed to clear legacy Caller ID SIP password from keyring"
-        );
-    }
-
-    Ok(())
 }
 
 fn normalize_config(mut config: CallerIdConfig) -> CallerIdConfig {
@@ -201,244 +113,34 @@ fn load_config(db_state: &db::DbState) -> CallerIdConfig {
     })
 }
 
-fn save_config(db_state: &db::DbState, config: &CallerIdConfig) -> Result<(), String> {
-    let conn = db_state.conn.lock().map_err(|e| e.to_string())?;
-
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "mode",
-        match config.mode {
-            CallerIdMode::AuthenticatedSip => "authenticated_sip",
-            CallerIdMode::PbxIpTrustLegacy => "pbx_ip_trust_legacy",
-        },
-    )?;
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "transport",
-        match config.transport {
-            CallerIdTransport::Udp => "udp",
-            CallerIdTransport::Tcp => "tcp",
-        },
-    )?;
-    db::set_setting(&conn, CALLERID_CATEGORY, "sip_server", &config.sip_server)?;
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "sip_port",
-        &config.sip_port.to_string(),
-    )?;
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "sip_username",
-        &config.sip_username,
-    )?;
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "auth_username",
-        config.auth_username.as_deref().unwrap_or(""),
-    )?;
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "outbound_proxy",
-        config.outbound_proxy.as_deref().unwrap_or(""),
-    )?;
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "provider_preset_id",
-        config.provider_preset_id.as_deref().unwrap_or(""),
-    )?;
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "listen_port",
-        &config.listen_port.to_string(),
-    )?;
-    db::set_setting(
-        &conn,
-        CALLERID_CATEGORY,
-        "enabled",
-        if config.enabled { "true" } else { "false" },
-    )?;
-
-    Ok(())
+fn resolve_runtime_config(_db_state: &db::DbState, _payload: Option<&Value>) -> Result<(), String> {
+    Err(LEGACY_CALLER_ID_DISABLED.to_string())
 }
 
-fn merge_config_from_payload(base: &CallerIdConfig, payload: &Value) -> CallerIdConfig {
-    let mode = parse_mode(value_str(payload, &["mode"]).as_deref(), base.mode);
-    let transport = parse_transport(
-        value_str(payload, &["transport"]).as_deref(),
-        base.transport,
-    );
-
-    normalize_config(CallerIdConfig {
-        mode,
-        transport,
-        sip_server: value_str(payload, &["sipServer", "sip_server"])
-            .unwrap_or_else(|| base.sip_server.clone()),
-        sip_port: parse_u16(payload, &["sipPort", "sip_port"], base.sip_port),
-        sip_username: value_str(payload, &["sipUsername", "sip_username"])
-            .unwrap_or_else(|| base.sip_username.clone()),
-        auth_username: parse_optional_string(
-            payload,
-            &["authUsername", "auth_username"],
-            base.auth_username.clone(),
-        ),
-        outbound_proxy: parse_optional_string(
-            payload,
-            &["outboundProxy", "outbound_proxy"],
-            base.outbound_proxy.clone(),
-        ),
-        provider_preset_id: parse_optional_string(
-            payload,
-            &["providerPresetId", "provider_preset_id"],
-            base.provider_preset_id.clone(),
-        ),
-        listen_port: parse_u16(payload, &["listenPort", "listen_port"], base.listen_port),
-        enabled: parse_bool(payload, &["enabled"], base.enabled),
-        has_password: base.has_password,
-    })
-}
-
-fn resolve_runtime_config(
-    db_state: &db::DbState,
-    payload: Option<&Value>,
-) -> Result<ResolvedCallerIdConfig, String> {
-    let saved = load_config(db_state);
-    let config = payload
-        .map(|value| merge_config_from_payload(&saved, value))
-        .unwrap_or(saved);
-
-    let password = match payload.and_then(parse_password_override) {
-        Some(password_override) => password_override,
-        None => get_stored_password(),
-    };
-
-    Ok(ResolvedCallerIdConfig {
-        config: normalize_config(CallerIdConfig {
-            has_password: password.is_some(),
-            ..config
-        }),
-        sip_password: password,
-    })
-}
-
-fn validate_config(
-    resolved: &ResolvedCallerIdConfig,
-    require_enabled: bool,
-) -> Result<(), (CallerIdStatusReason, String)> {
-    let config = &resolved.config;
-
-    if require_enabled && !config.enabled {
-        return Err((
-            CallerIdStatusReason::InvalidConfig,
-            "Caller ID is not enabled".into(),
-        ));
-    }
-
-    if config.sip_server.is_empty() || config.sip_username.is_empty() {
-        return Err((
-            CallerIdStatusReason::InvalidConfig,
-            "SIP server and username must be configured".into(),
-        ));
-    }
-
-    if matches!(config.mode, CallerIdMode::AuthenticatedSip)
-        && resolved
-            .sip_password
-            .as_deref()
-            .map(|value| value.trim().is_empty())
-            .unwrap_or(true)
-    {
-        return Err((
-            CallerIdStatusReason::InvalidConfig,
-            "A SIP password is required for authenticated SIP".into(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn result_message(success: bool, reason: Option<CallerIdStatusReason>, message: String) -> Value {
-    serde_json::json!({
-        "success": success,
-        "reasonCode": reason,
-        "message": message,
-    })
-}
-
-fn start_listener_with_config(
-    app: &tauri::AppHandle,
-    mgr: &Arc<callerid::CallerIdManager>,
-    cancel_token: &tokio_util::sync::CancellationToken,
-    resolved: ResolvedCallerIdConfig,
-) -> Result<Value, String> {
-    if mgr.is_running() {
-        return Ok(serde_json::json!({ "status": "already_running" }));
-    }
-
-    if let Err((reason, message)) = validate_config(&resolved, true) {
-        mgr.set_error(message.clone(), reason);
-        return Err(message);
-    }
-
-    mgr.update_config(resolved.config.clone());
-    let child_cancel = cancel_token.child_token();
-    mgr.set_registering();
-
-    callerid::sip_listener::start_sip_listener(
-        resolved,
-        Arc::clone(mgr),
-        app.clone(),
-        child_cancel,
-    );
-
-    info!("Caller ID SIP listener started");
-    Ok(serde_json::json!({ "status": "started" }))
-}
-
-pub fn autostart_if_enabled(
-    app: &tauri::AppHandle,
+pub fn disable_legacy_runtime_on_startup(
     db_state: &db::DbState,
     mgr: &Arc<callerid::CallerIdManager>,
-    cancel_token: &tokio_util::sync::CancellationToken,
 ) {
-    let resolved = match resolve_runtime_config(db_state, None) {
-        Ok(config) => config,
-        Err(error) => {
-            warn!(error = %error, "Caller ID startup load failed");
-            return;
-        }
-    };
-
-    if !resolved.config.enabled {
-        return;
-    }
-
-    if let Err(error) = start_listener_with_config(app, mgr, cancel_token, resolved) {
-        warn!(error = %error, "Caller ID autostart failed");
-    }
+    mgr.stop();
+    let _ = resolve_runtime_config(db_state, None);
+    info!("{LEGACY_CALLER_ID_DISABLED}");
 }
 
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
-/// Start the SIP listener.
+/// Legacy SIP activation is unavailable in the Phase 1 runtime.
 #[tauri::command]
 pub async fn callerid_start(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     db: tauri::State<'_, db::DbState>,
     mgr: tauri::State<'_, Arc<callerid::CallerIdManager>>,
-    cancel_token: tauri::State<'_, tokio_util::sync::CancellationToken>,
+    _cancel_token: tauri::State<'_, tokio_util::sync::CancellationToken>,
 ) -> Result<Value, String> {
-    let resolved = resolve_runtime_config(&db, None)?;
-    start_listener_with_config(&app, mgr.inner(), &cancel_token, resolved)
+    mgr.stop();
+    resolve_runtime_config(&db, None)?;
+    Err(LEGACY_CALLER_ID_DISABLED.to_string())
 }
 
 /// Stop the SIP listener.
@@ -460,7 +162,7 @@ pub async fn callerid_get_status(
     Ok(serde_json::to_value(&status).unwrap_or_default())
 }
 
-/// Save caller ID configuration.
+/// Legacy SIP configuration is read-only in the Phase 1 runtime.
 #[tauri::command]
 pub async fn callerid_save_config(
     db: tauri::State<'_, db::DbState>,
@@ -469,20 +171,9 @@ pub async fn callerid_save_config(
     arg1: Option<Value>,
 ) -> Result<Value, String> {
     let payload = crate::parse_channel_payload(arg0, arg1);
-    let saved = load_config(&db);
-    let config = merge_config_from_payload(&saved, &payload);
-
-    if let Some(password_override) = parse_password_override(&payload) {
-        set_password(password_override.as_deref())?;
-    }
-
-    let config = normalize_config(config);
-    save_config(&db, &config)?;
-    let updated = load_config(&db);
-    mgr.update_config(updated);
-
-    info!("Caller ID config saved");
-    Ok(serde_json::json!({ "success": true }))
+    mgr.stop();
+    resolve_runtime_config(&db, Some(&payload))?;
+    Err(LEGACY_CALLER_ID_DISABLED.to_string())
 }
 
 /// Get caller ID configuration.
@@ -505,7 +196,7 @@ pub async fn callerid_get_config(db: tauri::State<'_, db::DbState>) -> Result<Va
     }))
 }
 
-/// Test SIP connection — sends a REGISTER and waits for acceptance.
+/// Legacy SIP connection tests are unavailable in the Phase 1 runtime.
 #[tauri::command]
 pub async fn callerid_test_connection(
     db: tauri::State<'_, db::DbState>,
@@ -513,7 +204,7 @@ pub async fn callerid_test_connection(
     arg1: Option<Value>,
 ) -> Result<Value, String> {
     let payload = crate::parse_channel_payload(arg0, arg1);
-    let resolved = resolve_runtime_config(
+    resolve_runtime_config(
         &db,
         if payload == serde_json::json!({}) {
             None
@@ -522,16 +213,58 @@ pub async fn callerid_test_connection(
         },
     )?;
 
-    if let Err((reason, message)) = validate_config(&resolved, false) {
-        return Ok(result_message(false, Some(reason), message));
+    Err(LEGACY_CALLER_ID_DISABLED.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    fn test_db_state() -> db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE local_settings (
+                id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                setting_category TEXT NOT NULL,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT NOT NULL,
+                last_sync TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(setting_category, setting_key)
+            );",
+        )
+        .expect("create local_settings");
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
     }
 
-    match callerid::sip_listener::test_sip_connection(&resolved).await {
-        Ok(()) => Ok(result_message(
-            true,
-            None,
-            "SIP registration accepted — connection successful".into(),
-        )),
-        Err((reason, message)) => Ok(result_message(false, Some(reason), message)),
+    #[test]
+    fn existing_enabled_config_is_rejected_by_legacy_runtime_resolution() {
+        let db_state = test_db_state();
+        {
+            let conn = db_state.conn.lock().expect("lock test db");
+            db::set_setting(&conn, CALLERID_CATEGORY, "enabled", "true")
+                .expect("seed enabled legacy config");
+            db::set_setting(&conn, CALLERID_CATEGORY, "sip_server", "127.0.0.1")
+                .expect("seed server");
+            db::set_setting(&conn, CALLERID_CATEGORY, "sip_username", "100")
+                .expect("seed username");
+        }
+
+        let activation = resolve_runtime_config(&db_state, None);
+
+        assert_eq!(
+            activation.expect_err("legacy runtime activation must fail closed"),
+            "Legacy Caller ID disabled"
+        );
+        assert!(
+            load_config(&db_state).enabled,
+            "fail-closed activation must preserve existing user configuration"
+        );
     }
 }

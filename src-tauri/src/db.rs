@@ -4986,6 +4986,7 @@ pub fn set_setting(
     Ok(())
 }
 
+#[allow(dead_code)] // Legacy rows remain readable; Phase 1 has no native SIP writer.
 pub fn upsert_caller_id_log(
     conn: &Connection,
     caller_number: &str,

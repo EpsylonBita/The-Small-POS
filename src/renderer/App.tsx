@@ -59,6 +59,12 @@ import {
 import { subscribeToAdminOrderDeletedEvents } from "./services/OrderDeleteRealtimeService";
 import { DesktopRealtimeManager } from "./services/RealtimeManager";
 import {
+  RealtimeAuthService,
+  type RealtimeAuthClient,
+} from "./services/RealtimeAuthService";
+import { DesktopRealtimeLifecycleCoordinator } from "./services/DesktopRealtimeLifecycleCoordinator";
+import { supabase } from "./lib/supabase";
+import {
   emitParityQueueStatus,
   PARITY_QUEUE_STATUS_EVENT,
   PARITY_SYNC_STATUS_EVENT,
@@ -603,72 +609,6 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  useEffect(() => {
-    if (isConfigured !== true || isBrowser()) {
-      return;
-    }
-
-    let disposed = false;
-    let unsubscribeRealtimeDeletes: (() => void) | null = null;
-    let subscriptionGeneration = 0;
-
-    const resubscribeToDeletedOrders = async () => {
-      const generation = ++subscriptionGeneration;
-
-      unsubscribeRealtimeDeletes?.();
-      unsubscribeRealtimeDeletes = null;
-
-      try {
-        const credentials = await withStartupTimeout(
-          refreshTerminalCredentialCache(),
-          'refreshTerminalCredentialCache',
-        );
-        const terminalId = normalizeSessionIdentityValue(credentials.terminalId);
-        const organizationId = normalizeSessionIdentityValue(credentials.organizationId);
-        const branchId = normalizeSessionIdentityValue(credentials.branchId);
-
-        if (disposed || generation !== subscriptionGeneration) {
-          return;
-        }
-
-        if (!terminalId || !organizationId) {
-          console.warn('[ConfigGuard] Skipping delete realtime subscription due to incomplete terminal identity', {
-            terminalId: terminalId || null,
-            organizationId: organizationId || null,
-            branchId: branchId || null,
-          });
-          return;
-        }
-
-        unsubscribeRealtimeDeletes = subscribeToAdminOrderDeletedEvents({
-          terminalId,
-          organizationId,
-          branchId: branchId || undefined,
-        });
-      } catch (error) {
-        if (!disposed && generation === subscriptionGeneration) {
-          console.warn('[ConfigGuard] Failed to start delete realtime subscription:', error);
-        }
-      }
-    };
-
-    const handleTerminalIdentityChanged = () => {
-      void resubscribeToDeletedOrders();
-    };
-
-    void resubscribeToDeletedOrders();
-    onEvent('terminal-credentials-updated', handleTerminalIdentityChanged);
-    onEvent('terminal-config-updated', handleTerminalIdentityChanged);
-
-    return () => {
-      disposed = true;
-      subscriptionGeneration += 1;
-      offEvent('terminal-credentials-updated', handleTerminalIdentityChanged);
-      offEvent('terminal-config-updated', handleTerminalIdentityChanged);
-      unsubscribeRealtimeDeletes?.();
-    };
-  }, [isConfigured]);
-
   if (isConfigured === null) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -788,6 +728,7 @@ function AppContent() {
   const [showSyncRecoveryModal, setShowSyncRecoveryModal] = useState(false);
   const [syncRecoveryContext, setSyncRecoveryContext] =
     useState<SyncRecoveryOpenContext | null>(null);
+  const [realtimeReady, setRealtimeReady] = useState(false);
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
   const windowState = useWindowState();
@@ -848,6 +789,7 @@ function AppContent() {
     total: 0,
   });
   const paritySyncSnapshotRef = useRef<ParitySyncSnapshot | null>(null);
+  const stopRealtimeAuthRef = useRef<() => void>(() => {});
 
   const openConnectionSettings = useCallback(
     (section: ConnectionSettingsSection = null) => {
@@ -977,6 +919,7 @@ function AppContent() {
   // Use custom hook for app events
   const { isShuttingDown, shutdownState } = useAppEvents({
     onLogout: () => {
+      stopRealtimeAuthRef.current();
       void clearSecureSession();
       setUser(null);
       // Do NOT clear shift on session timeout to preserve active shift per EOD policy
@@ -1008,7 +951,9 @@ function AppContent() {
   useMenuVersionPolling({ enabled: !!user });
 
   // Caller ID notifications (gated by module availability inside the hook)
-  useCallerIdNotifications();
+  useCallerIdNotifications({
+    realtimeReady: Boolean(user) && realtimeReady,
+  });
 
   useEffect(() => {
     if (typeof document === 'undefined') {
@@ -1148,34 +1093,44 @@ function AppContent() {
 
   useEffect(() => {
     if (!user || isBrowser()) {
+      setRealtimeReady(false);
+      stopRealtimeAuthRef.current = () => {};
       return;
     }
 
     let disposed = false;
-    let manager: DesktopRealtimeManager | null = null;
-
-    const startRealtime = async () => {
-      try {
+    const authService = new RealtimeAuthService(
+      supabase as unknown as RealtimeAuthClient,
+    );
+    const coordinator = new DesktopRealtimeLifecycleCoordinator({
+      authService,
+      resolveIdentity: async () => {
         const credentials = await refreshTerminalCredentialCache();
+        const terminalId = normalizeSessionIdentityValue(credentials.terminalId);
         const organizationId = normalizeSessionIdentityValue(credentials.organizationId);
+        const branchId = normalizeSessionIdentityValue(credentials.branchId);
 
         if (
-          disposed ||
+          !terminalId ||
           !organizationId ||
+          !branchId ||
           !environment.SUPABASE_URL ||
           !environment.SUPABASE_ANON_KEY
         ) {
-          return;
+          return null;
         }
 
-        manager = new DesktopRealtimeManager({
+        return { terminalId, organizationId, branchId };
+      },
+      createManager: ({ organizationId }) => {
+        const manager = new DesktopRealtimeManager({
           supabaseUrl: environment.SUPABASE_URL,
           supabaseKey: environment.SUPABASE_ANON_KEY,
           organizationId,
           onOrderChange: () => {
             void silentRefreshOrders().catch(() => {});
           },
-          onConfigChange: async (payload) => {
+          onConfigChange: async () => {
             try {
               await bridge.terminalConfig.syncFromAdmin();
             } catch (error) {
@@ -1201,26 +1156,60 @@ function AppContent() {
           onStatusChange: (status) => {
             emitCompatEvent(REALTIME_STATUS_EVENT, { status });
           },
+          client: supabase,
         });
-
         emitCompatEvent(REALTIME_STATUS_EVENT, {
           status: manager.getConnectionStatus(),
         });
-        await manager.connect();
-      } catch (error) {
+        return manager;
+      },
+      subscribeAuthenticatedFeatures: (identity) =>
+        subscribeToAdminOrderDeletedEvents(identity),
+      onReadyChange: (ready) => {
         if (!disposed) {
-          console.warn('[App] Failed to start realtime manager:', error);
+          setRealtimeReady(ready);
+        }
+      },
+      onError: (error) => {
+        if (!disposed) {
+          console.warn('[App] Failed to reconcile realtime lifecycle:', error);
           emitCompatEvent(REALTIME_STATUS_EVENT, { status: 'error' });
         }
-      }
+      },
+    });
+
+    const stopRealtime = () => {
+      coordinator.stop();
+      emitCompatEvent(REALTIME_STATUS_EVENT, { status: 'disconnected' });
+    };
+    stopRealtimeAuthRef.current = stopRealtime;
+
+    const handleTerminalCredentialsChanged = () => {
+      void coordinator.credentialsChanged();
+    };
+    const handleTerminalConfigChanged = () => {
+      void coordinator.refreshIdentity();
+    };
+    const handleTerminalAuthPaused = () => {
+      stopRealtime();
     };
 
-    void startRealtime();
+    onEvent('terminal-credentials-updated', handleTerminalCredentialsChanged);
+    onEvent('terminal-config-updated', handleTerminalConfigChanged);
+    onEvent('terminal-auth-paused', handleTerminalAuthPaused);
+    onEvent('app:reset', handleTerminalAuthPaused);
+    void coordinator.start();
 
     return () => {
+      offEvent('terminal-credentials-updated', handleTerminalCredentialsChanged);
+      offEvent('terminal-config-updated', handleTerminalConfigChanged);
+      offEvent('terminal-auth-paused', handleTerminalAuthPaused);
+      offEvent('app:reset', handleTerminalAuthPaused);
+      coordinator.dispose();
       disposed = true;
-      manager?.disconnect();
-      emitCompatEvent(REALTIME_STATUS_EVENT, { status: 'disconnected' });
+      if (stopRealtimeAuthRef.current === stopRealtime) {
+        stopRealtimeAuthRef.current = () => {};
+      }
     };
   }, [bridge.terminalConfig, silentRefreshOrders, t, user]);
 
@@ -1432,6 +1421,7 @@ function AppContent() {
 
   // Logout function
   const handleLogout = async () => {
+    stopRealtimeAuthRef.current();
     try {
       await bridge.auth.logout();
     } catch (e) {

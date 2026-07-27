@@ -128,6 +128,8 @@ export class DesktopRealtimeManager {
   private intentionalDisconnect = false;
   /** Whether we have ever successfully connected (used for reconnect full-sync) */
   private hasConnectedBefore = false;
+  /** Invalidates asynchronous connection attempts after disconnect or reconnect. */
+  private lifecycleGeneration = 0;
 
   constructor(config: DesktopRealtimeManagerConfig) {
     this.config = config;
@@ -151,12 +153,16 @@ export class DesktopRealtimeManager {
    * Subscriptions are filtered by organization_id.
    */
   async connect(): Promise<void> {
+    const generation = ++this.lifecycleGeneration;
     this.intentionalDisconnect = false;
     this.setConnectionStatus('connecting');
 
     try {
-      await this.subscribeAll();
+      await this.subscribeAll(generation);
     } catch (err) {
+      if (!this.isCurrentGeneration(generation)) {
+        return;
+      }
       console.error('[RealtimeManager] Failed to connect:', err);
       this.handleConnectionFailure();
     }
@@ -166,6 +172,7 @@ export class DesktopRealtimeManager {
    * Gracefully close all subscriptions and stop reconnection / polling.
    */
   disconnect(): void {
+    this.lifecycleGeneration++;
     this.intentionalDisconnect = true;
     this.clearReconnectTimeout();
     this.stopPolling();
@@ -202,11 +209,14 @@ export class DesktopRealtimeManager {
    * Subscribe to every table listed in POS_REALTIME_SUBSCRIPTIONS,
    * filtered by `organization_id`.
    */
-  private async subscribeAll(): Promise<void> {
+  private async subscribeAll(generation: number): Promise<void> {
     const channelName = getRealtimeChannelName('POS_TAURI', this.config.organizationId);
 
     for (const sub of POS_REALTIME_SUBSCRIPTIONS) {
-      await this.subscribeToTable(sub, channelName);
+      if (!this.isCurrentGeneration(generation)) {
+        return;
+      }
+      await this.subscribeToTable(sub, channelName, generation);
     }
   }
 
@@ -215,8 +225,13 @@ export class DesktopRealtimeManager {
    */
   private async subscribeToTable(
     sub: RealtimeTableSubscriptionConfig,
-    baseChannelName: string
+    baseChannelName: string,
+    generation: number,
   ): Promise<void> {
+    if (!this.isCurrentGeneration(generation)) {
+      return;
+    }
+
     const callback = getCallbackForSubscription(sub.id, this.config);
     if (!callback) {
       console.warn(`[RealtimeManager] No callback registered for subscription: ${sub.id}`);
@@ -249,6 +264,9 @@ export class DesktopRealtimeManager {
           filter: `${sub.filterColumn}=eq.${this.config.organizationId}`,
         },
         (payload: any) => {
+          if (!this.isCurrentGeneration(generation)) {
+            return;
+          }
           try {
             callback({
               eventType: payload.eventType ?? payload.type ?? event,
@@ -266,8 +284,20 @@ export class DesktopRealtimeManager {
     }
 
     channel.subscribe((status: string, err?: Error) => {
+      if (!this.isCurrentGeneration(generation)) {
+        return;
+      }
       this.handleChannelStatus(sub.id, status, err);
     });
+
+    if (!this.isCurrentGeneration(generation)) {
+      try {
+        this.supabaseClient.removeChannel(channel);
+      } catch {
+        // best-effort cleanup for a channel created by an obsolete attempt
+      }
+      return;
+    }
 
     this.channels.set(sub.id, channel);
     console.log(`[RealtimeManager] Subscribed to ${sub.table} (${sub.id})`);
@@ -414,5 +444,9 @@ export class DesktopRealtimeManager {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
     }
+  }
+
+  private isCurrentGeneration(generation: number): boolean {
+    return !this.intentionalDisconnect && generation === this.lifecycleGeneration;
   }
 }

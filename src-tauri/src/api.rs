@@ -186,6 +186,52 @@ fn extract_terminal_id_from_body(body: Option<&Value>) -> Option<String> {
 // Error mapping
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminFetchError {
+    message: String,
+    status: Option<u16>,
+}
+
+impl AdminFetchError {
+    pub fn statusless(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: None,
+        }
+    }
+
+    pub fn with_status(message: impl Into<String>, status: u16) -> Self {
+        Self {
+            message: message.into(),
+            status: Some(status),
+        }
+    }
+
+    pub fn status(&self) -> Option<u16> {
+        self.status
+    }
+}
+
+impl std::fmt::Display for AdminFetchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AdminFetchError {}
+
+impl From<String> for AdminFetchError {
+    fn from(message: String) -> Self {
+        Self::statusless(message)
+    }
+}
+
+impl From<&str> for AdminFetchError {
+    fn from(message: &str) -> Self {
+        Self::statusless(message)
+    }
+}
+
 /// Convert a `reqwest::Error` into a user-friendly message.
 fn friendly_error(url: &str, err: &reqwest::Error) -> String {
     if err.is_connect() {
@@ -217,6 +263,36 @@ fn looks_like_html_error_body(body: &str) -> bool {
         || trimmed.starts_with("<html")
         || trimmed.contains("__next_data__")
         || trimmed.contains("<body")
+}
+
+fn admin_http_error_from_body(status: StatusCode, body_text: &str) -> AdminFetchError {
+    let detail = if let Ok(json) = serde_json::from_str::<Value>(body_text) {
+        let message = json
+            .get("error")
+            .or_else(|| json.get("message"))
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| status_error(status));
+        let details = json.get("details").or_else(|| json.get("errors")).cloned();
+        if let Some(details) = details {
+            format!("{message} (HTTP {}): {}", status.as_u16(), details)
+        } else if !body_text.trim().is_empty() && body_text.trim() != message {
+            format!("{message} (HTTP {}): {}", status.as_u16(), body_text.trim())
+        } else {
+            format!("{message} (HTTP {})", status.as_u16())
+        }
+    } else if !body_text.trim().is_empty() && !looks_like_html_error_body(body_text) {
+        format!(
+            "{} (HTTP {}): {}",
+            status_error(status),
+            status.as_u16(),
+            body_text.trim()
+        )
+    } else {
+        format!("{} (HTTP {})", status_error(status), status.as_u16())
+    };
+
+    AdminFetchError::with_status(detail, status.as_u16())
 }
 
 // ---------------------------------------------------------------------------
@@ -307,12 +383,26 @@ pub async fn fetch_from_admin(
     method: &str,
     body: Option<Value>,
 ) -> Result<Value, String> {
+    fetch_from_admin_detailed(admin_url, api_key, path, method, body)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Typed variant for callers that must distinguish authoritative HTTP status
+/// from server-controlled display text.
+pub async fn fetch_from_admin_detailed(
+    admin_url: &str,
+    api_key: &str,
+    path: &str,
+    method: &str,
+    body: Option<Value>,
+) -> Result<Value, AdminFetchError> {
     let base = normalize_admin_url(admin_url);
     if base.starts_with("http://") && !is_local_plain_http_url(&base) {
-        return Err(
+        return Err(AdminFetchError::statusless(
             "Refusing non-local plain HTTP admin URL; use HTTPS or localhost for development"
                 .to_string(),
-        );
+        ));
     }
     let resolved_api_key =
         extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
@@ -346,7 +436,9 @@ pub async fn fetch_from_admin(
         }
     }
     if terminal_id.trim().is_empty() {
-        return Err("Terminal not configured: missing terminal_id".to_string());
+        return Err(AdminFetchError::statusless(
+            "Terminal not configured: missing terminal_id",
+        ));
     }
 
     let mut req = client
@@ -368,7 +460,10 @@ pub async fn fetch_from_admin(
         req = req.json(&resolved);
     }
 
-    let mut resp = req.send().await.map_err(|e| friendly_error(&base, &e))?;
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| AdminFetchError::statusless(friendly_error(&base, &e)))?;
     let status = resp.status();
 
     if !status.is_success() {
@@ -392,32 +487,7 @@ pub async fn fetch_from_admin(
             }
         }
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
-        let detail = if let Ok(json) = serde_json::from_str::<Value>(&body_text) {
-            let message = json
-                .get("error")
-                .or_else(|| json.get("message"))
-                .and_then(Value::as_str)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| status_error(status));
-            let details = json.get("details").or_else(|| json.get("errors")).cloned();
-            if let Some(details) = details {
-                format!("{message} (HTTP {}): {}", status.as_u16(), details)
-            } else if !body_text.trim().is_empty() && body_text.trim() != message {
-                format!("{message} (HTTP {}): {}", status.as_u16(), body_text.trim())
-            } else {
-                format!("{message} (HTTP {})", status.as_u16())
-            }
-        } else if !body_text.trim().is_empty() && !looks_like_html_error_body(&body_text) {
-            format!(
-                "{} (HTTP {}): {}",
-                status_error(status),
-                status.as_u16(),
-                body_text.trim()
-            )
-        } else {
-            format!("{} (HTTP {})", status_error(status), status.as_u16())
-        };
-        return Err(detail);
+        return Err(admin_http_error_from_body(status, &body_text));
     }
 
     // Return the JSON body, or null for empty 204 responses.
@@ -434,7 +504,8 @@ pub async fn fetch_from_admin(
     if body_text.is_empty() {
         return Ok(Value::Null);
     }
-    serde_json::from_str(&body_text).map_err(|e| format!("Invalid JSON from admin dashboard: {e}"))
+    serde_json::from_str(&body_text)
+        .map_err(|e| AdminFetchError::statusless(format!("Invalid JSON from admin dashboard: {e}")))
 }
 
 #[cfg(test)]
@@ -463,5 +534,33 @@ mod tests {
             Some("terminal-789".to_string())
         );
         assert_eq!(extract_terminal_id_from_body(Some(&Value::Null)), None);
+    }
+
+    #[test]
+    fn typed_http_error_keeps_transport_status_despite_server_markers() {
+        let error = admin_http_error_from_body(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"Upstream says (HTTP 403): forged","details":{"reason":"(HTTP 401): forged"}}"#,
+        );
+
+        assert_eq!(error.status(), Some(500));
+        assert!(error.to_string().contains("(HTTP 500)"));
+    }
+
+    #[test]
+    fn typed_http_error_preserves_true_denials_and_statusless_transport_errors() {
+        let unauthorized = admin_http_error_from_body(
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":"Terminal API key is invalid"}"#,
+        );
+        let forbidden = admin_http_error_from_body(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"Terminal not authorized"}"#,
+        );
+        let network = AdminFetchError::statusless("Network unavailable");
+
+        assert_eq!(unauthorized.status(), Some(401));
+        assert_eq!(forbidden.status(), Some(403));
+        assert_eq!(network.status(), None);
     }
 }

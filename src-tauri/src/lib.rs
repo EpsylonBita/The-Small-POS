@@ -251,6 +251,17 @@ async fn admin_fetch(
     method: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
+    admin_fetch_detailed(db, path, method, body)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn admin_fetch_detailed(
+    db: Option<&db::DbState>,
+    path: &str,
+    method: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, api::AdminFetchError> {
     validate_admin_api_path(path)?;
 
     if let Some(db_state) = db {
@@ -305,7 +316,9 @@ async fn admin_fetch(
 
     let normalized_admin_url = api::normalize_admin_url(&admin_url);
     if normalized_admin_url.trim().is_empty() {
-        return Err("Terminal not configured: missing admin URL".to_string());
+        return Err(api::AdminFetchError::statusless(
+            "Terminal not configured: missing admin URL",
+        ));
     }
 
     if storage::get_credential("admin_dashboard_url")
@@ -328,10 +341,12 @@ async fn admin_fetch(
 
     let api_key = Zeroizing::new(raw_api_key.trim().to_string());
     if api_key.is_empty() {
-        return Err("Terminal not configured: missing API key".to_string());
+        return Err(api::AdminFetchError::statusless(
+            "Terminal not configured: missing API key",
+        ));
     }
 
-    api::fetch_from_admin(&normalized_admin_url, &api_key, path, method, body).await
+    api::fetch_from_admin_detailed(&normalized_admin_url, &api_key, path, method, body).await
 }
 
 async fn updater_manifest_is_reachable() -> Result<bool, String> {
@@ -586,11 +601,9 @@ pub fn run() {
             app.manage(cancel_token.clone());
             {
                 let db_state = app.state::<db::DbState>();
-                commands::callerid::autostart_if_enabled(
-                    app.handle(),
+                commands::callerid::disable_legacy_runtime_on_startup(
                     &db_state,
                     &caller_id_manager,
-                    &cancel_token,
                 );
             }
 

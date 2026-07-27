@@ -204,6 +204,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   // UpgradePromptModal falls back to its default plan copy in that case.
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
   const [blockedModule, setBlockedModule] = useState<{ moduleId: string; requiredPlan?: string } | null>(null);
+  const [customerSearchTerm, setCustomerSearchTerm] = useState('');
 
   const shiftManagerRef = useRef<ShiftManagerRef>(null);
   const pendingReportDate = isPendingLocalSubmit
@@ -283,10 +284,19 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
 
   useEffect(() => {
     const handleNavigateView = (event: Event) => {
-      const detail = (event as CustomEvent<{ view?: string }>).detail;
+      const detail = (event as CustomEvent<{
+        view?: string;
+        customerSearch?: string;
+      }>).detail;
       const requestedView = detail?.view?.trim();
       if (!requestedView) {
         return;
+      }
+      if (
+        (requestedView === 'users' || requestedView === 'customers') &&
+        typeof detail.customerSearch === 'string'
+      ) {
+        setCustomerSearchTerm(detail.customerSearch);
       }
       handleViewChange(requestedView);
     };
@@ -448,6 +458,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     // This function now only handles view component selection and Suspense wrapping.
     if (currentView === 'settings') {
       return <DashboardView />;
+    }
+    if (currentView === 'users' || currentView === 'customers') {
+      return <UsersPage initialSearchTerm={customerSearchTerm} />;
     }
 
     const ViewComponent = VIEW_COMPONENTS[currentView];

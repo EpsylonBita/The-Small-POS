@@ -88,35 +88,6 @@ impl Default for CallerIdConfig {
     }
 }
 
-impl CallerIdConfig {
-    pub fn effective_auth_username(&self) -> &str {
-        self.auth_username
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(self.sip_username.as_str())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedCallerIdConfig {
-    pub config: CallerIdConfig,
-    pub sip_password: Option<String>,
-}
-
-/// An incoming call event emitted to the frontend and broadcast to other terminals.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IncomingCallEvent {
-    /// Phone number extracted from SIP INVITE From: header
-    pub caller_number: String,
-    /// Display name from SIP From: header (may be empty)
-    pub caller_name: Option<String>,
-    /// SIP Call-ID header (used for deduplication)
-    pub sip_call_id: String,
-    /// ISO 8601 timestamp of detection
-    pub timestamp: String,
-}
-
 /// Status of the SIP listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,38 +160,9 @@ mod tests {
     }
 
     #[test]
-    fn test_incoming_call_event_serialization() {
-        let evt = IncomingCallEvent {
-            caller_number: "+306912345678".into(),
-            caller_name: Some("John".into()),
-            sip_call_id: "abc123@192.168.1.1".into(),
-            timestamp: "2026-03-25T12:00:00Z".into(),
-        };
-        let json = serde_json::to_string(&evt).unwrap();
-        assert!(json.contains("callerNumber"));
-        assert!(json.contains("+306912345678"));
-    }
-
-    #[test]
     fn test_listener_status_serialization() {
         let status = ListenerStatus::Listening;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, "\"listening\"");
-    }
-
-    #[test]
-    fn test_effective_auth_username_defaults_to_sip_username() {
-        let cfg = CallerIdConfig {
-            sip_username: "200".into(),
-            ..Default::default()
-        };
-        assert_eq!(cfg.effective_auth_username(), "200");
-
-        let cfg = CallerIdConfig {
-            sip_username: "200".into(),
-            auth_username: Some("auth200".into()),
-            ..Default::default()
-        };
-        assert_eq!(cfg.effective_auth_username(), "auth200");
     }
 }

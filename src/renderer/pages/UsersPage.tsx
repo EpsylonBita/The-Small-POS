@@ -182,13 +182,15 @@ function buildAddressFingerprint(
   return `${normalized}|${Number(latitude).toFixed(5)}|${Number(longitude).toFixed(5)}`;
 }
 
-const UsersPage: React.FC = () => {
+const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
+  initialSearchTerm = '',
+}) => {
   const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState(initialSearchTerm);
   const [currentPage, setCurrentPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<UserStatusFilter>('all');
   const [loyaltyFilter, setLoyaltyFilter] = useState<UserLoyaltyFilter>('all');
@@ -204,6 +206,11 @@ const UsersPage: React.FC = () => {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isLoadingAddresses, setIsLoadingAddresses] = useState(false);
   const addressSessionTokenRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setSearchTerm(initialSearchTerm);
+    setCurrentPage(1);
+  }, [initialSearchTerm]);
 
   // Refs + stable title ids so the portaled modals can declare labelled dialog
   // semantics and join the topmost-[role="dialog"] Escape stack used across the POS.

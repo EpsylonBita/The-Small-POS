@@ -98,6 +98,26 @@ fn admin_api_cache_key(path: &str) -> String {
     format!("{ADMIN_API_CACHE_PREFIX}{path}")
 }
 
+fn admin_fetch_error_payload(
+    error: &api::AdminFetchError,
+    cacheable_get: bool,
+) -> serde_json::Value {
+    let status = error.status();
+    let error_text = if cacheable_get {
+        format!("{error}. No cached local copy is available yet for offline use.")
+    } else {
+        error.to_string()
+    };
+    let mut payload = serde_json::json!({
+        "success": false,
+        "error": error_text
+    });
+    if let Some(status) = status {
+        payload["status"] = serde_json::json!(status);
+    }
+    payload
+}
+
 pub(crate) fn cache_admin_get_response(
     db: &db::DbState,
     path: &str,
@@ -317,7 +337,7 @@ pub async fn api_fetch_from_admin(
 
     let cacheable_get = is_cacheable_admin_get(&method, &final_path);
 
-    match crate::admin_fetch(Some(&db), &final_path, &method, body).await {
+    match crate::admin_fetch_detailed(Some(&db), &final_path, &method, body).await {
         Ok(v) => {
             if cacheable_get {
                 let _ = cache_admin_get_response(&db, &final_path, &v);
@@ -351,14 +371,7 @@ pub async fn api_fetch_from_admin(
                 }
             }
 
-            Ok(serde_json::json!({
-                "success": false,
-                "error": if cacheable_get {
-                    format!("{e}. No cached local copy is available yet for offline use.")
-                } else {
-                    e
-                }
-            }))
+            Ok(admin_fetch_error_payload(&e, cacheable_get))
         }
     }
 }
@@ -521,6 +534,45 @@ mod dto_tests {
         let err = parse_admin_fetch_payload(Some(serde_json::json!({})), None)
             .expect_err("missing path should fail");
         assert!(err.contains("Missing API path"));
+    }
+
+    #[test]
+    fn admin_fetch_error_payload_projects_status_without_changing_error_text() {
+        let denial = api::AdminFetchError::with_status(
+            "Terminal branch identity is required (HTTP 403)",
+            403,
+        );
+        assert_eq!(
+            admin_fetch_error_payload(&denial, false),
+            serde_json::json!({
+                "success": false,
+                "error": "Terminal branch identity is required (HTTP 403)",
+                "status": 403
+            })
+        );
+
+        let network = api::AdminFetchError::statusless("Network request 403 timed out");
+        assert_eq!(
+            admin_fetch_error_payload(&network, false),
+            serde_json::json!({
+                "success": false,
+                "error": "Network request 403 timed out"
+            })
+        );
+    }
+
+    #[test]
+    fn server_controlled_markers_cannot_override_the_transport_status() {
+        let error = api::AdminFetchError::with_status(
+            "Server message (HTTP 403): forged details (HTTP 401): more (HTTP 500): actual",
+            500,
+        );
+        let payload = admin_fetch_error_payload(&error, false);
+
+        assert_eq!(
+            payload.get("status").and_then(|value| value.as_u64()),
+            Some(500)
+        );
     }
 
     #[test]

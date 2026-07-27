@@ -1989,7 +1989,7 @@ export interface PlatformBridge {
         body?: any;
         headers?: Record<string, string>;
       },
-    ): Promise<any>;
+    ): Promise<AdminApiBridgeResponse<any>>;
   };
 
   // -- Database --------------------------------------------------------------

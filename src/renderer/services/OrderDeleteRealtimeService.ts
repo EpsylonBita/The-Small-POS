@@ -97,6 +97,10 @@ export function subscribeToAdminOrderDeletedEvents(
     channel = supabase
       .channel(`orders:${organizationId}`)
       .on('broadcast', { event: 'order_deleted' }, async (event: { payload?: unknown }) => {
+        if (disposed) {
+          return
+        }
+
         const payload = normalizeAdminOrderDeletedEventPayload(event?.payload)
         if (!payload) {
           return
@@ -140,6 +144,10 @@ export function subscribeToAdminOrderDeletedEvents(
         }
       })
       .subscribe((status, error) => {
+        if (disposed) {
+          return
+        }
+
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           console.warn('[OrderDeleteRealtimeService] Broadcast subscription error:', {
             organizationId,
