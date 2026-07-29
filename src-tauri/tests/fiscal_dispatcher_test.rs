@@ -279,11 +279,3 @@ fn active_cache_active_proceeds_with_enqueue() {
 // behaves well at the function boundary; the source-level invariant
 // proves the command boundary absorbs it. A follow-up may add a full
 // Tauri-State integration test if a future regression demands it.
-
-#[test]
-fn t40a_documentation_test() {
-    // Placeholder so this contract assertion appears in test output as a
-    // visible passing test. The actual contract is enforced by the source
-    // code shape documented above.
-    assert!(true, "T40a contract documented above");
-}

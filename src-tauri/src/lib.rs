@@ -600,11 +600,15 @@ pub fn run() {
             let cancel_token = tokio_util::sync::CancellationToken::new();
             app.manage(cancel_token.clone());
             {
-                let db_state = app.state::<db::DbState>();
-                commands::callerid::disable_legacy_runtime_on_startup(
-                    &db_state,
-                    &caller_id_manager,
+                let caller_id_app = app.handle().clone();
+                let caller_id_manager = Arc::clone(&caller_id_manager);
+                let caller_id_cancel = cancel_token.clone();
+                let caller_id_startup = commands::callerid::start_grandstream_fxo_runtime(
+                    caller_id_app,
+                    caller_id_manager,
+                    caller_id_cancel,
                 );
+                tauri::async_runtime::spawn(caller_id_startup);
             }
 
             // Second DB connection for the background sync loop

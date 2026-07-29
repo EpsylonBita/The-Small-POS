@@ -117,30 +117,51 @@ fn resolve_runtime_config(_db_state: &db::DbState, _payload: Option<&Value>) -> 
     Err(LEGACY_CALLER_ID_DISABLED.to_string())
 }
 
-pub fn disable_legacy_runtime_on_startup(
-    db_state: &db::DbState,
-    mgr: &Arc<callerid::CallerIdManager>,
-) {
-    mgr.stop();
-    let _ = resolve_runtime_config(db_state, None);
-    info!("{LEGACY_CALLER_ID_DISABLED}");
+pub fn start_grandstream_fxo_runtime(
+    app_handle: tauri::AppHandle,
+    mgr: Arc<callerid::CallerIdManager>,
+    root_cancel: tokio_util::sync::CancellationToken,
+) -> impl std::future::Future<Output = Option<u64>> + Send + 'static {
+    let reserved_start =
+        callerid::grandstream_fxo::start_connector_supervisor(app_handle, mgr, root_cancel);
+    async move {
+        let installed_generation = reserved_start.await;
+        if let Some(generation) = installed_generation {
+            info!(
+                generation,
+                "Grandstream FXO Caller ID source supervisor started"
+            );
+        }
+        installed_generation
+    }
+}
+
+async fn complete_callerid_start<F>(start: F) -> Value
+where
+    F: std::future::Future<Output = Option<u64>>,
+{
+    if start.await.is_some() {
+        serde_json::json!({ "status": "starting" })
+    } else {
+        serde_json::json!({ "status": "superseded" })
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
-/// Legacy SIP activation is unavailable in the Phase 1 runtime.
+/// Start (or restart) the server-configured Grandstream FXO source supervisor.
 #[tauri::command]
 pub async fn callerid_start(
-    _app: tauri::AppHandle,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+    _db: tauri::State<'_, db::DbState>,
     mgr: tauri::State<'_, Arc<callerid::CallerIdManager>>,
-    _cancel_token: tauri::State<'_, tokio_util::sync::CancellationToken>,
+    cancel_token: tauri::State<'_, tokio_util::sync::CancellationToken>,
 ) -> Result<Value, String> {
-    mgr.stop();
-    resolve_runtime_config(&db, None)?;
-    Err(LEGACY_CALLER_ID_DISABLED.to_string())
+    let start =
+        start_grandstream_fxo_runtime(app, Arc::clone(mgr.inner()), cancel_token.inner().clone());
+    Ok(complete_callerid_start(start).await)
 }
 
 /// Stop the SIP listener.
@@ -148,7 +169,7 @@ pub async fn callerid_start(
 pub async fn callerid_stop(
     mgr: tauri::State<'_, Arc<callerid::CallerIdManager>>,
 ) -> Result<Value, String> {
-    mgr.stop();
+    mgr.stop().await;
     info!("Caller ID SIP listener stopped via command");
     Ok(serde_json::json!({ "status": "stopped" }))
 }
@@ -166,12 +187,11 @@ pub async fn callerid_get_status(
 #[tauri::command]
 pub async fn callerid_save_config(
     db: tauri::State<'_, db::DbState>,
-    mgr: tauri::State<'_, Arc<callerid::CallerIdManager>>,
+    _mgr: tauri::State<'_, Arc<callerid::CallerIdManager>>,
     arg0: Option<Value>,
     arg1: Option<Value>,
 ) -> Result<Value, String> {
     let payload = crate::parse_channel_payload(arg0, arg1);
-    mgr.stop();
     resolve_runtime_config(&db, Some(&payload))?;
     Err(LEGACY_CALLER_ID_DISABLED.to_string())
 }
@@ -266,5 +286,35 @@ mod tests {
             load_config(&db_state).enabled,
             "fail-closed activation must preserve existing user configuration"
         );
+    }
+
+    #[test]
+    fn runtime_start_wrapper_preserves_connector_install_outcome() {
+        fn assert_install_outcome<F, Fut>(_start: F)
+        where
+            F: FnOnce(
+                tauri::AppHandle,
+                Arc<callerid::CallerIdManager>,
+                tokio_util::sync::CancellationToken,
+            ) -> Fut,
+            Fut: std::future::Future<Output = Option<u64>>,
+        {
+        }
+
+        assert_install_outcome(start_grandstream_fxo_runtime);
+    }
+
+    #[tokio::test]
+    async fn superseded_start_returns_an_honest_command_response() {
+        let response = complete_callerid_start(async { None }).await;
+
+        assert_eq!(response, serde_json::json!({ "status": "superseded" }));
+    }
+
+    #[tokio::test]
+    async fn installed_start_keeps_the_existing_command_response() {
+        let response = complete_callerid_start(async { Some(42) }).await;
+
+        assert_eq!(response, serde_json::json!({ "status": "starting" }));
     }
 }

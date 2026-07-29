@@ -1,6 +1,9 @@
 //! Caller ID module types.
 
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +31,28 @@ pub enum CallerIdStatusReason {
     InvalidConfig,
     NetworkError,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CallerIdConnectorFamily {
+    AnalogFxo,
+    SipPbx,
+    CloudWebhook,
+    AnalogUsb,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CallerIdSourceConfig {
+    pub source_id: Uuid,
+    pub source_version: u32,
+    pub device_profile_key: String,
+    pub connector_family: CallerIdConnectorFamily,
+    pub line_id: Uuid,
+    pub source_channel: String,
+    pub trusted_device_ip: IpAddr,
+    pub listen_port: u16,
 }
 
 /// SIP listener configuration stored in `local_settings` (category `callerid`).
@@ -120,6 +145,8 @@ pub struct CallerIdStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+    use uuid::Uuid;
 
     #[test]
     fn test_default_config() {
@@ -164,5 +191,38 @@ mod tests {
         let status = ListenerStatus::Listening;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, "\"listening\"");
+    }
+
+    #[test]
+    fn source_config_preserves_the_server_issued_source_and_channel_identity() {
+        let config: CallerIdSourceConfig = serde_json::from_value(serde_json::json!({
+            "sourceId": "018f7684-1436-7d3d-a3f8-58b1bf600da0",
+            "sourceVersion": 7,
+            "deviceProfileKey": "grandstream_ht841_fxo",
+            "connectorFamily": "analog_fxo",
+            "lineId": "018f7684-1436-7d3d-a3f8-58b1bf600dbd",
+            "sourceChannel": "fxo-3",
+            "trustedDeviceIp": "192.168.1.70",
+            "listenPort": 5062
+        }))
+        .expect("server-issued FXO source config");
+
+        assert_eq!(
+            config.source_id,
+            Uuid::parse_str("018f7684-1436-7d3d-a3f8-58b1bf600da0").unwrap()
+        );
+        assert_eq!(config.source_version, 7);
+        assert_eq!(config.device_profile_key, "grandstream_ht841_fxo");
+        assert_eq!(config.connector_family, CallerIdConnectorFamily::AnalogFxo);
+        assert_eq!(
+            config.line_id,
+            Uuid::parse_str("018f7684-1436-7d3d-a3f8-58b1bf600dbd").unwrap()
+        );
+        assert_eq!(config.source_channel, "fxo-3");
+        assert_eq!(
+            config.trusted_device_ip,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 70))
+        );
+        assert_eq!(config.listen_port, 5062);
     }
 }

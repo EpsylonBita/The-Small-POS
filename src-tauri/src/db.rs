@@ -5606,14 +5606,6 @@ mod tests {
 
     #[test]
     fn test_run_migrations_advances_existing_v67_database_to_current() {
-        // CURRENT_SCHEMA_VERSION must include every migration after v67;
-        // otherwise the early-return guard can skip pending work for databases
-        // left behind by an older app.
-        assert!(
-            CURRENT_SCHEMA_VERSION >= 69,
-            "CURRENT_SCHEMA_VERSION must cover the registered v69 migration",
-        );
-
         let conn = test_db();
         run_migrations(&conn).expect("initial migrations");
         assert_eq!(

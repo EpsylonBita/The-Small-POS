@@ -534,19 +534,19 @@ mod audit_1_tests {
         // scaffold, terminal-failing the HR validator. Post-fix, all
         // four are populated.
         assert!(
-            payload["lines"].as_array().unwrap().len() > 0,
+            !payload["lines"].as_array().unwrap().is_empty(),
             "lines must not be empty post-fix"
         );
         assert!(
-            payload["payments"].as_array().unwrap().len() > 0,
+            !payload["payments"].as_array().unwrap().is_empty(),
             "payments must not be empty post-fix"
         );
         assert!(
-            payload["vatBreakdown"].as_array().unwrap().len() > 0,
+            !payload["vatBreakdown"].as_array().unwrap().is_empty(),
             "vatBreakdown must not be empty post-fix"
         );
         assert!(
-            payload["metadata"].as_object().unwrap().len() > 0,
+            !payload["metadata"].as_object().unwrap().is_empty(),
             "metadata must not be empty post-fix"
         );
     }
@@ -802,7 +802,7 @@ mod audit_1_tests {
             .as_i64()
             .unwrap();
         assert!(
-            bp >= 2300 && bp <= 2500,
+            (2300..=2500).contains(&bp),
             "rateBasisPoints should be ~2400 for 24% VAT, got {bp}"
         );
     }
