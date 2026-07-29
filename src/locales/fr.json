@@ -366,6 +366,8 @@
     },
     "title": "Commandes",
     "subtitle": "Gérer les commandes clients",
+    "sandboxWarning": "Commande de test — aucune vente réelle. Le reçu fiscal, les totaux Z et l’impression de production sont désactivés.",
+    "sandboxPrintBlocked": "L’impression des reçus de production est désactivée pour les commandes sandbox.",
     "newOrder": "Nouvelle commande",
     "startShiftFirst": "Commencez un service pour créer des commandes",
     "backToOrders": "Retour aux commandes",
@@ -6487,6 +6489,15 @@
       "products": "Synchroniser les produits",
       "orders": "Synchroniser les commandes",
       "inventory": "Synchroniser l'inventaire"
+    },
+    "efood": {
+      "pendingProvider": "En attente de l’activation de cette succursale par efood. Les identifiants et secrets sont gérés dans l’Admin Dashboard.",
+      "targetTerminal": "Terminal cible",
+      "lastError": "Dernière erreur",
+      "openAdmin": "Ouvrir l’Admin Dashboard",
+      "adminUrlMissing": "L’URL de l’Admin Dashboard n’est pas configurée sur ce terminal.",
+      "adminLinkCopied": "Lien de l’Admin Dashboard copié.",
+      "adminOpenFailed": "Impossible d’ouvrir l’Admin Dashboard."
     },
     "plugins": {
       "efood": {

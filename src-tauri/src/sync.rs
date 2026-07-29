@@ -2166,7 +2166,8 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                         FROM order_payments op
                         WHERE op.order_id = orders.id
                           AND op.status = 'completed'
-                    ), 0)
+                    ), 0),
+                    integration_environment, is_test
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
              ORDER BY created_at ASC",
@@ -2283,6 +2284,10 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "guest_count": row.get::<_, Option<i64>>(60)?,
                 "paidTotal": row.get::<_, f64>(61)?,
                 "paid_total": row.get::<_, f64>(61)?,
+                "integrationEnvironment": row.get::<_, Option<String>>(62)?,
+                "integration_environment": row.get::<_, Option<String>>(62)?,
+                "isTest": row.get::<_, Option<i64>>(63)?.unwrap_or(0) != 0,
+                "is_test": row.get::<_, Option<i64>>(63)?.unwrap_or(0) != 0,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -2360,7 +2365,8 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                     FROM order_payments op
                     WHERE op.order_id = orders.id
                       AND op.status = 'completed'
-                ), 0)
+                ), 0),
+                integration_environment, is_test
         FROM orders WHERE id = ?1",
         params![id],
         |row| {
@@ -2467,6 +2473,10 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 "guest_count": row.get::<_, Option<i64>>(58)?,
                 "paidTotal": row.get::<_, f64>(59)?,
                 "paid_total": row.get::<_, f64>(59)?,
+                "integrationEnvironment": row.get::<_, Option<String>>(60)?,
+                "integration_environment": row.get::<_, Option<String>>(60)?,
+                "isTest": row.get::<_, Option<i64>>(61)?.unwrap_or(0) != 0,
+                "is_test": row.get::<_, Option<i64>>(61)?.unwrap_or(0) != 0,
             }))
         },
     );

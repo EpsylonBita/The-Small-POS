@@ -82,6 +82,12 @@ interface IntegrationWithStatus extends Integration {
     store_status_override?: string;
     target_terminal_id?: string | null;
   };
+  onboardingStatus?: string;
+  sandboxStatus?: string;
+  productionStatus?: string;
+  diagnostics?: Record<string, unknown>;
+  lastError?: string | null;
+  readOnlyAdminSetup?: boolean;
 }
 
 interface RemoteIntegrationPayload {
@@ -97,6 +103,11 @@ interface RemoteIntegrationPayload {
   requires_partner_credentials?: boolean;
   settings?: IntegrationWithStatus['settings'];
   last_sync_at?: string | null;
+  onboarding_status?: string | null;
+  sandbox_status?: string | null;
+  production_status?: string | null;
+  diagnostics?: Record<string, unknown> | null;
+  last_error?: string | null;
 }
 
 interface IntegrationStats {
@@ -416,6 +427,29 @@ const calculateStats = (integrations: IntegrationWithStatus[]): IntegrationStats
 const normalizeProviderId = (value: string) =>
   value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 
+const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set(['caller_id', 'efood']);
+
+const usesAdminDashboardSetup = (pluginId: string): boolean =>
+  ADMIN_DASHBOARD_SETUP_PLUGIN_IDS.has(pluginId);
+
+const buildAdminDashboardPluginUrl = (
+  pluginId: string,
+  branchId?: string | null,
+  organizationId?: string | null,
+): string => {
+  try {
+    const stored = localStorage.getItem('admin_dashboard_url') || '';
+    const base = normalizeAdminDashboardUrl(stored).replace(/\/+$/, '');
+    if (!base) return '';
+    const params = new URLSearchParams({ plugin: pluginId });
+    if (branchId) params.set('branch_id', branchId);
+    if (organizationId) params.set('organization_id', organizationId);
+    return `${base}/plugins?${params.toString()}`;
+  } catch {
+    return '';
+  }
+};
+
 const INTEGRATION_CATALOG_BY_ID = new Map(
   ALL_INTEGRATIONS.map((integration) => [normalizeProviderId(integration.id), integration])
 );
@@ -439,6 +473,15 @@ const getRemoteIntegrationId = (integration: RemoteIntegrationPayload) =>
   );
 
 const mapRemoteStatus = (integration: RemoteIntegrationPayload): IntegrationWithStatus['status'] => {
+  if (integration.provider === 'efood' || integration.plugin_id === 'efood') {
+    if (integration.onboarding_status === 'sandbox_connected' || integration.onboarding_status === 'production_connected') {
+      return 'connected';
+    }
+    if (integration.onboarding_status === 'not_configured' || integration.onboarding_status === 'disabled') {
+      return 'disconnected';
+    }
+    return 'pending';
+  }
   if (integration.status === 'connected') return 'connected';
   if (integration.status === 'pending' || integration.status === 'error') return 'pending';
   if (integration.status === 'inactive') return 'disconnected';
@@ -465,6 +508,12 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
     status: requiresPartnerCredentials ? 'pending' : mapRemoteStatus(remote),
     lastSyncedAt: typeof remote.last_sync_at === 'string' ? remote.last_sync_at : undefined,
     settings: remote.settings || undefined,
+    onboardingStatus: remote.onboarding_status || undefined,
+    sandboxStatus: remote.sandbox_status || undefined,
+    productionStatus: remote.production_status || undefined,
+    diagnostics: remote.diagnostics || undefined,
+    lastError: remote.last_error || null,
+    readOnlyAdminSetup: id === 'efood',
   };
 };
 
@@ -589,6 +638,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
   const statusColor = isLocked ? '#f59e0b' : getStatusColor(integration.status);
   const isToggleDisabled =
     isLocked ||
+    integration.readOnlyAdminSetup === true ||
     integration.status === 'pending' ||
     Boolean(toggleDisabledMessage);
   const isEnabled = integration.status === 'connected';
@@ -626,8 +676,16 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               <StatusIcon size={12} />
               <span>
                 {isLocked && t('integrations.status.partnerRequired', 'Partner credentials required')}
-                {!isLocked && integration.status === 'connected' && t('integrations.status.connected', 'Connected')}
-                {!isLocked && integration.status === 'pending' && t('integrations.status.pending', 'Pending')}
+                {!isLocked && integration.status === 'connected' && (
+                  integration.id === 'efood'
+                    ? integration.onboardingStatus || t('integrations.status.connected', 'Connected')
+                    : t('integrations.status.connected', 'Connected')
+                )}
+                {!isLocked && integration.status === 'pending' && (
+                  integration.id === 'efood'
+                    ? integration.onboardingStatus || t('integrations.status.pending', 'Pending')
+                    : t('integrations.status.pending', 'Pending')
+                )}
                 {!isLocked && integration.status === 'disconnected' && t('integrations.status.disconnected', 'Not Connected')}
               </span>
             </div>
@@ -660,6 +718,30 @@ const IntegrationCard = memo<IntegrationCardProps>(({
                 : t('integrations.mydata.statusLine.notReporting', 'Not set up yet — receipts are NOT being sent to AADE. Finish setup in your Admin Dashboard.')}
             </p>
           )}
+          {integration.id === 'efood' && integration.status === 'pending' && (
+            <p className={`mt-2 text-xs font-medium ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
+              {t(
+                'integrations.efood.pendingProvider',
+                'The connection has started and is waiting for activation by efood.'
+              )}
+            </p>
+          )}
+          {integration.id === 'efood' && (
+            <div className={`mt-3 grid grid-cols-2 gap-1 rounded-xl p-2 text-[11px] ${
+              isDark ? 'bg-white/5 text-gray-300' : 'bg-gray-50 text-gray-600'
+            }`}>
+              <span>Sandbox</span><strong>{integration.sandboxStatus || 'not_configured'}</strong>
+              <span>Production</span><strong>{integration.productionStatus || 'not_configured'}</strong>
+              <span>{t('integrations.efood.targetTerminal', 'Target terminal')}</span>
+              <strong>
+                {(integration.diagnostics as { target_terminal_configured?: boolean } | undefined)?.target_terminal_configured
+                  ? t('common.yes', 'Yes')
+                  : t('common.no', 'No')}
+              </strong>
+              <span>{t('integrations.efood.lastError', 'Last error')}</span>
+              <strong className="truncate" title={integration.lastError || ''}>{integration.lastError || '—'}</strong>
+            </div>
+          )}
         </div>
 
         {/* Actions */}
@@ -674,7 +756,16 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               }`}
               aria-label={t('integrations.configure', 'Configure')}
             >
-              <Settings size={18} />
+              {usesAdminDashboardSetup(integration.id) ? (
+                <>
+                  <ExternalLink size={16} />
+                  <span className="ml-1 hidden text-xs sm:inline">
+                    {t('integrations.efood.openAdmin', 'Open Admin Dashboard')}
+                  </span>
+                </>
+              ) : (
+                <Settings size={18} />
+              )}
             </button>
           ) : null}
           <button
@@ -1125,6 +1216,25 @@ export const IntegrationsPage: React.FC = () => {
     }
   }, [pluginModalOpen, loadTerminals]);
 
+  const openPluginInAdminDashboard = useCallback(async (pluginId: string) => {
+    const url = buildAdminDashboardPluginUrl(
+      pluginId,
+      getSetting('terminal', 'branch_id') as string | undefined,
+      getSetting('terminal', 'organization_id') as string | undefined,
+    );
+    if (!url) {
+      toast.error(t('integrations.efood.adminUrlMissing', 'Admin Dashboard URL is not configured on this terminal.'));
+      return;
+    }
+    if (await openExternalUrl(url)) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success(t('integrations.efood.adminLinkCopied', 'Admin Dashboard link copied.'));
+    } catch {
+      toast.error(t('integrations.efood.adminOpenFailed', 'Could not open the Admin Dashboard.'));
+    }
+  }, [getSetting, t]);
+
   // Handle toggle
   const handleToggle = useCallback(async (id: string) => {
     if (toggleAction.disabled) {
@@ -1134,6 +1244,11 @@ export const IntegrationsPage: React.FC = () => {
 
     const integration = integrations.find(i => i.id === id);
     if (!integration) return;
+
+    if (usesAdminDashboardSetup(integration.id)) {
+      await openPluginInAdminDashboard(integration.id);
+      return;
+    }
 
     if (integration.requiresPartnerCredentials) {
     toast(t('integrations.partnerRequiredInfo', 'This plugin requires partner credentials. Contact support to enable it.'), {
@@ -1201,10 +1316,14 @@ export const IntegrationsPage: React.FC = () => {
       setPluginForm(defaults);
       setPluginModalOpen(true);
     }
-  }, [integrations, t, toggleAction.disabled, toggleAction.message]);
+  }, [integrations, openPluginInAdminDashboard, t, toggleAction.disabled, toggleAction.message]);
 
   // Handle configure
   const handleConfigure = useCallback((integration: IntegrationWithStatus) => {
+    if (usesAdminDashboardSetup(integration.id)) {
+      void openPluginInAdminDashboard(integration.id);
+      return;
+    }
     if (integration.requiresPartnerCredentials) {
       toast(t('integrations.partnerRequiredInfo', 'This plugin requires partner credentials. Contact support to enable it.'), {
         icon: <Lock className="w-4 h-4 text-amber-500" />,
@@ -1236,7 +1355,7 @@ export const IntegrationsPage: React.FC = () => {
     setActivePlugin(integration);
     setPluginForm(defaults);
     setPluginModalOpen(true);
-  }, [t]);
+  }, [openPluginInAdminDashboard, t]);
 
   const handleSaveMyDataConfig = useCallback(async () => {
     if (!isMyDataFiscalDeviceMode) {

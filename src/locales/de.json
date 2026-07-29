@@ -366,6 +366,8 @@
     },
     "title": "Bestellungen",
     "subtitle": "Kundenbestellungen verwalten",
+    "sandboxWarning": "Testbestellung — kein echter Verkauf. Fiskalbeleg, Z-Summen und Produktionsdruck sind deaktiviert.",
+    "sandboxPrintBlocked": "Der Produktionsbelegdruck ist für Sandbox-Bestellungen deaktiviert.",
     "newOrder": "Neue Bestellung",
     "startShiftFirst": "Starten Sie zuerst eine Schicht, um Bestellungen zu erstellen",
     "backToOrders": "Zurück zu Bestellungen",
@@ -6487,6 +6489,15 @@
       "products": "Produkte synchronisieren",
       "orders": "Bestellungen synchronisieren",
       "inventory": "Inventar synchronisieren"
+    },
+    "efood": {
+      "pendingProvider": "Warten auf die Aktivierung dieser Filiale durch efood. Zugangsdaten und Geheimnisse werden im Admin Dashboard verwaltet.",
+      "targetTerminal": "Zielterminal",
+      "lastError": "Letzter Fehler",
+      "openAdmin": "Admin Dashboard öffnen",
+      "adminUrlMissing": "Die Admin-Dashboard-URL ist auf diesem Terminal nicht konfiguriert.",
+      "adminLinkCopied": "Admin-Dashboard-Link kopiert.",
+      "adminOpenFailed": "Das Admin Dashboard konnte nicht geöffnet werden."
     },
     "plugins": {
       "efood": {

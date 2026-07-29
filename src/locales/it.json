@@ -366,6 +366,8 @@
     },
     "title": "Ordini",
     "subtitle": "Gestisci gli ordini dei clienti",
+    "sandboxWarning": "Ordine di test — nessuna vendita reale. Ricevuta fiscale, totali Z e stampa di produzione sono disabilitati.",
+    "sandboxPrintBlocked": "La stampa delle ricevute di produzione è disabilitata per gli ordini sandbox.",
     "newOrder": "Nuovo ordine",
     "startShiftFirst": "Inizia un turno per creare ordini",
     "backToOrders": "Torna agli ordini",
@@ -6487,6 +6489,15 @@
       "products": "Sincronizza prodotti",
       "orders": "Sincronizza ordini",
       "inventory": "Sincronizza inventario"
+    },
+    "efood": {
+      "pendingProvider": "In attesa che efood attivi questa filiale. Credenziali e segreti sono gestiti nell’Admin Dashboard.",
+      "targetTerminal": "Terminale di destinazione",
+      "lastError": "Ultimo errore",
+      "openAdmin": "Apri Admin Dashboard",
+      "adminUrlMissing": "L’URL dell’Admin Dashboard non è configurato su questo terminale.",
+      "adminLinkCopied": "Link dell’Admin Dashboard copiato.",
+      "adminOpenFailed": "Impossibile aprire l’Admin Dashboard."
     },
     "plugins": {
       "efood": {

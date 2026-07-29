@@ -308,6 +308,62 @@ pub fn enqueue_print_job_with_payload(
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
+    let is_order_document = matches!(
+        entity_type,
+        "order_receipt"
+            | "kitchen_ticket"
+            | "delivery_slip"
+            | "order_completed_receipt"
+            | "order_canceled_receipt"
+    );
+    let is_sandbox_order = if is_order_document {
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM orders
+                WHERE id = ?1
+                  AND (
+                    integration_environment = 'sandbox'
+                    OR COALESCE(is_test, 0) = 1
+                  )
+             )",
+            params![entity_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|value| value != 0)
+        // Older test fixtures without the environment columns fail closed to
+        // their legacy behavior; all migrated application databases have v71.
+        .unwrap_or(false)
+    } else if entity_type == "split_receipt" {
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM payments p
+                JOIN orders o ON o.id = p.order_id
+                WHERE p.id = ?1
+                  AND (
+                    o.integration_environment = 'sandbox'
+                    OR COALESCE(o.is_test, 0) = 1
+                  )
+             )",
+            params![entity_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|value| value != 0)
+        .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if is_sandbox_order {
+        return Ok(serde_json::json!({
+            "success": true,
+            "skipped": true,
+            "reason": "sandbox_order",
+            "jobId": null,
+        }));
+    }
+
     // Idempotency: reject if a pending/printing job already exists for this entity
     let existing: Option<String> = conn
         .query_row(
@@ -7323,6 +7379,33 @@ mod tests {
         // Total jobs should still be 1
         let jobs2 = list_print_jobs(&db, None).unwrap();
         assert_eq!(jobs2.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_sandbox_order_never_enters_production_print_queue() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-sandbox", "TEST-1", 12.50);
+            conn.execute(
+                "UPDATE orders
+                 SET integration_environment = 'sandbox', is_test = 1
+                 WHERE id = 'ord-sandbox'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = enqueue_print_job(&db, "kitchen_ticket", "ord-sandbox", None).unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["skipped"], true);
+        assert_eq!(result["reason"], "sandbox_order");
+        assert!(list_print_jobs(&db, None)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

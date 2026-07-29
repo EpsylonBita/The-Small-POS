@@ -1141,6 +1141,7 @@ fn build_staff_cash_breakdown_row(
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND COALESCE(o.is_ghost, 0) = 0
+                   AND COALESCE(o.is_test, 0) = 0
                    AND o.status NOT IN ('cancelled', 'canceled')
                    AND COALESCE(o.order_type, 'dine-in') = 'delivery'";
 
@@ -1161,6 +1162,7 @@ fn build_staff_cash_breakdown_row(
              LEFT JOIN order_payments op ON op.order_id = o.id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND COALESCE(o.is_ghost, 0) = 0
+               AND COALESCE(o.is_test, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled')
                {}",
             role_order_type_filter_sql(role_type, "o")
@@ -1679,6 +1681,7 @@ fn load_sales_by_type_for_period(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND op.status = 'completed'
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
          GROUP BY bucket, op.method"
     );
@@ -1742,6 +1745,7 @@ fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Val
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND op.status = 'completed'
                AND COALESCE(o.is_ghost, 0) = 0
+               AND COALESCE(o.is_test, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY bucket, op.method",
         )
@@ -1810,6 +1814,7 @@ fn load_non_driver_order_totals(
               AND {financial_expr} >= ?2
               AND (?3 IS NULL OR {financial_expr} <= ?3)
               AND COALESCE(o.is_ghost, 0) = 0
+              AND COALESCE(o.is_test, 0) = 0
               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
               AND NOT {staff_open_tab}
               {}
@@ -1844,6 +1849,7 @@ fn load_non_driver_order_totals(
            AND {financial_expr} >= ?2
            AND (?3 IS NULL OR {financial_expr} <= ?3)
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            {}
            AND NOT EXISTS (
@@ -2582,6 +2588,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
          FROM orders
          WHERE staff_shift_id = ?1
            AND COALESCE(is_ghost, 0) = 0
+           AND COALESCE(is_test, 0) = 0
            AND status NOT IN ('cancelled', 'canceled')
            AND NOT {single_shift_open_tab}"
     );
@@ -2609,6 +2616,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
              WHERE op.staff_shift_id = ?1
                AND op.status = 'completed'
                AND COALESCE(o.is_ghost, 0) = 0
+               AND COALESCE(o.is_test, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY op.method",
         )
@@ -2666,6 +2674,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
              JOIN orders o ON o.id = op.order_id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND COALESCE(o.is_ghost, 0) = 0
+               AND COALESCE(o.is_test, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY pa.adjustment_type",
         )
@@ -2876,6 +2885,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
          ) r ON r.order_id = o.id
          WHERE o.staff_shift_id = ?1
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled')
            AND NOT {shift_ot_open_tab}
          GROUP BY COALESCE(o.order_type, 'dine-in')"
@@ -3612,6 +3622,7 @@ fn build_z_report_for_date(
            AND (?2 IS NULL OR {financial_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled')
            AND NOT {open_table_tab}"
     );
@@ -3646,6 +3657,7 @@ fn build_z_report_for_date(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND op.status = 'completed'
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
          GROUP BY op.method"
     );
@@ -3701,6 +3713,7 @@ fn build_z_report_for_date(
            AND (?2 IS NULL OR {adjustment_scope_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
          GROUP BY pa.adjustment_type"
     );
@@ -3867,6 +3880,7 @@ fn build_z_report_for_date(
            AND (?2 IS NULL OR {order_type_scope_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled')
            AND NOT {order_type_open_tab}
          GROUP BY COALESCE(o.order_type, 'dine-in')"
@@ -5385,6 +5399,33 @@ mod tests {
     fn test_generate_z_report_basic() {
         let db = test_db();
         let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                    payment_status, staff_shift_id, integration_environment, is_test,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-sandbox-z', 'TEST-Z', '[]', 500.0, 50000, 'completed', 'delivery',
+                    'paid', ?1, 'sandbox', 1, 'pending',
+                    '2026-02-16T18:00:00Z', '2026-02-16T18:00:00Z'
+                 )",
+                params![shift_id],
+            )
+            .expect("insert sandbox order");
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status,
+                    staff_shift_id, currency, created_at, updated_at
+                 ) VALUES (
+                    'pay-sandbox-z', 'ord-sandbox-z', 'cash', 500.0, 50000, 'completed',
+                    ?1, 'EUR', '2026-02-16T18:00:00Z', '2026-02-16T18:00:00Z'
+                 )",
+                params![shift_id],
+            )
+            .expect("insert sandbox payment");
+        }
 
         let payload = serde_json::json!({ "shiftId": shift_id });
         let result = generate_z_report(&db, &payload).expect("generate should succeed");

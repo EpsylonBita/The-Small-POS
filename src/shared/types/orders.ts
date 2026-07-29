@@ -224,6 +224,8 @@ export interface Order {
   plugin?: OrderPlugin | string; // Plugin where order originated (e.g., 'wolt', 'efood', 'pos')
   order_plugin?: OrderPlugin | string; // Alternative field name for plugin
   external_plugin_order_id?: string; // Original order ID from external plugin
+  integration_environment?: 'sandbox' | 'production';
+  is_test?: boolean;
   plugin_commission_pct?: number; // Commission percentage charged by plugin
   net_earnings?: number; // Net earnings after plugin commission deduction
 
@@ -292,6 +294,8 @@ export interface OrderRow {
   // Plugin tracking
   plugin?: OrderPlugin | string;
   external_plugin_order_id?: string;
+  integration_environment?: 'sandbox' | 'production';
+  is_test?: boolean;
   plugin_commission_pct?: number;
   net_earnings?: number;
   // Backward compatibility - @deprecated

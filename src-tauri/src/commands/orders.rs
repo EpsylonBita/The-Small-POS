@@ -718,6 +718,14 @@ fn attach_remote_order_identity_to_local(
     let owner_terminal_id = value_str(order_data, &["owner_terminal_id", "ownerTerminalId"]);
     let source_terminal_id = value_str(order_data, &["source_terminal_id", "sourceTerminalId"]);
     let branch_id = value_str(order_data, &["branch_id", "branchId"]);
+    let integration_environment = value_str(
+        order_data,
+        &["integration_environment", "integrationEnvironment"],
+    )
+    .filter(|value| value == "sandbox" || value == "production")
+    .unwrap_or_else(|| "production".to_string());
+    let is_test = value_bool_any(order_data, &["is_test", "isTest"])
+        .unwrap_or(integration_environment == "sandbox");
 
     let updated = conn
         .execute(
@@ -751,12 +759,14 @@ fn attach_remote_order_identity_to_local(
                   AND NULLIF(TRIM(COALESCE(branch_id, '')), '') IS NULL THEN ?6
                  ELSE branch_id
              END,
+             integration_environment = ?7,
+             is_test = ?8,
              sync_status = CASE
                  WHEN lower(COALESCE(sync_status, '')) IN ('pending', 'processing', 'failed', 'conflict') THEN sync_status
                  ELSE 'synced'
              END,
-             last_synced_at = ?7
-         WHERE id = ?8
+             last_synced_at = ?9
+         WHERE id = ?10
            AND (
                 NULLIF(TRIM(COALESCE(supabase_id, '')), '') IS NULL
                 OR supabase_id = ?1
@@ -768,6 +778,8 @@ fn attach_remote_order_identity_to_local(
             owner_terminal_id,
             source_terminal_id,
             branch_id,
+            integration_environment,
+            if is_test { 1_i64 } else { 0_i64 },
             synced_at,
             local_id,
         ],
@@ -3395,6 +3407,15 @@ pub async fn order_save_from_remote(
             "externalPlatformOrderId",
         ],
     );
+    let integration_environment = value_str(
+        &order_data,
+        &["integration_environment", "integrationEnvironment"],
+    )
+    .filter(|value| value == "sandbox" || value == "production")
+    .unwrap_or_else(|| "production".to_string());
+    let is_test = value_bool_any(&order_data, &["is_test", "isTest"])
+        .unwrap_or(integration_environment == "sandbox");
+    let suppress_auto_print = suppress_auto_print || is_test;
     let is_ghost = order_data
         .get("is_ghost")
         .or_else(|| order_data.get("isGhost"))
@@ -3454,6 +3475,7 @@ pub async fn order_save_from_remote(
                 tip_amount, tip_amount_cents,
                 version, terminal_id, owner_terminal_id, source_terminal_id,
                 branch_id, client_request_id, plugin, external_plugin_order_id,
+                integration_environment, is_test,
                 tax_rate,
                 delivery_fee, delivery_fee_cents,
                 is_ghost, ghost_source, ghost_metadata
@@ -3474,9 +3496,10 @@ pub async fn order_save_from_remote(
                 ?40, ?41,
                 1, ?42, ?43, ?44,
                 ?45, ?46, ?47, ?48,
-                ?49,
-                ?50, ?51,
-                ?52, ?53, ?54
+                ?49, ?50,
+                ?51,
+                ?52, ?53,
+                ?54, ?55, ?56
             )",
             rusqlite::params![
                 local_id,
@@ -3527,6 +3550,8 @@ pub async fn order_save_from_remote(
                 client_request_id,
                 plugin,
                 external_plugin_order_id,
+                integration_environment,
+                if is_test { 1_i64 } else { 0_i64 },
                 tax_rate,
                 delivery_fee,
                 delivery_fee_cents,
@@ -5042,6 +5067,8 @@ mod dto_tests {
                 owner_terminal_id TEXT,
                 source_terminal_id TEXT,
                 branch_id TEXT,
+                integration_environment TEXT NOT NULL DEFAULT 'production',
+                is_test INTEGER NOT NULL DEFAULT 0,
                 last_synced_at TEXT
             );",
         )

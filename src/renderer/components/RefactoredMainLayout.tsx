@@ -142,6 +142,8 @@ const SuppliersView = () => <SuppliersPage />;
 const InventoryView = () => <InventoryPage />;
 const KitchenDisplayView = () => <KitchenDisplayPage />;
 const CustomerDisplayView = () => <CustomerDisplayPage />;
+const KioskView = () => <KioskManagementPage />;
+const IntegrationsView = () => <IntegrationsPage />;
 
 // Placeholder views for modules not yet implemented
 const CustomerWebView = () => <ComingSoonView moduleName="Web Ordering" />;
@@ -417,7 +419,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     // Fast-food vertical (lazy-loaded)
     drive_through: DriveThruView,
     delivery: DeliveryView,
-    kiosk: () => <KioskManagementPage />, // Kiosk management for staff
+    kiosk: KioskView, // Kiosk management for staff
     delivery_zones: DeliveryZonesView,
 
     // Retail vertical (lazy-loaded)
@@ -442,8 +444,8 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     customer_app: CustomerAppView,
 
     // Integrations
-    plugin_integrations: () => <IntegrationsPage />,
-    integrations: () => <IntegrationsPage />, // alias
+    plugin_integrations: IntegrationsView,
+    integrations: IntegrationsView, // alias
 
   };
 

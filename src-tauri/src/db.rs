@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 70;
+const CURRENT_SCHEMA_VERSION: i32 = 71;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -454,6 +454,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 70 {
         run_migration_tx(conn, 70, migrate_v70)?;
+    }
+    if current < 71 {
+        run_migration_tx(conn, 71, migrate_v71)?;
     }
 
     Ok(())
@@ -4522,6 +4525,41 @@ fn migrate_v70(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v71: preserve delivery integration environment on local orders.
+///
+/// Sandbox orders remain actionable in POS, but downstream fiscal/reporting
+/// code can reliably identify them after restart without consulting remote
+/// provider state.
+fn migrate_v71(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "integration_environment")? {
+        conn.execute_batch(
+            "ALTER TABLE orders
+             ADD COLUMN integration_environment TEXT NOT NULL DEFAULT 'production'
+             CHECK (integration_environment IN ('sandbox', 'production'));",
+        )
+        .map_err(|e| format!("v71 add orders.integration_environment: {e}"))?;
+    }
+    if !column_exists(conn, "orders", "is_test")? {
+        conn.execute_batch("ALTER TABLE orders ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0;")
+            .map_err(|e| format!("v71 add orders.is_test: {e}"))?;
+    }
+    // Some repair-path fixtures and legacy partial schemas have an `orders`
+    // table without the base `created_at` column. Keep the additive column
+    // repair working there; normal application schemas still receive the
+    // composite lookup index.
+    if column_exists(conn, "orders", "created_at")? {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_orders_integration_environment_created
+               ON orders (integration_environment, created_at);",
+        )
+        .map_err(|e| format!("v71 index sandbox orders: {e}"))?;
+    }
+    conn.execute("INSERT INTO schema_version (version) VALUES (71)", [])
+        .map_err(|e| format!("v71 record schema_version: {e}"))?;
+    info!("Applied migration v71 (delivery integration environment)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -5686,6 +5724,42 @@ mod tests {
             CURRENT_SCHEMA_VERSION,
             "fresh databases should reach the tip-attribution migration",
         );
+    }
+
+    #[test]
+    fn test_migrate_v71_persists_sandbox_order_isolation() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        for column in ["integration_environment", "is_test"] {
+            assert!(
+                column_exists(&conn, "orders", column).expect("column check"),
+                "orders.{column} should exist after v71",
+            );
+        }
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, status, items, total_amount, order_type,
+                created_at, updated_at, integration_environment, is_test
+             ) VALUES (
+                'sandbox-order', 'TEST-71', 'pending', '[]', 0, 'takeaway',
+                datetime('now'), datetime('now'), 'sandbox', 1
+             )",
+            [],
+        )
+        .expect("insert sandbox order");
+
+        let marker: (String, i64) = conn
+            .query_row(
+                "SELECT integration_environment, is_test
+                 FROM orders WHERE id = 'sandbox-order'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read sandbox marker");
+        assert_eq!(marker, ("sandbox".to_string(), 1));
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
     }
 
     #[test]

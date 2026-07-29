@@ -75,6 +75,9 @@ interface Order {
   client_request_id?: string;
   cancellation_reason?: string;
   cancelled_at?: string;
+  platform?: string;
+  integration_environment?: 'sandbox' | 'production';
+  is_test?: boolean;
   source?: 'local' | 'remote';
 }
 
@@ -195,6 +198,15 @@ const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
     client_order_id: asString(raw.client_order_id) || asString(raw.clientOrderId),
     client_request_id: asString(raw.client_request_id) || asString(raw.clientRequestId),
     cancellation_reason: asString(raw.cancellation_reason) || asString(raw.cancellationReason),
+    platform: asString(raw.platform) || asString(raw.plugin),
+    integration_environment:
+      (asString(raw.integration_environment) || asString(raw.integrationEnvironment)) === 'sandbox'
+        ? 'sandbox'
+        : 'production',
+    is_test:
+      raw.is_test === true
+      || raw.isTest === true
+      || (asString(raw.integration_environment) || asString(raw.integrationEnvironment)) === 'sandbox',
     cancelled_at: asString(raw.cancelled_at) || asString(raw.cancelledAt),
     source,
   };
@@ -900,13 +912,26 @@ const OrdersPage: React.FC = () => {
                     key={order.id}
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className={`p-5 rounded-xl border cursor-pointer transition-all ${isDark ? 'border-zinc-800 bg-zinc-950/80 active:border-amber-400/40 active:bg-zinc-900' : 'border-amber-100/80 bg-[#fffaf1]/90 active:border-amber-300/90 active:bg-[#fff7e8] active:shadow-md'}`}
+                    className={`p-5 rounded-xl border cursor-pointer transition-all ${
+                      order.is_test
+                        ? isDark
+                          ? 'border-cyan-500/70 bg-cyan-950/20 active:bg-cyan-950/30'
+                          : 'border-cyan-500 bg-cyan-50 active:bg-cyan-100'
+                        : isDark
+                          ? 'border-zinc-800 bg-zinc-950/80 active:border-amber-400/40 active:bg-zinc-900'
+                          : 'border-amber-100/80 bg-[#fffaf1]/90 active:border-amber-300/90 active:bg-[#fff7e8] active:shadow-md'
+                    }`}
                     onClick={() => setSelectedOrder(order)}
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-3 mb-2">
                           <span className="font-mono font-bold text-lg">{displayOrderNumber}</span>
+                          {order.is_test && (
+                            <span className="rounded-full border border-cyan-500 bg-cyan-500/15 px-2 py-1 text-[11px] font-black tracking-wide text-cyan-700 dark:text-cyan-200">
+                              TEST / SANDBOX
+                            </span>
+                          )}
                           <span className={`inline-flex items-center justify-center rounded-full border px-3 py-1.5 text-[13px] leading-none font-bold whitespace-nowrap ${getOrderStatusPillClasses(order.status)}`}>
                             {getOrderStatusLabel(order.status)}
                           </span>
@@ -915,6 +940,13 @@ const OrdersPage: React.FC = () => {
                             <span>{getOrderTypeLabel(order.order_type)}</span>
                           </div>
                         </div>
+                        {order.is_test && (
+                          <p className="mb-3 text-xs font-semibold text-cyan-800 dark:text-cyan-200">
+                            {t('orders.sandboxWarning', {
+                              defaultValue: 'Test order — not a real sale. Fiscal receipt, Z totals and production printing are disabled.',
+                            })}
+                          </p>
+                        )}
 
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
                           {customerDisplayName && (
@@ -1015,6 +1047,14 @@ const OrdersPage: React.FC = () => {
           setOpenSelectedOrderPayment(false);
         }}
         onPrintReceipt={async () => {
+          if (selectedOrder?.is_test || selectedOrder?.integration_environment === 'sandbox') {
+            toast.error(
+              t('orders.sandboxPrintBlocked', {
+                defaultValue: 'Production receipt printing is disabled for sandbox orders.',
+              }),
+            );
+            return;
+          }
           const orderId = selectedOrder?.id;
           if (!orderId) {
             toast.error('No order ID available for printing');

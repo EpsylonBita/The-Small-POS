@@ -366,6 +366,8 @@
     },
     "title": "Orders",
     "subtitle": "Manage customer orders",
+    "sandboxWarning": "Test order — not a real sale. Fiscal receipt, Z totals and production printing are disabled.",
+    "sandboxPrintBlocked": "Production receipt printing is disabled for sandbox orders.",
     "newOrder": "New Order",
     "startShiftFirst": "Start a shift first to create orders",
     "backToOrders": "Back to Orders",
@@ -6486,7 +6488,16 @@
       "availability": "Sync availability",
       "products": "Sync products",
       "orders": "Sync orders",
-      "inventory": "Sync inventory"
+    "inventory": "Sync inventory"
+    },
+    "efood": {
+      "pendingProvider": "Waiting for efood to activate this branch. Credentials and secrets are managed in Admin Dashboard.",
+      "targetTerminal": "Target terminal",
+      "lastError": "Last error",
+      "openAdmin": "Open Admin Dashboard",
+      "adminUrlMissing": "Admin Dashboard URL is not configured on this terminal.",
+      "adminLinkCopied": "Admin Dashboard link copied.",
+      "adminOpenFailed": "Could not open the Admin Dashboard."
     },
     "plugins": {
       "efood": {

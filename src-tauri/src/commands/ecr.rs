@@ -2563,6 +2563,27 @@ pub async fn ecr_fiscal_print(
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_required_order_id(arg0)?;
 
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let sandbox_order = conn
+            .query_row(
+                "SELECT integration_environment = 'sandbox' OR COALESCE(is_test, 0) = 1
+                 FROM orders WHERE id = ?1",
+                rusqlite::params![order_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(|e| format!("inspect sandbox order before fiscal print: {e}"))?
+            .unwrap_or(false);
+        if sandbox_order {
+            return Ok(serde_json::json!({
+                "success": true,
+                "skipped": true,
+                "reason": "sandbox_order"
+            }));
+        }
+    }
+
     // Phase 1 — load device + order + payments under the DB lock.
     //
     // The inner block holds `db.conn` only for the duration of these fast
