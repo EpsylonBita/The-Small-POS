@@ -1012,12 +1012,12 @@ test('Round 243: the action row is sticky/reachable with neutral/green/red 44px 
   // Test = neutral, >=44px, centered icon+text.
   assert.match(
     callerIdSource,
-    /onClick=\{handleTest\}[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center[\s\S]*?bg-zinc-700/,
+    /onClick=\{handleTest\}[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center[\s\S]*?liquid-glass-modal-button/,
   );
   // Save & Activate = green when available, neutral grey when blocked (single gate), >=44px centered.
   assert.match(
     callerIdSource,
-    /onClick=\{handleSaveAndActivate\}[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center[\s\S]*?saveAndActivateDisabled[\s\S]*?bg-zinc-800 text-zinc-500[\s\S]*?bg-green-600/,
+    /onClick=\{handleSaveAndActivate\}[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center[\s\S]*?saveAndActivateDisabled[\s\S]*?liquid-glass-modal-button liquid-glass-modal-text-muted[\s\S]*?bg-green-600/,
   );
   // Disable = red, >=44px centered.
   assert.match(
@@ -1060,8 +1060,9 @@ test('Round 244: the non-action content reserves space so nothing renders under 
   const bodyIdx = callerIdSource.search(/className="space-y-4 pb-\d\d"/);
   const stickyIdx = callerIdSource.indexOf('sticky bottom-0');
   assert.ok(bodyIdx > 0 && stickyIdx > bodyIdx, 'the sticky action bar must follow the reserved-space body');
-  // The bar keeps the glass look but is near-opaque, so transient scrolled content cannot bleed through.
-  assert.match(callerIdSource, /sticky bottom-0[^"]*bg-zinc-950\/9\d[^"]*backdrop-blur/);
+  // The bar uses the shared elevated modal surface plus blur, so transient scrolled content cannot
+  // bleed through and the contrast contract remains correct in both themes.
+  assert.match(callerIdSource, /liquid-glass-modal-footer[^"]*sticky bottom-0[^"]*backdrop-blur/);
 });
 
 test('Round 244: the Older PBX option separates title and help (block layout, no concatenated text)', () => {

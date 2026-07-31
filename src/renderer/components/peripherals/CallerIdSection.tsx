@@ -198,10 +198,10 @@ const buildConfigPayload = (config: CallerIdConfig, enabled: boolean): Partial<C
 }
 
 const statusTone = (status?: CallerIdStatus | null) => {
-  if (status?.status === 'listening') return 'text-green-400'
-  if (status?.status === 'registering') return 'text-yellow-400'
-  if (status?.status === 'error') return 'text-red-400'
-  return 'text-zinc-500'
+  if (status?.status === 'listening') return 'text-green-700 dark:text-green-300'
+  if (status?.status === 'registering') return 'text-amber-700 dark:text-amber-300'
+  if (status?.status === 'error') return 'text-red-700 dark:text-red-300'
+  return 'liquid-glass-modal-text-muted'
 }
 
 const statusLabel = (status?: CallerIdStatus | null) => {
@@ -415,7 +415,7 @@ const CallerIdSection: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="py-4 flex items-center gap-2 text-zinc-500">
+      <div className="liquid-glass-modal-text-muted flex items-center gap-2 py-4">
         <Loader2 className="w-4 h-4 animate-spin" />
         <span className="text-sm">{t('common.loading', 'Loading...')}</span>
       </div>
@@ -452,8 +452,8 @@ const CallerIdSection: React.FC = () => {
       <div className="space-y-4 pb-32">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <PhoneIncoming className="w-5 h-5 text-amber-400" />
-          <h3 className="text-sm font-semibold text-zinc-200">
+          <PhoneIncoming className="h-5 w-5 text-amber-600 dark:text-amber-300" />
+          <h3 className="liquid-glass-modal-text text-sm font-semibold">
             {t('settings.peripherals.callerId.title', 'Caller ID (VoIP/SIP)')}
           </h3>
         </div>
@@ -466,9 +466,9 @@ const CallerIdSection: React.FC = () => {
       </div>
 
       {/* Compact one-line reminder (this terminal is the single source for the line). */}
-      <div className="flex items-start gap-2 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-2">
-        <Info className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-300" />
-        <p className="text-xs text-amber-100/90">
+      <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border px-3 py-2">
+        <Info className="mt-0.5 h-4 w-4 flex-shrink-0" />
+        <p className="text-xs">
           {t(
             'settings.peripherals.callerId.singleSourceBody',
             'This terminal will capture incoming calls and forward them to the rest of the store. Do not enable the same line on multiple POS terminals.',
@@ -477,15 +477,15 @@ const CallerIdSection: React.FC = () => {
       </div>
 
       {(status?.error || status?.reason) && (
-        <div className="rounded-2xl border border-red-500/20 bg-red-500/10 p-3">
+        <div className="liquid-glass-modal-error rounded-2xl border p-3">
           <div className="flex items-start gap-2">
-            <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-300" />
+            <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
             <div className="space-y-1">
-              <p className="text-xs font-medium text-red-200">
+              <p className="text-xs font-medium">
                 {status?.error || toReasonMessage(status?.reason, t)}
               </p>
               {status?.reason && (
-                <p className="text-xs text-red-200/80">{toReasonMessage(status.reason, t)}</p>
+                <p className="text-xs opacity-80">{toReasonMessage(status.reason, t)}</p>
               )}
             </div>
           </div>
@@ -495,17 +495,17 @@ const CallerIdSection: React.FC = () => {
       {/* STEP 1 — pick the kind of phone setup. The two common paths are prominent; the older PBX
           path is intentionally de-emphasised so it never reads as the default. */}
       <div className="space-y-2">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+        <p className="liquid-glass-modal-text-muted text-[11px] font-semibold uppercase tracking-wide">
           {t('settings.peripherals.callerId.steps.choose', 'Step 1 · Choose your phone setup')}
         </p>
         <div className="grid gap-2 sm:grid-cols-2">
           <button
             type="button"
             onClick={() => applySetupType('provider_preset')}
-            className={`rounded-xl border px-3 py-3 text-left transition-colors active:border-zinc-600 ${
+            className={`rounded-xl border px-3 py-3 text-left transition-colors active:border-amber-500 ${
               setupType === 'provider_preset'
-                ? 'border-amber-500 bg-amber-500/15 text-amber-100'
-                : 'border-zinc-700 bg-zinc-900/40 text-zinc-300'
+                ? 'border-amber-500 bg-amber-500/15 text-amber-950 dark:text-amber-100'
+                : 'liquid-glass-modal-border liquid-glass-modal-text bg-white/5 dark:bg-black/10'
             }`}
           >
             <p className="text-sm font-medium">
@@ -521,10 +521,10 @@ const CallerIdSection: React.FC = () => {
           <button
             type="button"
             onClick={() => applySetupType('generic_sip')}
-            className={`rounded-xl border px-3 py-3 text-left transition-colors active:border-zinc-600 ${
+            className={`rounded-xl border px-3 py-3 text-left transition-colors active:border-amber-500 ${
               setupType === 'generic_sip'
-                ? 'border-amber-500 bg-amber-500/15 text-amber-100'
-                : 'border-zinc-700 bg-zinc-900/40 text-zinc-300'
+                ? 'border-amber-500 bg-amber-500/15 text-amber-950 dark:text-amber-100'
+                : 'liquid-glass-modal-border liquid-glass-modal-text bg-white/5 dark:bg-black/10'
             }`}
           >
             <p className="text-sm font-medium">
@@ -541,10 +541,10 @@ const CallerIdSection: React.FC = () => {
         <button
           type="button"
           onClick={() => applySetupType('legacy_pbx')}
-          className={`w-full rounded-xl border px-3 py-2 text-left transition-colors active:border-zinc-600 ${
+          className={`w-full rounded-xl border px-3 py-2 text-left transition-colors active:border-amber-500 ${
             setupType === 'legacy_pbx'
-              ? 'border-amber-500/60 bg-amber-500/10 text-amber-200'
-              : 'border-zinc-800 bg-zinc-900/30 text-zinc-400'
+              ? 'border-amber-500/60 bg-amber-500/10 text-amber-950 dark:text-amber-100'
+              : 'liquid-glass-modal-border liquid-glass-modal-text-muted bg-white/5 dark:bg-black/10'
           }`}
         >
           <span className="block text-xs font-medium">
@@ -560,13 +560,13 @@ const CallerIdSection: React.FC = () => {
       </div>
 
       {/* STEP 2 — enter the line details (advanced/technical fields live behind the disclosure). */}
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+      <p className="liquid-glass-modal-text-muted text-[11px] font-semibold uppercase tracking-wide">
         {t('settings.peripherals.callerId.steps.details', 'Step 2 · Enter your line details')}
       </p>
 
       {authenticatedMode && (
-        <div className="space-y-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5">
-          <p className="text-xs font-medium text-zinc-300">
+        <div className="liquid-glass-modal-inset space-y-1.5 rounded-2xl px-3 py-2.5">
+          <p className="liquid-glass-modal-text text-xs font-medium">
             {t('settings.peripherals.callerId.checklist.title', "What you'll need")}
           </p>
           {([
@@ -588,11 +588,11 @@ const CallerIdSection: React.FC = () => {
           ] as const).map((item) => (
             <div key={item.key} className="flex items-start gap-2">
               {item.done ? (
-                <CheckCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-green-400" />
+                <CheckCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-green-600 dark:text-green-300" />
               ) : (
-                <Circle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
+                <Circle className="liquid-glass-modal-text-muted mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
               )}
-              <span className={`text-xs ${item.done ? 'text-zinc-500' : 'text-zinc-300'}`}>
+              <span className={`text-xs ${item.done ? 'liquid-glass-modal-text-muted' : 'liquid-glass-modal-text'}`}>
                 {t(`settings.peripherals.callerId.checklist.${item.key}`, item.fallback)}
               </span>
             </div>
@@ -602,13 +602,13 @@ const CallerIdSection: React.FC = () => {
 
       {setupType === 'provider_preset' && (
         <div className="space-y-2">
-          <label className="block text-xs text-zinc-400">
+          <label className="liquid-glass-modal-text-muted block text-xs">
             {t('settings.peripherals.callerId.providerPreset', 'Preset')}
           </label>
           <select
             value={config.providerPresetId || PROVIDER_PRESETS[0].id}
             onChange={(event) => applyPreset(event.target.value)}
-            className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 focus:border-amber-500 focus:outline-none"
+            className="liquid-glass-modal-input w-full text-sm"
           >
             {PROVIDER_PRESETS.map((preset) => (
               <option key={preset.id} value={preset.id}>
@@ -616,7 +616,7 @@ const CallerIdSection: React.FC = () => {
               </option>
             ))}
           </select>
-          <p className="text-xs text-zinc-500">
+          <p className="liquid-glass-modal-text-muted text-xs">
             {(() => {
               const selectedPreset = PROVIDER_PRESETS.find((preset) => preset.id === config.providerPresetId)
               return selectedPreset ? t(selectedPreset.descriptionKey, selectedPreset.description) : ''
@@ -627,7 +627,7 @@ const CallerIdSection: React.FC = () => {
 
       <div className="grid gap-3 md:grid-cols-2">
         <div>
-          <label className="mb-1 block text-xs text-zinc-400">
+          <label className="liquid-glass-modal-text-muted mb-1 block text-xs">
             {t('settings.peripherals.callerId.sipServer', 'SIP Server')}
           </label>
           <input
@@ -635,11 +635,11 @@ const CallerIdSection: React.FC = () => {
             value={config.sipServer}
             onChange={(event) => handleFieldChange('sipServer', event.target.value)}
             placeholder="sip.example.com"
-            className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
+            className="liquid-glass-modal-input w-full text-sm"
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs text-zinc-400">
+          <label className="liquid-glass-modal-text-muted mb-1 block text-xs">
             {t('settings.peripherals.callerId.username', 'SIP Username / Extension')}
           </label>
           <input
@@ -647,13 +647,13 @@ const CallerIdSection: React.FC = () => {
             value={config.sipUsername}
             onChange={(event) => handleFieldChange('sipUsername', event.target.value)}
             placeholder="200"
-            className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
+            className="liquid-glass-modal-input w-full text-sm"
           />
         </div>
 
         {authenticatedMode ? (
           <div>
-            <label className="mb-1 block text-xs text-zinc-400">
+            <label className="liquid-glass-modal-text-muted mb-1 block text-xs">
               {t('settings.peripherals.callerId.password', 'SIP Password')}
             </label>
             <input
@@ -661,10 +661,10 @@ const CallerIdSection: React.FC = () => {
               value={config.password || ''}
               onChange={(event) => handleFieldChange('password', event.target.value)}
               placeholder={config.hasPassword ? 'Stored securely on this terminal' : 'Required'}
-              className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
+              className="liquid-glass-modal-input w-full text-sm"
             />
             {config.hasPassword && !config.password?.trim() && (
-              <p className="mt-1 flex items-center gap-1 text-xs text-zinc-500">
+              <p className="liquid-glass-modal-text-muted mt-1 flex items-center gap-1 text-xs">
                 <Lock className="h-3.5 w-3.5" />
                 {t(
                   'settings.peripherals.callerId.passwordStored',
@@ -674,17 +674,17 @@ const CallerIdSection: React.FC = () => {
             )}
           </div>
         ) : (
-          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 md:col-span-2">
+          <div className="liquid-glass-modal-warning rounded-2xl border p-3 md:col-span-2">
             <div className="flex items-start gap-2">
-              <Server className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-300" />
+              <Server className="mt-0.5 h-4 w-4 flex-shrink-0" />
               <div>
-                <p className="text-xs font-medium text-amber-200">
+                <p className="text-xs font-medium">
                   {t(
                     'settings.peripherals.callerId.legacyInfoTitle',
                     'Legacy PBX trust mode',
                   )}
                 </p>
-                <p className="mt-1 text-xs text-amber-100/80">
+                <p className="mt-1 text-xs opacity-80">
                   {t(
                     'settings.peripherals.callerId.legacyInfoBody',
                     'Use this only if your PBX trusts the POS terminal IP and does not require SIP username/password authentication.',
@@ -695,14 +695,14 @@ const CallerIdSection: React.FC = () => {
           </div>
         )}
         <div>
-          <label className="mb-1 block text-xs text-zinc-400">
+          <label className="liquid-glass-modal-text-muted mb-1 block text-xs">
             {t('settings.peripherals.callerId.sipPort', 'SIP Port')}
           </label>
           <input
             type="number"
             value={config.sipPort}
             onChange={(event) => handleFieldChange('sipPort', Number(event.target.value) || 5060)}
-            className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 focus:border-amber-500 focus:outline-none"
+            className="liquid-glass-modal-input w-full text-sm"
           />
         </div>
       </div>
@@ -712,7 +712,7 @@ const CallerIdSection: React.FC = () => {
       <button
         type="button"
         onClick={() => setShowAdvanced((current) => !current)}
-        className="flex w-full items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-sm text-zinc-200 transition-colors active:border-zinc-700"
+        className="liquid-glass-modal-inset flex w-full items-center justify-between rounded-xl px-3 py-2 text-sm transition-colors active:border-amber-500"
       >
         <span>{t('settings.peripherals.callerId.advanced', 'Advanced settings')}</span>
         {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
@@ -722,7 +722,7 @@ const CallerIdSection: React.FC = () => {
         <div className="grid gap-3 md:grid-cols-2">
           {authenticatedMode && (
             <div>
-              <label className="mb-1 block text-xs text-zinc-400">
+              <label className="liquid-glass-modal-text-muted mb-1 block text-xs">
                 {t('settings.peripherals.callerId.authUsername', 'Auth Username')}
               </label>
               <input
@@ -733,19 +733,19 @@ const CallerIdSection: React.FC = () => {
                   'settings.peripherals.callerId.authUsernamePlaceholder',
                   'Leave blank to use the SIP username',
                 )}
-                className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
+                className="liquid-glass-modal-input w-full text-sm"
               />
             </div>
           )}
           {authenticatedMode && (
             <div>
-              <label className="mb-1 block text-xs text-zinc-400">
+              <label className="liquid-glass-modal-text-muted mb-1 block text-xs">
                 {t('settings.peripherals.callerId.transport', 'Transport')}
               </label>
               <select
                 value={config.transport}
                 onChange={(event) => handleFieldChange('transport', event.target.value as CallerIdTransport)}
-                className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 focus:border-amber-500 focus:outline-none"
+                className="liquid-glass-modal-input w-full text-sm"
               >
                 <option value="udp">UDP</option>
                 <option value="tcp">TCP</option>
@@ -754,7 +754,7 @@ const CallerIdSection: React.FC = () => {
           )}
           {authenticatedMode && (
             <div>
-              <label className="mb-1 block text-xs text-zinc-400">
+              <label className="liquid-glass-modal-text-muted mb-1 block text-xs">
                 {t('settings.peripherals.callerId.outboundProxy', 'Outbound Proxy')}
               </label>
               <input
@@ -762,19 +762,19 @@ const CallerIdSection: React.FC = () => {
                 value={config.outboundProxy || ''}
                 onChange={(event) => handleFieldChange('outboundProxy', event.target.value)}
                 placeholder="proxy.example.com:5060"
-                className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
+                className="liquid-glass-modal-input w-full text-sm"
               />
             </div>
           )}
           <div>
-            <label className="mb-1 block text-xs text-zinc-400">
+            <label className="liquid-glass-modal-text-muted mb-1 block text-xs">
               {t('settings.peripherals.callerId.listenPort', 'Local Listen Port')}
             </label>
             <input
               type="number"
               value={config.listenPort}
               onChange={(event) => handleFieldChange('listenPort', Number(event.target.value) || 5060)}
-              className="w-full rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 focus:border-amber-500 focus:outline-none"
+              className="liquid-glass-modal-input w-full text-sm"
             />
           </div>
         </div>
@@ -783,22 +783,22 @@ const CallerIdSection: React.FC = () => {
       {/* Router-only telephony note — only a prominent caution when the live status reason says the
           provider is unsupported; otherwise a quiet one-line note (no big always-on scary card). */}
       {status?.reason === 'unsupported_provider' ? (
-        <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3">
+        <div className="liquid-glass-modal-warning rounded-2xl border p-3">
           <div className="flex items-start gap-2">
-            <ShieldAlert className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-300" />
+            <ShieldAlert className="mt-0.5 h-4 w-4 flex-shrink-0" />
             <div className="space-y-1">
-              <p className="text-xs font-medium text-amber-200">
+              <p className="text-xs font-medium">
                 {t(
                   'settings.peripherals.callerId.routerUnsupportedTitle',
                   'Router-only telephony accounts are unsupported in v1',
                 )}
               </p>
-              <p className="text-xs text-amber-100/80">{unsupportedMessage}</p>
+              <p className="text-xs opacity-80">{unsupportedMessage}</p>
             </div>
           </div>
         </div>
       ) : (
-        <p className="flex items-start gap-1.5 text-xs text-zinc-500">
+        <p className="liquid-glass-modal-text-muted flex items-start gap-1.5 text-xs">
           <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           {t(
             'settings.peripherals.callerId.routerNoteCompact',
@@ -808,7 +808,7 @@ const CallerIdSection: React.FC = () => {
       )}
 
       {status && status.callsDetected > 0 && (
-        <p className="text-xs text-zinc-500">
+        <p className="liquid-glass-modal-text-muted text-xs">
           {t('settings.peripherals.callerId.callsDetected', 'Calls detected')}: {status.callsDetected}
         </p>
       )}
@@ -816,14 +816,14 @@ const CallerIdSection: React.FC = () => {
 
       {/* STEP 3 — test, then turn it on. Sticky within the section so Test/Save stay reachable while
           scrolling the form; the body above reserves space (pb-32) so content never sits under it.
-          The glass is near-opaque (bg-zinc-950/95) so transient scrolled content cannot bleed
-          through. Touch targets are >=44px with centered icon+text. */}
-      <div className="sticky bottom-0 z-10 space-y-2 rounded-2xl border border-white/10 bg-zinc-950/95 px-3 py-3 backdrop-blur-md">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+          The shared elevated modal surface keeps scrolled content from bleeding through in either
+          theme. Touch targets are >=44px with centered icon+text. */}
+      <div className="liquid-glass-modal-footer sticky bottom-0 z-10 space-y-2 rounded-2xl border px-3 py-3 backdrop-blur-md">
+        <p className="liquid-glass-modal-text-muted text-[11px] font-semibold uppercase tracking-wide">
           {t('settings.peripherals.callerId.steps.activate', 'Step 3 · Test, then turn it on')}
         </p>
         {requiresFreshTest && (
-          <p className="text-xs text-amber-300">
+          <p className="text-xs text-amber-800 dark:text-amber-300">
             {t(
               'settings.peripherals.callerId.testRequiredHint',
               'Run Test Connection after any change before you activate Caller ID on this terminal.',
@@ -841,7 +841,7 @@ const CallerIdSection: React.FC = () => {
               !config.sipUsername.trim() ||
               (authenticatedMode && !config.hasPassword && !config.password?.trim())
             }
-            className="inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-xl bg-zinc-700 px-3 py-2 text-sm font-medium text-zinc-100 transition-transform duration-150 active:scale-95 active:bg-zinc-600 disabled:cursor-not-allowed disabled:opacity-50"
+            className="liquid-glass-modal-button inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             {t('settings.peripherals.callerId.testConnection', 'Test Connection')}
@@ -853,7 +853,7 @@ const CallerIdSection: React.FC = () => {
             disabled={saveAndActivateDisabled}
             className={`inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-medium transition-transform duration-150 active:scale-95 ${
               saveAndActivateDisabled
-                ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                ? 'liquid-glass-modal-button liquid-glass-modal-text-muted cursor-not-allowed'
                 : 'bg-green-600 text-white active:bg-green-700'
             }`}
           >

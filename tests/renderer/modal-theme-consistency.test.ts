@@ -14,6 +14,7 @@ const integrationsPage = readRendererFile('pages', 'IntegrationsPage.tsx');
 const zReportModal = readRendererFile('components', 'modals', 'ZReportModal.tsx');
 const updateDialog = readRendererFile('components', 'UpdateDialog.tsx');
 const confirmDialog = readRendererFile('components', 'ui', 'ConfirmDialog.tsx');
+const callerIdSection = readRendererFile('components', 'peripherals', 'CallerIdSection.tsx');
 
 test('light theme clears a stale dark class from html and body portal roots', () => {
   const applyThemeToDocument = (
@@ -130,6 +131,16 @@ test('generic confirmation and update dialogs use semantic modal text and inset 
   assert.match(updateDialog, /liquid-glass-modal-text/);
   assert.match(updateDialog, /liquid-glass-modal-text-muted/);
   assert.match(updateDialog, /liquid-glass-modal-inset/);
+});
+
+test('Caller ID settings use the shared light and dark modal theme contract', () => {
+  assert.match(callerIdSection, /liquid-glass-modal-text/);
+  assert.match(callerIdSection, /liquid-glass-modal-text-muted/);
+  assert.match(callerIdSection, /liquid-glass-modal-input/);
+  assert.match(callerIdSection, /liquid-glass-modal-inset/);
+  assert.match(callerIdSection, /liquid-glass-modal-footer/);
+
+  assert.doesNotMatch(callerIdSection, /(?:text|bg|border|placeholder)-zinc-(?:[1-9]00|950)/);
 });
 
 test('modal inventory has no unthemed dark-only content outside the intentional order-type palette', () => {
