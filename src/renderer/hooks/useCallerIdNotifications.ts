@@ -11,18 +11,21 @@ import {
   reportCallerIdReceipt,
   subscribeToCallerIdEvents,
   type CallerIdBroadcastEvent,
+  type CallerIdRealtimeClient,
 } from '../services/CallerIdRealtimeService'
 import { showCallerIdToast } from '../components/callerid/CallerIdPopup'
 import { navigateToCallerIdCustomerSearch } from '../services/caller-id-customer-search'
 
 interface CallerIdNotificationsOptions {
   realtimeReady?: boolean
+  realtimeClient?: CallerIdRealtimeClient | null
 }
 
 export function useCallerIdNotifications(options?: CallerIdNotificationsOptions) {
   const { isModuleEnabled } = useModules()
   const enabled = isModuleEnabled('plugin_integrations' as any)
   const realtimeReady = options?.realtimeReady === true
+  const realtimeClient = options?.realtimeClient ?? null
   const callEventsRef = useRef(new Map<string, CallerIdBroadcastEvent>())
   const cleanupTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const optionsRef = useRef(options)
@@ -96,16 +99,17 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
   }, [enabled])
 
   useEffect(() => {
-    if (!enabled || !realtimeReady) {
+    if (!enabled || !realtimeReady || !realtimeClient) {
       return
     }
 
     const creds = getCachedTerminalCredentials()
-    if (!creds.organizationId) {
+    if (!creds.organizationId || !creds.branchId) {
       return
     }
 
     return subscribeToCallerIdEvents(
+      realtimeClient,
       creds.organizationId,
       creds.terminalId,
       handleCallEvent,
@@ -113,11 +117,12 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
         const current = getCachedTerminalCredentials()
         return (
           current.organizationId === creds.organizationId &&
-          current.terminalId === creds.terminalId
+          current.terminalId === creds.terminalId &&
+          current.branchId === creds.branchId
         )
       },
     )
-  }, [enabled, handleCallEvent, realtimeReady])
+  }, [enabled, handleCallEvent, realtimeClient, realtimeReady])
 }
 
 function mergeCallerIdEvent(

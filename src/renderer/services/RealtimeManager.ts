@@ -48,6 +48,11 @@ export interface RealtimePayload {
 }
 
 /** Configuration accepted by the DesktopRealtimeManager constructor */
+export type DesktopRealtimeClient = Pick<
+  SupabaseClient,
+  'channel' | 'removeChannel'
+>;
+
 export interface DesktopRealtimeManagerConfig {
   supabaseUrl: string;
   supabaseKey: string;
@@ -68,8 +73,8 @@ export interface DesktopRealtimeManagerConfig {
   reconnectConfig?: Partial<RealtimeReconnectConfig>;
   /** Polling interval in milliseconds when realtime is unavailable (default 30000) */
   pollingIntervalMs?: number;
-  /** Optional pre-built Supabase client (useful for testing) */
-  client?: SupabaseClient;
+  /** Optional pre-built Realtime-only client (useful for testing and terminal JWT isolation) */
+  client?: DesktopRealtimeClient;
 }
 
 // ============================================================
@@ -110,7 +115,7 @@ function getCallbackForSubscription(
 }
 
 export class DesktopRealtimeManager {
-  private supabaseClient: SupabaseClient;
+  private supabaseClient: DesktopRealtimeClient;
   private config: DesktopRealtimeManagerConfig;
   private reconnectConfig: RealtimeReconnectConfig;
 

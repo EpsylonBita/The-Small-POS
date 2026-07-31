@@ -4,11 +4,11 @@
 
 This document defines the release contract for the native-only desktop app in `pos-tauri/`.
 
-## Current Release Baseline (2026-03-27)
+## Current Release Baseline (2026-08-01)
 
 - Desktop source of truth: `pos-tauri/`
 - Public distribution repo: `EpsylonBita/The-Small-POS`
-- Active workflow: `.github/workflows/pos-tauri-auto-release.yml` (`workflow_dispatch` only)
+- Active workflow: `.github/workflows/pos-tauri-auto-release.yml` (automatic on matching `main`/`master` pushes, with `workflow_dispatch` as a recovery fallback)
 - Runtime model: Tauri-native only
 
 ## Required Secrets (GitHub Actions)
@@ -66,16 +66,16 @@ Required shape:
 `notes` may contain Markdown. The POS update dialog renders Markdown release notes
 before install so operators can review changes before accepting the update.
 
-## Manual Public Release Flow
+## Automatic Public Release Flow
 
-Public `pos-tauri` releases are dispatched manually from the private source repo after the code is already merged.
+Public `pos-tauri` releases start automatically when a matching `pos-tauri/**`,
+desktop-branding, or release-workflow change reaches private `main` or `master`.
 
 Operational rule:
 
 1. Merge the tested `pos-tauri` change and version bump into private `main` or `master`.
-2. Open GitHub Actions in `EpsylonBita/The-Small-002`.
-3. Run `POS Tauri Auto Release` with `workflow_dispatch` from `main` or `master`.
-4. Let the workflow validate version sync, inject the updater key, build/sign the installer, generate `latest.json`, sync `pos-tauri/` into `EpsylonBita/The-Small-POS`, and recreate the public release tag `v<version>`.
+2. Let `POS Tauri Auto Release` validate version sync, inject the updater key, build/sign the installer, generate `latest.json`, sync `pos-tauri/` into `EpsylonBita/The-Small-POS`, and recreate the public release tag `v<version>`.
+3. Use `workflow_dispatch` from `main` or `master` only if that automatic run failed and is no longer active. Do not launch both paths for the same version.
 
 The workflow fails fast if it is dispatched from any ref other than branch `main` or `master`.
 
@@ -83,9 +83,9 @@ No separate private release commit or private release tag is required. The publi
 
 This keeps `The-Small-002` as the source of truth while avoiding a second private push just to publish the public desktop release.
 
-## Manual Release Output
+## Release Output
 
-Each manual run still performs the same release work:
+Each automatic or recovery run performs the same release work:
 
 1. Validate version sync.
 2. Inject updater public key into `src-tauri/tauri.conf.json`.
@@ -164,5 +164,4 @@ CI checks enforce this policy.
 - `ARCHITECTURE.md`
 - `SUPPORT.md`
 - `docs/security-native-migration/EXECUTION_BACKLOG.md`
-
 

@@ -4,8 +4,7 @@
  * Configuration is reconciled continuously so a prepared setup line can be
  * subscribed and acknowledged without restarting the POS.
  */
-import type { RealtimeChannel } from '@supabase/supabase-js'
-import { supabase } from '../../shared/supabase'
+import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
 import { posApiGet, posApiPost } from '../utils/api-helpers'
 import {
   createCallerIdPrivateChannel,
@@ -66,6 +65,12 @@ interface ActiveSubscription {
 }
 
 type CallerIdEventCallback = (event: CallerIdBroadcastEvent) => void
+export type CallerIdRealtimeClient = Pick<
+  SupabaseClient,
+  'channel' | 'removeChannel'
+> & {
+  isTopicRetiring?(topic: string): boolean
+}
 export type CallerIdReceipt =
   | { status: 'received' }
   | { status: 'displayed' }
@@ -80,6 +85,8 @@ export type CallerIdReceipt =
 
 const DELIVERY_TTL_MS = 30_000
 const CONFIG_POLL_MS = 1_000
+const CHANNEL_RETRY_BASE_MS = 1_000
+const CHANNEL_RETRY_MAX_MS = 30_000
 const UUID_PATTERN =
   '[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 const UUID_REGEX = new RegExp(`^${UUID_PATTERN}$`, 'i')
@@ -199,6 +206,7 @@ export async function reportCallerIdReceipt(
  * reconcile prepared tests. Cleanup is valid immediately.
  */
 export function subscribeToCallerIdEvents(
+  client: CallerIdRealtimeClient,
   organizationId: string,
   terminalId: string,
   onEvent: CallerIdEventCallback,
@@ -209,6 +217,9 @@ export function subscribeToCallerIdEvents(
   const seen = new Map<string, number>()
   const channels = new Map<string, ActiveSubscription>()
   const acknowledged = new Set<string>()
+  const retryAttempts = new Map<string, number>()
+  const retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const pendingRemovals = new Map<string, Promise<unknown>>()
   let disposed = false
   let refreshInFlight = false
   let configInterval: ReturnType<typeof setInterval> | null = null
@@ -222,6 +233,61 @@ export function subscribeToCallerIdEvents(
     }
   }
 
+  const clearRetry = (lineId: string) => {
+    const retryTimer = retryTimers.get(lineId)
+    if (retryTimer) clearTimeout(retryTimer)
+    retryTimers.delete(lineId)
+    retryAttempts.delete(lineId)
+  }
+
+  const scheduleRetry = (lineId: string) => {
+    if (disposed || retryTimers.has(lineId)) return
+    const attempt = (retryAttempts.get(lineId) ?? 0) + 1
+    retryAttempts.set(lineId, attempt)
+    const retryDelay = Math.min(
+      CHANNEL_RETRY_MAX_MS,
+      CHANNEL_RETRY_BASE_MS * 2 ** (attempt - 1),
+    )
+    const retryTimer = setTimeout(() => {
+      retryTimers.delete(lineId)
+      if (!disposed && identityCurrent()) {
+        void refresh()
+      }
+    }, retryDelay)
+    retryTimers.set(lineId, retryTimer)
+  }
+
+  const retireChannel = (
+    lineId: string,
+    active: ActiveSubscription,
+  ) => {
+    if (channels.get(lineId) === active) {
+      channels.delete(lineId)
+    }
+    if (pendingRemovals.has(lineId)) return
+
+    let removal: Promise<unknown>
+    try {
+      removal = Promise.resolve(client.removeChannel(active.channel)).catch(
+        () => undefined,
+      )
+    } catch {
+      removal = Promise.resolve()
+    }
+    pendingRemovals.set(lineId, removal)
+    void removal.finally(() => {
+      if (pendingRemovals.get(lineId) !== removal) return
+      pendingRemovals.delete(lineId)
+      if (
+        !disposed &&
+        identityCurrent() &&
+        !retryTimers.has(lineId)
+      ) {
+        void refresh()
+      }
+    })
+  }
+
   const dispose = () => {
     if (disposed) return
     disposed = true
@@ -229,8 +295,14 @@ export function subscribeToCallerIdEvents(
     if (cleanupInterval) clearInterval(cleanupInterval)
     seen.clear()
     acknowledged.clear()
+    for (const retryTimer of retryTimers.values()) {
+      clearTimeout(retryTimer)
+    }
+    retryTimers.clear()
+    retryAttempts.clear()
+    pendingRemovals.clear()
     for (const { channel } of channels.values()) {
-      void supabase.removeChannel(channel)
+      void client.removeChannel(channel)
     }
     channels.clear()
   }
@@ -285,11 +357,15 @@ export function subscribeToCallerIdEvents(
         if (parsed) desired.set(parsed.line.id, parsed)
       }
 
+      for (const lineId of retryAttempts.keys()) {
+        if (!desired.has(lineId)) clearRetry(lineId)
+      }
+
       for (const [lineId, active] of channels) {
         const next = desired.get(lineId)
         if (!next || next.line.name !== active.config.line.name) {
-          void supabase.removeChannel(active.channel)
-          channels.delete(lineId)
+          clearRetry(lineId)
+          retireChannel(lineId, active)
           continue
         }
         active.config = next
@@ -300,13 +376,16 @@ export function subscribeToCallerIdEvents(
         if (
           disposed ||
           !identityCurrent() ||
-          channels.has(config.line.id)
+          channels.has(config.line.id) ||
+          retryTimers.has(config.line.id) ||
+          pendingRemovals.has(config.line.id) ||
+          client.isTopicRetiring?.(`callerid:line:${config.line.id}`) === true
         ) {
           continue
         }
+        let active: ActiveSubscription | undefined
         try {
-          let active: ActiveSubscription | undefined
-          const channel = createCallerIdPrivateChannel(supabase, config.line)
+          const channel = createCallerIdPrivateChannel(client, config.line)
             .on(
               'broadcast',
               { event: 'caller_id' },
@@ -356,36 +435,43 @@ export function subscribeToCallerIdEvents(
                 }
               },
             )
-            .subscribe((status, error) => {
-              if (
-                disposed ||
-                !identityCurrent() ||
-                !active ||
-                channels.get(config.line.id) !== active
-              ) {
-                return
-              }
-              if (status === 'SUBSCRIBED') {
-                active.subscribed = true
-                void acknowledge(active)
-              } else if (
-                status === 'CHANNEL_ERROR' ||
-                status === 'TIMED_OUT'
-              ) {
-                active.subscribed = false
-                console.warn('[CallerIdRealtimeService] Subscription error', {
-                  organizationId,
-                  terminalId,
-                  lineId: config.line.id,
-                  status,
-                  error,
-                })
-              }
-            })
           active = { config, channel, subscribed: false }
           channels.set(config.line.id, active)
+          channel.subscribe((status, error) => {
+            if (
+              disposed ||
+              !identityCurrent() ||
+              !active ||
+              channels.get(config.line.id) !== active
+            ) {
+              return
+            }
+            if (status === 'SUBSCRIBED') {
+              active.subscribed = true
+              clearRetry(config.line.id)
+              void acknowledge(active)
+            } else if (
+              status === 'CHANNEL_ERROR' ||
+              status === 'TIMED_OUT' ||
+              status === 'CLOSED'
+            ) {
+              active.subscribed = false
+              retireChannel(config.line.id, active)
+              scheduleRetry(config.line.id)
+              console.warn('[CallerIdRealtimeService] Subscription error', {
+                organizationId,
+                terminalId,
+                lineId: config.line.id,
+                status,
+                error,
+              })
+            }
+          })
         } catch {
-          // Config polling retries the private subscription without PII logs.
+          if (active && channels.get(config.line.id) === active) {
+            retireChannel(config.line.id, active)
+          }
+          scheduleRetry(config.line.id)
         }
       }
     } catch {

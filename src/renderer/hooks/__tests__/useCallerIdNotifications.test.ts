@@ -39,6 +39,11 @@ vi.mock('../../components/callerid/CallerIdPopup', () => ({
 import { useCallerIdNotifications } from '../useCallerIdNotifications'
 
 describe('useCallerIdNotifications', () => {
+  const realtimeClient = {
+    channel: vi.fn(),
+    removeChannel: vi.fn(),
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.isModuleEnabled.mockReturnValue(true)
@@ -51,10 +56,39 @@ describe('useCallerIdNotifications', () => {
     mocks.subscribeToCallerIdEvents.mockReturnValue(mocks.unsubscribeRealtime)
   })
 
+  it('does not subscribe before the authenticated terminal client is available', () => {
+    renderHook(() =>
+      useCallerIdNotifications({
+        realtimeReady: true,
+        realtimeClient: null,
+      }),
+    )
+
+    expect(mocks.subscribeToCallerIdEvents).not.toHaveBeenCalled()
+  })
+
+  it('invalidates the subscription when only the terminal branch changes', () => {
+    renderHook(() =>
+      useCallerIdNotifications({ realtimeReady: true, realtimeClient } as any),
+    )
+    const identityCurrent =
+      mocks.subscribeToCallerIdEvents.mock.calls[0]?.[4]
+    expect(identityCurrent()).toBe(true)
+
+    mocks.getCachedTerminalCredentials.mockReturnValue({
+      terminalId: 'terminal-1',
+      apiKey: 'terminal-api-key',
+      organizationId: 'org-1',
+      branchId: 'branch-2',
+    })
+
+    expect(identityCurrent()).toBe(false)
+  })
+
   it('never subscribes to or displays legacy native caller events', () => {
     const { rerender, unmount } = renderHook(
       ({ realtimeReady }) =>
-        useCallerIdNotifications({ realtimeReady } as any),
+        useCallerIdNotifications({ realtimeReady, realtimeClient } as any),
       { initialProps: { realtimeReady: false } },
     )
 
@@ -78,13 +112,14 @@ describe('useCallerIdNotifications', () => {
 
     rerender({ realtimeReady: true })
     expect(mocks.subscribeToCallerIdEvents).toHaveBeenCalledWith(
+      realtimeClient,
       'org-1',
       'terminal-1',
       expect.any(Function),
       expect.any(Function),
     )
     const identityCurrent =
-      mocks.subscribeToCallerIdEvents.mock.calls[0]?.[3]
+      mocks.subscribeToCallerIdEvents.mock.calls[0]?.[4]
     expect(identityCurrent()).toBe(true)
     mocks.getCachedTerminalCredentials.mockReturnValue({
       terminalId: 'terminal-2',
@@ -105,8 +140,10 @@ describe('useCallerIdNotifications', () => {
   })
 
   it('does not report displayed at enqueue and reports it only from the mounted card callback', () => {
-    renderHook(() => useCallerIdNotifications({ realtimeReady: true }))
-    const realtimeHandler = mocks.subscribeToCallerIdEvents.mock.calls[0]?.[2]
+    renderHook(() =>
+      useCallerIdNotifications({ realtimeReady: true, realtimeClient } as any),
+    )
+    const realtimeHandler = mocks.subscribeToCallerIdEvents.mock.calls[0]?.[3]
     const reportReceipt = vi.fn()
 
     act(() => {
@@ -138,8 +175,10 @@ describe('useCallerIdNotifications', () => {
     mocks.showCallerIdToast.mockImplementationOnce(() => {
       throw new Error('toast unavailable')
     })
-    renderHook(() => useCallerIdNotifications({ realtimeReady: true }))
-    const realtimeHandler = mocks.subscribeToCallerIdEvents.mock.calls[0]?.[2]
+    renderHook(() =>
+      useCallerIdNotifications({ realtimeReady: true, realtimeClient } as any),
+    )
+    const realtimeHandler = mocks.subscribeToCallerIdEvents.mock.calls[0]?.[3]
     const reportReceipt = vi.fn()
 
     act(() => {

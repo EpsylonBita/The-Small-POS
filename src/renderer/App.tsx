@@ -56,14 +56,13 @@ import {
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from "./services/terminal-credentials";
-import { subscribeToAdminOrderDeletedEvents } from "./services/OrderDeleteRealtimeService";
 import { DesktopRealtimeManager } from "./services/RealtimeManager";
-import {
-  RealtimeAuthService,
-  type RealtimeAuthClient,
-} from "./services/RealtimeAuthService";
+import { RealtimeAuthService } from "./services/RealtimeAuthService";
 import { DesktopRealtimeLifecycleCoordinator } from "./services/DesktopRealtimeLifecycleCoordinator";
-import { supabase } from "./lib/supabase";
+import {
+  createTerminalRealtimeSession,
+  type TerminalRealtimeSession,
+} from "./services/terminal-realtime-client";
 import {
   emitParityQueueStatus,
   PARITY_QUEUE_STATUS_EVENT,
@@ -729,6 +728,8 @@ function AppContent() {
   const [syncRecoveryContext, setSyncRecoveryContext] =
     useState<SyncRecoveryOpenContext | null>(null);
   const [realtimeReady, setRealtimeReady] = useState(false);
+  const [terminalRealtimeSession, setTerminalRealtimeSession] =
+    useState<TerminalRealtimeSession | null>(null);
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
   const windowState = useWindowState();
@@ -953,6 +954,7 @@ function AppContent() {
   // Caller ID notifications (gated by module availability inside the hook)
   useCallerIdNotifications({
     realtimeReady: Boolean(user) && realtimeReady,
+    realtimeClient: terminalRealtimeSession?.client ?? null,
   });
 
   useEffect(() => {
@@ -1094,14 +1096,34 @@ function AppContent() {
   useEffect(() => {
     if (!user || isBrowser()) {
       setRealtimeReady(false);
+      setTerminalRealtimeSession(null);
+      stopRealtimeAuthRef.current = () => {};
+      return;
+    }
+
+    if (!environment.SUPABASE_URL || !environment.SUPABASE_ANON_KEY) {
+      setRealtimeReady(false);
+      setTerminalRealtimeSession(null);
       stopRealtimeAuthRef.current = () => {};
       return;
     }
 
     let disposed = false;
-    const authService = new RealtimeAuthService(
-      supabase as unknown as RealtimeAuthClient,
-    );
+    let realtimeSession: TerminalRealtimeSession;
+    try {
+      realtimeSession = createTerminalRealtimeSession(
+        environment.SUPABASE_URL,
+        environment.SUPABASE_ANON_KEY,
+      );
+    } catch (error) {
+      setRealtimeReady(false);
+      setTerminalRealtimeSession(null);
+      console.warn('[App] Failed to create terminal realtime client:', error);
+      emitCompatEvent(REALTIME_STATUS_EVENT, { status: 'error' });
+      return;
+    }
+    setTerminalRealtimeSession(realtimeSession);
+    const authService = new RealtimeAuthService(realtimeSession.authClient);
     const coordinator = new DesktopRealtimeLifecycleCoordinator({
       authService,
       resolveIdentity: async () => {
@@ -1113,9 +1135,7 @@ function AppContent() {
         if (
           !terminalId ||
           !organizationId ||
-          !branchId ||
-          !environment.SUPABASE_URL ||
-          !environment.SUPABASE_ANON_KEY
+          !branchId
         ) {
           return null;
         }
@@ -1156,15 +1176,17 @@ function AppContent() {
           onStatusChange: (status) => {
             emitCompatEvent(REALTIME_STATUS_EVENT, { status });
           },
-          client: supabase,
+          client: realtimeSession.client,
         });
         emitCompatEvent(REALTIME_STATUS_EVENT, {
           status: manager.getConnectionStatus(),
         });
         return manager;
       },
-      subscribeAuthenticatedFeatures: (identity) =>
-        subscribeToAdminOrderDeletedEvents(identity),
+      // Destructive order deletes recover through the strict POS sync API.
+      // The legacy org-topic broadcast remains disabled until a terminal- and
+      // branch-private server policy is deployed end to end.
+      subscribeAuthenticatedFeatures: () => () => {},
       onReadyChange: (ready) => {
         if (!disposed) {
           setRealtimeReady(ready);
@@ -1207,6 +1229,9 @@ function AppContent() {
       offEvent('app:reset', handleTerminalAuthPaused);
       coordinator.dispose();
       disposed = true;
+      setTerminalRealtimeSession((current) =>
+        current === realtimeSession ? null : current,
+      );
       if (stopRealtimeAuthRef.current === stopRealtime) {
         stopRealtimeAuthRef.current = () => {};
       }

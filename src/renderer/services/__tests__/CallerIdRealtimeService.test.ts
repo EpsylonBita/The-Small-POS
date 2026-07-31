@@ -3,15 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   channel: vi.fn(),
   removeChannel: vi.fn(),
+  isTopicRetiring: vi.fn(),
   posApiGet: vi.fn(),
   posApiPost: vi.fn(),
-}))
-
-vi.mock('../../../shared/supabase', () => ({
-  supabase: {
-    channel: mocks.channel,
-    removeChannel: mocks.removeChannel,
-  },
 }))
 
 vi.mock('../../utils/api-helpers', () => ({
@@ -21,11 +15,32 @@ vi.mock('../../utils/api-helpers', () => ({
 
 import {
   reportCallerIdReceipt,
-  subscribeToCallerIdEvents,
+  subscribeToCallerIdEvents as subscribeToCallerIdEventsWithClient,
 } from '../CallerIdRealtimeService'
 
+const realtimeClient = {
+  channel: mocks.channel,
+  removeChannel: mocks.removeChannel,
+  isTopicRetiring: mocks.isTopicRetiring,
+} as Parameters<typeof subscribeToCallerIdEventsWithClient>[0]
+
+function subscribeToCallerIdEvents(
+  organizationId: string,
+  terminalId: string,
+  onEvent: Parameters<typeof subscribeToCallerIdEventsWithClient>[3],
+  isIdentityCurrent: () => boolean = () => true,
+) {
+  return subscribeToCallerIdEventsWithClient(
+    realtimeClient,
+    organizationId,
+    terminalId,
+    onEvent,
+    isIdentityCurrent,
+  )
+}
+
 type BroadcastHandler = (message: { payload?: unknown }) => void
-type StatusHandler = (status: string) => void
+type StatusHandler = (status: string, error?: Error) => void
 
 function makeChannel(
   topic: string,
@@ -63,6 +78,7 @@ describe('CallerIdRealtimeService', () => {
     vi.spyOn(Date, 'now').mockReturnValue(now.getTime())
     handlers.clear()
     statuses.clear()
+    mocks.isTopicRetiring.mockReturnValue(false)
     mocks.posApiPost.mockResolvedValue({ success: true })
     mocks.posApiGet.mockResolvedValue({
       success: true,
@@ -112,6 +128,38 @@ describe('CallerIdRealtimeService', () => {
 
     unsubscribe()
     expect(mocks.removeChannel).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for a session-level topic retirement from an earlier subscription', async () => {
+    vi.useFakeTimers()
+    mocks.isTopicRetiring.mockReturnValue(true)
+    mocks.posApiGet.mockResolvedValue({
+      success: true,
+      data: {
+        receivingLines: [
+          {
+            id: firstLineId,
+            name: 'Main line',
+            topic: `callerid:line:${firstLineId}`,
+            version: 1,
+          },
+        ],
+      },
+    })
+
+    const unsubscribe = subscribeToCallerIdEvents(
+      'org-1',
+      'terminal-1',
+      vi.fn(),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.channel).not.toHaveBeenCalled()
+
+    mocks.isTopicRetiring.mockReturnValue(false)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(mocks.channel).toHaveBeenCalledTimes(1)
+
+    unsubscribe()
   })
 
   it('drops an event replayed 31 seconds after it occurred', async () => {
@@ -169,6 +217,176 @@ describe('CallerIdRealtimeService', () => {
     expect(mocks.posApiPost).toHaveBeenCalledWith(
       '/api/pos/caller-id/readiness',
       { attemptId, lineId: firstLineId, lineVersion: 7 },
+    )
+    unsubscribe()
+  })
+
+  it('removes a rejected channel and recreates it after a bounded retry delay', async () => {
+    vi.useFakeTimers()
+    mocks.posApiGet.mockResolvedValue({
+      success: true,
+      data: {
+        receivingLines: [
+          {
+            id: firstLineId,
+            name: 'Main line',
+            topic: `callerid:line:${firstLineId}`,
+            version: 1,
+          },
+        ],
+      },
+    })
+
+    const unsubscribe = subscribeToCallerIdEvents(
+      'org-1',
+      'terminal-1',
+      vi.fn(),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.channel).toHaveBeenCalledTimes(1)
+    const rejectedChannel = mocks.channel.mock.results[0]?.value
+
+    statuses
+      .get(`callerid:line:${firstLineId}`)
+      ?.('CHANNEL_ERROR', new Error('Unauthorized'))
+    await vi.advanceTimersByTimeAsync(999)
+
+    expect(mocks.removeChannel).toHaveBeenCalledWith(rejectedChannel)
+    expect(mocks.channel).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mocks.channel).toHaveBeenCalledTimes(2)
+
+    unsubscribe()
+  })
+
+  it('waits for asynchronous channel removal before reusing the same topic', async () => {
+    vi.useFakeTimers()
+    let finishRemoval!: () => void
+    const removal = new Promise<void>((resolve) => {
+      finishRemoval = resolve
+    })
+    mocks.removeChannel.mockReturnValueOnce(removal)
+    mocks.posApiGet.mockResolvedValue({
+      success: true,
+      data: {
+        receivingLines: [
+          {
+            id: firstLineId,
+            name: 'Main line',
+            topic: `callerid:line:${firstLineId}`,
+            version: 1,
+          },
+        ],
+      },
+    })
+
+    const unsubscribe = subscribeToCallerIdEvents(
+      'org-1',
+      'terminal-1',
+      vi.fn(),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    statuses.get(`callerid:line:${firstLineId}`)?.('CHANNEL_ERROR')
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(mocks.channel).toHaveBeenCalledTimes(1)
+
+    finishRemoval()
+    await removal
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.channel).toHaveBeenCalledTimes(2)
+
+    unsubscribe()
+  })
+
+  it('backs off repeated failures and resets the delay after subscribing', async () => {
+    vi.useFakeTimers()
+    mocks.posApiGet.mockResolvedValue({
+      success: true,
+      data: {
+        receivingLines: [
+          {
+            id: firstLineId,
+            name: 'Main line',
+            topic: `callerid:line:${firstLineId}`,
+            version: 1,
+          },
+        ],
+      },
+    })
+
+    const unsubscribe = subscribeToCallerIdEvents(
+      'org-1',
+      'terminal-1',
+      vi.fn(),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+
+    statuses.get(`callerid:line:${firstLineId}`)?.('CHANNEL_ERROR')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(mocks.channel).toHaveBeenCalledTimes(2)
+
+    statuses.get(`callerid:line:${firstLineId}`)?.('TIMED_OUT')
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(mocks.channel).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mocks.channel).toHaveBeenCalledTimes(3)
+
+    const recoveredStatus = statuses.get(`callerid:line:${firstLineId}`)
+    recoveredStatus?.('SUBSCRIBED')
+    recoveredStatus?.('CLOSED')
+    await vi.advanceTimersByTimeAsync(999)
+    expect(mocks.channel).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mocks.channel).toHaveBeenCalledTimes(4)
+
+    unsubscribe()
+  })
+
+  it('ACKs readiness when subscribe reports success synchronously', async () => {
+    vi.useFakeTimers()
+    const attemptId = '30000000-0000-4000-8000-000000000002'
+    mocks.posApiGet.mockResolvedValue({
+      success: true,
+      data: {
+        receivingLines: [
+          {
+            id: firstLineId,
+            name: 'Main line',
+            topic: `callerid:line:${firstLineId}`,
+            version: 3,
+            readinessAttempt: {
+              attemptId,
+              lineVersion: 3,
+              expiresAt: new Date(now.getTime() + 10_000).toISOString(),
+            },
+          },
+        ],
+      },
+    })
+    mocks.channel.mockImplementationOnce((topic: string) => {
+      const channel = {
+        on: vi.fn(() => channel),
+        subscribe: vi.fn((status: StatusHandler) => {
+          statuses.set(topic, status)
+          status('SUBSCRIBED')
+          return channel
+        }),
+      }
+      return channel
+    })
+
+    const unsubscribe = subscribeToCallerIdEvents(
+      'org-1',
+      'terminal-1',
+      vi.fn(),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(mocks.posApiPost).toHaveBeenCalledWith(
+      '/api/pos/caller-id/readiness',
+      { attemptId, lineId: firstLineId, lineVersion: 3 },
     )
     unsubscribe()
   })

@@ -1,6 +1,9 @@
-import type { RealtimeChannel } from '@supabase/supabase-js'
+import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
 import { getBridge } from '../../lib'
-import { supabase } from '../../shared/supabase'
+
+// Desktop bootstrap intentionally leaves this listener disabled. It may only be
+// re-enabled after the publisher and Realtime RLS enforce a private terminal-
+// and branch-scoped topic end to end.
 
 export interface AdminOrderDeletedEventPayload {
   orderId: string
@@ -16,6 +19,11 @@ export interface TerminalRealtimeIdentity {
   organizationId: string
   branchId?: string
 }
+
+export type OrderDeleteRealtimeClient = Pick<
+  SupabaseClient,
+  'channel' | 'removeChannel'
+>
 
 function normalizeString(value: unknown): string | null {
   if (typeof value !== 'string') {
@@ -63,15 +71,20 @@ export function shouldProcessAdminOrderDeletedEvent(
   const organizationId = normalizeString(identity.organizationId)
   const branchId = normalizeString(identity.branchId)
 
-  if (!terminalId || !organizationId || !normalizeString(payload.orderId)) {
+  if (
+    !terminalId ||
+    !organizationId ||
+    !branchId ||
+    !normalizeString(payload.orderId)
+  ) {
     return false
   }
 
-  if (payload.organizationId && payload.organizationId !== organizationId) {
+  if (normalizeString(payload.organizationId) !== organizationId) {
     return false
   }
 
-  if (payload.branchId && branchId && payload.branchId !== branchId) {
+  if (normalizeString(payload.branchId) !== branchId) {
     return false
   }
 
@@ -79,13 +92,14 @@ export function shouldProcessAdminOrderDeletedEvent(
 }
 
 export function subscribeToAdminOrderDeletedEvents(
+  client: OrderDeleteRealtimeClient,
   identity: TerminalRealtimeIdentity
 ): () => void {
   const terminalId = normalizeString(identity.terminalId)
   const organizationId = normalizeString(identity.organizationId)
   const branchId = normalizeString(identity.branchId)
 
-  if (!terminalId || !organizationId) {
+  if (!terminalId || !organizationId || !branchId) {
     return () => {}
   }
 
@@ -94,8 +108,10 @@ export function subscribeToAdminOrderDeletedEvents(
   let disposed = false
 
   try {
-    channel = supabase
-      .channel(`orders:${organizationId}`)
+    channel = client
+      .channel(`orders:${organizationId}`, {
+        config: { private: true, broadcast: { self: false } },
+      })
       .on('broadcast', { event: 'order_deleted' }, async (event: { payload?: unknown }) => {
         if (disposed) {
           return
@@ -168,7 +184,7 @@ export function subscribeToAdminOrderDeletedEvents(
   return () => {
     disposed = true
     if (channel) {
-      void supabase.removeChannel(channel)
+      void client.removeChannel(channel)
     }
   }
 }
