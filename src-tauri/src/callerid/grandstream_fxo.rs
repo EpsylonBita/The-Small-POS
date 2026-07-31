@@ -2,8 +2,8 @@
 //!
 //! This module intentionally implements no SIP registration, authentication,
 //! call establishment, media, or organization-wide event channel. The legacy
-//! UDP parser remains covered for compatibility research, but runtime startup
-//! rejects IP-trust sources until device-origin authentication is certified.
+//! UDP parser is available only for server-authorized founder-pilot sources.
+//! Missing, ordinary, or unknown authorization remains fail-closed.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-#[cfg(test)]
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -24,7 +23,6 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::manager::CallerIdManager;
-#[cfg(test)]
 use super::types::CallerIdConnectorFamily;
 use super::types::{CallerIdSourceConfig, CallerIdStatusReason};
 
@@ -72,7 +70,6 @@ pub struct ParsedInvite {
     pub provider_event_id: String,
 }
 
-#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SourceLineWire {
@@ -92,7 +89,6 @@ struct SourceLineWire {
     readiness_attempt: Option<ReadinessAttemptWire>,
 }
 
-#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrandstreamFxoConfigWire {
@@ -103,7 +99,6 @@ struct GrandstreamFxoConfigWire {
     listen_port: u16,
 }
 
-#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadinessAttemptWire {
@@ -112,7 +107,6 @@ struct ReadinessAttemptWire {
     expires_at: String,
 }
 
-#[cfg(test)]
 fn reviewed_profile_capacity(profile_key: &str) -> Option<usize> {
     match profile_key {
         "grandstream_ht813_fxo" => Some(1),
@@ -122,7 +116,6 @@ fn reviewed_profile_capacity(profile_key: &str) -> Option<usize> {
     }
 }
 
-#[cfg(test)]
 fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> {
     let wire: SourceLineWire = serde_json::from_value(value.clone())
         .map_err(|_| "Caller ID source line has an invalid shape".to_string())?;
@@ -205,7 +198,6 @@ fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> 
     })
 }
 
-#[cfg(test)]
 fn validate_ip_trust_source_lines(value: &Value) -> Result<Vec<GrandstreamFxoSourceLine>, String> {
     let enabled = value
         .get("enabled")
@@ -281,17 +273,20 @@ fn parse_runtime_source_lines(value: &Value) -> Result<Vec<GrandstreamFxoSourceL
     if source_lines.len() > 16 {
         return Err("Caller ID source configuration has too many lines".into());
     }
-    if source_lines.iter().any(|line| {
+    let has_ip_trust_source = source_lines.iter().any(|line| {
         line.get("adapterType")
             .and_then(Value::as_str)
             .is_some_and(|adapter| adapter == "generic_sip")
-    }) {
+    });
+    if !has_ip_trust_source {
+        return Ok(Vec::new());
+    }
+    if value.get("ipTrustSourcePolicy").and_then(Value::as_str) != Some("founder_pilot") {
         return Err(
-            "Unauthenticated Caller ID IP-trust sources are disabled until device-origin authentication is certified"
-                .into(),
+            "Caller ID IP-trust sources require an explicit founder-pilot entitlement".into(),
         );
     }
-    Ok(Vec::new())
+    validate_ip_trust_source_lines(value)
 }
 
 fn requires_udp_rebind(
@@ -1921,9 +1916,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unauthenticated_ip_trust_before_runtime_listener_binding() {
+    fn rejects_ip_trust_without_an_explicit_founder_pilot_policy() {
         parse_runtime_source_lines(&reviewed_source("grandstream_ht813_fxo", 1))
-            .expect_err("IP-only device identity must not produce a runtime listener config");
+            .expect_err("missing policy must not produce a runtime listener config");
+
+        let mut unknown_policy = reviewed_source("grandstream_ht813_fxo", 1);
+        unknown_policy["ipTrustSourcePolicy"] = json!("unknown");
+        parse_runtime_source_lines(&unknown_policy)
+            .expect_err("unknown policy must not produce a runtime listener config");
+    }
+
+    #[test]
+    fn accepts_strict_reviewed_ip_trust_sources_for_the_founder_pilot() {
+        let mut config = reviewed_source("grandstream_ht813_fxo", 1);
+        config["ipTrustSourcePolicy"] = json!("founder_pilot");
+
+        let parsed = parse_runtime_source_lines(&config)
+            .expect("the scoped founder pilot can bind its reviewed HT813 listener");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].source.device_profile_key, "grandstream_ht813_fxo");
     }
 
     #[test]

@@ -149,11 +149,12 @@ describe('Caller ID setup entry point', () => {
     })
   })
 
-  it('opens Caller ID setup in Admin Dashboard instead of showing plugin credentials', async () => {
+  it('shows a read-only status with an explicit Admin setup action instead of a fake toggle or credentials', async () => {
     render(<IntegrationsPage />)
 
     await screen.findByText('Caller ID (VoIP/SIP)')
-    fireEvent.click(screen.getByRole('switch', { name: 'Toggle plugin' }))
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Set up Caller ID in Admin Dashboard' }))
 
     await waitFor(() => {
       expect(mocks.openExternalUrl).toHaveBeenCalledWith(

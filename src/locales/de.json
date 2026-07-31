@@ -580,6 +580,10 @@
       "multipleItems": "{{count}} Artikel im Warenkorb",
       "header": "Warenkorb ({{count}})",
       "empty": "Ihr Warenkorb ist leer",
+      "autoOfferReward": "Angebot",
+      "freeLabel": "Gratis",
+      "offerDiscount": "Angebote",
+      "offerDiscountWithNames": "Angebote ({{names}})",
       "ingredients": "Zutaten",
       "specialNotes": "Besondere Hinweise",
       "discountLabel": "Rabatt %",
@@ -6505,6 +6509,10 @@
       "adminUrlMissing": "Die Admin-Dashboard-URL ist auf diesem Terminal nicht konfiguriert.",
       "adminLinkCopied": "Admin-Dashboard-Link kopiert.",
       "adminOpenFailed": "Das Admin Dashboard konnte nicht geöffnet werden."
+    },
+    "callerId": {
+      "setupInAdmin": "Anruferkennung im Admin Dashboard einrichten",
+      "manageInAdmin": "Anruferkennung im Admin Dashboard verwalten"
     },
     "plugins": {
       "efood": {

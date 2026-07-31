@@ -580,6 +580,10 @@
       "multipleItems": "{{count}} articles dans le panier",
       "header": "Panier ({{count}})",
       "empty": "Votre panier est vide",
+      "autoOfferReward": "Offre",
+      "freeLabel": "Gratuit",
+      "offerDiscount": "Offres",
+      "offerDiscountWithNames": "Offres ({{names}})",
       "ingredients": "Ingrédients",
       "specialNotes": "Notes spéciales",
       "discountLabel": "Remise %",
@@ -6505,6 +6509,10 @@
       "adminUrlMissing": "L’URL de l’Admin Dashboard n’est pas configurée sur ce terminal.",
       "adminLinkCopied": "Lien de l’Admin Dashboard copié.",
       "adminOpenFailed": "Impossible d’ouvrir l’Admin Dashboard."
+    },
+    "callerId": {
+      "setupInAdmin": "Configurer l’identification de l’appelant dans l’Admin Dashboard",
+      "manageInAdmin": "Gérer l’identification de l’appelant dans l’Admin Dashboard"
     },
     "plugins": {
       "efood": {

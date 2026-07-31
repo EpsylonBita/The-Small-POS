@@ -580,6 +580,10 @@
       "multipleItems": "{{count}} items in cart",
       "header": "Cart ({{count}})",
       "empty": "Your cart is empty",
+      "autoOfferReward": "Offer",
+      "freeLabel": "Free",
+      "offerDiscount": "Offers",
+      "offerDiscountWithNames": "Offers ({{names}})",
       "ingredients": "Ingredients",
       "specialNotes": "Special Notes",
       "discountLabel": "Discount %",
@@ -6505,6 +6509,10 @@
       "adminUrlMissing": "Admin Dashboard URL is not configured on this terminal.",
       "adminLinkCopied": "Admin Dashboard link copied.",
       "adminOpenFailed": "Could not open the Admin Dashboard."
+    },
+    "callerId": {
+      "setupInAdmin": "Set up Caller ID in Admin Dashboard",
+      "manageInAdmin": "Manage Caller ID in Admin Dashboard"
     },
     "plugins": {
       "efood": {

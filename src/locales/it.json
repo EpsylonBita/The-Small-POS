@@ -580,6 +580,10 @@
       "multipleItems": "{{count}} articoli nel carrello",
       "header": "Carrello ({{count}})",
       "empty": "Il carrello è vuoto",
+      "autoOfferReward": "Offerta",
+      "freeLabel": "Gratis",
+      "offerDiscount": "Offerte",
+      "offerDiscountWithNames": "Offerte ({{names}})",
       "ingredients": "Ingredienti",
       "specialNotes": "Note speciali",
       "discountLabel": "Sconto %",
@@ -6505,6 +6509,10 @@
       "adminUrlMissing": "L’URL dell’Admin Dashboard non è configurato su questo terminale.",
       "adminLinkCopied": "Link dell’Admin Dashboard copiato.",
       "adminOpenFailed": "Impossibile aprire l’Admin Dashboard."
+    },
+    "callerId": {
+      "setupInAdmin": "Configura l’ID chiamante nell’Admin Dashboard",
+      "manageInAdmin": "Gestisci l’ID chiamante nell’Admin Dashboard"
     },
     "plugins": {
       "efood": {

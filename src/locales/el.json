@@ -580,6 +580,10 @@
       "multipleItems": "{{count}} προϊόντα στο καλάθι",
       "header": "Καλάθι ({{count}})",
       "empty": "Το καλάθι σας είναι άδειο",
+      "autoOfferReward": "Προσφορά",
+      "freeLabel": "Δωρεάν",
+      "offerDiscount": "Προσφορές",
+      "offerDiscountWithNames": "Προσφορές ({{names}})",
       "ingredients": "Υλικά",
       "specialNotes": "Ειδικές Οδηγίες",
       "discountLabel": "Έκπτωση %",
@@ -6857,6 +6861,10 @@
       "adminUrlMissing": "Δεν έχει ρυθμιστεί το URL του Admin Dashboard σε αυτό το τερματικό.",
       "adminLinkCopied": "Ο σύνδεσμος του Admin Dashboard αντιγράφηκε.",
       "adminOpenFailed": "Δεν ήταν δυνατό να ανοίξει το Admin Dashboard."
+    },
+    "callerId": {
+      "setupInAdmin": "Ρύθμιση Caller ID στο Admin Dashboard",
+      "manageInAdmin": "Διαχείριση Caller ID στο Admin Dashboard"
     },
     "plugins": {
       "efood": {

@@ -513,7 +513,7 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
     productionStatus: remote.production_status || undefined,
     diagnostics: remote.diagnostics || undefined,
     lastError: remote.last_error || null,
-    readOnlyAdminSetup: id === 'efood',
+    readOnlyAdminSetup: usesAdminDashboardSetup(id),
   };
 };
 
@@ -636,12 +636,18 @@ const IntegrationCard = memo<IntegrationCardProps>(({
 
   const StatusIcon = isLocked ? AlertCircle : getStatusIcon(integration.status);
   const statusColor = isLocked ? '#f59e0b' : getStatusColor(integration.status);
+  const isAdminDashboardSetup = usesAdminDashboardSetup(integration.id);
   const isToggleDisabled =
     isLocked ||
     integration.readOnlyAdminSetup === true ||
     integration.status === 'pending' ||
     Boolean(toggleDisabledMessage);
   const isEnabled = integration.status === 'connected';
+  const adminActionLabel = integration.id === 'caller_id'
+    ? integration.status === 'disconnected'
+      ? t('integrations.callerId.setupInAdmin', 'Set up Caller ID in Admin Dashboard')
+      : t('integrations.callerId.manageInAdmin', 'Manage Caller ID in Admin Dashboard')
+    : t('integrations.efood.openAdmin', 'Open Admin Dashboard');
 
   return (
     <motion.div
@@ -746,7 +752,21 @@ const IntegrationCard = memo<IntegrationCardProps>(({
 
         {/* Actions */}
         <div className="flex flex-col items-end gap-2">
-          {(integration.status === 'connected' || integration.status === 'pending') && !isLocked ? (
+          {isAdminDashboardSetup && !isLocked ? (
+            <button
+              type="button"
+              onClick={() => onConfigure(integration)}
+              className={`inline-flex items-center justify-center gap-1 rounded-xl px-3 py-2 text-xs font-semibold transition-transform duration-150 active:scale-95 ${
+                isDark
+                  ? 'bg-white/10 text-white active:bg-white/15'
+                  : 'bg-gray-100 text-gray-800 active:bg-gray-200'
+              }`}
+              aria-label={adminActionLabel}
+            >
+              <ExternalLink size={15} />
+              <span>{adminActionLabel}</span>
+            </button>
+          ) : (integration.status === 'connected' || integration.status === 'pending') && !isLocked ? (
             <button
               onClick={() => onConfigure(integration)}
               className={`p-2 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 active:scale-95 ${
@@ -768,27 +788,29 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               )}
             </button>
           ) : null}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={isEnabled}
-            aria-label={isToggleDisabled && toggleDisabledMessage ? toggleDisabledMessage : t('integrations.togglePlugin', 'Toggle plugin')}
-            onClick={() => !isToggleDisabled && onToggle(integration.id)}
-            disabled={isToggleDisabled}
-            className={`relative inline-flex h-6 w-14 shrink-0 items-center rounded-full border transition-all duration-200 ${
-              isEnabled
-                ? 'bg-[#67d75f] border-[#67d75f] shadow-[0_0_12px_rgba(103,215,95,0.45)]'
-                : 'bg-[#d7d7d9] border-[#d7d7d9]'
-            } ${isToggleDisabled ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer'}`}
-          >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-[0_2px_6px_rgba(0,0,0,0.35)] transition-all duration-200 ${
+          {!isAdminDashboardSetup && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isEnabled}
+              aria-label={isToggleDisabled && toggleDisabledMessage ? toggleDisabledMessage : t('integrations.togglePlugin', 'Toggle plugin')}
+              onClick={() => !isToggleDisabled && onToggle(integration.id)}
+              disabled={isToggleDisabled}
+              className={`relative inline-flex h-6 w-14 shrink-0 items-center rounded-full border transition-all duration-200 ${
                 isEnabled
-                  ? 'translate-x-8'
-                  : 'translate-x-0.5'
-              }`}
-            />
-          </button>
+                  ? 'bg-[#67d75f] border-[#67d75f] shadow-[0_0_12px_rgba(103,215,95,0.45)]'
+                  : 'bg-[#d7d7d9] border-[#d7d7d9]'
+              } ${isToggleDisabled ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer'}`}
+            >
+              <span
+                className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-[0_2px_6px_rgba(0,0,0,0.35)] transition-all duration-200 ${
+                  isEnabled
+                    ? 'translate-x-8'
+                    : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          )}
           <span className={`text-[10px] font-medium ${isEnabled ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
             {isLocked
               ? t('integrations.partnerRequired', 'Partner Required')
