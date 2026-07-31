@@ -13,6 +13,8 @@ use tracing::{info, warn};
 
 /// Default timeout for API requests (30 seconds).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const POS_CLIENT_VERSION_HEADER: &str = "x-pos-client-version";
+const POS_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Shared reqwest::Client — holds a connection pool, TLS session cache,
 /// and DNS cache. Previously a fresh Client was built on every call to
@@ -49,6 +51,12 @@ fn shared_client() -> Result<&'static Client, String> {
         })
         .as_ref()
         .map_err(|e| e.clone())
+}
+
+fn pos_request(client: &Client, method: Method, url: &str) -> reqwest::RequestBuilder {
+    client
+        .request(method, url)
+        .header(POS_CLIENT_VERSION_HEADER, POS_CLIENT_VERSION)
 }
 
 /// Redact a sensitive string for log output: shows only the last 4 characters.
@@ -332,8 +340,7 @@ pub async fn test_connectivity(admin_url: &str, api_key: &str) -> ConnectivityRe
 
     let start = Instant::now();
 
-    let resp = match client
-        .get(&health_url)
+    let resp = match pos_request(client, Method::GET, &health_url)
         .timeout(CONNECTIVITY_TIMEOUT)
         .header("X-POS-API-Key", resolved_api_key)
         .send()
@@ -441,8 +448,7 @@ pub async fn fetch_from_admin_detailed(
         ));
     }
 
-    let mut req = client
-        .request(http_method, &full_url)
+    let mut req = pos_request(client, http_method, &full_url)
         .timeout(DEFAULT_TIMEOUT)
         .header("X-POS-API-Key", resolved_api_key)
         .header("x-terminal-id", &terminal_id)
@@ -512,6 +518,26 @@ pub async fn fetch_from_admin_detailed(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pos_request_applies_the_packaged_version_header() {
+        let client = shared_client().expect("build shared HTTP client");
+        let request = pos_request(
+            client,
+            Method::GET,
+            "https://example.com/api/pos/caller-id/config",
+        )
+        .build()
+        .expect("build authenticated POS request");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(POS_CLIENT_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(POS_CLIENT_VERSION)
+        );
+    }
 
     #[test]
     fn extract_terminal_id_from_body_reads_object_payloads() {
