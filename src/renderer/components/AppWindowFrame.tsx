@@ -390,7 +390,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
     ? `${update.label} - ${update.detail}`
     : update?.label;
   const logoSource = isDark ? logoDark : logoLight;
-  const controlBase = `inline-flex h-[60px] min-h-[60px] w-[64px] min-w-[64px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none transition-colors duration-75 active:bg-yellow-400/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${
+  const controlBase = `inline-flex h-[32px] min-h-[32px] w-[48px] min-w-[48px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none transition-colors duration-75 active:bg-yellow-400/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${
     isDark ? 'text-zinc-100' : 'text-zinc-900'
   }`;
 
@@ -404,7 +404,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
       onPointerCancel={stopWindowDrag}
       onLostPointerCapture={stopWindowDrag}
       style={{ zIndex: 2147483600, pointerEvents: 'auto' }}
-      className={`fixed inset-x-0 top-0 h-16 shrink-0 touch-none select-none bg-transparent px-2 ${className}`}
+      className={`relative z-[2147483600] h-8 w-full shrink-0 touch-none select-none border-b border-slate-200/80 bg-white/95 px-2 shadow-[0_1px_0_rgba(15,23,42,0.04)] backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/95 ${className}`}
     >
       <div
         data-app-window-drag-zone
@@ -414,13 +414,15 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
       />
 
       <div
+        data-app-window-logo
+        data-app-window-no-drag
         className="absolute left-3 top-1/2 z-30 flex -translate-y-1/2 items-center"
       >
         <img
           src={logoSource}
           alt="The Small"
           draggable={false}
-          className="h-8 w-8 object-contain"
+          className="h-6 w-6 object-contain"
         />
       </div>
 
@@ -445,7 +447,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
       )}
 
       <div
-        className="absolute right-0 top-0 z-30 flex h-16 items-start gap-0"
+        className="absolute right-0 top-0 z-30 flex h-8 items-start gap-0"
         data-app-window-controls
         data-app-window-no-drag
         onPointerDown={stopWindowControlPointer}
@@ -459,7 +461,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
           onClick={() => runWindowCommand('minimize')}
           className={controlBase}
         >
-          <Minus className="block h-5 w-5 translate-y-[2px]" />
+          <Minus className="block h-4 w-4 translate-y-[1px]" />
         </button>
         <button
           type="button"
@@ -474,9 +476,9 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
           className={controlBase}
         >
           {windowState?.isMaximized ? (
-            <Minimize className="block h-5 w-5" />
+            <Minimize className="block h-4 w-4" />
           ) : (
-            <Maximize className="block h-5 w-5" />
+            <Maximize className="block h-4 w-4" />
           )}
         </button>
         <button
@@ -485,9 +487,9 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
           data-app-window-no-drag
           aria-label={t('common.actions.close', 'Close')}
           onClick={() => runWindowCommand('close')}
-          className="inline-flex h-[60px] min-h-[60px] w-[64px] min-w-[64px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none text-red-500 transition-colors duration-75 active:bg-red-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/80"
+          className="inline-flex h-[32px] min-h-[32px] w-[48px] min-w-[48px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none text-red-500 transition-colors duration-75 active:bg-red-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/80"
         >
-          <X className="block h-5 w-5" />
+          <X className="block h-4 w-4" />
         </button>
       </div>
     </div>

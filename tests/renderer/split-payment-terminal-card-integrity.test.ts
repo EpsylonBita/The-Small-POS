@@ -187,8 +187,14 @@ test('round 2 P0 (behavioral): a confirm settlement and a terminal charge are mu
 // ---------------------------------------------------------------------------
 
 test('round 2 P1: modal close (X and Escape) is locked while a terminal charge is in flight', () => {
-  assert.match(modalSource, /onClose=\{processingPortionId \|\| isProcessing \|\| isTerminalChargeInFlight \? \(\) => undefined : onClose\}/);
-  assert.match(modalSource, /closeOnEscape=\{!processingPortionId && !isProcessing && !isTerminalChargeInFlight\}/);
+  assert.match(
+    modalSource,
+    /onClose=\{\s*processingPortionId\s*\|\|\s*isProcessing\s*\|\|\s*isTerminalChargeInFlight\s*\?\s*\(\)\s*=>\s*undefined\s*:\s*onClose\s*\}/,
+  );
+  assert.match(
+    modalSource,
+    /closeOnEscape=\{\s*!processingPortionId\s*&&\s*!isProcessing\s*&&\s*!isTerminalChargeInFlight\s*\}/,
+  );
 });
 
 test('round 2 P1: the in-flight flag is armed with the guard and cleared in finally', () => {

@@ -1260,18 +1260,18 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     }
   };
 
-  const drawerSummaryCardClass = 'rounded-3xl border border-neutral-700/70 bg-black/50 p-3 shadow-[0_12px_36px_rgba(0,0,0,0.24)] backdrop-blur-xl dark:border-neutral-700/60 dark:bg-black/50 dark:shadow-[0_18px_48px_rgba(0,0,0,0.34)]';
-  const drawerPanelClass = 'rounded-[28px] border border-neutral-700/70 bg-neutral-950/80 p-5 shadow-[0_18px_50px_rgba(0,0,0,0.24)] dark:border-neutral-700/60 dark:bg-neutral-950/80';
-  const drawerSidePanelClass = 'rounded-[28px] border border-neutral-700/70 bg-neutral-950/80 p-3.5 shadow-[0_16px_42px_rgba(0,0,0,0.22)] dark:border-neutral-700/60 dark:bg-neutral-950/80';
-  const drawerListItemClass = 'rounded-2xl border border-neutral-700/70 bg-black/35 px-4 py-3 dark:border-neutral-700/60 dark:bg-black/35';
-  const drawerActivityItemClass = 'flex items-start justify-between gap-4 rounded-2xl border border-neutral-700/70 bg-black/35 px-4 py-3 shadow-[0_10px_26px_rgba(0,0,0,0.22)] dark:border-neutral-700/60 dark:bg-black/35';
-  const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-neutral-700/70 bg-neutral-900/70 px-6 py-4 text-center dark:border-neutral-700/70 dark:bg-neutral-900/70';
-  const drawerEmptyIconClass = 'mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-neutral-800 text-neutral-400 shadow-[0_10px_25px_rgba(0,0,0,0.24)] dark:bg-neutral-800 dark:text-neutral-400';
-  const drawerInputClass = 'w-full rounded-2xl border border-neutral-700/80 bg-black px-4 py-3 text-white shadow-inner outline-none transition-colors placeholder:text-neutral-500 focus:border-yellow-400/70 focus:ring-2 focus:ring-yellow-400/15 disabled:cursor-not-allowed disabled:opacity-60';
-  const drawerExpenseSubmitClass = '!border-neutral-700/60 !bg-transparent !font-bold !text-emerald-400 !shadow-none active:!scale-[0.98] disabled:!text-emerald-400 disabled:!opacity-100';
-  const drawerStaffPaymentSubmitClass = '!border-neutral-700/60 !bg-transparent !font-bold !text-yellow-400 !shadow-none active:!scale-[0.98] disabled:!text-yellow-400 disabled:!opacity-100';
-  const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-neutral-700/80 bg-neutral-950 shadow-[0_18px_44px_rgba(0,0,0,0.42)]';
-  const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-white transition-colors active:bg-neutral-800 focus:bg-neutral-800 focus:outline-none';
+  const drawerSummaryCardClass = 'rounded-3xl border border-slate-200/90 bg-white/80 p-3 shadow-[0_12px_30px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-neutral-700/60 dark:bg-black/50 dark:shadow-[0_18px_48px_rgba(0,0,0,0.34)]';
+  const drawerPanelClass = 'rounded-[28px] border border-slate-200/90 bg-white/90 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.10)] dark:border-neutral-700/60 dark:bg-neutral-950/80 dark:shadow-[0_18px_50px_rgba(0,0,0,0.24)]';
+  const drawerSidePanelClass = 'rounded-[28px] border border-slate-200/90 bg-white/90 p-3.5 shadow-[0_16px_36px_rgba(15,23,42,0.09)] dark:border-neutral-700/60 dark:bg-neutral-950/80 dark:shadow-[0_16px_42px_rgba(0,0,0,0.22)]';
+  const drawerListItemClass = 'rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 dark:border-neutral-700/60 dark:bg-black/35';
+  const drawerActivityItemClass = 'flex items-start justify-between gap-4 rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 shadow-[0_10px_24px_rgba(15,23,42,0.07)] dark:border-neutral-700/60 dark:bg-black/35 dark:shadow-[0_10px_26px_rgba(0,0,0,0.22)]';
+  const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-slate-300/90 bg-slate-50/80 px-6 py-4 text-center dark:border-neutral-700/70 dark:bg-neutral-900/70';
+  const drawerEmptyIconClass = 'mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 text-slate-500 shadow-[0_10px_24px_rgba(15,23,42,0.09)] dark:bg-neutral-800 dark:text-neutral-400 dark:shadow-[0_10px_25px_rgba(0,0,0,0.24)]';
+  const drawerInputClass = 'w-full rounded-2xl border border-slate-300/90 bg-white/95 px-4 py-3 text-slate-900 shadow-inner outline-none transition-colors placeholder:text-slate-400 focus:border-yellow-400/70 focus:ring-2 focus:ring-yellow-400/15 disabled:cursor-not-allowed disabled:opacity-60 dark:border-neutral-700/80 dark:bg-black dark:text-white dark:placeholder:text-neutral-500';
+  const drawerExpenseSubmitClass = '!border-slate-300/80 !bg-white/70 !font-bold !text-emerald-700 !shadow-[0_8px_20px_rgba(15,23,42,0.08)] active:!scale-[0.98] disabled:!text-emerald-500 disabled:!opacity-100 dark:!border-neutral-700/60 dark:!bg-transparent dark:!text-emerald-400 dark:!shadow-none';
+  const drawerStaffPaymentSubmitClass = '!border-slate-300/80 !bg-white/70 !font-bold !text-amber-700 !shadow-[0_8px_20px_rgba(15,23,42,0.08)] active:!scale-[0.98] disabled:!text-amber-500 disabled:!opacity-100 dark:!border-neutral-700/60 dark:!bg-transparent dark:!text-yellow-400 dark:!shadow-none';
+  const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-slate-200/90 bg-white text-slate-900 shadow-[0_18px_38px_rgba(15,23,42,0.16)] dark:border-neutral-700/80 dark:bg-neutral-950 dark:text-white dark:shadow-[0_18px_44px_rgba(0,0,0,0.42)]';
+  const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-slate-800 transition-colors active:bg-slate-100 focus:bg-slate-100 focus:outline-none dark:text-white dark:active:bg-neutral-800 dark:focus:bg-neutral-800';
 
   const renderDrawerDropdown = ({
     dropdownKey,
@@ -1314,11 +1314,11 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             isOpenDropdown ? 'border-yellow-400/80 ring-2 ring-yellow-400/15' : ''
           }`}
         >
-          <span className={selectedOption?.value ? 'truncate' : 'truncate text-neutral-500'}>
+          <span className={selectedOption?.value ? 'truncate' : 'truncate text-slate-400 dark:text-neutral-500'}>
             {selectedOption?.label}
           </span>
           <ChevronDown
-            className={`h-5 w-5 shrink-0 text-neutral-300 transition-transform ${isOpenDropdown ? 'rotate-180 text-yellow-300' : ''}`}
+            className={`h-5 w-5 shrink-0 text-slate-500 transition-transform dark:text-neutral-300 ${isOpenDropdown ? 'rotate-180 !text-yellow-500 dark:!text-yellow-300' : ''}`}
           />
         </button>
 
@@ -1337,7 +1337,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     onChange(option.value);
                     setOpenDropdown(null);
                   }}
-                  className={`${drawerDropdownOptionClass} ${selected ? 'bg-neutral-800 text-yellow-300' : ''}`}
+                  className={`${drawerDropdownOptionClass} ${selected ? 'bg-yellow-50 text-yellow-700 dark:bg-neutral-800 dark:text-yellow-300' : ''}`}
                 >
                   <span className="truncate">{option.label}</span>
                   {selected && <Check className="h-4 w-4 shrink-0" />}
@@ -1555,7 +1555,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-all active:scale-[0.98] ${
                 active
                   ? 'border-yellow-400 bg-yellow-400 text-black shadow-[0_14px_34px_rgba(250,204,21,0.24)]'
-                  : 'border-neutral-700/60 bg-neutral-950/55 text-neutral-200 dark:border-neutral-700/60 dark:bg-neutral-950/55 dark:text-neutral-200'
+                  : 'border-slate-200/90 bg-white/80 text-slate-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)] dark:border-neutral-700/60 dark:bg-neutral-950/55 dark:text-neutral-200 dark:shadow-none'
               }`}
             >
               {tab.icon}
@@ -1665,7 +1665,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               </div>
             )}
 
-            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center gap-3 rounded-b-[28px] border-t border-neutral-700/60 bg-neutral-950/90 px-5 py-4 backdrop-blur-xl">
+            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center gap-3 rounded-b-[28px] border-t border-slate-200/80 bg-white/95 px-5 py-4 backdrop-blur-xl dark:border-neutral-700/60 dark:bg-neutral-950/90">
               <POSGlassButton
                 type="button"
                 variant="success"
@@ -1869,7 +1869,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               )}
             </p>
 
-            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center gap-3 rounded-b-[28px] border-t border-neutral-700/60 bg-neutral-950/90 px-5 py-4 backdrop-blur-xl">
+            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center gap-3 rounded-b-[28px] border-t border-slate-200/80 bg-white/95 px-5 py-4 backdrop-blur-xl dark:border-neutral-700/60 dark:bg-neutral-950/90">
               {editingPaymentId && (
                 <POSGlassButton
                   type="button"

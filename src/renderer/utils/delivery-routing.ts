@@ -376,17 +376,21 @@ export function buildGoogleMapsDirectionsUrl(
   origin: StoreMapOrigin | null | undefined,
   stop: DeliveryRouteStopPayload,
 ): string | null {
-  const originValue = origin ? locationToMapsValue(origin) : ''
-  if (!originValue) {
-    return null
-  }
-
   const destination = stop.coordinates
     ? `${stop.coordinates.lat},${stop.coordinates.lng}`
     : normalizeText(stop.address)
 
   if (!destination) {
     return null
+  }
+
+  const originValue = origin ? locationToMapsValue(origin) : ''
+  if (!originValue) {
+    const searchParams = new URLSearchParams({
+      api: '1',
+      query: destination,
+    })
+    return `https://www.google.com/maps/search/?${searchParams.toString()}`
   }
 
   const params = new URLSearchParams({

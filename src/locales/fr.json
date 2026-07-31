@@ -564,6 +564,13 @@
       "savory": "Salé",
       "sweet": "Sucré"
     },
+    "featuredShortcuts": {
+      "quickAccess": "Accès rapide",
+      "hint": "Catégories et filtres populaires",
+      "frequentItems": "Commandés fréquemment",
+      "openCategory": "Ouvrir {{category}}",
+      "openSubcategory": "Ouvrir {{category}}, {{subcategory}}"
+    },
     "items": "Articles",
     "search": "Rechercher dans le menu...",
     "searchPlaceholder": "Rechercher des articles, catégories...",

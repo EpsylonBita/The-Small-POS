@@ -4,13 +4,22 @@ import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { MenuItemCard } from './MenuItemCard';
 import { ComboCard } from './ComboCard';
-import { menuService, MenuItem } from '../../services/MenuService';
-import { AlertTriangle, Utensils, X } from 'lucide-react';
+import type { MenuItem } from '../../services/MenuService';
+import { AlertTriangle, Layers, LayoutGrid, Utensils, X } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import type { MenuCombo } from '@shared/types/combo';
 import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
+import {
+  buildFeaturedMenuNavigationShortcuts,
+  rankFeaturedMenuItems,
+  type FeaturedMenuCategoryLike,
+  type FeaturedSellerRanking,
+} from '../../utils/featured-menu-items';
 
 interface MenuItemGridProps {
+  menuItems: MenuItem[];
+  loading?: boolean;
+  error?: string | null;
   selectedCategory: string;
   selectedSubcategory?: string;
   onItemSelect: (item: MenuItem) => void;
@@ -21,6 +30,9 @@ interface MenuItemGridProps {
   // Top seller IDs for featured category filtering
   topSellerIds?: Set<string>;
   featuredRankedIds?: string[];
+  topSellers?: FeaturedSellerRanking[];
+  categories?: FeaturedMenuCategoryLike[];
+  onShortcutNavigate?: (categoryId: string, subcategoryId?: string) => void;
   // Combo mode
   comboMode?: boolean;
   combos?: MenuCombo[];
@@ -46,6 +58,9 @@ interface MenuItemPreviewState {
 }
 
 export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
+  menuItems,
+  loading = false,
+  error = null,
   selectedCategory,
   selectedSubcategory = '',
   onItemSelect,
@@ -55,15 +70,15 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   searchQuery = '',
   topSellerIds,
   featuredRankedIds = [],
+  topSellers = [],
+  categories = [],
+  onShortcutNavigate,
   comboMode = false,
   combos = [],
   onComboSelect,
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<MenuItemPreviewState | null>(null);
 
   const previewPosition = useMemo(() => {
@@ -104,140 +119,76 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
     };
   }, [preview]);
 
-  useEffect(() => {
-    // Wave 5 H: guard against setState-after-unmount. The previous
-    // implementation fired `loadMenuItems` and (later) subscribed to
-    // real-time updates — either callback could resolve after the
-    // component unmounted (fast category switches, menu modal
-    // closing), landing a React warning and, in the wrong order,
-    // overwriting the new component's state. `disposed` matches the
-    // pattern already used in App.tsx's validateAndRestoreSession.
-    let disposed = false;
+  const featuredMenuItems = useMemo(() => {
+    const ranking = topSellers.length > 0
+      ? topSellers
+      : (featuredRankedIds.length > 0
+          ? featuredRankedIds
+          : Array.from(topSellerIds ?? []))
+        .map((menuItemId) => ({
+          menuItemId,
+          name: '',
+          categoryId: null,
+        }));
 
-    const loadMenuItems = async () => {
-      if (disposed) return;
-      setLoading(true);
-      setError(null);
+    return rankFeaturedMenuItems(menuItems, ranking);
+  }, [featuredRankedIds, menuItems, topSellerIds, topSellers]);
 
-      try {
-        let items: MenuItem[] = [];
+  const featuredNavigationShortcuts = useMemo(
+    () => buildFeaturedMenuNavigationShortcuts(featuredMenuItems, categories),
+    [categories, featuredMenuItems],
+  );
 
-        // Fetch items based on selected category
-        if (selectedCategory === 'all') {
-          items = await menuService.getMenuItems();
-        } else if (selectedCategory === 'featured') {
-          const allItems = await menuService.getMenuItems();
-          if (featuredRankedIds.length > 0) {
-            const itemsById = new Map(allItems.map(item => [item.id, item]));
-            const rankedItems = featuredRankedIds
-              .map((itemId) => itemsById.get(itemId))
-              .filter((item): item is MenuItem => Boolean(item));
+  const visibleMenuItems = useMemo(() => {
+    let items: MenuItem[];
 
-            items = rankedItems.length > 0
-              ? rankedItems
-              : allItems.filter(item => item.is_featured || false);
-          } else if (topSellerIds && topSellerIds.size > 0) {
-            const filteredItems = allItems.filter(item => topSellerIds.has(item.id));
-            items = filteredItems.length > 0
-              ? filteredItems
-              : allItems.filter(item => item.is_featured || false);
-          } else {
-            items = allItems.filter(item => item.is_featured || false);
-          }
-        } else {
-          // Category filtering by UUID
-          items = await menuService.getMenuItemsByCategory(selectedCategory);
-        }
-
-        // Filter by subcategory if selected
-        if (selectedSubcategory) {
-          // Check if filtering by flavor type (sweet/savory)
-          const isSavory = selectedSubcategory.includes('savory');
-          const isSweet = selectedSubcategory.includes('sweet');
-
-          if (isSavory || isSweet) {
-            // Filter items based on their flavor_type column
-            const targetFlavorType = isSweet ? 'sweet' : 'savory';
-            items = items.filter(item => item.flavor_type === targetFlavorType);
-
-            console.log(`Filtering by ${targetFlavorType}:`, {
-              totalItems: items.length,
-              allItems: menuItems.length,
-              itemsWithFlavorType: menuItems.filter(i => i.flavor_type).length,
-              sampleItem: menuItems[0]
-            });
-          } else {
-            // Legacy filtering for customizable/standard
-            const isCustomizable = selectedSubcategory.includes('customizable');
-
-            if (isCustomizable) {
-              // Filter to show only customizable items
-              items = items.filter(item => item.is_customizable);
-            } else {
-              // Show standard pre-configured items
-              items = items.filter(item => !item.is_customizable);
-            }
-          }
-        }
-
-        // Validate items have required fields
-        const validItems = items.filter(item => {
-          const isValid = item.id && item.name && item.price !== undefined;
-          if (!isValid) {
-            console.warn('Invalid menu item detected:', item);
-          }
-          return isValid;
-        });
-
-        // Deduplicate items by ID to prevent React key warnings
-        const uniqueItems = validItems.reduce((acc, item) => {
-          if (!acc.find(i => i.id === item.id)) {
-            acc.push(item);
-          }
-          return acc;
-        }, [] as MenuItem[]);
-
-        // Filter by search query
-        const searchFiltered = searchQuery.trim()
-          ? uniqueItems.filter(item =>
-              item.name?.toLowerCase().includes(searchQuery.trim().toLowerCase())
-            )
-          : uniqueItems;
-
-        if (!disposed) {
-          setMenuItems(searchFiltered);
-        }
-      } catch (err) {
-        console.error('Error loading menu items:', err);
-        if (!disposed) {
-          setError(t('menu.grid.error'));
-        }
-      } finally {
-        if (!disposed) {
-          setLoading(false);
-        }
-      }
-    };
-
-    loadMenuItems();
-
-    // Subscribe to real-time updates. The callback also routes through
-    // `loadMenuItems`, which already checks `disposed` at each setState.
-    let unsubscribe: (() => void) | undefined;
-    try {
-      unsubscribe = menuService.subscribeToMenuUpdates(() => {
-        loadMenuItems();
-      });
-    } catch (error) {
-      console.error('Error setting up real-time subscription:', error);
-      // Continue without real-time updates.
+    if (selectedCategory === 'all') {
+      items = menuItems;
+    } else if (selectedCategory === 'featured') {
+      items = featuredMenuItems;
+    } else {
+      items = menuItems.filter((item) => item.category_id === selectedCategory);
     }
 
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-    };
-  }, [featuredRankedIds, searchQuery, selectedCategory, selectedSubcategory, topSellerIds]);
+    if (selectedSubcategory) {
+      const isSavory = selectedSubcategory.includes('savory');
+      const isSweet = selectedSubcategory.includes('sweet');
+
+      if (isSavory || isSweet) {
+        const targetFlavorType = isSweet ? 'sweet' : 'savory';
+        items = items.filter((item) => item.flavor_type === targetFlavorType);
+      } else {
+        const isCustomizable = selectedSubcategory.includes('customizable');
+        items = items.filter((item) => Boolean(item.is_customizable) === isCustomizable);
+      }
+    }
+
+    const seenItemIds = new Set<string>();
+    const uniqueItems: MenuItem[] = [];
+    for (const item of items) {
+      const isValid = Boolean(item.id && item.name && item.price !== undefined);
+      if (!isValid) {
+        console.warn('Invalid menu item detected:', item);
+        continue;
+      }
+      if (seenItemIds.has(item.id)) continue;
+      seenItemIds.add(item.id);
+      uniqueItems.push(item);
+    }
+
+    const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase();
+    if (!normalizedSearchQuery) return uniqueItems;
+
+    return uniqueItems.filter((item) =>
+      item.name?.toLocaleLowerCase().includes(normalizedSearchQuery)
+    );
+  }, [
+    featuredMenuItems,
+    menuItems,
+    searchQuery,
+    selectedCategory,
+    selectedSubcategory,
+  ]);
 
   // Combo mode - render combo cards instead of menu items
   if (comboMode && onComboSelect) {
@@ -325,7 +276,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
     );
   }
 
-  if (menuItems.length === 0) {
+  if (visibleMenuItems.length === 0) {
     return (
       <div className="flex-1 p-4 overflow-y-auto scrollbar-hide flex items-center justify-center">
         <div className="text-center">
@@ -445,8 +396,93 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
         </div>,
         document.body,
       )}
+      {selectedCategory === 'featured'
+        && !searchQuery.trim()
+        && onShortcutNavigate
+        && featuredNavigationShortcuts.length > 0 && (
+          <section
+            className={`mb-3 rounded-2xl border p-3 shadow-sm backdrop-blur-md ${
+              resolvedTheme === 'dark'
+                ? 'border-white/10 bg-white/[0.04] shadow-black/20'
+                : 'border-white/80 bg-white/65 shadow-gray-900/5'
+            }`}
+            aria-label={t('menu.featuredShortcuts.quickAccess')}
+            data-testid="featured-menu-shortcuts"
+          >
+            <div className="mb-2 flex items-baseline justify-between gap-3 px-0.5">
+              <h3 className={`text-sm font-bold ${
+                resolvedTheme === 'dark' ? 'text-zinc-100' : 'text-gray-900'
+              }`}>
+                {t('menu.featuredShortcuts.quickAccess')}
+              </h3>
+              <span className={`text-xs ${
+                resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-500'
+              }`}>
+                {t('menu.featuredShortcuts.hint')}
+              </span>
+            </div>
+            <div className="flex gap-2 overflow-x-auto py-1 scrollbar-hide touch-pan-x">
+              {featuredNavigationShortcuts.map((shortcut) => {
+                const flavorName = shortcut.flavorType
+                  ? t(`menu.categories.${shortcut.flavorType}`)
+                  : '';
+                const label = shortcut.kind === 'category'
+                  ? shortcut.categoryName
+                  : `${shortcut.categoryName} · ${flavorName}`;
+
+                return (
+                  <button
+                    key={shortcut.id}
+                    type="button"
+                    onClick={() => onShortcutNavigate(shortcut.categoryId, shortcut.subcategoryId)}
+                    className={`flex min-h-[42px] flex-shrink-0 items-center gap-2 whitespace-nowrap rounded-xl border px-3 py-2 text-[13px] font-semibold antialiased shadow-sm transition-all duration-150 active:scale-[0.98] ${
+                      resolvedTheme === 'dark'
+                        ? 'border-white/12 bg-white/[0.08] text-zinc-100 shadow-black/20 active:border-yellow-300/60 active:bg-yellow-400 active:text-black'
+                        : 'border-white/80 bg-white/90 text-gray-800 shadow-gray-900/5 active:border-yellow-500 active:bg-yellow-400 active:text-black'
+                    }`}
+                    aria-label={
+                      shortcut.kind === 'category'
+                        ? t('menu.featuredShortcuts.openCategory', { category: shortcut.categoryName })
+                        : t('menu.featuredShortcuts.openSubcategory', {
+                            category: shortcut.categoryName,
+                            subcategory: flavorName,
+                          })
+                    }
+                  >
+                    {shortcut.kind === 'category' ? (
+                      <LayoutGrid
+                        aria-hidden="true"
+                        className={`h-4 w-4 flex-shrink-0 ${
+                          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-600'
+                        }`}
+                      />
+                    ) : (
+                      <Layers
+                        aria-hidden="true"
+                        className={`h-4 w-4 flex-shrink-0 ${
+                          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-600'
+                        }`}
+                      />
+                    )}
+                    <span>{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
+      {selectedCategory === 'featured' && !searchQuery.trim() && (
+        <h3
+          className={`mb-2 px-0.5 text-sm font-bold ${
+            resolvedTheme === 'dark' ? 'text-zinc-200' : 'text-gray-800'
+          }`}
+          data-testid="featured-menu-items-heading"
+        >
+          {t('menu.featuredShortcuts.frequentItems')}
+        </h3>
+      )}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-2.5 sm:gap-3">
-        {menuItems.map((item) => {
+        {visibleMenuItems.map((item) => {
           // Tier-price resolution lives in a shared util so cart-repricing
           // in MenuModal (when order type changes mid-edit) uses exactly
           // the same fallback chain as the grid displays here.

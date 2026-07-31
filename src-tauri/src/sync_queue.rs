@@ -486,6 +486,7 @@ const STALE_ORDER_UPDATE_PARENT_WAIT_REASON: &str =
     "Stale order update replay: local parent order missing";
 const SUPERSEDED_ORDER_UPDATE_REASON: &str =
     "Order status update superseded by a locally synced newer status";
+const SUPERSEDED_ORDER_STATUS_REBASE_REASON: &str = "superseded_status_rebase";
 
 // ---------------------------------------------------------------------------
 // Schema initialization
@@ -3086,10 +3087,18 @@ fn recover_stale_processing_items(conn: &Connection) -> Result<i64, String> {
 }
 
 fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<usize, String> {
-    let rows: Vec<(String, String, String, String)> = {
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+    )> = {
         let mut stmt = conn
             .prepare(
-                "SELECT id, record_id, operation, data
+                "SELECT id, record_id, operation, data, status, error_message, conflict_strategy
                  FROM parity_sync_queue
                  WHERE table_name = 'orders'
                    AND operation = 'UPDATE'
@@ -3104,18 +3113,64 @@ fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<u
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             })
             .map_err(|e| format!("sync_queue superseded order cleanup query: {e}"))?;
         mapped.filter_map(|row| row.ok()).collect()
     };
 
-    let mut removed = 0usize;
-    for (queue_id, record_id, operation, data) in rows {
-        let Ok(payload) = serde_json::from_str::<Value>(&data) else {
+    let mut handled = 0usize;
+    for (queue_id, record_id, operation, data, queue_status, error_message, conflict_strategy) in
+        rows
+    {
+        let Ok(mut payload) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
-        let Some(reason) = superseded_synced_order_status_update_reason(
+        if let Some(reason) = superseded_synced_order_status_update_reason(
+            conn,
+            record_id.as_str(),
+            operation.as_str(),
+            &payload,
+        )? {
+            let affected = conn
+                .execute(
+                    "DELETE FROM parity_sync_queue
+                     WHERE id = ?1
+                       AND table_name = 'orders'
+                       AND operation = 'UPDATE'",
+                    params![queue_id.as_str()],
+                )
+                .map_err(|e| format!("sync_queue superseded order cleanup delete: {e}"))?;
+
+            if affected > 0 {
+                handled += affected;
+                info!(
+                    item_id = %queue_id,
+                    record_id = %record_id,
+                    reason = %reason,
+                    "Removed superseded order status parity row"
+                );
+            }
+            continue;
+        }
+
+        let is_failed_invalid_transition = queue_status == "failed"
+            && conflict_strategy == "server-wins"
+            && error_message.as_deref().is_some_and(|message| {
+                message
+                    .to_ascii_lowercase()
+                    .contains("invalid status transition")
+            })
+            && payload.get("syncRecoveryReason").and_then(Value::as_str)
+                != Some(SUPERSEDED_ORDER_STATUS_REBASE_REASON);
+        if !is_failed_invalid_transition || is_status_only_order_update_payload(&payload) {
+            continue;
+        }
+
+        let Some((queued_status, local_status)) = superseding_synced_local_order_statuses(
             conn,
             record_id.as_str(),
             operation.as_str(),
@@ -3124,29 +3179,50 @@ fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<u
         else {
             continue;
         };
+        if local_status != "cancelled" {
+            continue;
+        }
+        let Some(object) = payload.as_object_mut() else {
+            continue;
+        };
+        object.insert("status".to_string(), Value::String(local_status.clone()));
+        object.insert(
+            "syncRecoveryReason".to_string(),
+            Value::String(SUPERSEDED_ORDER_STATUS_REBASE_REASON.to_string()),
+        );
 
+        // Requeue this recovery only once. If the rebased request is rejected
+        // too, the marker above leaves it failed for operator review.
         let affected = conn
             .execute(
-                "DELETE FROM parity_sync_queue
-                 WHERE id = ?1
-                   AND table_name = 'orders'
-                   AND operation = 'UPDATE'",
-                params![queue_id.as_str()],
+                "UPDATE parity_sync_queue
+                 SET data = ?1,
+                     status = 'pending',
+                     attempts = 0,
+                     last_attempt = NULL,
+                     error_message = NULL,
+                     next_retry_at = NULL,
+                     retry_delay_ms = 1000
+                 WHERE id = ?2
+                   AND status = 'failed'
+                   AND conflict_strategy = 'server-wins'",
+                params![payload.to_string(), queue_id.as_str()],
             )
-            .map_err(|e| format!("sync_queue superseded order cleanup delete: {e}"))?;
+            .map_err(|e| format!("sync_queue superseded order metadata rebase: {e}"))?;
 
         if affected > 0 {
-            removed += affected;
+            handled += affected;
             info!(
                 item_id = %queue_id,
                 record_id = %record_id,
-                reason = %reason,
-                "Removed superseded order status parity row"
+                queued_status = %queued_status,
+                local_status = %local_status,
+                "Rebased failed order metadata parity row to synced local status"
             );
         }
     }
 
-    Ok(removed)
+    Ok(handled)
 }
 
 /// Peek at the next item without removing or marking it.
@@ -4359,6 +4435,27 @@ fn superseded_synced_order_status_update_reason(
         return Ok(None);
     }
 
+    let Some((queued_status, local_status)) =
+        superseding_synced_local_order_statuses(conn, record_id, operation, payload)?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(format!(
+        "{SUPERSEDED_ORDER_UPDATE_REASON}: queued {queued_status}, local {local_status}"
+    )))
+}
+
+fn superseding_synced_local_order_statuses(
+    conn: &Connection,
+    record_id: &str,
+    operation: &str,
+    payload: &Value,
+) -> Result<Option<(String, String)>, String> {
+    if operation != "UPDATE" {
+        return Ok(None);
+    }
+
     let Some(queued_status) = string_field(payload, &["status"])
         .map(|status| normalize_status_for_storage(&status))
         .filter(|status| !status.is_empty())
@@ -4395,9 +4492,60 @@ fn superseded_synced_order_status_update_reason(
         return Ok(None);
     }
 
-    Ok(Some(format!(
-        "{SUPERSEDED_ORDER_UPDATE_REASON}: queued {queued_status}, local {local_status}"
-    )))
+    Ok(Some((queued_status, local_status)))
+}
+
+fn next_queued_cancellation_status(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    queued_status: &str,
+) -> Result<Option<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT data
+             FROM parity_sync_queue
+             WHERE table_name = 'orders'
+               AND record_id = ?1
+               AND operation = 'UPDATE'
+               AND status IN ('pending', 'processing')
+               AND (
+                    created_at > ?2
+                    OR (created_at = ?2 AND id > ?3)
+               )
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|e| format!("sync_queue newer order cancellation prepare: {e}"))?;
+    let rows = stmt
+        .query_map(
+            params![
+                item.record_id.as_str(),
+                item.created_at.as_str(),
+                item.id.as_str()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("sync_queue newer order cancellation query: {e}"))?;
+
+    for row in rows {
+        let data = row.map_err(|e| format!("sync_queue newer order cancellation row: {e}"))?;
+        let Ok(payload) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let Some(status) = string_field(&payload, &["status"])
+            .map(|status| normalize_status_for_storage(&status))
+            .filter(|status| status == "cancelled" && status != queued_status)
+        else {
+            continue;
+        };
+        // Cancellation is forward-reachable from every active status accepted
+        // here. Do not collapse reactivation/reset-to-pending rows: those carry
+        // distinct remote side effects and must replay in FIFO order.
+        if can_transition_locally(queued_status, &status) {
+            return Ok(Some(status));
+        }
+    }
+
+    Ok(None)
 }
 
 fn prepare_order_request(
@@ -4569,6 +4717,10 @@ fn prepare_order_request(
             .optional()
             .map_err(|e| format!("sync_queue prepare_order_request status: {e}"))?
             .unwrap_or_default();
+    }
+    let normalized_status = normalize_status_for_storage(&status);
+    if let Some(newer_status) = next_queued_cancellation_status(conn, item, &normalized_status)? {
+        status = newer_status;
     }
     if status.trim().is_empty() {
         return Ok(RequestPreparation::Failed {
@@ -9220,6 +9372,221 @@ mod tests {
         assert_eq!(
             body.get("delivery_address").and_then(Value::as_str),
             Some("Asklipiou 10")
+        );
+    }
+
+    #[test]
+    fn prepare_order_request_rebases_stale_metadata_update_to_newer_queued_cancellation() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, sync_status,
+                created_at, updated_at
+             ) VALUES (
+                'order-cancel-race', 'remote-order-cancel-race', '[]',
+                27.0, 'cancelled', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed locally cancelled order");
+
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status
+             ) VALUES (
+                'queue-stale-assignment', 'orders', 'order-cancel-race', 'UPDATE',
+                ?1, 'org-1', '2026-07-30T08:12:13.961442600+00:00',
+                0, 1000, 0, 'orders', 'server-wins', 1, 'pending'
+             ), (
+                'queue-newer-cancellation', 'orders', 'order-cancel-race', 'UPDATE',
+                ?2, 'org-1', '2026-07-30T08:12:22.574601000+00:00',
+                0, 1000, 0, 'orders', 'server-wins', 1, 'pending'
+             )",
+            params![
+                json!({
+                    "orderId": "order-cancel-race",
+                    "orderType": "delivery",
+                    "status": "delivered",
+                    "driverId": "driver-wolt",
+                    "driverName": "WOLT WOLT",
+                    "deliveryNotes": null
+                })
+                .to_string(),
+                json!({
+                    "orderId": "order-cancel-race",
+                    "status": "cancelled",
+                    "cancellationReason": "Operator cancelled",
+                    "cancelled_at": "2026-07-30T08:12:22.574601000+00:00"
+                })
+                .to_string()
+            ],
+        )
+        .expect("seed ordered status updates");
+
+        let item = dequeue(&conn)
+            .expect("dequeue stale assignment")
+            .expect("stale assignment row");
+        assert_eq!(item.id, "queue-stale-assignment");
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse assignment payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare stale assignment replay")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(
+            body.get("status").and_then(Value::as_str),
+            Some("cancelled")
+        );
+        assert_eq!(
+            body.get("driver_name").and_then(Value::as_str),
+            Some("WOLT WOLT")
+        );
+    }
+
+    #[test]
+    fn prepare_order_request_keeps_cancellation_before_queued_reactivation() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, sync_status,
+                created_at, updated_at
+             ) VALUES (
+                'order-reactivation-race', 'remote-order-reactivation-race', '[]',
+                27.0, 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed locally reactivated order");
+
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status
+             ) VALUES (
+                'queue-cancellation', 'orders', 'order-reactivation-race', 'UPDATE',
+                ?1, 'org-1', '2026-07-30T08:12:13.961442600+00:00',
+                0, 1000, 0, 'orders', 'server-wins', 1, 'pending'
+             ), (
+                'queue-reactivation', 'orders', 'order-reactivation-race', 'UPDATE',
+                ?2, 'org-1', '2026-07-30T08:12:22.574601000+00:00',
+                0, 1000, 0, 'orders', 'server-wins', 1, 'pending'
+             )",
+            params![
+                json!({
+                    "orderId": "order-reactivation-race",
+                    "status": "cancelled",
+                    "cancellationReason": "Operator cancelled"
+                })
+                .to_string(),
+                json!({
+                    "orderId": "order-reactivation-race",
+                    "status": "pending",
+                    "cancellationReason": null,
+                    "cancelled_at": null
+                })
+                .to_string()
+            ],
+        )
+        .expect("seed cancellation and reactivation");
+
+        let item = dequeue(&conn)
+            .expect("dequeue cancellation")
+            .expect("cancellation row");
+        assert_eq!(item.id, "queue-cancellation");
+        let payload =
+            serde_json::from_str::<Value>(&item.data).expect("parse cancellation payload");
+
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare cancellation replay")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(
+            body.get("status").and_then(Value::as_str),
+            Some("cancelled")
+        );
+    }
+
+    #[test]
+    fn cleanup_superseded_synced_order_status_updates_rebases_failed_metadata_row() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, sync_status,
+                created_at, updated_at
+             ) VALUES (
+                'order-failed-cancel-race', 'remote-order-failed-cancel-race', '[]',
+                27.0, 'cancelled', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced cancelled order");
+
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, last_attempt, error_message, retry_delay_ms,
+                priority, module_type, conflict_strategy, version, status
+             ) VALUES (
+                'queue-failed-assignment', 'orders', 'order-failed-cancel-race', 'UPDATE',
+                ?1, 'org-1', '2026-07-30T08:12:13.961442600+00:00',
+                1, '2026-07-30T08:12:57.962983400+00:00',
+                'HTTP 400: Invalid status transition: Cannot transition from cancelled to delivered',
+                2248, 0, 'orders', 'server-wins', 1, 'failed'
+             )",
+            params![json!({
+                "orderId": "order-failed-cancel-race",
+                "orderType": "delivery",
+                "status": "delivered",
+                "driverId": "driver-wolt",
+                "driverName": "WOLT WOLT",
+                "deliveryNotes": null
+            })
+            .to_string()],
+        )
+        .expect("seed failed stale assignment");
+
+        let handled = cleanup_superseded_synced_order_status_updates(&conn)
+            .expect("repair failed stale assignment");
+        assert_eq!(handled, 1);
+
+        let (status, data, attempts, error_message): (String, String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, data, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-failed-assignment'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read repaired assignment row");
+        let payload = serde_json::from_str::<Value>(&data).expect("parse repaired payload");
+
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+        assert_eq!(error_message, None);
+        assert_eq!(
+            payload.get("status").and_then(Value::as_str),
+            Some("cancelled")
+        );
+        assert_eq!(
+            payload.get("driverName").and_then(Value::as_str),
+            Some("WOLT WOLT")
+        );
+        assert_eq!(
+            payload.get("syncRecoveryReason").and_then(Value::as_str),
+            Some(SUPERSEDED_ORDER_STATUS_REBASE_REASON)
         );
     }
 

@@ -9,7 +9,7 @@ use std::io::Cursor;
 
 use crate::escpos::{EscPosBuilder, PaperWidth};
 
-pub const RECEIPT_LAYOUT_REVISION: &str = "2026-07-24-r18";
+pub const RECEIPT_LAYOUT_REVISION: &str = "2026-07-30-r19";
 
 pub fn layout_revision() -> &'static str {
     RECEIPT_LAYOUT_REVISION
@@ -330,6 +330,8 @@ pub struct ShiftCheckoutDoc {
     pub staff_payouts_total: f64,
     #[serde(default)]
     pub staff_payout_lines: Vec<StaffPayoutLine>,
+    #[serde(default)]
+    pub expense_lines: Vec<ZReportExpenseEntry>,
     #[serde(default)]
     pub transferred_staff_count: i64,
     #[serde(default)]
@@ -1093,6 +1095,14 @@ fn z_report_expense_reason<'a>(lang: &str, reason: &'a str) -> &'a str {
     }
 }
 
+fn z_report_staff_payment_total(staff: &ZReportStaffEntry) -> f64 {
+    if staff.cash_amount != 0.0 || staff.card_amount != 0.0 {
+        staff.cash_amount + staff.card_amount
+    } else {
+        staff.total_amount
+    }
+}
+
 fn z_report_staff_payment_detail_label(lang: &str, payment: &ZReportStaffPaymentEntry) -> String {
     let role = match payment.role.trim() {
         "driver" => receipt_label(lang, "Driver"),
@@ -1666,6 +1676,12 @@ fn shift_checkout_tips_received(doc: &ShiftCheckoutDoc) -> f64 {
     }
 }
 
+fn driver_shift_checkout_variance(doc: &ShiftCheckoutDoc) -> Option<f64> {
+    doc.closing_amount
+        .map(|closing| ((closing - doc.amount_to_return) * 100.0).round() / 100.0)
+        .or(doc.variance_amount)
+}
+
 #[derive(Clone, Copy)]
 struct DriverShiftCheckoutSummaryRow {
     label_key: &'static str,
@@ -1741,7 +1757,7 @@ fn driver_shift_checkout_summary_rows(
         });
     }
 
-    if let Some(variance) = doc.variance_amount {
+    if let Some(variance) = driver_shift_checkout_variance(doc) {
         rows.push(DriverShiftCheckoutSummaryRow {
             label_key: "Variance",
             amount: variance,
@@ -2184,13 +2200,34 @@ fn should_render_delivery_block(doc: &OrderReceiptDoc) -> bool {
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut line = String::new();
+    let width = width.max(8);
+
     for token in text.split_whitespace() {
+        let token_len = token.chars().count();
+        if token_len > width {
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+
+            let chars: Vec<char> = token.chars().collect();
+            let mut chunks = chars.chunks(width).peekable();
+            while let Some(chunk) = chunks.next() {
+                let chunk: String = chunk.iter().collect();
+                if chunks.peek().is_some() {
+                    out.push(chunk);
+                } else {
+                    line = chunk;
+                }
+            }
+            continue;
+        }
+
         if line.is_empty() {
             line.push_str(token);
             continue;
         }
         let next_len = line.chars().count() + 1 + token.chars().count();
-        if next_len > width.max(8) {
+        if next_len > width {
             out.push(line);
             line = token.to_string();
         } else {
@@ -2205,6 +2242,31 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         out.push(String::new());
     }
     out
+}
+
+fn split_token_pixels<F>(token: &str, indent: &str, max_width: i32, measure: &F) -> Vec<String>
+where
+    F: Fn(&str) -> i32,
+{
+    let mut chunks = Vec::new();
+    let mut current = indent.to_string();
+
+    for ch in token.chars() {
+        let mut candidate = current.clone();
+        candidate.push(ch);
+        if measure(&candidate) > max_width && current != indent {
+            chunks.push(current);
+            current = indent.to_string();
+            current.push(ch);
+        } else {
+            current = candidate;
+        }
+    }
+
+    if current != indent {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn apply_character_set(
@@ -2524,7 +2586,9 @@ body {{ background: #2a2a2a; display: flex; justify-content: center; padding: 32
 .classic .footer {{ text-align: center; margin-top: {classic_footer_margin_top}px; font-family: 'Courier Prime', 'Courier New', monospace; font-size: {c_footer}px; color: #666; line-height: {classic_footer_line_height}; letter-spacing: 1px; }}
 
 /* Legacy compat classes */
-.line {{ display: flex; justify-content: space-between; gap: 8px; font-size: 10px; }}
+.line {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; font-size: 10px; }}
+.line > span {{ min-width: 0; overflow-wrap: anywhere; }}
+.line > span:last-child {{ text-align: right; }}
 .line strong {{ font-size: 11px; }}
 .payment-value {{ display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px; white-space: nowrap; }}
 .payment-icon {{ width: 14px; height: 14px; flex: 0 0 14px; }}
@@ -3613,6 +3677,24 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             ));
                         }
                     }
+                    if !doc.expense_lines.is_empty() {
+                        body.push_str(&format!(
+                            "</div><div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+                            esc(receipt_label(lang, "EXPENSES"))
+                        ));
+                        for expense in &doc.expense_lines {
+                            body.push_str(&format!(
+                                "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
+                                esc(z_report_expense_reason(lang, &expense.reason)),
+                                money(expense.amount),
+                            ));
+                        }
+                        body.push_str(&format!(
+                            "<hr/><div class=\"line\"><strong>{}</strong><strong>-{}</strong></div>",
+                            esc(receipt_label(lang, "Total Expenses")),
+                            money(doc.total_expenses),
+                        ));
+                    }
                 } else {
                     let expected = doc
                         .expected_amount
@@ -3824,7 +3906,8 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         "<div><strong>{} ({})</strong></div>\
                          <div class=\"line\"><span>{}</span><span>{}</span></div>\
                          <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                         <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                         <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                         <div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
                         esc(&staff.name),
                         esc(role_label),
                         esc(receipt_label(lang, "Orders")),
@@ -3833,6 +3916,8 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         money(staff.cash_amount),
                         esc(receipt_label(lang, "Card")),
                         money(staff.card_amount),
+                        esc(receipt_label(lang, "TOTAL")),
+                        money(z_report_staff_payment_total(staff)),
                     ));
                     if staff.staff_payment > 0.0 {
                         body.push_str(&format!(
@@ -3990,18 +4075,21 @@ fn emit_pair_internal(
     }
 
     let value_len = value.chars().count();
-    if value_len >= width.saturating_sub(2) {
+    let label_len = label.chars().count();
+    if label_len + value_len + 1 >= width {
         emit_wrapped(builder, label, width);
-        if bold_value {
-            builder
-                .right()
-                .bold(true)
-                .text(value)
-                .bold(false)
-                .lf()
-                .left();
-        } else {
-            builder.right().text(value).lf().left();
+        for value_line in wrap(value, width) {
+            if bold_value {
+                builder
+                    .right()
+                    .bold(true)
+                    .text(&value_line)
+                    .bold(false)
+                    .lf()
+                    .left();
+            } else {
+                builder.right().text(&value_line).lf().left();
+            }
         }
         return;
     }
@@ -4984,11 +5072,20 @@ where
             };
             if measure(&candidate) <= width {
                 current = candidate;
-            } else if current.is_empty() {
-                out.push(candidate);
             } else {
-                out.push(current);
-                current = format!("{indent}{token}");
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+
+                let chunks = split_token_pixels(token, &indent, width, &measure);
+                let chunk_count = chunks.len();
+                for (index, chunk) in chunks.into_iter().enumerate() {
+                    if index + 1 == chunk_count {
+                        current = chunk;
+                    } else {
+                        out.push(chunk);
+                    }
+                }
             }
         }
 
@@ -5167,13 +5264,30 @@ impl TtfReceiptComposer {
         let value_text_w = self.text_width(value, style);
         let value_w = value_text_w + right_reserve.max(0);
         let pair_gap = (self.preset.medium_gap * 2).max(6);
+        let label_text_w = self.text_width(label, style);
+        if label_text_w + pair_gap + value_w > self.content_width {
+            self.draw_wrapped(label, BitmapAlign::Left, style);
+            let value_width = (self.content_width - right_reserve.max(0)).max(8);
+            let lines = wrap_pixels(value, value_width, |line| self.text_width(line, style));
+            for line in lines {
+                let line_width = self.text_width(&line, style);
+                let value_x = self.left_margin + value_width - line_width;
+                self.draw_text_at_position(&line, value_x, style, self.y);
+                self.y += style.line_height;
+            }
+            return;
+        }
+
         let max_label_width = self.content_width - value_w - pair_gap;
         if max_label_width <= 24 {
             self.draw_wrapped(label, BitmapAlign::Left, style);
-            let y = self.y;
-            let value_x = self.left_margin + self.content_width - right_reserve - value_text_w;
-            self.draw_text_at_position(value, value_x, style, y);
-            self.y += style.line_height;
+            let value_width = (self.content_width - right_reserve.max(0)).max(8);
+            for line in wrap_pixels(value, value_width, |line| self.text_width(line, style)) {
+                let line_width = self.text_width(&line, style);
+                let value_x = self.left_margin + value_width - line_width;
+                self.draw_text_at_position(&line, value_x, style, self.y);
+                self.y += style.line_height;
+            }
             return;
         }
 
@@ -5638,13 +5752,18 @@ impl BitmapReceiptComposer {
         }
         let width = self.chars_per_line();
         let value_len = value.chars().count();
-        if value_len >= width.saturating_sub(2) {
+        let label_len = label.chars().count();
+        if label_len + value_len + 1 >= width {
             if apply_body_boldness {
                 self.draw_left_wrapped_body(label, bold, scale);
-                self.draw_body_text_line(value, BitmapAlign::Right, bold, scale, 0);
+                for value_line in wrap(value, width) {
+                    self.draw_body_text_line(&value_line, BitmapAlign::Right, bold, scale, 0);
+                }
             } else {
                 self.draw_left_wrapped(label, bold, scale);
-                self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+                for value_line in wrap(value, width) {
+                    self.draw_text_line(&value_line, BitmapAlign::Right, bold, scale, 0);
+                }
             }
             return;
         }
@@ -7023,6 +7142,33 @@ fn render_classic_non_customer_raster_exact_ttf(
                             );
                         }
                     }
+                    if !doc.expense_lines.is_empty() {
+                        canvas.draw_rule();
+                        canvas.draw_text_line(
+                            receipt_label(lang, "EXPENSES"),
+                            BitmapAlign::Left,
+                            preset.section_style,
+                        );
+                        canvas.draw_rule();
+                        for expense in &doc.expense_lines {
+                            canvas.draw_pair(
+                                &format!("{}:", z_report_expense_reason(lang, &expense.reason)),
+                                &format!(
+                                    "-{}",
+                                    money_with_currency_locale(expense.amount, &cur, comma)
+                                ),
+                                preset.item_style,
+                            );
+                        }
+                        canvas.draw_pair(
+                            &format!("{}:", receipt_label(lang, "Total Expenses")),
+                            &format!(
+                                "-{}",
+                                money_with_currency_locale(doc.total_expenses, &cur, comma)
+                            ),
+                            preset.subtotal_style,
+                        );
+                    }
                 } else {
                     canvas.draw_pair(
                         &format!("{}:", receipt_label(lang, "Orders")),
@@ -7237,6 +7383,15 @@ fn render_classic_non_customer_raster_exact_ttf(
                         &format!("  {}:", receipt_label(lang, "Card")),
                         &money_with_currency_locale(staff.card_amount, &cur, comma),
                         preset.item_style,
+                    );
+                    canvas.draw_pair(
+                        &format!("  {}:", receipt_label(lang, "TOTAL")),
+                        &money_with_currency_locale(
+                            z_report_staff_payment_total(staff),
+                            &cur,
+                            comma,
+                        ),
+                        preset.subtotal_style,
                     );
                 }
             }
@@ -8647,6 +8802,28 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                             );
                         }
                     }
+                    if !doc.expense_lines.is_empty() {
+                        emit_rule(&mut builder, width, '-');
+                        builder
+                            .bold(true)
+                            .text(receipt_label(lang, "EXPENSES"))
+                            .lf()
+                            .bold(false);
+                        for expense in &doc.expense_lines {
+                            emit_pair(
+                                &mut builder,
+                                z_report_expense_reason(lang, &expense.reason),
+                                &format!("-{}", money_locale(expense.amount, comma)),
+                                width,
+                            );
+                        }
+                        emit_pair_bold(
+                            &mut builder,
+                            receipt_label(lang, "Total Expenses"),
+                            &format!("-{}", money_locale(doc.total_expenses, comma)),
+                            width,
+                        );
+                    }
                 } else {
                     emit_pair(
                         &mut builder,
@@ -8949,6 +9126,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         &money_locale(staff.card_amount, comma),
                         width,
                     );
+                    emit_pair_bold(
+                        &mut builder,
+                        receipt_label(lang, "TOTAL"),
+                        &money_locale(z_report_staff_payment_total(staff), comma),
+                        width,
+                    );
                 }
             }
 
@@ -9169,6 +9352,48 @@ mod tests {
 
     fn count_text(text: &str, needle: &str) -> usize {
         text.match_indices(needle).count()
+    }
+
+    #[test]
+    fn wrapping_hard_breaks_a_single_token_that_exceeds_the_print_width() {
+        let lines = wrap("KONSTANTINOYPOLEOS THEOFYLAKTOS", 12);
+
+        assert!(lines.len() > 2);
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 12),
+            "every wrapped line must fit the configured character width: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn raster_pair_wraps_a_long_customer_name_below_its_label() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "el".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let long_name = "ΚΩΝΣΤΑΝΤΙΝΟΥΠΟΛΕΩΣ ΘΕΟΦΥΛΑΚΤΟΣ ΠΑΠΑΔΟΠΟΥΛΟΣ";
+        let mut composer = TtfReceiptComposer::try_new(&cfg).expect("load receipt fonts");
+        let style = composer.preset.contact_style;
+        let start_y = composer.y;
+        let label = receipt_label("el", "Customer");
+        let expected_value_lines = wrap_pixels(long_name, composer.content_width, |line| {
+            composer.text_width(line, style)
+        });
+
+        assert!(
+            expected_value_lines.len() >= 2,
+            "fixture must require multiple printed value lines"
+        );
+
+        composer.draw_pair(label, long_name, style);
+        let rendered_lines = (composer.y - start_y) / style.line_height;
+
+        assert!(
+            rendered_lines > expected_value_lines.len() as i32,
+            "long pair value must render below the label on all required lines"
+        );
     }
 
     fn sample_driver_shift_checkout_doc() -> ShiftCheckoutDoc {
@@ -10510,6 +10735,42 @@ mod tests {
     }
 
     #[test]
+    fn z_report_staff_analysis_prints_cash_card_and_their_total() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ZReport(ZReportDoc {
+            staff_reports: vec![ZReportStaffEntry {
+                name: "Driver One".to_string(),
+                role: "driver".to_string(),
+                order_count: 7,
+                cash_amount: 31.60,
+                card_amount: 50.95,
+                total_amount: 82.55,
+                ..ZReportStaffEntry::default()
+            }],
+            ..ZReportDoc::default()
+        });
+
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+        let staff_start = text.find("STAFF").expect("staff section");
+        let drawer_start = text[staff_start..]
+            .find("CASH DRAWER")
+            .map(|offset| staff_start + offset)
+            .expect("cash drawer section");
+        let staff_section = &text[staff_start..drawer_start];
+
+        assert!(staff_section.contains("Cash"));
+        assert!(staff_section.contains("Card"));
+        assert!(staff_section.contains("TOTAL"));
+        assert!(staff_section.contains("82.55"));
+    }
+
+    #[test]
     fn z_report_drawer_uses_one_simple_complete_equation() {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
@@ -10742,6 +11003,24 @@ mod tests {
         assert!(!text.contains("Closing"));
         assert!(!text.contains("42.50"));
         assert!(!text.contains("DRIVER DELIVERIES"));
+    }
+
+    #[test]
+    fn driver_checkout_printed_variance_matches_return_and_actual_returned() {
+        let doc = ShiftCheckoutDoc {
+            amount_to_return: 51.60,
+            closing_amount: Some(51.60),
+            variance_amount: Some(7.20),
+            ..sample_driver_shift_checkout_doc()
+        };
+
+        let variance = driver_shift_checkout_summary_rows(&doc)
+            .into_iter()
+            .find(|row| row.label_key == "Variance")
+            .expect("driver variance row")
+            .amount;
+
+        assert_eq!(variance, 0.0);
     }
 
     #[test]
@@ -11103,6 +11382,56 @@ mod tests {
         assert!(!text.contains("Sales"));
         assert!(!text.contains("Expenses"));
         assert!(!text.contains("Expected"));
+    }
+
+    #[test]
+    fn classic_cashier_shift_checkout_raster_exact_expands_for_expense_lines() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let base_doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            shift_id: "SHIFT-CASHIER-EXPENSES".to_string(),
+            role_type: "cashier".to_string(),
+            staff_name: "Cashier One".to_string(),
+            terminal_name: "Front".to_string(),
+            check_in: "2026-03-05T08:00:00Z".to_string(),
+            check_out: "2026-03-05T16:00:00Z".to_string(),
+            total_expenses: 11.0,
+            expected_amount: Some(139.0),
+            closing_amount: Some(139.0),
+            variance_amount: Some(0.0),
+            ..ShiftCheckoutDoc::default()
+        });
+        let expense_doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            expense_lines: vec![
+                ZReportExpenseEntry {
+                    reason: "Fuel for delivery scooter".to_string(),
+                    amount: 7.20,
+                    ..ZReportExpenseEntry::default()
+                },
+                ZReportExpenseEntry {
+                    reason: "Cleaning supplies".to_string(),
+                    amount: 3.80,
+                    ..ZReportExpenseEntry::default()
+                },
+            ],
+            ..match &base_doc {
+                ReceiptDocument::ShiftCheckout(doc) => doc.clone(),
+                _ => unreachable!(),
+            }
+        });
+
+        let base_image = render_classic_non_customer_raster_exact_ttf(&base_doc, &cfg)
+            .expect("render cashier checkout without expense detail");
+        let expense_image = render_classic_non_customer_raster_exact_ttf(&expense_doc, &cfg)
+            .expect("render cashier checkout with expense detail");
+
+        assert!(
+            expense_image.height() > base_image.height(),
+            "cashier raster receipt should grow when expense detail is rendered"
+        );
     }
 
     #[test]

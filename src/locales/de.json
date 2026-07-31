@@ -564,6 +564,13 @@
       "savory": "Herzhaft",
       "sweet": "Süß"
     },
+    "featuredShortcuts": {
+      "quickAccess": "Schnellzugriff",
+      "hint": "Beliebte Kategorien und Filter",
+      "frequentItems": "Häufig bestellt",
+      "openCategory": "{{category}} öffnen",
+      "openSubcategory": "{{category}}, {{subcategory}} öffnen"
+    },
     "items": "Artikel",
     "search": "Speisekarte durchsuchen...",
     "searchPlaceholder": "Artikel, Kategorien suchen...",

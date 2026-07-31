@@ -284,8 +284,8 @@ test('SplitPaymentModal tab switching is stable: load-state does not reset to in
   assert.match(loadEffect[0], /applySplitStateSnapshot\(snapshot, \{ resetDraft: true, mode: initialMode \}\)/);
 
   // Both tabs remain wired (reachable) and the drift refresh still passes the live tab.
-  assert.match(source, /onClick=\{\(\) => setActiveTab\('by-amount'\)\}/);
-  assert.match(source, /onClick=\{\(\) => setActiveTab\('by-items'\)\}/);
+  assert.match(source, /onClick=\{\(\)\s*=>\s*setActiveTab\(["']by-amount["']\)\}/);
+  assert.match(source, /onClick=\{\(\)\s*=>\s*setActiveTab\(["']by-items["']\)\}/);
   assert.match(source, /ensureLatestOutstanding\([^)]*activeTab\)/);
 });
 
@@ -295,7 +295,10 @@ test('SplitPaymentModal unassigned-item warning uses real i18next plurals, no pa
     'utf8',
   );
   // Component calls the key with count and no parenthetical defaultValue.
-  assert.match(source, /t\('splitPayment\.unassignedWarning', \{ count: unassignedCount \}\)/);
+  assert.match(
+    source,
+    /t\(\s*["']splitPayment\.unassignedWarning["']\s*,\s*\{\s*count:\s*unassignedCount\s*,?\s*\}\s*\)/,
+  );
   assert.doesNotMatch(source, /item\(s\) not assigned/);
 
   const loadLocale = (lng: string) =>

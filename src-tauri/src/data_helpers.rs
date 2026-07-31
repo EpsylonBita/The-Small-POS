@@ -70,7 +70,11 @@ pub(crate) fn load_orders_for_period(
         .prepare(
             "SELECT id, status, created_at, items, staff_id, payment_method
              FROM orders
-             WHERE (?1 = '' OR branch_id = ?1)
+             WHERE (
+                    ?1 = ''
+                    OR branch_id = ?1
+                    OR TRIM(COALESCE(branch_id, '')) = ''
+                   )
                AND COALESCE(is_ghost, 0) = 0
                AND substr(created_at, 1, 10) >= ?2
                AND substr(created_at, 1, 10) <= ?3",
@@ -175,4 +179,41 @@ pub(crate) fn validate_external_url(
     }
 
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_period_load_includes_legacy_unscoped_rows_but_excludes_other_branches() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE orders (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                created_at TEXT,
+                items TEXT,
+                staff_id TEXT,
+                payment_method TEXT,
+                branch_id TEXT,
+                is_ghost INTEGER DEFAULT 0
+            );
+            INSERT INTO orders VALUES
+              ('matching', 'completed', '2026-07-29T10:00:00Z', '[]', NULL, 'cash', 'branch-A', 0),
+              ('legacy-blank', 'completed', '2026-07-29T11:00:00Z', '[]', NULL, 'cash', '', 0),
+              ('legacy-null', 'completed', '2026-07-29T12:00:00Z', '[]', NULL, 'cash', NULL, 0),
+              ('other', 'completed', '2026-07-29T13:00:00Z', '[]', NULL, 'cash', 'branch-B', 0);",
+        )
+        .expect("setup orders");
+
+        let rows = load_orders_for_period(&conn, "branch-A", "2026-07-29", "2026-07-29")
+            .expect("load period");
+        let ids: std::collections::HashSet<_> = rows.into_iter().map(|row| row.0).collect();
+
+        assert!(ids.contains("matching"));
+        assert!(ids.contains("legacy-blank"));
+        assert!(ids.contains("legacy-null"));
+        assert!(!ids.contains("other"));
+    }
 }

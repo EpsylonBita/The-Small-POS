@@ -129,6 +129,18 @@ test('MenuCart centers the manual-item plus inside its enlarged touch target', (
   );
 });
 
+test('MenuCart manual item form uses the yellow POS accent instead of amber/orange', () => {
+  const menuCart = source(menuCartPath);
+  const formStart = menuCart.indexOf('{/* Manual item inline form */}');
+  const formEnd = menuCart.indexOf('</div>', menuCart.indexOf("menu.cart.manualItemSubmit", formStart));
+  const form = menuCart.slice(formStart, formEnd);
+
+  assert.ok(formStart > 0 && formEnd > formStart, 'manual item form should exist');
+  assert.match(form, /focus:ring-yellow-400/);
+  assert.match(form, /bg-yellow-400 text-black/);
+  assert.doesNotMatch(form, /focus:ring-amber-|bg-amber-5/);
+});
+
 test('MenuCart uses the yellow POS accent for its quick-action icons', () => {
   const menuCart = source(menuCartPath);
 

@@ -401,6 +401,10 @@ fn top_items_to_json(items: Vec<AggregatedTopItem>, limit: usize) -> Vec<serde_j
 pub(crate) fn top_sellers_aggregate_into_rolling(
     conn: &rusqlite::Connection,
 ) -> Result<usize, String> {
+    let terminal_branch_id = db::get_setting(conn, "terminal", "branch_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
     let mut stmt = conn
         .prepare(
             "SELECT o.id, o.status, o.branch_id, o.created_at, o.items
@@ -437,7 +441,10 @@ pub(crate) fn top_sellers_aggregate_into_rolling(
         if is_cancelled_status(&status) {
             continue;
         }
-        let branch_id = branch_id_opt.unwrap_or_default();
+        let branch_id = branch_id_opt
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| terminal_branch_id.clone());
         let created_at = created_at_opt.unwrap_or_default();
 
         let parsed: Value =
@@ -620,7 +627,11 @@ fn load_daily_top_items(
                     SUM(total_quantity),
                     SUM(total_revenue)
              FROM top_sellers_daily
-             WHERE (?1 = '' OR branch_id = ?1)
+             WHERE (
+                    ?1 = ''
+                    OR branch_id = ?1
+                    OR TRIM(COALESCE(branch_id, '')) = ''
+                   )
                AND sale_date >= ?2
                AND sale_date <= ?3
              GROUP BY menu_item_id",
@@ -2127,6 +2138,39 @@ mod dto_tests {
         )
         .expect("setup tables");
         conn
+    }
+
+    #[test]
+    fn top_sellers_assigns_legacy_blank_branch_orders_to_the_terminal_branch() {
+        let conn = setup_top_sellers_test_db();
+        conn.execute_batch(
+            "CREATE TABLE local_settings (
+                setting_category TEXT NOT NULL,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (setting_category, setting_key)
+            );
+            INSERT INTO local_settings (setting_category, setting_key, setting_value)
+            VALUES ('terminal', 'branch_id', 'branch-A');",
+        )
+        .expect("configure terminal branch");
+        insert_order_at(
+            &conn,
+            "legacy-order",
+            "",
+            "completed",
+            "2026-07-29T20:00:00Z",
+            r#"[{"menu_item_id":"m1","name":"Κρέπα Αλμυρή","category_id":"savory","quantity":2,"unit_price":6}]"#,
+        );
+
+        top_sellers_aggregate_into_rolling(&conn).expect("archive legacy order");
+        let archived = load_daily_top_items(&conn, "branch-A", "2026-07-29", "2026-07-29")
+            .expect("load branch ranking");
+
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].menu_item_id, "m1");
+        assert_eq!(archived[0].quantity, 2.0);
     }
 
     fn insert_order(

@@ -4372,6 +4372,27 @@ fn clear_delivery_tip_recipients_for_reset(
     Ok(payment_ids.len())
 }
 
+fn reset_order_row_to_active(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    order_type: &str,
+    now: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE orders
+         SET status = 'pending',
+             order_type = ?1,
+             driver_id = NULL,
+             driver_name = NULL,
+             cancellation_reason = NULL,
+             sync_status = 'pending',
+             updated_at = ?2
+         WHERE id = ?3",
+        rusqlite::params![order_type, now, order_id],
+    )
+    .map_err(|e| format!("reset order to active: {e}"))
+}
+
 #[tauri::command]
 pub async fn order_reset_to_active(
     arg0: Option<String>,
@@ -4461,20 +4482,7 @@ pub async fn order_reset_to_active(
 
         clear_delivery_tip_recipients_for_reset(&tx, &order_id, &now)?;
 
-        tx.execute(
-            "UPDATE orders
-             SET status = 'pending',
-                 order_type = ?1,
-                 driver_id = NULL,
-                 driver_name = NULL,
-                 completed_at = NULL,
-                 cancellation_reason = NULL,
-                 sync_status = 'pending',
-                 updated_at = ?2
-             WHERE id = ?3",
-            rusqlite::params![order_type, now, order_id],
-        )
-        .map_err(|e| format!("reset order to active: {e}"))?;
+        reset_order_row_to_active(&tx, &order_id, &order_type, &now)?;
 
         let sync_payload = serde_json::json!({
             "orderId": order_id,
@@ -4944,6 +4952,72 @@ pub async fn orders_get_retry_info(
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    #[test]
+    fn reset_order_row_uses_the_deployed_schema_without_completed_at() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open reset test database");
+        conn.execute_batch(
+            "CREATE TABLE orders (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                order_type TEXT,
+                driver_id TEXT,
+                driver_name TEXT,
+                cancellation_reason TEXT,
+                sync_status TEXT,
+                updated_at TEXT
+            );
+            INSERT INTO orders (
+                id, status, order_type, driver_id, driver_name,
+                cancellation_reason, sync_status, updated_at
+            ) VALUES (
+                'order-1', 'delivered', 'delivery', 'driver-1', 'Driver',
+                'old reason', 'synced', 'old'
+            );",
+        )
+        .expect("create deployed orders schema");
+
+        let updated =
+            reset_order_row_to_active(&conn, "order-1", "delivery", "2026-07-30T20:00:00Z")
+                .expect("reset should not require a completed_at column");
+        assert_eq!(updated, 1);
+
+        let row: (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, order_type, driver_id, driver_name, cancellation_reason,
+                        sync_status, updated_at
+                 FROM orders WHERE id = 'order-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .expect("read reset order");
+
+        assert_eq!(row.0, "pending");
+        assert_eq!(row.1, "delivery");
+        assert_eq!(row.2, None);
+        assert_eq!(row.3, None);
+        assert_eq!(row.4, None);
+        assert_eq!(row.5, "pending");
+        assert_eq!(row.6, "2026-07-30T20:00:00Z");
+    }
 
     #[test]
     fn parse_status_payload_supports_legacy_shape() {

@@ -42,7 +42,7 @@ test('ExpenseModal uses yellow selected tabs and neutral inactive tabs', () => {
   );
   assert.match(
     source,
-    /:\s*'border-neutral-700\/60 bg-neutral-950\/55 text-neutral-200 dark:border-neutral-700\/60 dark:bg-neutral-950\/55 dark:text-neutral-200'/,
+    /:\s*'border-slate-200\/90 bg-white\/80 text-slate-700 shadow-\[0_8px_20px_rgba\(15,23,42,0\.06\)\] dark:border-neutral-700\/60 dark:bg-neutral-950\/55 dark:text-neutral-200 dark:shadow-none'/,
   );
   assert.doesNotMatch(
     source,
@@ -55,26 +55,26 @@ test('ExpenseModal uses yellow selected tabs and neutral inactive tabs', () => {
   assert.doesNotMatch(source, /hover:/);
 });
 
-test('ExpenseModal uses neutral cards and black drawer input fields', () => {
+test('ExpenseModal surfaces and fields are light by default and retain dark-theme variants', () => {
   assert.match(
     source,
-    /const drawerPanelClass = 'rounded-\[28px\] border border-neutral-700\/70 bg-neutral-950\/80 p-5[\s\S]*dark:bg-neutral-950\/80'/,
+    /const drawerPanelClass = 'rounded-\[28px\] border border-slate-200\/90 bg-white\/90 p-5[\s\S]*dark:border-neutral-700\/60 dark:bg-neutral-950\/80/,
   );
   assert.match(
     source,
-    /const drawerSidePanelClass = 'rounded-\[28px\] border border-neutral-700\/70 bg-neutral-950\/80 p-3\.5[\s\S]*dark:bg-neutral-950\/80'/,
+    /const drawerSidePanelClass = 'rounded-\[28px\] border border-slate-200\/90 bg-white\/90 p-3\.5[\s\S]*dark:border-neutral-700\/60 dark:bg-neutral-950\/80/,
   );
   assert.match(
     source,
-    /const drawerSummaryCardClass = 'rounded-3xl border border-neutral-700\/70 bg-black\/50[\s\S]*dark:bg-black\/50/,
+    /const drawerSummaryCardClass = 'rounded-3xl border border-slate-200\/90 bg-white\/80[\s\S]*dark:border-neutral-700\/60 dark:bg-black\/50/,
   );
   assert.match(
     source,
-    /const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-neutral-700\/70 bg-neutral-900\/70[\s\S]*dark:bg-neutral-900\/70'/,
+    /const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-slate-300\/90 bg-slate-50\/80[\s\S]*dark:border-neutral-700\/70 dark:bg-neutral-900\/70'/,
   );
   assert.match(
     source,
-    /const drawerInputClass = 'w-full rounded-2xl border border-neutral-700\/80 bg-black px-4 py-3 text-white[\s\S]*focus:border-yellow-400\/70/,
+    /const drawerInputClass = 'w-full rounded-2xl border border-slate-300\/90 bg-white\/95 px-4 py-3 text-slate-900[\s\S]*dark:border-neutral-700\/80 dark:bg-black dark:text-white/,
   );
   assert.match(source, /className=\{drawerPanelClass\}/);
   assert.match(source, /className=\{drawerSidePanelClass\}/);
@@ -82,18 +82,16 @@ test('ExpenseModal uses neutral cards and black drawer input fields', () => {
   assert.match(source, /className=\{`\$\{drawerInputClass\} !pl-10 text-lg font-bold`\}/);
   assert.match(source, /className=\{`\$\{drawerInputClass\} min-h-\[92px\] resize-none`\}/);
   assert.doesNotMatch(source, /liquid-glass-modal-input/);
-  assert.doesNotMatch(source, /dark:bg-slate-(900|950)/);
-  assert.doesNotMatch(source, /bg-neutral-50\/85|bg-neutral-100\/90|bg-white\/80/);
 });
 
-test('ExpenseModal keeps drawer submit button wrappers transparent with colored icon text', () => {
+test('ExpenseModal submit actions are light surfaces with dark-theme transparent variants', () => {
   assert.match(
     source,
-    /const drawerExpenseSubmitClass = '!border-neutral-700\/60 !bg-transparent !font-bold !text-emerald-400 !shadow-none active:!scale-\[0\.98\] disabled:!text-emerald-400 disabled:!opacity-100'/,
+    /const drawerExpenseSubmitClass = '!border-slate-300\/80 !bg-white\/70 !font-bold !text-emerald-700[\s\S]*dark:!border-neutral-700\/60 dark:!bg-transparent dark:!text-emerald-400 dark:!shadow-none'/,
   );
   assert.match(
     source,
-    /const drawerStaffPaymentSubmitClass = '!border-neutral-700\/60 !bg-transparent !font-bold !text-yellow-400 !shadow-none active:!scale-\[0\.98\] disabled:!text-yellow-400 disabled:!opacity-100'/,
+    /const drawerStaffPaymentSubmitClass = '!border-slate-300\/80 !bg-white\/70 !font-bold !text-amber-700[\s\S]*dark:!border-neutral-700\/60 dark:!bg-transparent dark:!text-yellow-400 dark:!shadow-none'/,
   );
   assert.match(
     source,
@@ -133,7 +131,7 @@ test('ExpenseModal uses modern custom dropdowns and removes form total chips', (
   assert.match(source, /type DrawerDropdownKey = 'expenseType' \| 'staffMember' \| 'paymentType'/);
   assert.match(
     source,
-    /const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-neutral-700\/80 bg-neutral-950/,
+    /const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-slate-200\/90 bg-white[\s\S]*dark:border-neutral-700\/80 dark:bg-neutral-950/,
   );
   assert.match(source, /const renderDrawerDropdown = \(\{/);
   assert.match(source, /aria-haspopup="listbox"/);
@@ -154,7 +152,7 @@ test('ExpenseModal pins the record actions in sticky bars so they stay visible a
   // At 1282x802 the form was taller than the modal and the save button sat below
   // the fold. Both the expense and staff-payment actions now live in a sticky bar.
   const stickyBars = source.match(
-    /sticky bottom-0 z-10 -mx-5 -mb-5 mt-\d+ flex flex-wrap items-center gap-3 rounded-b-\[28px\] border-t border-neutral-700\/60 bg-neutral-950\/90 px-5 py-4 backdrop-blur-xl/g,
+    /sticky bottom-0 z-10 -mx-5 -mb-5 mt-\d+ flex flex-wrap items-center gap-3 rounded-b-\[28px\] border-t border-slate-200\/80 bg-white\/95 px-5 py-4 backdrop-blur-xl dark:border-neutral-700\/60 dark:bg-neutral-950\/90/g,
   );
   assert.ok(
     stickyBars && stickyBars.length === 2,

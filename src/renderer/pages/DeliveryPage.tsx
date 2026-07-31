@@ -720,11 +720,6 @@ const DeliveryPage: React.FC = () => {
   }, []);
 
   const handleOpenMap = useCallback(async (delivery: Delivery) => {
-    if (!storeMapOrigin) {
-      toast.error(t('delivery.storeLocationMissing', 'Store location is not configured'));
-      return;
-    }
-
     const routeStop = buildSingleDeliveryRouteStop({
       id: delivery.id,
       orderNumber: delivery.orderNumber,
@@ -917,7 +912,7 @@ const DeliveryPage: React.FC = () => {
                 onStatusUpdate={handleStatusUpdate}
                 onAssignDriver={openAssignModal}
                 onOpenMap={handleOpenMap}
-                canOpenMap={Boolean(storeMapOrigin && delivery.address.street)}
+                canOpenMap={Boolean(delivery.address.street)}
                 isDark={isDark}
               />
             ))}

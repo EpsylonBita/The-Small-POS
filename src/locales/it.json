@@ -564,6 +564,13 @@
       "savory": "Salato",
       "sweet": "Dolce"
     },
+    "featuredShortcuts": {
+      "quickAccess": "Accesso rapido",
+      "hint": "Categorie e filtri popolari",
+      "frequentItems": "Ordinati frequentemente",
+      "openCategory": "Apri {{category}}",
+      "openSubcategory": "Apri {{category}}, {{subcategory}}"
+    },
     "items": "Articoli",
     "search": "Cerca nel menu...",
     "searchPlaceholder": "Cerca articoli, categorie...",

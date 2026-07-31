@@ -335,9 +335,18 @@
 - Modern and classic both keep driver/kitchen-critical data in the same order, with modern using stronger section framing.
 - 58mm safety is preserved via compact-width guards and command-profile gating.
 - Delivery-specific fields in kitchen delivery blocks remain bolded for quick scanning.
+- Long pair values (for example a delivery customer or ringer name) move below
+  their label and wrap to the printable width in HTML, text, bitmap, and
+  RasterExact output.
+- Cashier shift checkout receipts itemize the expenses recorded against that
+  exact shift and retain the expense total in the reconciliation.
+- Driver checkout receipts derive the printed variance from the displayed
+  Return and Actual Returned amounts, so historical reprints remain internally
+  consistent after a corrected earnings handoff.
+- Each Z-report staff entry prints Cash, Card, and their combined Total.
 
 ## Runtime Verification
-- Current renderer revision marker: `2026-07-24-r18`.
+- Current renderer revision marker: `2026-07-30-r19`.
 - Queue dispatch logs include:
   - `layout_revision`
   - `template`

@@ -2949,6 +2949,11 @@ test('RESET uses the dedicated local-first order reset command', () => {
   const branch = dashboard.slice(branchStart, dashboard.indexOf('} else if (action ===', branchStart + 1));
 
   assert.match(branch, /bridge\.orders\.resetToActive\(order\.id\)/);
+  assert.match(
+    branch,
+    /catch\s*\(error\)[\s\S]*?returnToOrdersFailed/,
+    'native reset rejections must be surfaced to the cashier instead of failing silently',
+  );
   assert.match(branch, /clearBulkSelection\(\)/);
   assert.match(branch, /await loadOrders\(\)/);
 });

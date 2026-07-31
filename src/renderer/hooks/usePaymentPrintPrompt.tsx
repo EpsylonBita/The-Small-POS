@@ -85,9 +85,7 @@ export function usePaymentPrintPrompt() {
     >
       <div className="space-y-5">
         <div className="flex items-start gap-4">
-          <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl border border-yellow-400/35 bg-yellow-400/15 text-yellow-300">
-            <Printer className="h-6 w-6" />
-          </div>
+          <Printer className="h-9 w-9 flex-shrink-0 text-yellow-500 dark:text-yellow-300" />
           <div className="min-w-0 space-y-2">
             <p className="text-sm leading-6 liquid-glass-modal-text-muted">
               {t(

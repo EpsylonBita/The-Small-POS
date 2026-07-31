@@ -564,6 +564,13 @@
       "savory": "Savoury",
       "sweet": "Sweet"
     },
+    "featuredShortcuts": {
+      "quickAccess": "Quick access",
+      "hint": "Popular categories and filters",
+      "frequentItems": "Frequently ordered",
+      "openCategory": "Open {{category}}",
+      "openSubcategory": "Open {{category}}, {{subcategory}}"
+    },
     "items": "Items",
     "search": "Search menu...",
     "searchPlaceholder": "Search items, categories...",

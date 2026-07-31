@@ -1025,7 +1025,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 value={manualName}
                 onChange={(e) => setManualName(e.target.value)}
                 placeholder={t('menu.cart.manualNamePlaceholder', 'Item name (optional)')}
-                className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
               />
             </div>
             <div className="flex gap-2">
@@ -1041,7 +1041,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }
                 }}
                 placeholder={`${t('menu.cart.manualPricePlaceholder', 'Price')} (0,00)`}
-                className="flex-1 min-w-0 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                className="flex-1 min-w-0 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
                 autoFocus
               />
               <button
@@ -1050,7 +1050,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 className={`shrink-0 whitespace-nowrap px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
                   !canAddManualItem
                     ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
-                    : 'bg-amber-500 text-black active:bg-amber-600'
+                    : 'bg-yellow-400 text-black active:bg-yellow-300'
                 }`}
               >
                 {t('menu.cart.manualItemSubmit', 'Add')}

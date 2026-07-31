@@ -13,6 +13,8 @@ const systemUiPath = path.join(projectRoot, 'src-tauri', 'src', 'commands', 'sys
 const tauriLibPath = path.join(projectRoot, 'src-tauri', 'src', 'lib.rs');
 const tauriConfigPath = path.join(projectRoot, 'src-tauri', 'tauri.conf.json');
 const tauriCapabilityPath = path.join(projectRoot, 'src-tauri', 'capabilities', 'default.json');
+const modalPrimitivesPath = path.join(projectRoot, 'src', 'renderer', 'components', 'ui', 'pos-glass-components.tsx');
+const glassStylesPath = path.join(projectRoot, 'src', 'renderer', 'styles', 'glassmorphism.css');
 
 test('frameless Tauri window is backed by the slim app frame, not the removed desktop menu bar', () => {
   const layoutSource = readFileSync(fullscreenLayoutPath, 'utf8');
@@ -23,14 +25,64 @@ test('frameless Tauri window is backed by the slim app frame, not the removed de
   assert.match(capabilitySource, /"core:window:allow-start-dragging"/);
   assert.match(layoutSource, /import AppWindowFrame/);
   assert.match(layoutSource, /relative flex h-screen min-h-0 flex-col overflow-hidden/);
-  assert.match(layoutSource, /flex min-h-0 flex-1 flex-col overflow-hidden/);
+  assert.match(layoutSource, /const showFrame = !windowState\?\.isFullScreen/);
+  assert.match(layoutSource, /\{showFrame && \(\s*<AppWindowFrame/);
+  assert.match(layoutSource, /data-app-window-content/);
+  assert.match(layoutSource, /relative flex min-h-0 flex-1 transform-gpu flex-col overflow-hidden/);
   assert.doesNotMatch(layoutSource, /className="fixed inset-x-0 top-0"/);
   assert.doesNotMatch(layoutSource, /CustomTitleBar/);
   assert.doesNotMatch(layoutSource, /File\/Edit\/View\/Window\/Help dropdown row/);
   assert.doesNotMatch(layoutSource, /pt-8/);
 });
 
-test('AppWindowFrame keeps update access visible and uses touch-safe window controls', () => {
+test('the native titlebar owns visible space and top shell actions stay below its drag surface', () => {
+  const frameSource = readFileSync(framePath, 'utf8');
+  const layoutSource = readFileSync(fullscreenLayoutPath, 'utf8');
+  const mainLayoutSource = readFileSync(mainLayoutPath, 'utf8');
+  const appSource = readFileSync(appPath, 'utf8');
+  const modalPrimitivesSource = readFileSync(modalPrimitivesPath, 'utf8');
+  const glassStylesSource = readFileSync(glassStylesPath, 'utf8');
+
+  assert.match(
+    frameSource,
+    /className=\{`relative z-\[2147483600\] h-8 w-full shrink-0 touch-none select-none border-b/,
+  );
+  assert.doesNotMatch(frameSource, /fixed inset-x-0 top-0/);
+  assert.match(frameSource, /bg-white\/95/);
+  assert.match(frameSource, /dark:bg-zinc-950\/95/);
+  assert.match(frameSource, /border-slate-200\/80/);
+  assert.match(frameSource, /dark:border-white\/10/);
+  assert.match(layoutSource, /\{showFrame && \(\s*<AppWindowFrame/);
+  assert.match(layoutSource, /React\.useLayoutEffect\(\(\) => \{/);
+  assert.match(
+    layoutSource,
+    /root\.style\.setProperty\('--app-window-frame-height', showFrame \? '2rem' : '0rem'\)/,
+  );
+  assert.match(
+    layoutSource,
+    /data-app-window-content[\s\S]*?className="relative flex min-h-0 flex-1 transform-gpu flex-col overflow-hidden"/,
+  );
+  assert.match(mainLayoutSource, /fixed top-12 right-24 sm:right-28/);
+  assert.match(appSource, /fixed top-12 left-\[9\.5rem\]/);
+  assert.doesNotMatch(mainLayoutSource, /fixed top-28 right-24 sm:right-28/);
+  assert.doesNotMatch(appSource, /fixed top-28 left-\[9\.5rem\]/);
+  assert.equal(
+    (modalPrimitivesSource.match(/ReactDOM\.createPortal\(modalContent, document\.body\)/g) || []).length,
+    2,
+    'shared modal portals must remain body children for background inert isolation',
+  );
+  assert.match(glassStylesSource, /--app-window-frame-height: 2rem/);
+  assert.match(
+    glassStylesSource,
+    /\.liquid-glass-modal-viewport \{[\s\S]*?top: var\(--app-window-frame-height, 2rem\);[\s\S]*?right: 0;[\s\S]*?bottom: 0;[\s\S]*?left: 0;/,
+  );
+  assert.match(
+    glassStylesSource,
+    /\.liquid-glass-modal-viewport > \.liquid-glass-modal-shell \{[\s\S]*?max-height: 100% !important;[\s\S]*?min-height: 0;/,
+  );
+});
+
+test('AppWindowFrame keeps update access visible and uses compact no-drag window controls', () => {
   const source = readFileSync(framePath, 'utf8');
   const nativeDragSource = source.match(
     /const startNativeWindowDrag = useCallback\([\s\S]*?const scheduleWindowMove = useCallback/,
@@ -61,7 +113,7 @@ test('AppWindowFrame keeps update access visible and uses touch-safe window cont
   assert.match(source, /window\.removeEventListener\('pointermove', handleGlobalMove, true\)/);
   assert.match(source, /data-app-window-drag-zone/);
   assert.match(source, /style=\{\{ zIndex: 2147483600, pointerEvents: 'auto' \}\}/);
-  assert.match(source, /className=\{`fixed inset-x-0 top-0 h-16 shrink-0 touch-none select-none bg-transparent px-2 \$\{className\}`\}/);
+  assert.match(source, /className=\{`relative z-\[2147483600\] h-8 w-full shrink-0 touch-none select-none border-b/);
   assert.doesNotMatch(source, /className=\{`relative h-10/);
   assert.match(source, /absolute inset-x-0 inset-y-0/);
   assert.match(source, /touch-none cursor-grab bg-transparent active:cursor-grabbing/);
@@ -101,7 +153,12 @@ test('AppWindowFrame keeps update access visible and uses touch-safe window cont
   assert.match(source, /import logoDark from '\.\.\/assets\/logo-black\.png'/);
   assert.match(source, /import logoLight from '\.\.\/assets\/logo-white\.png'/);
   assert.match(source, /const logoSource = isDark \? logoDark : logoLight/);
+  assert.match(
+    source,
+    /data-app-window-logo[\s\S]*?data-app-window-no-drag[\s\S]*?<img/,
+  );
   assert.match(source, /src=\{logoSource\}/);
+  assert.match(source, /className="h-6 w-6 object-contain"/);
   assert.doesNotMatch(source, />\s*S\s*</);
   assert.doesNotMatch(source, />\s*The Small POS\s*</);
   assert.match(source, /data-app-frame-update/);
@@ -133,11 +190,11 @@ test('AppWindowFrame keeps update access visible and uses touch-safe window cont
     /data-app-window-control="fullscreen"[\s\S]*?onClick=\{\(\) => runWindowCommand\('maximize'\)\}/,
   );
   assert.doesNotMatch(source, /active:scale-90/);
-  assert.match(source, /inline-flex h-\[60px\] min-h-\[60px\] w-\[64px\] min-w-\[64px\] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none/);
-  assert.match(source, /className="absolute right-0 top-0 z-30 flex h-16 items-start gap-0"/);
-  assert.match(source, /<Minus className="block h-5 w-5 translate-y-\[2px\]" \/>/);
+  assert.match(source, /inline-flex h-\[32px\] min-h-\[32px\] w-\[48px\] min-w-\[48px\] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none/);
+  assert.match(source, /className="absolute right-0 top-0 z-30 flex h-8 items-start gap-0"/);
+  assert.match(source, /<Minus className="block h-4 w-4 translate-y-\[1px\]" \/>/);
   assert.doesNotMatch(source, /\bSquare\b/);
-  assert.match(source, /<X className="block h-5 w-5" \/>/);
+  assert.match(source, /<X className="block h-4 w-4" \/>/);
   const controlBase = source.match(/const controlBase = `([\s\S]*?)`;/);
   assert.ok(controlBase, 'window control base classes should be centralized');
   assert.doesNotMatch(controlBase[1], /border/);

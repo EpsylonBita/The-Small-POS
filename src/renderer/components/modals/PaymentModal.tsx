@@ -89,6 +89,8 @@ type CashChangeBreakdownItem = {
 
 const CASH_CHANGE_DENOMINATIONS = [50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05];
 const QUICK_CASH_ROUNDING_STEPS = [1, 5, 10, 20, 50, 100];
+const CASH_CHANGE_CHIP_CLASS =
+  'inline-flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-full border border-slate-200/90 bg-white/90 px-2.5 py-1 text-xs font-semibold text-slate-700 shadow-[0_4px_12px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:shadow-none';
 
 const roundMoney = (value: number): number =>
   Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
@@ -96,7 +98,7 @@ const roundMoney = (value: number): number =>
 const hasMoneyAmount = (amounts: number[], candidate: number): boolean =>
   amounts.some(amount => Math.abs(amount - candidate) < 0.01);
 
-type AccentedPaymentOption = 'card' | 'split';
+type AccentedPaymentOption = 'cash' | 'card' | 'split';
 
 export const getPaymentOptionVisualClasses = (
   method: AccentedPaymentOption,
@@ -107,6 +109,14 @@ export const getPaymentOptionVisualClasses = (
       option: 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed',
       icon: 'text-gray-400',
       label: 'text-gray-400',
+    };
+  }
+
+  if (method === 'cash') {
+    return {
+      option: 'payment-option-cash active:scale-[0.98]',
+      icon: 'payment-option-cash-icon',
+      label: 'liquid-glass-modal-text',
     };
   }
 
@@ -123,6 +133,53 @@ export const getPaymentOptionVisualClasses = (
     icon: 'payment-option-split-icon',
     label: 'liquid-glass-modal-text',
   };
+};
+
+export const getCashInputVisualClasses = (
+  hasEnoughCash: boolean,
+): Record<string, string> => ({
+  quickAmountsPanel:
+    'space-y-3 rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3 dark:border-white/10 dark:bg-white/5',
+  quickAmountsLabel: 'text-slate-600 dark:text-slate-300',
+  quickAmountSelected:
+    'border-yellow-400 bg-yellow-400 text-slate-950 shadow-[0_6px_16px_rgba(234,179,8,0.18)] dark:border-yellow-400/70 dark:bg-yellow-400/20 dark:text-yellow-100 dark:shadow-none',
+  quickAmountIdle:
+    'border-slate-200/90 bg-white/90 text-slate-900 shadow-sm active:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-white dark:shadow-none dark:active:bg-white/10',
+  cashInput:
+    'border-slate-300/90 bg-white/90 text-slate-950 shadow-inner placeholder:text-slate-400 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/20 dark:border-white/20 dark:bg-white/10 dark:text-white dark:placeholder:text-white/35 dark:focus:border-yellow-400/70',
+  summary: hasEnoughCash
+    ? 'border-slate-200/90 bg-white/80 shadow-[0_12px_28px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/5 dark:shadow-none'
+    : 'border-red-300/70 bg-red-50/80 dark:border-red-400/30 dark:bg-red-500/10',
+  summaryDivider: 'border-slate-200/80 dark:border-white/10',
+  changeTone: hasEnoughCash
+    ? 'text-emerald-700 dark:text-emerald-300'
+    : 'text-red-700 dark:text-red-300',
+  changeChip: CASH_CHANGE_CHIP_CLASS,
+  completeButton: hasEnoughCash
+    ? '!border-emerald-700 !bg-emerald-700 !text-white !shadow-[0_8px_20px_rgba(4,120,87,0.24)] active:!bg-emerald-800 dark:!border-emerald-400/50 dark:!bg-emerald-500/20 dark:!text-emerald-100 dark:!shadow-none'
+    : '!border-slate-200/80 !bg-slate-100/80 !text-slate-400 dark:!border-white/10 dark:!bg-white/5 dark:!text-white/35',
+});
+
+export const CashChangeChip: React.FC<{
+  item: CashChangeBreakdownItem;
+  formattedValue: string;
+}> = ({ item, formattedValue }) => {
+  const Icon = item.type === 'bill' ? Banknote : Coins;
+
+  return (
+    <span className={CASH_CHANGE_CHIP_CLASS}>
+      <Icon
+        className={
+          item.type === 'bill'
+            ? 'h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-300'
+            : 'h-3.5 w-3.5 shrink-0 text-amber-500 dark:text-amber-300'
+        }
+      />
+      <span>
+        {item.count} x {formattedValue}
+      </span>
+    </span>
+  );
 };
 
 export const PaymentModal: React.FC<PaymentModalProps> = ({
@@ -169,6 +226,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const paymentOptionPaddingClass = paymentOptionCount === 3 ? 'p-4' : 'p-6';
   const paymentMethodLabelBaseClass =
     'w-full text-center text-sm font-bold uppercase leading-tight tracking-normal hyphens-none whitespace-normal transition-colors duration-300';
+  const cashVisualClasses = getPaymentOptionVisualClasses(
+    'cash',
+    !canUseCash || isProcessingPayment,
+  );
   const cardVisualClasses = getPaymentOptionVisualClasses(
     'card',
     !canUseCard || isProcessingPayment,
@@ -199,6 +260,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const changeAmount = roundMoney(cashAmount - roundedOrderTotal);
   const hasEnoughCash = cashAmount >= roundedOrderTotal;
   const amountShort = roundMoney(Math.max(0, roundedOrderTotal - cashAmount));
+  const cashInputVisualClasses = getCashInputVisualClasses(hasEnoughCash);
 
   const quickCashAmounts = useMemo(() => {
     const amounts: number[] = [];
@@ -558,9 +620,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.99]'}`}
             >
               <span className="flex items-center gap-3">
-                <span className="rounded-xl bg-emerald-500/15 p-2">
-                  <HandCoins className="h-6 w-6 text-emerald-400" />
-                </span>
+                <HandCoins className="h-6 w-6 shrink-0 text-emerald-500 dark:text-emerald-300" />
                 <span>
                   <span className="block font-bold liquid-glass-modal-text">
                     {tipAmount > 0
@@ -609,19 +669,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   onClick={() => canUseCash && handlePaymentMethodSelect('cash')}
                   disabled={!canUseCash || isProcessingPayment}
                   className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
-                    ${!canUseCash || isProcessingPayment
-                      ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                      : 'border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 active:scale-[0.98]'
-                    }`}
+                    ${cashVisualClasses.option}`}
                 >
                   <Banknote
                     className={`w-20 h-20 mb-3 transition-all duration-300
-                      ${!canUseCash || isProcessingPayment ? 'text-gray-400' : 'text-green-400'}`}
+                      ${cashVisualClasses.icon}`}
                     strokeWidth={1.5}
                   />
 
                   <span className={`${paymentMethodLabelBaseClass}
-                    ${!canUseCash || isProcessingPayment ? 'text-gray-400' : 'text-green-400'}`}
+                    ${cashVisualClasses.label}`}
                   >
                     {t('modals.payment.cashSimple', 'CASH')}
                   </span>
@@ -739,8 +796,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         {currentStep === 'cash_input' && (
           <div className="space-y-6">
             {quickCashAmounts.length > 0 && (
-              <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-3">
-                <p className="text-sm font-semibold liquid-glass-modal-text-muted">
+              <div className={cashInputVisualClasses.quickAmountsPanel}>
+                <p className={`text-sm font-semibold ${cashInputVisualClasses.quickAmountsLabel}`}>
                   {t('modals.payment.quickAmounts', 'Quick Amounts')}
                 </p>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -755,8 +812,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         disabled={isProcessingPayment}
                         className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-bold transition-all ${
                           isSelected
-                            ? 'border-green-400 bg-green-500/25 text-green-100'
-                            : 'border-white/10 bg-white/5 liquid-glass-modal-text active:bg-white/10'
+                            ? cashInputVisualClasses.quickAmountSelected
+                            : cashInputVisualClasses.quickAmountIdle
                         } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.98]'}`}
                       >
                         {formatCurrency(amount)}
@@ -779,16 +836,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 onChange={(e) => setCashReceived(formatMoneyInputWithCents(e.target.value))}
                 placeholder="0,00"
                 autoFocus
-                className="w-full text-center text-3xl font-bold p-4 rounded-xl bg-white/10 border-2 border-white/20 focus:border-green-400/50 focus:outline-none liquid-glass-modal-text transition-colors"
+                className={`w-full rounded-xl border-2 p-4 text-center text-3xl font-bold outline-none transition-colors ${cashInputVisualClasses.cashInput}`}
               />
             </div>
 
             {cashReceived && (
-              <div className={`p-4 rounded-2xl border-2 transition-colors ${
-                hasEnoughCash
-                  ? 'bg-green-500/10 border-green-400/30'
-                  : 'bg-red-500/10 border-red-400/30'
-              }`}>
+              <div className={`rounded-2xl border-2 p-4 transition-colors ${cashInputVisualClasses.summary}`}>
                 <div className="flex justify-between items-center mb-2">
                   <span className="liquid-glass-modal-text-muted">
                     {t('modals.payment.totalAmount')}
@@ -805,40 +858,30 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     {formatCurrency(cashAmount)}
                   </span>
                 </div>
-                <div className="border-t border-white/10 pt-2 mt-2"></div>
+                <div className={`mt-2 border-t pt-2 ${cashInputVisualClasses.summaryDivider}`}></div>
                 <div className="flex justify-between items-center">
-                  <span className={`font-semibold ${
-                    hasEnoughCash ? 'text-green-400' : 'text-red-400'
-                  }`}>
+                  <span className={`font-semibold ${cashInputVisualClasses.changeTone}`}>
                     {hasEnoughCash
                       ? t('modals.payment.change', 'Change')
                       : t('modals.payment.amountShort', 'Amount Short')}
                   </span>
-                  <span className={`text-2xl font-bold ${
-                    hasEnoughCash ? 'text-green-400' : 'text-red-400'
-                  }`}>
+                  <span className={`text-2xl font-bold ${cashInputVisualClasses.changeTone}`}>
                     {hasEnoughCash ? formatCurrency(changeAmount) : formatCurrency(amountShort)}
                   </span>
                 </div>
                 {hasEnoughCash && changeAmount > 0 && changeBreakdown.length > 0 && (
-                  <div className="mt-3 border-t border-white/10 pt-3">
+                  <div className={`mt-3 border-t pt-3 ${cashInputVisualClasses.summaryDivider}`}>
                     <p className="mb-2 text-xs font-semibold uppercase tracking-normal liquid-glass-modal-text-muted">
                       {t('modals.payment.suggestedChange', 'Suggested change')}
                     </p>
                     <div className="flex flex-wrap gap-2">
-                      {changeBreakdown.map((item) => {
-                        const Icon = item.type === 'bill' ? Banknote : Coins;
-
-                        return (
-                          <span
-                            key={item.value}
-                            className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs font-semibold liquid-glass-modal-text"
-                          >
-                            <Icon className={item.type === 'bill' ? 'h-3 w-3 text-green-400' : 'h-3 w-3 text-yellow-400'} />
-                            {item.count} x {formatCurrency(item.value)}
-                          </span>
-                        );
-                      })}
+                      {changeBreakdown.map((item) => (
+                        <CashChangeChip
+                          key={item.value}
+                          item={item}
+                          formattedValue={formatCurrency(item.value)}
+                        />
+                      ))}
                     </div>
                   </div>
                 )}
@@ -858,8 +901,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 disabled={!hasEnoughCash || isProcessingPayment}
                 className={`liquid-glass-modal-button flex-1 font-medium ${
                   hasEnoughCash && !isProcessingPayment
-                    ? 'bg-green-600/20 active:bg-green-600/30 text-green-400 border-green-500/30'
-                    : 'bg-gray-500/20 text-gray-400 cursor-not-allowed opacity-50'
+                    ? cashInputVisualClasses.completeButton
+                    : `${cashInputVisualClasses.completeButton} cursor-not-allowed opacity-50`
                 }`}
               >
                 {isProcessingPayment ? t('modals.payment.processing') : t('modals.payment.completeCash', 'Complete')}

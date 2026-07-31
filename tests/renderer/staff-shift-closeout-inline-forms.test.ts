@@ -75,6 +75,29 @@ test('closeout inline expense receipt field is fiscal-entitlement gated', () => 
   );
 });
 
+test('cashier checkout exposes staff payouts and deducts them from the drawer total', () => {
+  assert.match(
+    source,
+    /if \(isCashierCheckoutRole\) \{\s*return renderCashierCheckoutView\(\);/,
+    'cashier and manager shifts should use the financial checkout view',
+  );
+  assert.match(
+    source,
+    /\{renderExpensesPanel\(\)\}\s*\{renderStaffPaymentsPanel\(\)\}/,
+    'expenses and staff payouts should be available together in cashier checkout',
+  );
+  assert.match(
+    source,
+    /const allowCurrentCashierSelection = isCashierCheckoutRole;/,
+    'the active cashier must be selectable for a staff payout',
+  );
+  assert.match(
+    source,
+    /staffPaymentsDeductedLabel[\s\S]*amount: breakdown\.deductedStaffPayments[\s\S]*prefix: '-'/,
+    'recorded staff payouts must be visible as a drawer deduction',
+  );
+});
+
 // --- Audit order-history payment/status badge localization ----------------
 
 test('audit order-history payment badge localizes the unpaid "pending" slug (no raw leak)', () => {

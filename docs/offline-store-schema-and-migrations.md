@@ -126,7 +126,7 @@ of truth is `vertical_modules`; purchased modules live in
 
 ## Conflict Expectations
 
-- Orders: keep local creation usable offline. Status and non-monetary updates may use server-wins when replaying, but stale parent records, remote rollover, and total/payment mismatches need repair or operator review.
+- Orders: keep local creation usable offline. Status and non-monetary updates may use server-wins when replaying, but stale parent records, remote rollover, and total/payment mismatches need repair or operator review. If a later queued cancellation supersedes an older metadata update, replay the metadata with `cancelled` without dropping its other fields. An already-failed invalid-transition row may be rebased to a locally synced cancellation and retried once; a second failure remains visible for operator review.
 - Payments and financial closeout: monetary conflicts are never silently accepted. Rows can be deferred while parent order or shift rows are still pending.
 - Menu/catalog: remote catalog is authoritative; local catalog changes use manual conflict handling.
 - Inventory, coupons, reservations, appointments, rooms, and housekeeping: cached local changes keep vertical screens usable offline; conflicts should park in `conflict` until an operator can reconcile.

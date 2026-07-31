@@ -28,7 +28,7 @@ type ConsumedQuantity = {
   unit_price: number;
 };
 
-type CachedOffersPayload = {
+export type CachedOffersPayload = {
   success?: boolean;
   branch_id?: string;
   catalog_type?: CatalogType;
@@ -286,7 +286,7 @@ function evaluateOfferAgainstRemainingCart({
   };
 }
 
-function evaluateCachedCatalogOffers(
+export function evaluateCachedCatalogOffers(
   payload: CachedOffersPayload,
   cartItems: OfferEvaluationCartItem[],
   catalogType: CatalogType,

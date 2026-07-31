@@ -3834,6 +3834,21 @@ fn claim_transferred_cash_staff(
         )
         .map_err(|e| format!("claim transferred staff: {e}"))?;
 
+        // Earnings move with the active driver wallet. The handoff temporarily
+        // marks them transferred so the closing cashier no longer owns them;
+        // claiming the driver must reactivate the same earnings for the
+        // receiving cashier, otherwise the driver's expected return omits all
+        // pre-handoff cash deliveries.
+        conn.execute(
+            "UPDATE driver_earnings SET
+                is_transferred = 0,
+                updated_at = ?1
+             WHERE staff_shift_id = ?2
+               AND COALESCE(settled, 0) = 0",
+            params![now, driver_shift_id],
+        )
+        .map_err(|e| format!("reactivate claimed driver earnings: {e}"))?;
+
         // Wave 5 Session 6: claim-transferred staff_shifts update routes
         // through parity's module_type="shifts" endpoint.
         let sync_payload = serde_json::json!({
@@ -5812,6 +5827,53 @@ mod tests {
         let d_result = open_shift(&db, &d_payload).unwrap();
         let driver_shift_id = d_result["shiftId"].as_str().unwrap().to_string();
 
+        // This cash delivery happened before the cashier handoff. It must stay
+        // part of the driver's wallet when the next cashier claims the shift.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'order-before-cashier-handoff', '#039', '[]', 7.20, 720,
+                    'completed', 'delivery', 'paid', ?1,
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                params![driver_shift_id.as_str()],
+            )
+            .expect("insert delivery before cashier handoff");
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status,
+                    staff_shift_id, currency, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'payment-before-cashier-handoff', 'order-before-cashier-handoff',
+                    'cash', 7.20, 720, 'completed', ?1, 'EUR', 'pending',
+                    datetime('now'), datetime('now')
+                 )",
+                params![driver_shift_id.as_str()],
+            )
+            .expect("insert payment before cashier handoff");
+            conn.execute(
+                "INSERT INTO driver_earnings (
+                    id, driver_id, staff_shift_id, order_id, branch_id,
+                    total_earning, total_earning_cents, payment_method,
+                    cash_collected, cash_collected_cents,
+                    cash_to_return, cash_to_return_cents,
+                    settled, is_transferred, created_at, updated_at
+                 ) VALUES (
+                    'earning-before-cashier-handoff', 'staff-d1', ?1,
+                    'order-before-cashier-handoff', 'b1',
+                    0.0, 0, 'cash', 7.20, 720, 7.20, 720,
+                    0, 0, datetime('now'), datetime('now')
+                 )",
+                params![driver_shift_id.as_str()],
+            )
+            .expect("insert driver earning before cashier handoff");
+        }
+
         // Verify cashier1's drawer has driver_cash_given = 60
         {
             let conn = db.conn.lock().unwrap();
@@ -5832,7 +5894,7 @@ mod tests {
         });
         close_shift(&db, &close_c1).unwrap();
 
-        // Verify driver is transfer pending
+        // Verify driver and the existing earning are transfer pending.
         {
             let conn = db.conn.lock().unwrap();
             let pending: i32 = conn
@@ -5845,6 +5907,17 @@ mod tests {
             assert_eq!(
                 pending, 1,
                 "driver should be transfer pending after cashier1 close"
+            );
+            let earning_transferred: i32 = conn
+                .query_row(
+                    "SELECT is_transferred FROM driver_earnings WHERE id = 'earning-before-cashier-handoff'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                earning_transferred, 1,
+                "existing driver earnings should be transfer pending with the driver"
             );
         }
 
@@ -5860,33 +5933,59 @@ mod tests {
         let c2_shift_id = c2_result["shiftId"].as_str().unwrap().to_string();
 
         // Verify driver was claimed by cashier2
-        let conn = db.conn.lock().unwrap();
-        let (transfer_id, pending): (Option<String>, i32) = conn
-            .query_row(
-                "SELECT transferred_to_cashier_shift_id, is_transfer_pending FROM staff_shifts WHERE id = ?1",
-                params![driver_shift_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            transfer_id.as_deref(),
-            Some(c2_shift_id.as_str()),
-            "driver should be transferred to cashier2"
-        );
-        assert_eq!(pending, 0, "is_transfer_pending should be cleared");
+        {
+            let conn = db.conn.lock().unwrap();
+            let (transfer_id, pending): (Option<String>, i32) = conn
+                .query_row(
+                    "SELECT transferred_to_cashier_shift_id, is_transfer_pending FROM staff_shifts WHERE id = ?1",
+                    params![driver_shift_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                transfer_id.as_deref(),
+                Some(c2_shift_id.as_str()),
+                "driver should be transferred to cashier2"
+            );
+            assert_eq!(pending, 0, "is_transfer_pending should be cleared");
 
-        // Verify cashier2 does not inherit a new negative float.
-        let dcg2: f64 = conn
-            .query_row(
-                "SELECT driver_cash_given FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
-                params![c2_shift_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            dcg2, 0.0,
-            "cashier2 should not inherit driver_cash_given from the previous cashier"
-        );
+            let earning_transferred: i32 = conn
+                .query_row(
+                    "SELECT is_transferred FROM driver_earnings WHERE id = 'earning-before-cashier-handoff'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                earning_transferred, 0,
+                "claimed driver earnings must become active for the receiving cashier"
+            );
+
+            // Verify cashier2 does not inherit a new negative float.
+            let dcg2: f64 = conn
+                .query_row(
+                    "SELECT driver_cash_given FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
+                    params![c2_shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                dcg2, 0.0,
+                "cashier2 should not inherit driver_cash_given from the previous cashier"
+            );
+        }
+
+        // The driver's 60.00 float plus the 7.20 cash delivery must reconcile.
+        let close_driver = close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": driver_shift_id,
+                "closingCash": 67.20,
+            }),
+        )
+        .expect("close inherited driver shift");
+        assert_eq!(close_driver["expected"], 67.20);
+        assert_eq!(close_driver["variance"], 0.0);
     }
 
     #[test]

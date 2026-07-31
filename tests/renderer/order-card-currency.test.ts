@@ -87,17 +87,18 @@ test('OrderCard delivery directions affordance uses aria-label/role, not a nativ
   assert.match(cardSource, /aria-disabled=\{!isEnabled\}/);
 });
 
-test('OrderCard directions require a configured store origin and target the resolved selected address', () => {
+test('OrderCard directions target the resolved address and keep destination-only maps available', () => {
   assert.match(
     cardSource,
     /delivery_address:\s*deliveryAddressNormalized \|\| resolvedAddress,\s*deliveryAddress:\s*deliveryAddressNormalized \|\| resolvedAddress/,
     'both address aliases must target the address rendered on the selected order row',
   );
-  assert.match(
+  assert.doesNotMatch(
     cardSource,
-    /const disabledReason = !storeMapOrigin[\s\S]*?orderCard\.storeLocationNotConfigured/,
-    'the grid route button must not silently fall back to the cashier PC location',
+    /if\s*\(!storeMapOrigin\)[\s\S]*?storeLocationNotConfigured/,
+    'a missing origin must use the destination-only URL instead of disabling the map action',
   );
+  assert.match(cardSource, /buildGoogleMapsDirectionsUrl\(storeMapOrigin, routeStop\)/);
 });
 
 // Round 343 (live QA, delivered/history tab): a completed pickup row showed a huge red elapsed timer

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { getBridge, offEvent, onEvent } from '../../lib';
 
-interface TopSeller {
+export interface TopSeller {
   menuItemId: string;
   name: string;
   quantity: number;

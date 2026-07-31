@@ -51,7 +51,7 @@ import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
 import { resolveCouponErrorKey, COUPON_ERROR_FALLBACKS } from '../../utils/couponErrors';
 import { shouldBypassPaymentForTableOrder } from '../../utils/tableOrderFlow';
 import { posApiPost } from '../../utils/api-helpers';
-import { getBridge, isBrowser } from '../../../lib';
+import { getBridge, isBrowser, offEvent, onEvent } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
 import type { CatalogOfferEvaluationResult, MatchedCatalogOffer, OfferEvaluationCartItem } from '../../../../../shared/types/catalog-offer';
 import type { CartItem as MenuCartItem } from '../menu/MenuCart';
@@ -411,7 +411,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     isValidating: isValidatingDeliveryFee,
   } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
-  const { topSellerIds, rankedTopSellerIds } = useFeaturedItems(staff?.branchId || null, {
+  const { topSellerIds, rankedTopSellerIds, topSellers } = useFeaturedItems(staff?.branchId || null, {
     strategy: 'weekly',
     limit: 20,
   });
@@ -437,6 +437,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [ghostModeArmedAt, setGhostModeArmedAt] = useState<string | null>(null);
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
   const [menuItemsForCategoryTabs, setMenuItemsForCategoryTabs] = useState<MenuItem[]>([]);
+  const [isMenuCatalogLoading, setIsMenuCatalogLoading] = useState(false);
+  const [menuCatalogError, setMenuCatalogError] = useState<string | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [isLocalProcessing, setIsLocalProcessing] = useState(false);
@@ -449,6 +451,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const refocusMenuSearch = useCallback(() => {
     if (typeof window === 'undefined') return;
     window.setTimeout(() => menuSearchRef.current?.focus(), 50);
+  }, []);
+  const handleFeaturedShortcutNavigate = useCallback((
+    categoryId: string,
+    subcategoryId = '',
+  ) => {
+    setSelectedCategory(categoryId);
+    setSelectedSubcategory(subcategoryId);
+    setMenuSearchQuery('');
   }, []);
 
   useEffect(() => {
@@ -1356,6 +1366,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // Default categories
         const defaultCategories = [
           { id: "featured", name: t('modals.menu.featured'), icon: "⭐" },
+          { id: "combos", name: t('modals.menu.combos', 'Προσφορές & Κόμπο'), icon: "🎁" },
         ];
 
         // Combine default categories with database categories
@@ -1381,7 +1392,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         console.error('Error loading categories in MenuModal:', error);
         // Fallback to default categories
         setCategories([
-          { id: "featured", name: t('modals.menu.featured'), icon: "⭐" }
+          { id: "featured", name: t('modals.menu.featured'), icon: "⭐" },
+          { id: "combos", name: t('modals.menu.combos', 'Προσφορές & Κόμπο'), icon: "🎁" },
         ]);
       }
     };
@@ -1394,41 +1406,58 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   useEffect(() => {
     if (!isOpen) {
       setMenuItemsForCategoryTabs([]);
+      setIsMenuCatalogLoading(false);
+      setMenuCatalogError(null);
       return;
     }
 
     let cancelled = false;
 
-    const loadMenuItemsForCategoryTabs = async () => {
+    const loadMenuItemsForCategoryTabs = async (showInitialLoading = false) => {
+      if (showInitialLoading) {
+        setIsMenuCatalogLoading(true);
+      }
+      setMenuCatalogError(null);
+
       try {
         const items = await menuService.getMenuItems();
         if (!cancelled) {
           setMenuItemsForCategoryTabs(items);
+          if (menuService.getLoadingStatus().menuItems === 'error' && items.length === 0) {
+            setMenuCatalogError(t('menu.grid.error'));
+          }
         }
       } catch (error) {
         console.warn('[MenuModal] Unable to load menu item flavor availability for category tabs:', error);
         if (!cancelled) {
-          setMenuItemsForCategoryTabs([]);
+          if (showInitialLoading) {
+            setMenuItemsForCategoryTabs([]);
+          }
+          setMenuCatalogError(t('menu.grid.error'));
+        }
+      } finally {
+        if (!cancelled && showInitialLoading) {
+          setIsMenuCatalogLoading(false);
         }
       }
     };
 
-    void loadMenuItemsForCategoryTabs();
+    void loadMenuItemsForCategoryTabs(true);
 
-    let unsubscribe: (() => void) | undefined;
-    try {
-      unsubscribe = menuService.subscribeToMenuUpdates(() => {
-        void loadMenuItemsForCategoryTabs();
-      });
-    } catch (error) {
-      console.warn('[MenuModal] Unable to subscribe category tab flavor availability updates:', error);
-    }
+    const handleMenuCatalogRefresh = () => {
+      menuService.clearCacheEntry('menu_items');
+      void loadMenuItemsForCategoryTabs(false);
+    };
+
+    onEvent('menu:sync', handleMenuCatalogRefresh);
+    window.addEventListener('menu-sync:refreshed', handleMenuCatalogRefresh);
 
     return () => {
       cancelled = true;
-      unsubscribe?.();
+      offEvent('menu:sync', handleMenuCatalogRefresh);
+      window.removeEventListener('menu-sync:refreshed', handleMenuCatalogRefresh);
     };
-  }, [isOpen]);
+  }, [isOpen, t]);
 
   // Load combos when modal opens
   useEffect(() => {
@@ -2556,6 +2585,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               menuItems={menuItemsForCategoryTabs}
             />
             <MenuItemGrid
+              menuItems={menuItemsForCategoryTabs}
+              loading={isMenuCatalogLoading}
+              error={menuCatalogError}
               selectedCategory={selectedCategory}
               selectedSubcategory={selectedSubcategory}
               orderType={orderType}
@@ -2563,6 +2595,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               onQuickAdd={handleQuickAdd}
               topSellerIds={topSellerIds}
               featuredRankedIds={rankedTopSellerIds}
+              topSellers={topSellers}
+              categories={categories}
+              onShortcutNavigate={handleFeaturedShortcutNavigate}
               comboMode={selectedCategory === 'combos'}
               combos={combos}
               onComboSelect={handleComboSelect}

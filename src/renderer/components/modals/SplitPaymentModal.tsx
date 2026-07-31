@@ -429,12 +429,12 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   const MethodToggle: React.FC<{ portion: SplitPortion }> = ({ portion }) => {
     const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight;
     return (
-      <div className="flex gap-1 rounded-2xl bg-white/5 p-0.5">
+      <div className="flex gap-1 rounded-2xl bg-slate-100/80 p-0.5 dark:bg-white/5">
         <button
           type="button"
           disabled={locked}
           onClick={() => setPortionMethod(portion.id, 'cash')}
-          className={`flex items-center gap-1.5 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${portion.method === 'cash' ? 'border border-green-400/30 bg-green-500/20 text-green-400' : 'text-white/40 active:text-white/60'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+          className={`flex items-center gap-1.5 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${portion.method === 'cash' ? 'border border-green-400/30 bg-green-500/20 text-green-700 dark:text-green-400' : 'text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
         >
           <Banknote className="h-3.5 w-3.5" />
           {t('splitPayment.cash', 'Cash')}
@@ -443,7 +443,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           type="button"
           disabled={locked}
           onClick={() => void handleTerminalCardPayment(portion.id)}
-          className={`flex items-center gap-1.5 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${portion.method === 'card' ? 'border border-slate-400/30 bg-slate-500/20 text-slate-200' : 'text-white/40 active:text-white/60'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+          className={`flex items-center gap-1.5 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${portion.method === 'card' ? 'border border-slate-400/30 bg-slate-500/20 text-slate-700 dark:text-slate-200' : 'text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
         >
           {portion.status === 'processing' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CreditCard className="h-3.5 w-3.5" />}
           {t('splitPayment.card', 'Card')}
@@ -460,18 +460,18 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     const selectedOwner = portion.collectedBy ?? defaultCollectedBy ?? 'cashier_drawer';
     return (
       <div className="space-y-1">
-        <p className="text-[11px] font-semibold text-white/40">
+        <p className="text-[11px] font-semibold text-slate-500 dark:text-white/40">
           {collectionMode.label || t('splitPayment.collectedBy', { defaultValue: 'Collected By' })}
         </p>
         {collectionMode.description ? (
           <p className="text-xs liquid-glass-modal-text-muted">{collectionMode.description}</p>
         ) : null}
-        <div className="flex gap-1 rounded-2xl bg-white/5 p-0.5">
+        <div className="flex gap-1 rounded-2xl bg-slate-100/80 p-0.5 dark:bg-white/5">
           <button
             type="button"
             disabled={locked}
             onClick={() => setPortionCollectedBy(portion.id, 'cashier_drawer')}
-            className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner !== 'driver_shift' ? 'border border-emerald-400/30 bg-emerald-500/15 text-emerald-300' : 'text-white/50 active:text-white/70'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+            className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner !== 'driver_shift' ? 'border border-emerald-400/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300' : 'text-slate-500 active:text-slate-700 dark:text-white/50 dark:active:text-white/70'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
           >
             {t('splitPayment.cashierDrawer', { defaultValue: 'Cashier' })}
           </button>
@@ -480,7 +480,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               type="button"
               disabled={locked}
               onClick={() => setPortionCollectedBy(portion.id, 'driver_shift')}
-              className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner === 'driver_shift' ? 'border border-slate-400/30 bg-slate-500/15 text-slate-200' : 'text-white/50 active:text-white/70'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+              className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner === 'driver_shift' ? 'border border-slate-400/30 bg-slate-500/15 text-slate-700 dark:text-slate-200' : 'text-slate-500 active:text-slate-700 dark:text-white/50 dark:active:text-white/70'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
             >
               {t('splitPayment.driverShift', { defaultValue: 'Driver' })}
             </button>
@@ -502,7 +502,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             <span>{t('modals.orderDetails.subtotal', { defaultValue: 'Subtotal' })}</span>
             <span>{formatCurrency(portion.grossAmount)}</span>
           </div>
-          <div className="flex items-center justify-between text-xs text-green-300">
+          <div className="flex items-center justify-between text-xs text-green-700 dark:text-green-300">
             <span>{t('modals.orderDetails.discount', { defaultValue: 'Discount' })}</span>
             <span>-{formatCurrency(portion.discountAmount)}</span>
           </div>
@@ -513,12 +513,12 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         <span>{formatCurrency(portion.amount)}</span>
       </div>
       {portion.status === 'paid' ? (
-        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-200">
           {t('modals.orderDetails.paid', { defaultValue: 'Paid' })} • {t(portion.method === 'card' ? 'modals.orderDetails.card' : 'modals.orderDetails.cash', { defaultValue: portion.method === 'card' ? 'Card' : 'Cash' })}
           {portion.paymentOrigin === 'terminal' ? ` • ${t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })}` : ''}
         </div>
       ) : portion.status === 'processing' ? (
-        <div className="rounded-2xl border border-slate-400/30 bg-slate-500/10 px-3 py-2 text-xs text-slate-200">
+        <div className="rounded-2xl border border-slate-400/30 bg-slate-500/10 px-3 py-2 text-xs text-slate-700 dark:text-slate-200">
           {t('splitPayment.waitingForApproval', { defaultValue: 'Waiting for card approval on the payment terminal...' })}
         </div>
       ) : (
@@ -530,15 +530,15 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                 type="button"
                 disabled={portion.grossAmount <= 0.009}
                 onClick={() => openDiscountEditor(portion.id)}
-                className={`flex items-center gap-1.5 rounded-2xl px-3 py-1 text-xs font-medium transition-all ${portion.grossAmount > 0.009 ? 'border border-yellow-500/30 bg-yellow-500/10 text-yellow-300 active:bg-yellow-500/15' : 'cursor-not-allowed bg-gray-500/20 text-gray-500'}`}
+                className={`flex items-center gap-1.5 rounded-2xl px-3 py-1 text-xs font-medium transition-all ${portion.grossAmount > 0.009 ? 'border border-yellow-500/30 bg-yellow-500/10 text-yellow-700 active:bg-yellow-500/15 dark:text-yellow-300' : 'cursor-not-allowed bg-gray-500/20 text-gray-500'}`}
               >
                 <BadgePercent className="h-3.5 w-3.5" />
                 {t('splitPayment.discount', { defaultValue: 'Discount' })}
               </button>
               {discountEditorPortionId === portion.id ? (
-                <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 p-2">
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200/90 bg-slate-50/80 p-2 dark:border-white/10 dark:bg-white/5">
                   <div className="relative flex-1">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/40">&euro;</span>
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-500 dark:text-white/40">&euro;</span>
                     <input
                       type="number"
                       step="0.01"
@@ -546,21 +546,21 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                       max={portion.grossAmount}
                       value={discountDraftValue}
                       onChange={(event) => setDiscountDraftValue(event.target.value)}
-                      className="w-full rounded-2xl border border-white/20 bg-white/10 py-2 pl-7 pr-3 text-sm liquid-glass-modal-text focus:border-emerald-400/50 focus:outline-none"
+                      className="w-full rounded-2xl border border-slate-300/90 bg-white/95 py-2 pl-7 pr-3 text-sm liquid-glass-modal-text focus:border-emerald-400/50 focus:outline-none dark:border-white/20 dark:bg-white/10"
                       placeholder="0.00"
                     />
                   </div>
                   <button
                     type="button"
                     onClick={() => saveDiscount(portion.id)}
-                    className="rounded-2xl border border-emerald-500/30 bg-emerald-600/20 px-3 py-2 text-xs font-semibold text-emerald-300"
+                    className="rounded-2xl border border-emerald-500/30 bg-emerald-600/20 px-3 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300"
                   >
                     {t('common.actions.apply', { defaultValue: 'Apply' })}
                   </button>
                   <button
                     type="button"
                     onClick={() => { setDiscountEditorPortionId(null); setDiscountDraftValue(''); }}
-                    className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-white/70"
+                    className="rounded-2xl border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-white/70"
                   >
                     {t('common.actions.cancel', { defaultValue: 'Cancel' })}
                   </button>
@@ -573,8 +573,363 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     </div>
     );
   };
-  const renderByAmountTab = () => <div className="space-y-3"><div className="flex gap-2"><button type="button" onClick={() => { const half = round2(adjustedDue / 2); setPortions([createPortion(personLabel(0), half), createPortion(personLabel(1), round2(adjustedDue - half))]); }} className="liquid-glass-modal-button flex-1 border border-white/10 bg-white/5 text-sm font-medium liquid-glass-modal-text active:bg-white/10">{t('splitPayment.halfHalf', '50 / 50')}</button><button type="button" onClick={() => { const third = round2(adjustedDue / 3); setPortions([createPortion(personLabel(0), third), createPortion(personLabel(1), third), createPortion(personLabel(2), round2(adjustedDue - third * 2))]); }} className="liquid-glass-modal-button flex-1 border border-white/10 bg-white/5 text-sm font-medium liquid-glass-modal-text active:bg-white/10">{t('splitPayment.threeWay', '3-Way Equal')}</button><button type="button" onClick={() => setPortions([createPortion(personLabel(0), 0), createPortion(personLabel(1), 0)])} className="liquid-glass-modal-button flex-1 border border-white/10 bg-white/5 text-sm font-medium liquid-glass-modal-text active:bg-white/10">{t('splitPayment.custom', 'Custom')}</button></div><div className="space-y-2"><AnimatePresence mode="popLayout">{portions.map((portion) => <motion.div key={portion.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }} className="space-y-2 rounded-2xl border border-white/10 bg-white/5 p-3"><div className="flex items-center justify-between"><span className="flex items-center gap-2 text-sm font-semibold liquid-glass-modal-text"><Users className="h-4 w-4 text-white/40" />{portion.label}</span>{portions.length > 2 && portion.status === 'draft' && <button type="button" onClick={() => removePerson(portion.id)} className="rounded-2xl p-1 text-red-400/60 transition-colors active:bg-red-500/10 active:text-red-400"><Trash2 className="h-4 w-4" /></button>}</div><div className="flex items-center gap-3"><div className="relative flex-1"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-white/40">&euro;</span><input type="number" step="0.01" min="0" value={portion.grossAmount || ''} disabled={portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight} onChange={(event) => updatePortionGrossAmount(portion.id, Number.parseFloat(event.target.value) || 0)} className="w-full rounded-2xl border border-white/20 bg-white/10 py-2 pl-7 pr-3 text-sm font-medium liquid-glass-modal-text focus:border-emerald-400/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-70" placeholder="0.00" /></div><MethodToggle portion={portion} /></div>{renderPortionDetails(portion)}</motion.div>)}</AnimatePresence></div><button type="button" onClick={addPerson} disabled={Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight} className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-white/15 py-2.5 text-sm font-medium text-white/50 transition-colors active:border-white/25 active:text-white/70 disabled:cursor-not-allowed disabled:opacity-60"><Plus className="h-4 w-4" />{t('splitPayment.addPerson', 'Add Person')}</button></div>;
-  const renderByItemsTab = () => { const unassignedCount = availableItems.filter((item) => itemAssignments[Number(item.itemIndex ?? 0)] === undefined).length; return <div className="grid grid-cols-2 gap-3"><div className="space-y-2"><h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-white/40"><ShoppingCart className="h-3.5 w-3.5" />{t('splitPayment.orderItems', 'Order Items')}</h4>{availableItems.map((item) => { const itemIndex = Number(item.itemIndex ?? 0); const assignedTo = itemAssignments[itemIndex]; const assignedPortion = portions.find((portion) => portion.id === assignedTo); return <div key={itemIndex} className={`rounded-2xl border p-2.5 transition-colors ${assignedTo ? 'border-emerald-400/20 bg-emerald-500/5' : 'border-white/10 bg-white/5'}`}><div className="mb-1.5 flex items-center justify-between"><span className="flex-1 truncate text-sm font-medium liquid-glass-modal-text">{item.quantity > 1 && <span className="mr-1 text-white/40">{item.quantity}x</span>}{item.name}</span><span className="ml-2 whitespace-nowrap text-sm font-semibold text-emerald-400">{formatCurrency(item.totalPrice)}</span></div><div className="space-y-1.5"><button type="button" onClick={() => setOpenAssignmentItemIndex((current) => current === itemIndex ? null : itemIndex)} className={`flex w-full items-center justify-between gap-2 rounded-2xl border px-2 py-1.5 text-xs transition-colors ${openAssignmentItemIndex === itemIndex ? 'border-emerald-400/40 bg-white/12' : 'border-white/15 bg-white/10 active:border-white/25 active:bg-white/12'}`}><span className={`truncate ${assignedPortion ? 'text-white' : 'text-white/70'}`}>{assignedPortion?.label || t('splitPayment.unassigned', '-- Unassigned --')}</span><ChevronDown className={`h-3.5 w-3.5 text-white/50 transition-transform ${openAssignmentItemIndex === itemIndex ? 'rotate-180' : ''}`} /></button>{openAssignmentItemIndex === itemIndex && <div className="overflow-hidden rounded-2xl border border-white/15 bg-[#2f2f2f] shadow-xl"><button type="button" onClick={() => assignItem(itemIndex, null)} className={`w-full px-3 py-2 text-left text-xs transition-colors ${!assignedTo ? 'bg-emerald-500/20 text-emerald-300' : 'text-white/80 active:bg-white/8'}`}>{t('splitPayment.unassigned', '-- Unassigned --')}</button>{portions.filter((portion) => portion.status !== 'paid').map((portion) => <button key={portion.id} type="button" onClick={() => assignItem(itemIndex, portion.id)} className={`w-full px-3 py-2 text-left text-xs transition-colors ${assignedTo === portion.id ? 'bg-emerald-500/20 text-emerald-300' : 'text-white active:bg-white/8'}`}>{portion.label}</button>)}</div>}</div></div>; })}{availableItems.length === 0 && <div className="rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-2 text-center"><span className="text-xs font-medium text-emerald-400">{t('splitPayment.allItemsPaid', { defaultValue: 'All remaining balance has already been allocated to previous item payments' })}</span></div>}{availableItems.length > 0 && unassignedCount > 0 && <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 p-2 text-center"><span className="text-xs font-medium text-amber-400">{t('splitPayment.unassignedWarning', { count: unassignedCount })}</span></div>}</div><div className="space-y-2"><h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-white/40"><Users className="h-3.5 w-3.5" />{t('splitPayment.people', 'People')}</h4>{portions.map((portion) => <div key={portion.id} className={`space-y-2 rounded-2xl border p-2.5 ${portion.status === 'paid' ? 'border-emerald-400/20 bg-emerald-500/5' : portion.status === 'processing' ? 'border-slate-400/25 bg-slate-500/5' : 'border-white/10 bg-white/5'}`}><div className="flex items-center justify-between"><span className="text-sm font-semibold liquid-glass-modal-text">{portion.label}</span>{portions.length > 2 && portion.status === 'draft' && <button type="button" onClick={() => removePerson(portion.id)} className="rounded-full p-1 text-red-400/60 transition-colors active:bg-red-500/10 active:text-red-400"><Trash2 className="h-3.5 w-3.5" /></button>}</div>{isEmptyByItemsPortion(portion) ? (<><p className="text-xs italic text-white/30">{t('splitPayment.noItems', 'No items assigned')}</p><div className="flex items-center justify-between"><span className="text-sm font-bold text-emerald-400">{formatCurrency(portion.amount)}</span><MethodToggle portion={portion} /></div></>) : (<>{portion.items.length > 0 ? <ul className="space-y-0.5">{portion.items.map((item) => <li key={`${portion.id}-${item.itemIndex}`} className="flex justify-between text-xs liquid-glass-modal-text-muted"><span className="truncate">{item.quantity > 1 && `${item.quantity}x `}{item.name}</span><span className="ml-1 whitespace-nowrap">{formatCurrency(item.totalPrice)}</span></li>)}</ul> : <p className="text-xs italic text-white/30">{t('splitPayment.noItems', 'No items assigned')}</p>}<div className="border-t border-white/10 pt-2"><div className="mb-2 flex items-center justify-between"><span className="text-sm font-bold text-emerald-400">{formatCurrency(portion.amount)}</span><MethodToggle portion={portion} /></div>{renderPortionDetails(portion)}</div></>)}</div>)}<button type="button" onClick={addPerson} disabled={Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight} className="flex w-full items-center justify-center gap-1.5 rounded-2xl border-2 border-dashed border-white/15 py-2 text-xs font-medium text-white/50 transition-colors active:border-white/25 active:text-white/70 disabled:cursor-not-allowed disabled:opacity-60"><Plus className="h-3.5 w-3.5" />{t('splitPayment.addPerson', 'Add Person')}</button></div></div>; };
-  const footer = <div className="flex items-center justify-between gap-4 border-t border-white/10 pt-4"><div className="flex gap-1 rounded-2xl bg-white/5 p-0.5"><button type="button" onClick={() => setReceiptMode('combined')} className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === 'combined' ? 'border border-yellow-400 bg-yellow-400 text-black split-payment-segment-selected' : 'text-white/40 active:text-white/60'}`}>{t('splitPayment.receiptCombined', 'All Together')}</button><button type="button" onClick={() => setReceiptMode('individual')} className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === 'individual' ? 'border border-yellow-400 bg-yellow-400 text-black split-payment-segment-selected' : 'text-white/40 active:text-white/60'}`}>{t('splitPayment.receiptIndividual', 'Separate')}</button></div><div className="flex items-center gap-4 text-xs">{alreadyPaidAmount > 0 && <span className="liquid-glass-modal-text-muted">{t('splitPayment.alreadyPaid', 'Already Paid')}: <span className="font-bold text-emerald-400">{formatCurrency(alreadyPaidAmount)}</span></span>}{activeDiscountTotal > 0 && <span className="liquid-glass-modal-text-muted">{t('modals.orderDetails.discount', { defaultValue: 'Discount' })}: <span className="font-bold text-green-300">-{formatCurrency(activeDiscountTotal)}</span></span>}<span className="liquid-glass-modal-text-muted">{t('splitPayment.outstanding', 'Due')}: <span className="font-bold liquid-glass-modal-text">{formatCurrency(persistedOutstanding)}</span></span><span className="liquid-glass-modal-text-muted">{t('splitPayment.total', 'Total')}: <span className="font-bold liquid-glass-modal-text">{formatCurrency(orderFinancials.totalAmount)}</span></span><span className="liquid-glass-modal-text-muted">{t('splitPayment.assigned', 'Assigned')}: <span className="font-bold text-emerald-400">{formatCurrency(assignedDraftAmount)}</span></span><span className="liquid-glass-modal-text-muted">{t('splitPayment.remaining', 'Remaining')}: <span className={`font-bold ${Math.abs(remaining) < 0.01 ? 'text-emerald-400' : 'text-amber-400'}`}>{formatCurrency(remaining)}</span></span></div><button type="button" onClick={handleConfirm} disabled={!canConfirm} className={`flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-all ${canConfirm ? 'border border-emerald-500/30 bg-emerald-600/20 text-emerald-400 active:bg-emerald-600/30 active:scale-[0.98]' : 'cursor-not-allowed bg-gray-500/20 text-gray-500 opacity-50'}`}>{isProcessing ? <><Loader2 className="h-4 w-4 animate-spin" />{t('splitPayment.processing', 'Processing...')}</> : <><Check className="h-4 w-4" />{t('splitPayment.confirm', 'Confirm Split')}</>}</button></div>;
-  return <><LiquidGlassModal isOpen={isOpen} onClose={processingPortionId || isProcessing || isTerminalChargeInFlight ? () => undefined : onClose} title={t('splitPayment.title', 'Split Payment')} size="xl" className="!max-w-4xl !max-h-[96vh]" closeOnBackdrop={false} closeOnEscape={!processingPortionId && !isProcessing && !isTerminalChargeInFlight} footer={footer} contentClassName="flex min-h-0 flex-col overflow-hidden !px-6 !py-5"><div className="flex min-h-0 flex-1 flex-col space-y-3"><div className="flex-shrink-0 text-center"><p className="mb-0.5 text-sm liquid-glass-modal-text-muted">{t('splitPayment.orderTotal', 'Order Total')}</p><p className="text-2xl font-bold tracking-tight text-emerald-500 dark:text-emerald-400">{formatCurrency(orderFinancials.totalAmount)}</p>{alreadyPaidAmount > 0 && <p className="mt-2 text-sm liquid-glass-modal-text-muted">{t('splitPayment.alreadyPaidSummary', { defaultValue: 'Already paid {{paid}}. Remaining due {{due}}', paid: formatCurrency(alreadyPaidAmount), due: formatCurrency(persistedOutstanding) })}</p>}</div>{isInitializing ? <div className="flex flex-shrink-0 items-center gap-3 rounded-2xl border border-white/10 bg-white/5 p-4"><Loader2 className="h-5 w-5 animate-spin text-white/70" /><div><h3 className="font-semibold liquid-glass-modal-text">{t('splitPayment.loading', 'Loading split payment')}</h3><p className="text-sm liquid-glass-modal-text-muted">{t('splitPayment.loadingHint', { defaultValue: 'Checking existing split payments and paid items...' })}</p></div></div> : <><div className="flex flex-shrink-0 gap-1 rounded-xl border border-white/10 bg-white/5 p-1"><button type="button" onClick={() => setActiveTab('by-amount')} className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === 'by-amount' ? 'bg-yellow-400 text-black shadow-sm split-payment-segment-selected' : 'text-white/40 active:text-white/60'}`}><Split className="h-4 w-4" />{t('splitPayment.byAmount', 'By Amount')}</button><button type="button" onClick={() => setActiveTab('by-items')} className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === 'by-items' ? 'bg-yellow-400 text-black shadow-sm split-payment-segment-selected' : 'text-white/40 active:text-white/60'}`}><ShoppingCart className="h-4 w-4" />{t('splitPayment.byItems', 'By Items')}</button></div><div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide pb-24 scroll-pb-24">{activeTab === 'by-amount' ? renderByAmountTab() : renderByItemsTab()}</div></>}</div></LiquidGlassModal>{paymentPrintPromptModal}</>;
+  const renderByAmountTab = () => <div className="space-y-3"><div className="flex gap-2"><button type="button" onClick={() => { const half = round2(adjustedDue / 2); setPortions([createPortion(personLabel(0), half), createPortion(personLabel(1), round2(adjustedDue - half))]); }} className="liquid-glass-modal-button flex-1 text-sm font-medium liquid-glass-modal-text">{t('splitPayment.halfHalf', '50 / 50')}</button><button type="button" onClick={() => { const third = round2(adjustedDue / 3); setPortions([createPortion(personLabel(0), third), createPortion(personLabel(1), third), createPortion(personLabel(2), round2(adjustedDue - third * 2))]); }} className="liquid-glass-modal-button flex-1 text-sm font-medium liquid-glass-modal-text">{t('splitPayment.threeWay', '3-Way Equal')}</button><button type="button" onClick={() => setPortions([createPortion(personLabel(0), 0), createPortion(personLabel(1), 0)])} className="liquid-glass-modal-button flex-1 text-sm font-medium liquid-glass-modal-text">{t('splitPayment.custom', 'Custom')}</button></div><div className="space-y-2"><AnimatePresence mode="popLayout">{portions.map((portion) => <motion.div key={portion.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }} className="space-y-2 rounded-2xl border border-slate-200/90 bg-white/80 p-3 dark:border-white/10 dark:bg-white/5"><div className="flex items-center justify-between"><span className="flex items-center gap-2 text-sm font-semibold liquid-glass-modal-text"><Users className="h-4 w-4 text-slate-500 dark:text-white/40" />{portion.label}</span>{portions.length > 2 && portion.status === 'draft' && <button type="button" onClick={() => removePerson(portion.id)} className="rounded-2xl p-1 text-red-400/60 transition-colors active:bg-red-500/10 active:text-red-400"><Trash2 className="h-4 w-4" /></button>}</div><div className="flex items-center gap-3"><div className="relative flex-1"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-slate-500 dark:text-white/40">&euro;</span><input type="number" step="0.01" min="0" value={portion.grossAmount || ''} disabled={portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight} onChange={(event) => updatePortionGrossAmount(portion.id, Number.parseFloat(event.target.value) || 0)} className="w-full rounded-2xl border border-slate-300/90 bg-white/95 py-2 pl-7 pr-3 text-sm font-medium liquid-glass-modal-text focus:border-emerald-400/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/20 dark:bg-white/10" placeholder="0.00" /></div><MethodToggle portion={portion} /></div>{renderPortionDetails(portion)}</motion.div>)}</AnimatePresence></div><button type="button" onClick={addPerson} disabled={Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight} className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300/90 py-2.5 text-sm font-medium text-slate-500 transition-colors active:border-slate-400 active:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:text-white/50 dark:active:border-white/25 dark:active:text-white/70"><Plus className="h-4 w-4" />{t('splitPayment.addPerson', 'Add Person')}</button></div>;
+  const renderByItemsTab = () => {
+    const unassignedCount = availableItems.filter(
+      (item) => itemAssignments[Number(item.itemIndex ?? 0)] === undefined,
+    ).length;
+    return (
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
+          <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-white/40">
+            <ShoppingCart className="h-3.5 w-3.5" />
+            {t("splitPayment.orderItems", "Order Items")}
+          </h4>
+          {availableItems.map((item) => {
+            const itemIndex = Number(item.itemIndex ?? 0);
+            const assignedTo = itemAssignments[itemIndex];
+            const assignedPortion = portions.find(
+              (portion) => portion.id === assignedTo,
+            );
+            return (
+              <div
+                key={itemIndex}
+                className={`rounded-2xl border p-2.5 transition-colors ${assignedTo ? "border-emerald-300/60 bg-emerald-50/80 dark:border-emerald-400/20 dark:bg-emerald-500/5" : "border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5"}`}
+              >
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="flex-1 truncate text-sm font-medium liquid-glass-modal-text">
+                    {item.quantity > 1 && (
+                      <span className="mr-1 text-slate-500 dark:text-white/40">
+                        {item.quantity}x
+                      </span>
+                    )}
+                    {item.name}
+                  </span>
+                  <span className="ml-2 whitespace-nowrap text-sm font-semibold text-emerald-500 dark:text-emerald-400">
+                    {formatCurrency(item.totalPrice)}
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setOpenAssignmentItemIndex((current) =>
+                        current === itemIndex ? null : itemIndex,
+                      )
+                    }
+                    className={`flex w-full items-center justify-between gap-2 rounded-2xl border px-2 py-1.5 text-xs transition-colors ${openAssignmentItemIndex === itemIndex ? "border-emerald-400/40 bg-emerald-50/80 dark:bg-white/12" : "border-slate-300/90 bg-white/90 active:border-slate-400 active:bg-slate-100 dark:border-white/15 dark:bg-white/10 dark:active:border-white/25 dark:active:bg-white/12"}`}
+                  >
+                    <span
+                      className={`truncate ${assignedPortion ? "text-slate-900 dark:text-white" : "text-slate-600 dark:text-white/70"}`}
+                    >
+                      {assignedPortion?.label ||
+                        t("splitPayment.unassigned", "-- Unassigned --")}
+                    </span>
+                    <ChevronDown
+                      className={`h-3.5 w-3.5 text-slate-500 transition-transform dark:text-white/50 ${openAssignmentItemIndex === itemIndex ? "rotate-180" : ""}`}
+                    />
+                  </button>
+                  {openAssignmentItemIndex === itemIndex && (
+                    <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white text-slate-900 shadow-xl dark:border-white/15 dark:bg-[#2f2f2f] dark:text-white">
+                      <button
+                        type="button"
+                        onClick={() => assignItem(itemIndex, null)}
+                        className={`w-full px-3 py-2 text-left text-xs transition-colors ${!assignedTo ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300" : "text-slate-800 active:bg-slate-100 dark:text-white/80 dark:active:bg-white/8"}`}
+                      >
+                        {t("splitPayment.unassigned", "-- Unassigned --")}
+                      </button>
+                      {portions
+                        .filter((portion) => portion.status !== "paid")
+                        .map((portion) => (
+                          <button
+                            key={portion.id}
+                            type="button"
+                            onClick={() => assignItem(itemIndex, portion.id)}
+                            className={`w-full px-3 py-2 text-left text-xs transition-colors ${assignedTo === portion.id ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300" : "text-slate-900 active:bg-slate-100 dark:text-white dark:active:bg-white/8"}`}
+                          >
+                            {portion.label}
+                          </button>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {availableItems.length === 0 && (
+            <div className="rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-2 text-center">
+              <span className="text-xs font-medium text-emerald-500 dark:text-emerald-400">
+                {t("splitPayment.allItemsPaid", {
+                  defaultValue:
+                    "All remaining balance has already been allocated to previous item payments",
+                })}
+              </span>
+            </div>
+          )}
+          {availableItems.length > 0 && unassignedCount > 0 && (
+            <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 p-2 text-center">
+              <span className="text-xs font-medium text-amber-500 dark:text-amber-400">
+                {t("splitPayment.unassignedWarning", {
+                  count: unassignedCount,
+                })}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="space-y-2">
+          <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-white/40">
+            <Users className="h-3.5 w-3.5" />
+            {t("splitPayment.people", "People")}
+          </h4>
+          {portions.map((portion) => (
+            <div
+              key={portion.id}
+              className={`space-y-2 rounded-2xl border p-2.5 ${portion.status === "paid" ? "border-emerald-300/60 bg-emerald-50/80 dark:border-emerald-400/20 dark:bg-emerald-500/5" : portion.status === "processing" ? "border-slate-300/70 bg-slate-100/80 dark:border-slate-400/25 dark:bg-slate-500/5" : "border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5"}`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold liquid-glass-modal-text">
+                  {portion.label}
+                </span>
+                {portions.length > 2 && portion.status === "draft" && (
+                  <button
+                    type="button"
+                    onClick={() => removePerson(portion.id)}
+                    className="rounded-full p-1 text-red-400/60 transition-colors active:bg-red-500/10 active:text-red-400"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+              {isEmptyByItemsPortion(portion) ? (
+                <>
+                  <p className="text-xs italic text-slate-400 dark:text-white/30">
+                    {t("splitPayment.noItems", "No items assigned")}
+                  </p>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-emerald-500 dark:text-emerald-400">
+                      {formatCurrency(portion.amount)}
+                    </span>
+                    <MethodToggle portion={portion} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  {portion.items.length > 0 ? (
+                    <ul className="space-y-0.5">
+                      {portion.items.map((item) => (
+                        <li
+                          key={`${portion.id}-${item.itemIndex}`}
+                          className="flex justify-between text-xs liquid-glass-modal-text-muted"
+                        >
+                          <span className="truncate">
+                            {item.quantity > 1 && `${item.quantity}x `}
+                            {item.name}
+                          </span>
+                          <span className="ml-1 whitespace-nowrap">
+                            {formatCurrency(item.totalPrice)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-xs italic text-slate-400 dark:text-white/30">
+                      {t("splitPayment.noItems", "No items assigned")}
+                    </p>
+                  )}
+                  <div className="border-t border-slate-200/90 pt-2 dark:border-white/10">
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="text-sm font-bold text-emerald-500 dark:text-emerald-400">
+                        {formatCurrency(portion.amount)}
+                      </span>
+                      <MethodToggle portion={portion} />
+                    </div>
+                    {renderPortionDetails(portion)}
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={addPerson}
+            disabled={
+              Boolean(processingPortionId) ||
+              isProcessing ||
+              isTerminalChargeInFlight
+            }
+            className="flex w-full items-center justify-center gap-1.5 rounded-2xl border-2 border-dashed border-slate-300/90 py-2 text-xs font-medium text-slate-500 transition-colors active:border-slate-400 active:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:text-white/50 dark:active:border-white/25 dark:active:text-white/70"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {t("splitPayment.addPerson", "Add Person")}
+          </button>
+        </div>
+      </div>
+    );
+  };
+  const footer = (
+    <div className="flex items-center justify-between gap-4 border-t border-slate-200/90 pt-4 dark:border-white/10">
+      <div className="flex gap-1 rounded-2xl bg-slate-100/80 p-0.5 dark:bg-white/5">
+        <button
+          type="button"
+          onClick={() => setReceiptMode("combined")}
+          className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "combined" ? "border border-yellow-400 bg-yellow-400 text-black split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+        >
+          {t("splitPayment.receiptCombined", "All Together")}
+        </button>
+        <button
+          type="button"
+          onClick={() => setReceiptMode("individual")}
+          className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "individual" ? "border border-yellow-400 bg-yellow-400 text-black split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+        >
+          {t("splitPayment.receiptIndividual", "Separate")}
+        </button>
+      </div>
+      <div className="flex items-center gap-4 text-xs">
+        {alreadyPaidAmount > 0 && (
+          <span className="liquid-glass-modal-text-muted">
+            {t("splitPayment.alreadyPaid", "Already Paid")}:{" "}
+            <span className="font-bold text-emerald-400">
+              {formatCurrency(alreadyPaidAmount)}
+            </span>
+          </span>
+        )}
+        {activeDiscountTotal > 0 && (
+          <span className="liquid-glass-modal-text-muted">
+            {t("modals.orderDetails.discount", { defaultValue: "Discount" })}:{" "}
+            <span className="font-bold text-green-700 dark:text-green-300">
+              -{formatCurrency(activeDiscountTotal)}
+            </span>
+          </span>
+        )}
+        <span className="liquid-glass-modal-text-muted">
+          {t("splitPayment.outstanding", "Due")}:{" "}
+          <span className="font-bold liquid-glass-modal-text">
+            {formatCurrency(persistedOutstanding)}
+          </span>
+        </span>
+        <span className="liquid-glass-modal-text-muted">
+          {t("splitPayment.total", "Total")}:{" "}
+          <span className="font-bold liquid-glass-modal-text">
+            {formatCurrency(orderFinancials.totalAmount)}
+          </span>
+        </span>
+        <span className="liquid-glass-modal-text-muted">
+          {t("splitPayment.assigned", "Assigned")}:{" "}
+          <span className="font-bold text-emerald-400">
+            {formatCurrency(assignedDraftAmount)}
+          </span>
+        </span>
+        <span className="liquid-glass-modal-text-muted">
+          {t("splitPayment.remaining", "Remaining")}:{" "}
+          <span
+            className={`font-bold ${Math.abs(remaining) < 0.01 ? "text-emerald-400" : "text-amber-400"}`}
+          >
+            {formatCurrency(remaining)}
+          </span>
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={handleConfirm}
+        disabled={!canConfirm}
+        className={`flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-all ${canConfirm ? "border border-emerald-500/30 bg-emerald-600/20 text-emerald-400 active:bg-emerald-600/30 active:scale-[0.98]" : "cursor-not-allowed bg-gray-500/20 text-gray-500 opacity-50"}`}
+      >
+        {isProcessing ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            {t("splitPayment.processing", "Processing...")}
+          </>
+        ) : (
+          <>
+            <Check className="h-4 w-4" />
+            {t("splitPayment.confirm", "Confirm Split")}
+          </>
+        )}
+      </button>
+    </div>
+  );
+  return (
+    <>
+      <LiquidGlassModal
+        isOpen={isOpen}
+        onClose={
+          processingPortionId || isProcessing || isTerminalChargeInFlight
+            ? () => undefined
+            : onClose
+        }
+        title={t("splitPayment.title", "Split Payment")}
+        size="xl"
+        className="!max-w-4xl !max-h-[96vh]"
+        closeOnBackdrop={false}
+        closeOnEscape={
+          !processingPortionId && !isProcessing && !isTerminalChargeInFlight
+        }
+        footer={footer}
+        contentClassName="flex min-h-0 flex-col overflow-hidden !px-6 !py-5"
+      >
+        <div className="flex min-h-0 flex-1 flex-col space-y-3">
+          <div className="flex-shrink-0 text-center">
+            <p className="mb-0.5 text-sm liquid-glass-modal-text-muted">
+              {t("splitPayment.orderTotal", "Order Total")}
+            </p>
+            <p className="text-2xl font-bold tracking-tight text-emerald-500 dark:text-emerald-400">
+              {formatCurrency(orderFinancials.totalAmount)}
+            </p>
+            {alreadyPaidAmount > 0 && (
+              <p className="mt-2 text-sm liquid-glass-modal-text-muted">
+                {t("splitPayment.alreadyPaidSummary", {
+                  defaultValue: "Already paid {{paid}}. Remaining due {{due}}",
+                  paid: formatCurrency(alreadyPaidAmount),
+                  due: formatCurrency(persistedOutstanding),
+                })}
+              </p>
+            )}
+          </div>
+          {isInitializing ? (
+            <div className="flex flex-shrink-0 items-center gap-3 rounded-2xl border border-slate-200/90 bg-white/80 p-4 dark:border-white/10 dark:bg-white/5">
+              <Loader2 className="h-5 w-5 animate-spin text-slate-600 dark:text-white/70" />
+              <div>
+                <h3 className="font-semibold liquid-glass-modal-text">
+                  {t("splitPayment.loading", "Loading split payment")}
+                </h3>
+                <p className="text-sm liquid-glass-modal-text-muted">
+                  {t("splitPayment.loadingHint", {
+                    defaultValue:
+                      "Checking existing split payments and paid items...",
+                  })}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-shrink-0 gap-1 rounded-xl border border-slate-200/90 bg-slate-100/80 p-1 dark:border-white/10 dark:bg-white/5">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("by-amount")}
+                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-amount" ? "bg-yellow-400 text-black shadow-sm split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+                >
+                  <Split className="h-4 w-4" />
+                  {t("splitPayment.byAmount", "By Amount")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("by-items")}
+                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-items" ? "bg-yellow-400 text-black shadow-sm split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+                >
+                  <ShoppingCart className="h-4 w-4" />
+                  {t("splitPayment.byItems", "By Items")}
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide pb-24 scroll-pb-24">
+                {activeTab === "by-amount"
+                  ? renderByAmountTab()
+                  : renderByItemsTab()}
+              </div>
+            </>
+          )}
+        </div>
+      </LiquidGlassModal>
+      {paymentPrintPromptModal}
+    </>
+  );
 };

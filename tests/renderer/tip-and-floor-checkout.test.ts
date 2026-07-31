@@ -109,6 +109,49 @@ test('payment checkout treats tip as an auditable addition, not a payment method
   assert.match(tipModal, /cashier/);
 });
 
+test('tip controls have raised touch depth and role-colored icons in both themes', () => {
+  const tipModal = readSource(
+    'src',
+    'renderer',
+    'components',
+    'modals',
+    'TipModal.tsx',
+  );
+  const glassStyles = readSource(
+    'src',
+    'renderer',
+    'styles',
+    'glassmorphism.css',
+  );
+
+  assert.match(
+    tipModal,
+    /const tipChoiceButtonBaseClass =\s*'[^']*shadow-\[0_8px_20px_rgba\(15,23,42,0\.10\)\][^']*dark:shadow-\[0_10px_24px_rgba\(0,0,0,0\.28\)\][^']*active:translate-y-px[^']*'/,
+    'percentage and recipient choices should use a shared raised touch surface',
+  );
+  assert.match(tipModal, /cashier:\s*'tip-recipient-icon-cashier'/);
+  assert.match(tipModal, /waiter:\s*'tip-recipient-icon-waiter'/);
+  assert.match(tipModal, /driver:\s*'tip-recipient-icon-driver'/);
+  for (const role of ['waiter', 'cashier', 'driver']) {
+    assert.match(
+      glassStyles,
+      new RegExp(`\\.tip-recipient-icon-${role} \\{\\s*color: #[0-9a-f]{6} !important;`),
+      `${role} icon should keep an explicit color despite the global cool-color remap`,
+    );
+    assert.match(
+      glassStyles,
+      new RegExp(`\\.dark \\.liquid-glass-modal-shell \\.tip-recipient-icon-${role}`),
+      `${role} icon should have a dark-theme color`,
+    );
+  }
+  assert.match(
+    tipModal,
+    /className="liquid-glass-modal-button[^"]*shadow-\[0_10px_24px_rgba\(15,23,42,0\.12\)\][^"]*active:translate-y-px/,
+    'footer actions should not remain visually flat',
+  );
+  assert.doesNotMatch(tipModal, /<span className="rounded-xl bg-white\/10 p-2">/);
+});
+
 test('all new-order paths persist tip financials and recipient attribution', () => {
   for (const relativePath of [
     ['src', 'renderer', 'components', 'OrderDashboard.tsx'],

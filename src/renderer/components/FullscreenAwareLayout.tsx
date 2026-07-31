@@ -24,13 +24,40 @@ export const FullscreenAwareLayout: React.FC<FullscreenAwareLayoutProps> = ({
   update,
   windowState,
 }) => {
+  const showFrame = !windowState?.isFullScreen;
+
+  React.useLayoutEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    const root = document.documentElement;
+    const previousFrameHeight = root.style.getPropertyValue('--app-window-frame-height');
+    root.style.setProperty('--app-window-frame-height', showFrame ? '2rem' : '0rem');
+
+    return () => {
+      if (previousFrameHeight) {
+        root.style.setProperty('--app-window-frame-height', previousFrameHeight);
+      } else {
+        root.style.removeProperty('--app-window-frame-height');
+      }
+    };
+  }, [showFrame]);
+
   return (
     <div className={`relative flex h-screen min-h-0 flex-col overflow-hidden ${className}`}>
-      <AppWindowFrame
-        update={update}
-        windowState={windowState}
-      />
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
+      {showFrame && (
+        <AppWindowFrame
+          update={update}
+          windowState={windowState}
+        />
+      )}
+      <div
+        data-app-window-content
+        className="relative flex min-h-0 flex-1 transform-gpu flex-col overflow-hidden"
+      >
+        {children}
+      </div>
     </div>
   );
 };

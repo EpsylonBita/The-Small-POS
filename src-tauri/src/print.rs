@@ -3589,6 +3589,22 @@ fn build_shift_checkout_doc(
             .map(|line| line.amount)
             .sum::<f64>()
     });
+    let expense_lines = summary
+        .get("expenses")
+        .and_then(Value::as_array)
+        .map(|expenses| {
+            expenses
+                .iter()
+                .map(|expense| crate::receipt_renderer::ZReportExpenseEntry {
+                    reason: text_from_paths(expense, &["/description"]).unwrap_or_default(),
+                    expense_type: text_from_paths(expense, &["/expense_type", "/expenseType"])
+                        .unwrap_or_default(),
+                    amount: number_from_paths(expense, &["/amount"]).unwrap_or(0.0),
+                    created_at: text_from_paths(expense, &["/created_at", "/createdAt"]),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let resolved_role_type = payload
         .and_then(|value| object_text_field(value, &["roleType", "role_type"]))
         .or_else(|| {
@@ -3709,6 +3725,7 @@ fn build_shift_checkout_doc(
         .unwrap_or(0.0),
         staff_payouts_total,
         staff_payout_lines,
+        expense_lines,
         transferred_staff_count,
         transferred_staff_returns,
         expected_amount: snapshot_expected_amount.or_else(|| {
@@ -5950,6 +5967,40 @@ mod tests {
             }
             _ => panic!("expected shift checkout document"),
         }
+    }
+
+    #[test]
+    fn test_cashier_shift_checkout_prints_each_expense_from_that_shift() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_shift_checkout_fixture(&conn, "shift-checkout-expenses", "terminal-1");
+            conn.execute(
+                "INSERT INTO shift_expenses (
+                    id, staff_shift_id, staff_id, branch_id, expense_type,
+                    amount, amount_cents, description, status, sync_status,
+                    created_at, updated_at
+                 ) VALUES
+                    ('expense-fuel', 'shift-checkout-expenses', 'staff-1', 'branch-1', 'other',
+                     7.20, 720, 'Fuel for delivery scooter', 'pending', 'pending',
+                     '2026-03-15T12:00:00Z', '2026-03-15T12:00:00Z'),
+                    ('expense-supplies', 'shift-checkout-expenses', 'staff-1', 'branch-1', 'supplies',
+                     3.80, 380, 'Cleaning supplies', 'approved', 'pending',
+                     '2026-03-15T13:00:00Z', '2026-03-15T13:00:00Z')",
+                [],
+            )
+            .expect("insert cashier shift expenses");
+        }
+
+        let document =
+            build_document_for_job(&db, "shift_checkout", "shift-checkout-expenses", None)
+                .expect("build cashier checkout with expenses");
+        let html = receipt_renderer::render_html(&document, &LayoutConfig::default());
+
+        assert!(html.contains("Fuel for delivery scooter"));
+        assert!(html.contains("Cleaning supplies"));
+        assert!(html.contains("7.20"));
+        assert!(html.contains("3.80"));
     }
 
     #[test]

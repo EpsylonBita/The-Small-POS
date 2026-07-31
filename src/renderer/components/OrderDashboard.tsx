@@ -4987,7 +4987,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             );
           } else {
             for (const order of completedOrders) {
-              const result = await bridge.orders.resetToActive(order.id);
+              let result;
+              try {
+                result = await bridge.orders.resetToActive(order.id);
+              } catch (error) {
+                console.error("[OrderDashboard] Failed to reset order:", error);
+                toast.error(
+                  t("orderDashboard.returnToOrdersFailed", {
+                    orderNumber: formatCompactOrderNumberForDisplay(
+                      getVisibleOrderNumber(order),
+                    ),
+                  }),
+                );
+                return;
+              }
               if (!result?.success) {
                 toast.error(
                   result?.error ||

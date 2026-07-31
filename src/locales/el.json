@@ -564,6 +564,13 @@
       "savory": "Αλμυρά",
       "sweet": "Γλυκά"
     },
+    "featuredShortcuts": {
+      "quickAccess": "Γρήγορη πρόσβαση",
+      "hint": "Δημοφιλείς κατηγορίες και φίλτρα",
+      "frequentItems": "Συχνές επιλογές",
+      "openCategory": "Άνοιγμα {{category}}",
+      "openSubcategory": "Άνοιγμα {{category}}, {{subcategory}}"
+    },
     "items": "Προϊόντα",
     "search": "Αναζήτηση μενού...",
     "searchPlaceholder": "Αναζήτηση προϊόντων, κατηγοριών...",

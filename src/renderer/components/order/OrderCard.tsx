@@ -598,21 +598,13 @@ export const OrderCard = memo<OrderCardProps>(({
           ? buildGoogleMapsDirectionsUrl(storeMapOrigin, routeStop)
           : null;
         const isEnabled = Boolean(mapsUrl);
-        const disabledReason = !storeMapOrigin
-          ? t('orderCard.storeLocationNotConfigured', 'Store address is not configured')
-          : t('orderCard.missingAddress') || 'No address available';
+        const disabledReason = t('orderCard.missingAddress') || 'No address available';
         return (
           <div
             onClick={(e) => {
               e.stopPropagation();
               if (!hasAddress) {
                 toast.error(t('orderCard.missingAddress') || 'Delivery address not available');
-                return;
-              }
-              if (!storeMapOrigin) {
-                toast.error(
-                  t('orderCard.storeLocationNotConfigured', 'Store address is not configured'),
-                );
                 return;
               }
               if (!mapsUrl) {
