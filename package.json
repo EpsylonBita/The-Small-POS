@@ -1,7 +1,7 @@
 {
   "name": "the-small-pos-tauri",
   "private": true,
-  "version": "1.4.47",
+  "version": "1.4.48",
   "description": "The Small POS - Tauri v2 desktop application",
   "type": "module",
   "scripts": {
@@ -14,7 +14,7 @@
     "locale:parity": "node scripts/check-locale-parity.mjs",
     "test:desktop-parity": "node scripts/run-parity-tests.mjs",
     "test:support-layer": "node scripts/run-support-tests.mjs",
-    "test:native-runtime": "node scripts/check-no-electron-surfaces.mjs && node scripts/check-native-bootstrap.mjs",
+    "test:native-runtime": "node scripts/check-no-electron-surfaces.mjs && node scripts/check-native-bootstrap.mjs && node scripts/check-release-runtime-config.mjs",
     "soak:report": "node scripts/evaluate-soak-report.mjs --report docs/security-native-migration/reports/staging-soak-report.json",
     "parity:contract": "node scripts/check-parity-contract.mjs",
     "pos:tauri:dev": "node scripts/check-dev-port.mjs && cross-env CARGO_BUILD_JOBS=1 RUSTFLAGS=-Cdebuginfo=0 tauri dev",
