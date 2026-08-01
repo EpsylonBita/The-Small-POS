@@ -340,6 +340,7 @@ export function subscribeToCallerIdEvents(
   const desiredLines = new Map<string, ReceivingLineConfig>()
   const fallbackLineIds = new Set<string>()
   const pendingCatchupLineIds = new Set<string>()
+  const postAttemptCatchupUntil = new Map<string, number>()
   const acknowledged = new Set<string>()
   const acknowledging = new Set<string>()
   const retryAttempts = new Map<string, number>()
@@ -427,6 +428,7 @@ export function subscribeToCallerIdEvents(
     desiredLines.clear()
     fallbackLineIds.clear()
     pendingCatchupLineIds.clear()
+    postAttemptCatchupUntil.clear()
     acknowledged.clear()
     acknowledging.clear()
     for (const retryTimer of retryTimers.values()) {
@@ -529,6 +531,7 @@ export function subscribeToCallerIdEvents(
         (config) =>
           fallbackLineIds.has(config.line.id) ||
           pendingCatchupLineIds.has(config.line.id) ||
+          (postAttemptCatchupUntil.get(config.line.id) ?? 0) > now ||
           (config.readinessAttempt !== undefined &&
             Date.parse(config.readinessAttempt.expiresAt) > now),
       )
@@ -635,10 +638,22 @@ export function subscribeToCallerIdEvents(
       for (const lineId of pendingCatchupLineIds) {
         if (!nextDesired.has(lineId)) pendingCatchupLineIds.delete(lineId)
       }
+      for (const lineId of postAttemptCatchupUntil.keys()) {
+        if (!nextDesired.has(lineId)) postAttemptCatchupUntil.delete(lineId)
+      }
       desiredLines.clear()
       for (const [lineId, config] of nextDesired) {
         desiredLines.set(lineId, config)
         const previous = previousDesired.get(lineId)
+        if (
+          previous?.readinessAttempt &&
+          !config.readinessAttempt &&
+          sameReceivingLineVersion(previous, config)
+        ) {
+          postAttemptCatchupUntil.set(lineId, Date.now() + DELIVERY_TTL_MS)
+        } else if (!sameReceivingLineVersion(previous, config)) {
+          postAttemptCatchupUntil.delete(lineId)
+        }
         if (
           !previous ||
           previous.version !== config.version ||
@@ -774,6 +789,9 @@ export function subscribeToCallerIdEvents(
     const now = Date.now()
     for (const [eventId, receivedAt] of seen) {
       if (now - receivedAt > DELIVERY_TTL_MS) seen.delete(eventId)
+    }
+    for (const [lineId, catchupUntil] of postAttemptCatchupUntil) {
+      if (catchupUntil <= now) postAttemptCatchupUntil.delete(lineId)
     }
     for (const key of acknowledged) {
       const attemptId = key.split(':')[0]

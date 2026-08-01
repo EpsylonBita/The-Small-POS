@@ -421,6 +421,7 @@ describe('CallerIdRealtimeService', () => {
       `/api/pos/caller-id/events/${eventId}/receipt`,
       { status: 'received' },
     )
+
     unsubscribe()
   })
 
@@ -908,6 +909,116 @@ describe('CallerIdRealtimeService', () => {
       `/api/pos/caller-id/events/${eventId}/receipt`,
       { status: 'received' },
     )
+    unsubscribe()
+  })
+
+  it('keeps polling long enough to catch an event committed after its readiness attempt disappears', async () => {
+    vi.mocked(Date.now).mockRestore()
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const attemptId = '30000000-0000-4000-8000-000000000006'
+    const eventId = '20000000-0000-4000-8000-000000000029'
+    let configLoads = 0
+    let eventPolls = 0
+    mocks.posApiGet.mockImplementation((path: string) => {
+      if (path === '/api/pos/caller-id/config') {
+        configLoads += 1
+        return Promise.resolve({
+          success: true,
+          data: {
+            receivingLines: [
+              {
+                id: firstLineId,
+                name: 'Main line',
+                topic: `callerid:line:${firstLineId}`,
+                version: 1,
+                ...(configLoads === 1
+                  ? {
+                      readinessAttempt: {
+                        attemptId,
+                        lineVersion: 1,
+                        expiresAt: '2026-07-27T10:00:51.000Z',
+                      },
+                    }
+                  : {}),
+              },
+            ],
+          },
+        })
+      }
+      if (path === '/api/pos/caller-id/events') {
+        eventPolls += 1
+        return Promise.resolve({
+          success: true,
+          data: {
+            serverTime: new Date(Date.now()).toISOString(),
+            events:
+              eventPolls === 1
+                ? []
+                : [
+                    {
+                      eventId,
+                      lineId: firstLineId,
+                      lineName: 'Main line',
+                      lineVersion: 1,
+                      callerNumber: '+302101234567',
+                      presentation: 'allowed',
+                      occurredAt: '2026-07-27T10:00:32.000Z',
+                      deliveryExpiresAt: '2026-07-27T10:01:02.000Z',
+                    },
+                  ],
+          },
+        })
+      }
+      return Promise.reject(new Error(`Unexpected POS API path: ${path}`))
+    })
+    mocks.channel.mockImplementationOnce((topic: string) => {
+      const channel = {
+        on: vi.fn(
+          (
+            _kind: string,
+            _filter: { event: string },
+            handler: BroadcastHandler,
+          ) => {
+            handlers.set(topic, handler)
+            return channel
+          },
+        ),
+        subscribe: vi.fn((status: StatusHandler) => {
+          statuses.set(topic, status)
+          status('SUBSCRIBED')
+          return channel
+        }),
+      }
+      return channel
+    })
+    const onEvent = vi.fn()
+
+    const unsubscribe = subscribeToCallerIdEvents(
+      'org-1',
+      'terminal-1',
+      onEvent,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(eventPolls).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(configLoads).toBeGreaterThanOrEqual(2)
+    expect(eventPolls).toBeGreaterThanOrEqual(2)
+    expect(onEvent).toHaveBeenCalledTimes(1)
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ sipCallId: eventId, lineId: firstLineId }),
+    )
+    expect(mocks.posApiPost).toHaveBeenCalledWith(
+      `/api/pos/caller-id/events/${eventId}/receipt`,
+      { status: 'received' },
+    )
+
+    await vi.advanceTimersByTimeAsync(31_000)
+    const pollsAfterCatchupWindow = eventPolls
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(eventPolls).toBe(pollsAfterCatchupWindow)
     unsubscribe()
   })
 
