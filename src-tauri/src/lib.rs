@@ -571,6 +571,11 @@ pub fn run() {
                 error!("Failed to initialize database: {e}");
                 format!("Failed to initialize database: {e}")
             })?;
+            if let Err(error) =
+                commands::api_bridge::purge_caller_id_admin_cache(&db_state)
+            {
+                warn!(error = %error, "Failed to purge legacy Caller ID API cache");
+            }
             // Migrate credentials from legacy plaintext `local_settings` rows
             // into the OS keyring, then purge the plaintext rows that have
             // been successfully migrated. Hydrate must run before purge so a

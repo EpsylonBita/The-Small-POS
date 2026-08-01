@@ -87,15 +87,40 @@ fn parse_admin_fetch_payload(
     Ok(AdminFetchCompatPayload { path, options })
 }
 
+fn canonical_admin_route(path: &str) -> &str {
+    path.split(['?', '#'])
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches('/')
+}
+
+fn is_caller_id_admin_route(path: &str) -> bool {
+    let route = canonical_admin_route(path);
+    route == "/api/pos/caller-id" || route.starts_with("/api/pos/caller-id/")
+}
+
 fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
+    let route = canonical_admin_route(path);
     method.eq_ignore_ascii_case("GET")
-        && path.starts_with("/api/pos/")
-        && !path.contains("/api/pos/auth")
-        && !path.contains("/api/pos/updates")
+        && route.starts_with("/api/pos/")
+        && !route.contains("/api/pos/auth")
+        && !route.contains("/api/pos/updates")
+        && !is_caller_id_admin_route(path)
 }
 
 fn admin_api_cache_key(path: &str) -> String {
     format!("{ADMIN_API_CACHE_PREFIX}{path}")
+}
+
+pub(crate) fn purge_caller_id_admin_cache(db: &db::DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM local_settings
+         WHERE setting_category = 'local'
+           AND setting_key GLOB ?1",
+        [format!("{ADMIN_API_CACHE_PREFIX}/api/pos/caller-id*")],
+    )
+    .map_err(|e| format!("purge legacy Caller ID API cache: {e}"))
 }
 
 fn admin_fetch_error_payload(
@@ -584,6 +609,53 @@ mod dto_tests {
         ));
         assert!(!is_cacheable_admin_get("POST", "/api/pos/suppliers"));
         assert!(!is_cacheable_admin_get("GET", "/api/admin/users"));
+    }
+
+    #[test]
+    fn caller_id_namespace_is_not_offline_cacheable() {
+        for path in [
+            "/api/pos/caller-id",
+            "/api/pos/caller-id/",
+            "/api/pos/caller-id/config",
+            "/api/pos/caller-id/events",
+            "/api/pos/caller-id/events/",
+            "/api/pos/caller-id/events?cursor=next",
+            "/api/pos/caller-id/events#pending",
+        ] {
+            assert!(
+                !is_cacheable_admin_get("GET", path),
+                "Caller ID live route must not be cached: {path}"
+            );
+        }
+        assert!(is_cacheable_admin_get("GET", "/api/pos/suppliers"));
+    }
+
+    #[test]
+    fn caller_id_cache_purge_removes_legacy_sensitive_rows_only() {
+        let db = test_db_state();
+        let sensitive_path = "/api/pos/caller-id/config";
+        let ordinary_path = "/api/pos/suppliers";
+        cache_admin_get_response(
+            &db,
+            sensitive_path,
+            &serde_json::json!({
+                "sourceLines": [{ "credentials": { "present": true } }]
+            }),
+        )
+        .expect("seed sensitive legacy cache");
+        cache_admin_get_response(
+            &db,
+            ordinary_path,
+            &serde_json::json!({
+                "items": []
+            }),
+        )
+        .expect("seed ordinary cache");
+
+        purge_caller_id_admin_cache(&db).expect("purge Caller ID cache");
+
+        assert!(read_cached_admin_get_response(&db, sensitive_path).is_none());
+        assert!(read_cached_admin_get_response(&db, ordinary_path).is_some());
     }
 
     #[test]

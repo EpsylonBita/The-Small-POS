@@ -37,9 +37,24 @@ interface CallerIdRealtimePayload {
   eventId: string
   lineId: string
   lineName: string
+  lineVersion: number
   callerNumber: string | null
   presentation: 'allowed' | 'restricted' | 'unknown'
   occurredAt: string
+}
+
+interface CallerIdPolledPayload extends CallerIdRealtimePayload {
+  deliveryExpiresAt: string
+}
+
+interface CallerIdPosEventsResponse {
+  serverTime?: unknown
+  events?: unknown
+}
+
+interface ParsedCallerIdEvent {
+  event: CallerIdBroadcastEvent
+  deliveryDeadline: number
 }
 
 interface ReadinessAttempt {
@@ -85,11 +100,14 @@ export type CallerIdReceipt =
 
 const DELIVERY_TTL_MS = 30_000
 const CONFIG_POLL_MS = 1_000
+const EVENT_POLL_MS = 1_000
+const MAX_POLLED_EVENTS = 50
 const CHANNEL_RETRY_BASE_MS = 1_000
 const CHANNEL_RETRY_MAX_MS = 30_000
 const UUID_PATTERN =
   '[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 const UUID_REGEX = new RegExp(`^${UUID_PATTERN}$`, 'i')
+const E164_REGEX = /^\+[1-9]\d{1,14}$/
 
 function parseReceivingLineConfig(value: unknown): ReceivingLineConfig | null {
   const line = parseCallerIdReceivingLine(value)
@@ -133,6 +151,8 @@ function parseReceivingLineConfig(value: unknown): ReceivingLineConfig | null {
 function parseFreshEvent(
   value: unknown,
   expectedLine: CallerIdReceivingLine,
+  expectedLineVersion: number,
+  referenceTime = Date.now(),
 ): CallerIdBroadcastEvent | null {
   if (!value || typeof value !== 'object') return null
   const event = value as CallerIdRealtimePayload
@@ -140,9 +160,15 @@ function parseFreshEvent(
     !UUID_REGEX.test(event.eventId) ||
     event.lineId !== expectedLine.id ||
     typeof event.lineName !== 'string' ||
+    event.lineName.length === 0 ||
+    !Number.isSafeInteger(event.lineVersion) ||
+    event.lineVersion <= 0 ||
+    event.lineVersion !== expectedLineVersion ||
     !['allowed', 'restricted', 'unknown'].includes(event.presentation) ||
-    (event.callerNumber !== null &&
-      (typeof event.callerNumber !== 'string' || event.callerNumber.length === 0))
+    (event.presentation === 'allowed'
+      ? typeof event.callerNumber !== 'string' ||
+        !E164_REGEX.test(event.callerNumber)
+      : event.callerNumber !== null)
   ) {
     return null
   }
@@ -150,8 +176,8 @@ function parseFreshEvent(
   const occurredAt = Date.parse(event.occurredAt)
   if (
     !Number.isFinite(occurredAt) ||
-    Date.now() - occurredAt > DELIVERY_TTL_MS ||
-    occurredAt - Date.now() > 5_000
+    referenceTime - occurredAt > DELIVERY_TTL_MS ||
+    occurredAt - referenceTime > 5_000
   ) {
     return null
   }
@@ -168,8 +194,99 @@ function parseFreshEvent(
   }
 }
 
+function sameReceivingLineVersion(
+  left: ReceivingLineConfig | undefined,
+  right: ReceivingLineConfig,
+): boolean {
+  return Boolean(
+    left &&
+      left.line.id === right.line.id &&
+      left.line.name === right.line.name &&
+      left.version === right.version,
+  )
+}
+
+function sameReceivingLineConfig(
+  left: ReceivingLineConfig | undefined,
+  right: ReceivingLineConfig,
+): boolean {
+  return Boolean(
+    left &&
+      sameReceivingLineVersion(left, right) &&
+      left.readinessAttempt?.attemptId === right.readinessAttempt?.attemptId &&
+      left.readinessAttempt?.lineVersion ===
+        right.readinessAttempt?.lineVersion &&
+      left.readinessAttempt?.expiresAt === right.readinessAttempt?.expiresAt,
+  )
+}
+
+function parsePolledEvents(
+  value: unknown,
+  requestedLines: Map<string, ReceivingLineConfig>,
+  pollStartedAt: number,
+): ParsedCallerIdEvent[] | null {
+  if (!value || typeof value !== 'object') return null
+  const response = value as CallerIdPosEventsResponse
+  if (typeof response.serverTime !== 'string' || !Array.isArray(response.events)) {
+    return null
+  }
+  const serverTime = Date.parse(response.serverTime)
+  if (
+    !Number.isFinite(serverTime) ||
+    response.events.length > MAX_POLLED_EVENTS
+  ) {
+    return null
+  }
+
+  const parsed: ParsedCallerIdEvent[] = []
+  const responseEventIds = new Set<string>()
+  for (const value of response.events) {
+    if (!value || typeof value !== 'object') return null
+    const payload = value as CallerIdPolledPayload
+    const deliveryExpiresAt = Date.parse(payload.deliveryExpiresAt)
+    if (
+      typeof payload.lineId !== 'string' ||
+      !UUID_REGEX.test(payload.lineId) ||
+      typeof payload.lineName !== 'string' ||
+      payload.lineName.length === 0 ||
+      !Number.isSafeInteger(payload.lineVersion) ||
+      payload.lineVersion <= 0 ||
+      typeof payload.deliveryExpiresAt !== 'string' ||
+      !Number.isFinite(deliveryExpiresAt) ||
+      deliveryExpiresAt <= serverTime ||
+      deliveryExpiresAt - serverTime > DELIVERY_TTL_MS ||
+      responseEventIds.has(payload.eventId)
+    ) {
+      return null
+    }
+    const wireEvent = parseFreshEvent(
+      payload,
+      { id: payload.lineId, name: payload.lineName },
+      payload.lineVersion,
+      serverTime,
+    )
+    if (!wireEvent) return null
+    responseEventIds.add(payload.eventId)
+    const expected = requestedLines.get(payload.lineId)
+    if (!expected || payload.lineVersion !== expected.version) {
+      continue
+    }
+    parsed.push({
+      event: { ...wireEvent, lineName: expected.line.name },
+      deliveryDeadline:
+        pollStartedAt +
+        Math.min(DELIVERY_TTL_MS, deliveryExpiresAt - serverTime),
+    })
+  }
+  return parsed
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+function monotonicNow(): number {
+  return globalThis.performance?.now() ?? Date.now()
 }
 
 export async function reportCallerIdReceipt(
@@ -177,12 +294,16 @@ export async function reportCallerIdReceipt(
   receipt: CallerIdReceipt,
   occurredAt?: string,
   isCurrent: () => boolean = () => true,
+  deliveryDeadline?: number,
 ): Promise<boolean> {
   if (!UUID_REGEX.test(eventId)) return false
   const occurred = occurredAt ? Date.parse(occurredAt) : Date.now()
-  const deadline = Number.isFinite(occurred)
-    ? occurred + DELIVERY_TTL_MS
-    : Date.now()
+  const deadline =
+    typeof deliveryDeadline === 'number' && Number.isFinite(deliveryDeadline)
+      ? deliveryDeadline
+      : Number.isFinite(occurred)
+        ? occurred + DELIVERY_TTL_MS
+        : Date.now()
   const backoff = [0, 250, 750]
   for (const waitMs of backoff) {
     if (!isCurrent()) return false
@@ -216,13 +337,21 @@ export function subscribeToCallerIdEvents(
 
   const seen = new Map<string, number>()
   const channels = new Map<string, ActiveSubscription>()
+  const desiredLines = new Map<string, ReceivingLineConfig>()
+  const fallbackLineIds = new Set<string>()
+  const pendingCatchupLineIds = new Set<string>()
   const acknowledged = new Set<string>()
+  const acknowledging = new Set<string>()
   const retryAttempts = new Map<string, number>()
   const retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const pendingRemovals = new Map<string, Promise<unknown>>()
   let disposed = false
   let refreshInFlight = false
+  let eventPollInFlight = false
+  let nextEventPollAt = 0
+  let catchupRevision = 0
   let configInterval: ReturnType<typeof setInterval> | null = null
+  let eventPollInterval: ReturnType<typeof setInterval> | null = null
   let cleanupInterval: ReturnType<typeof setInterval> | null = null
 
   const identityCurrent = () => {
@@ -292,9 +421,14 @@ export function subscribeToCallerIdEvents(
     if (disposed) return
     disposed = true
     if (configInterval) clearInterval(configInterval)
+    if (eventPollInterval) clearInterval(eventPollInterval)
     if (cleanupInterval) clearInterval(cleanupInterval)
     seen.clear()
+    desiredLines.clear()
+    fallbackLineIds.clear()
+    pendingCatchupLineIds.clear()
     acknowledged.clear()
+    acknowledging.clear()
     for (const retryTimer of retryTimers.values()) {
       clearTimeout(retryTimer)
     }
@@ -307,39 +441,173 @@ export function subscribeToCallerIdEvents(
     channels.clear()
   }
 
-  const acknowledge = async (active: ActiveSubscription) => {
-    const attempt = active.config.readinessAttempt
+  const isDesiredConfigCurrent = (config: ReceivingLineConfig) =>
+    !disposed &&
+    identityCurrent() &&
+    sameReceivingLineConfig(desiredLines.get(config.line.id), config)
+
+  const isDesiredLineCurrent = (config: ReceivingLineConfig) =>
+    !disposed &&
+    identityCurrent() &&
+    sameReceivingLineVersion(desiredLines.get(config.line.id), config)
+
+  const acknowledge = async (
+    config: ReceivingLineConfig,
+    transportReady: boolean,
+  ) => {
+    const attempt = config.readinessAttempt
     if (
       disposed ||
       !identityCurrent() ||
-      !active.subscribed ||
+      !transportReady ||
+      !isDesiredConfigCurrent(config) ||
       !attempt ||
       Date.parse(attempt.expiresAt) <= Date.now()
     ) {
       return
     }
     const key = `${attempt.attemptId}:${attempt.lineVersion}`
-    if (acknowledged.has(key)) return
+    if (acknowledged.has(key) || acknowledging.has(key)) return
+    acknowledging.add(key)
     try {
       const result = await posApiPost('/api/pos/caller-id/readiness', {
         attemptId: attempt.attemptId,
-        lineId: active.config.line.id,
+        lineId: config.line.id,
         lineVersion: attempt.lineVersion,
       })
-      if (!disposed && identityCurrent() && result.success) {
+      if (isDesiredConfigCurrent(config) && result.success) {
         acknowledged.add(key)
       }
     } catch {
       // The next bounded config reconciliation retries while the attempt lives.
+    } finally {
+      acknowledging.delete(key)
+    }
+  }
+
+  const deliverEvent = (
+    event: CallerIdBroadcastEvent,
+    deliveryDeadline: number,
+    isCurrent: () => boolean,
+  ) => {
+    if (
+      !isCurrent() ||
+      Date.now() >= deliveryDeadline ||
+      seen.has(event.sipCallId)
+    ) {
+      return
+    }
+    const acceptedEvent: CallerIdBroadcastEvent = {
+      ...event,
+      reportReceipt: (receipt) =>
+        reportCallerIdReceipt(
+          event.sipCallId,
+          receipt,
+          event.timestamp,
+          isCurrent,
+          deliveryDeadline,
+        ),
+    }
+    seen.set(event.sipCallId, Date.now())
+    void acceptedEvent.reportReceipt!({ status: 'received' })
+    if (!isCurrent() || Date.now() >= deliveryDeadline) return
+    try {
+      onEvent(acceptedEvent)
+    } catch {
+      void acceptedEvent.reportReceipt!({
+        status: 'failed',
+        failureCode: 'CLIENT_RUNTIME_ERROR',
+      })
+    }
+  }
+
+  const shouldPollEvents = () => {
+    const now = Date.now()
+    return (
+      desiredLines.size > 0 &&
+      [...desiredLines.values()].some(
+        (config) =>
+          fallbackLineIds.has(config.line.id) ||
+          pendingCatchupLineIds.has(config.line.id) ||
+          (config.readinessAttempt !== undefined &&
+            Date.parse(config.readinessAttempt.expiresAt) > now),
+      )
+    )
+  }
+
+  const pollPendingEvents = async () => {
+    const cadenceTime = monotonicNow()
+    if (
+      disposed ||
+      eventPollInFlight ||
+      !identityCurrent() ||
+      !shouldPollEvents() ||
+      cadenceTime < nextEventPollAt
+    ) {
+      return
+    }
+    const pollStartedAt = Date.now()
+    const requestedLines = new Map(desiredLines)
+    const requestedCatchupRevision = catchupRevision
+    nextEventPollAt = cadenceTime + EVENT_POLL_MS
+    eventPollInFlight = true
+    try {
+      const result = await posApiGet<CallerIdPosEventsResponse>(
+        '/api/pos/caller-id/events',
+      )
+      if (disposed || !identityCurrent()) return
+      if (!result.success) {
+        if (result.status === 429) {
+          nextEventPollAt = Math.max(
+            nextEventPollAt,
+            monotonicNow() + 5 * EVENT_POLL_MS,
+          )
+        }
+        return
+      }
+      const parsed = parsePolledEvents(
+        result.data,
+        requestedLines,
+        pollStartedAt,
+      )
+      if (!parsed) return
+
+      for (const config of requestedLines.values()) {
+        void acknowledge(config, true)
+      }
+      for (const { event, deliveryDeadline } of parsed) {
+        const acceptedConfig = requestedLines.get(event.lineId ?? '')
+        if (!acceptedConfig) continue
+        const isCurrent = () => isDesiredLineCurrent(acceptedConfig)
+        deliverEvent(event, deliveryDeadline, isCurrent)
+      }
+      for (const [lineId, config] of requestedLines) {
+        if (!isDesiredLineCurrent(config)) continue
+        if (
+          requestedCatchupRevision === catchupRevision &&
+          channels.get(lineId)?.subscribed
+        ) {
+          pendingCatchupLineIds.delete(lineId)
+          fallbackLineIds.delete(lineId)
+        }
+      }
+    } catch {
+      // A later bounded poll retries without logging caller data.
+    } finally {
+      eventPollInFlight = false
+      if (shouldPollEvents()) {
+        void pollPendingEvents()
+      }
     }
   }
 
   const refresh = async () => {
-    if (disposed || refreshInFlight) return
+    if (disposed) return
     if (!identityCurrent()) {
       dispose()
       return
     }
+    if (refreshInFlight) return
     refreshInFlight = true
     try {
       const result = await posApiGet<CallerIdPosConfig>(
@@ -351,28 +619,52 @@ export function subscribeToCallerIdEvents(
         return
       }
       if (!result.success) return
-      const desired = new Map<string, ReceivingLineConfig>()
+      const nextDesired = new Map<string, ReceivingLineConfig>()
       for (const value of result.data?.receivingLines ?? []) {
         const parsed = parseReceivingLineConfig(value)
-        if (parsed) desired.set(parsed.line.id, parsed)
+        if (parsed) nextDesired.set(parsed.line.id, parsed)
       }
 
+      const previousDesired = new Map(desiredLines)
       for (const lineId of retryAttempts.keys()) {
-        if (!desired.has(lineId)) clearRetry(lineId)
+        if (!nextDesired.has(lineId)) clearRetry(lineId)
+      }
+      for (const lineId of fallbackLineIds) {
+        if (!nextDesired.has(lineId)) fallbackLineIds.delete(lineId)
+      }
+      for (const lineId of pendingCatchupLineIds) {
+        if (!nextDesired.has(lineId)) pendingCatchupLineIds.delete(lineId)
+      }
+      desiredLines.clear()
+      for (const [lineId, config] of nextDesired) {
+        desiredLines.set(lineId, config)
+        const previous = previousDesired.get(lineId)
+        if (
+          !previous ||
+          previous.version !== config.version ||
+          previous.line.name !== config.line.name
+        ) {
+          pendingCatchupLineIds.add(lineId)
+          catchupRevision += 1
+        }
       }
 
       for (const [lineId, active] of channels) {
-        const next = desired.get(lineId)
-        if (!next || next.line.name !== active.config.line.name) {
+        const next = desiredLines.get(lineId)
+        if (
+          !next ||
+          next.line.name !== active.config.line.name ||
+          next.version !== active.config.version
+        ) {
           clearRetry(lineId)
           retireChannel(lineId, active)
           continue
         }
         active.config = next
-        void acknowledge(active)
+        void acknowledge(active.config, active.subscribed)
       }
 
-      for (const config of desired.values()) {
+      for (const config of desiredLines.values()) {
         if (
           disposed ||
           !identityCurrent() ||
@@ -401,6 +693,7 @@ export function subscribeToCallerIdEvents(
                 const event = parseFreshEvent(
                   message?.payload,
                   active.config.line,
+                  active.config.version,
                 )
                 if (!event || seen.has(event.sipCallId)) return
                 const acceptedSubscription = active
@@ -408,31 +701,9 @@ export function subscribeToCallerIdEvents(
                   !disposed &&
                   identityCurrent() &&
                   channels.get(config.line.id) === acceptedSubscription
-                const acceptedEvent: CallerIdBroadcastEvent = {
-                  ...event,
-                  reportReceipt: (receipt) =>
-                    reportCallerIdReceipt(
-                      event.sipCallId,
-                      receipt,
-                      event.timestamp,
-                      isCurrent,
-                    ),
-                }
                 const deliveryDeadline =
                   Date.parse(event.timestamp) + DELIVERY_TTL_MS
-                seen.set(event.sipCallId, Date.now())
-                void acceptedEvent.reportReceipt!({ status: 'received' })
-                if (!isCurrent() || Date.now() >= deliveryDeadline) {
-                  return
-                }
-                try {
-                  onEvent(acceptedEvent)
-                } catch {
-                  void acceptedEvent.reportReceipt!({
-                    status: 'failed',
-                    failureCode: 'CLIENT_RUNTIME_ERROR',
-                  })
-                }
+                deliverEvent(event, deliveryDeadline, isCurrent)
               },
             )
           active = { config, channel, subscribed: false }
@@ -447,17 +718,25 @@ export function subscribeToCallerIdEvents(
               return
             }
             if (status === 'SUBSCRIBED') {
+              const joined = !active.subscribed
               active.subscribed = true
+              if (joined) {
+                pendingCatchupLineIds.add(config.line.id)
+                catchupRevision += 1
+              }
               clearRetry(config.line.id)
-              void acknowledge(active)
+              void acknowledge(active.config, true)
+              void pollPendingEvents()
             } else if (
               status === 'CHANNEL_ERROR' ||
               status === 'TIMED_OUT' ||
               status === 'CLOSED'
             ) {
               active.subscribed = false
+              fallbackLineIds.add(config.line.id)
               retireChannel(config.line.id, active)
               scheduleRetry(config.line.id)
+              void pollPendingEvents()
               console.warn('[CallerIdRealtimeService] Subscription error', {
                 organizationId,
                 terminalId,
@@ -472,8 +751,11 @@ export function subscribeToCallerIdEvents(
             retireChannel(config.line.id, active)
           }
           scheduleRetry(config.line.id)
+          fallbackLineIds.add(config.line.id)
+          void pollPendingEvents()
         }
       }
+      void pollPendingEvents()
     } catch {
       // Config polling is self-healing and intentionally logs no caller data.
     } finally {
@@ -484,6 +766,10 @@ export function subscribeToCallerIdEvents(
   void refresh()
   if (disposed) return dispose
   configInterval = setInterval(() => void refresh(), CONFIG_POLL_MS)
+  eventPollInterval = setInterval(
+    () => void pollPendingEvents(),
+    EVENT_POLL_MS,
+  )
   cleanupInterval = setInterval(() => {
     const now = Date.now()
     for (const [eventId, receivedAt] of seen) {
@@ -491,10 +777,10 @@ export function subscribeToCallerIdEvents(
     }
     for (const key of acknowledged) {
       const attemptId = key.split(':')[0]
-      const stillPresent = [...channels.values()].some(
-        (active) =>
-          active.config.readinessAttempt?.attemptId === attemptId &&
-          Date.parse(active.config.readinessAttempt.expiresAt) > now,
+      const stillPresent = [...desiredLines.values()].some(
+        (config) =>
+          config.readinessAttempt?.attemptId === attemptId &&
+          Date.parse(config.readinessAttempt.expiresAt) > now,
       )
       if (!stillPresent) acknowledged.delete(key)
     }
