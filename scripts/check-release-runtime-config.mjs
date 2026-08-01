@@ -23,6 +23,12 @@ if (!fs.existsSync(workflowPath)) {
 }
 
 const workflow = fs.readFileSync(workflowPath, 'utf8');
+const verificationStepMarker = '      - name: Verify POS Tauri contracts and runtime';
+const verificationStepStart = workflow.indexOf(verificationStepMarker);
+const verificationNextStepStart = workflow.indexOf(
+  '\n      - name:',
+  verificationStepStart + verificationStepMarker.length,
+);
 const buildStepMarker = '      - name: Build NSIS bundle';
 const buildStepStart = workflow.indexOf(buildStepMarker);
 const nextStepStart = workflow.indexOf('\n      - name:', buildStepStart + buildStepMarker.length);
@@ -31,6 +37,16 @@ if (buildStepStart < 0) {
   console.error('POS release runtime config contract failed: Build NSIS bundle step is missing.');
   process.exit(1);
 }
+
+if (verificationStepStart < 0) {
+  console.error('POS release runtime config contract failed: verification step is missing.');
+  process.exit(1);
+}
+
+const verificationStep = workflow.slice(
+  verificationStepStart,
+  verificationNextStepStart < 0 ? workflow.length : verificationNextStepStart,
+);
 
 const buildStep = workflow.slice(
   buildStepStart,
@@ -46,6 +62,10 @@ const requiredTokens = [
 const violations = requiredTokens
   .filter((token) => !buildStep.includes(token))
   .map((token) => `missing ${token}`);
+
+if (!verificationStep.includes('npm run test:unit')) {
+  violations.push('release verification must run the POS unit regression suite');
+}
 
 if (buildStep.includes('SUPABASE_SERVICE_ROLE_KEY')) {
   violations.push('service-role credentials must never be injected into the renderer build');

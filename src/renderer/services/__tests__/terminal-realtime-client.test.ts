@@ -35,7 +35,7 @@ describe('createTerminalRealtimeSession', () => {
     })
   })
 
-  it('uses a standalone client with an isolated in-memory token provider', async () => {
+  it('pins the exact non-null terminal JWT in the standalone Realtime client', async () => {
     const session = createTerminalRealtimeSession(
       'https://project.example.com',
       'anon-key',
@@ -59,7 +59,8 @@ describe('createTerminalRealtimeSession', () => {
     await session.authClient.realtime.setAuth('terminal-jwt')
 
     await expect(options.accessToken?.()).resolves.toBe('terminal-jwt')
-    expect(mocks.setAuth).toHaveBeenCalledWith()
+    expect(mocks.setAuth).toHaveBeenCalledTimes(1)
+    expect(mocks.setAuth).toHaveBeenCalledWith('terminal-jwt')
   })
 
   it('disconnects terminal channels and clears to real null auth', async () => {

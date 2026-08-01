@@ -105,8 +105,9 @@ export function createTerminalRealtimeSession(
           await realtime.disconnect()
           return
         }
-        // No argument deliberately re-reads the isolated provider above.
-        await realtime.setAuth()
+        // Pin the exact terminal JWT so channel joins and resubscriptions keep
+        // the same POS identity instead of re-entering callback auth mode.
+        await realtime.setAuth(token)
       },
     },
   }
