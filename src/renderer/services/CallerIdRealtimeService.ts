@@ -629,6 +629,21 @@ export function subscribeToCallerIdEvents(
       }
 
       const previousDesired = new Map(desiredLines)
+      const now = Date.now()
+      for (const [lineId, previous] of previousDesired) {
+        if (nextDesired.has(lineId)) continue
+
+        const existingCatchupUntil = postAttemptCatchupUntil.get(lineId) ?? 0
+        if (previous.readinessAttempt) {
+          postAttemptCatchupUntil.set(lineId, now + DELIVERY_TTL_MS)
+          nextDesired.set(lineId, {
+            line: previous.line,
+            version: previous.version,
+          })
+        } else if (existingCatchupUntil > now) {
+          nextDesired.set(lineId, previous)
+        }
+      }
       for (const lineId of retryAttempts.keys()) {
         if (!nextDesired.has(lineId)) clearRetry(lineId)
       }
