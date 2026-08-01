@@ -15,7 +15,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -46,6 +46,7 @@ pub struct GrandstreamFxoSourceLine {
     pub source: CallerIdSourceConfig,
     pub name: String,
     pub line_version: u64,
+    pub is_receiving_target: bool,
     pub readiness_attempt: Option<ReadinessAttempt>,
 }
 
@@ -138,11 +139,6 @@ fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> 
         return Err("Caller ID source line is not a reviewed Grandstream FXO configuration".into());
     }
 
-    // Receiving on the source terminal is optional. Reading the server-owned
-    // flag here makes the strict wire contract reject omitted/mistyped data
-    // without coupling connector activation to the terminal also being a
-    // display target.
-    let _is_receiving_target = wire.is_receiving_target;
     if !(1024..=u16::MAX).contains(&wire.config.listen_port) {
         return Err("Grandstream FXO listen port must be between 1024 and 65535".into());
     }
@@ -194,6 +190,7 @@ fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> 
         },
         name: wire.name.trim().to_string(),
         line_version: wire.version,
+        is_receiving_target: wire.is_receiving_target,
         readiness_attempt,
     })
 }
@@ -293,7 +290,7 @@ fn requires_udp_rebind(
     current: &GrandstreamFxoSourceLine,
     desired: &GrandstreamFxoSourceLine,
 ) -> bool {
-    current.source != desired.source
+    current.source != desired.source || current.is_receiving_target != desired.is_receiving_target
 }
 
 fn build_source_readiness_ack(
@@ -1091,12 +1088,12 @@ async fn reconcile_active_lines(
         let (event_sender, event_receiver) = mpsc::channel(EVENT_QUEUE_CAPACITY);
         let publisher_stopped = worker_stopped.clone();
         let publisher_app = app_handle.clone();
-        let publisher_source = line.source.clone();
+        let publisher_line = line.clone();
         let publisher_cancel = line_cancel.clone();
         let publisher_task = tauri::async_runtime::spawn(async move {
             run_event_publisher(
                 publisher_app,
-                publisher_source,
+                publisher_line,
                 event_receiver,
                 publisher_cancel,
             )
@@ -1289,7 +1286,7 @@ async fn run_udp_line(
 
 async fn run_event_publisher(
     app_handle: tauri::AppHandle,
-    source: CallerIdSourceConfig,
+    line: GrandstreamFxoSourceLine,
     mut events: mpsc::Receiver<PendingEvent>,
     cancel: CancellationToken,
 ) {
@@ -1300,7 +1297,18 @@ async fn run_event_publisher(
                 let Some(pending) = pending else {
                     return;
                 };
-                publish_event(&app_handle, &source, pending, &cancel).await;
+                if let Some(payload) = build_local_event_body_for_target(&line, &pending) {
+                    if app_handle
+                        .emit("caller_id_validated_local_call", payload)
+                        .is_err()
+                    {
+                        warn!(
+                            line_id = %line.source.line_id,
+                            "Validated local Caller ID event could not reach the renderer"
+                        );
+                    }
+                }
+                publish_event(&app_handle, &line.source, pending, &cancel).await;
             }
         }
     }
@@ -1371,6 +1379,33 @@ fn build_event_body(source: &CallerIdSourceConfig, pending: &PendingEvent) -> Va
         "presentation": presentation,
         "occurredAt": pending.occurred_at.to_rfc3339_opts(SecondsFormat::Millis, true),
     })
+}
+
+fn build_local_event_body(line: &GrandstreamFxoSourceLine, pending: &PendingEvent) -> Value {
+    let presentation = match pending.invite.presentation {
+        Presentation::Allowed => "allowed",
+        Presentation::Restricted => "restricted",
+    };
+    serde_json::json!({
+        "schemaVersion": 1,
+        "sourceId": line.source.source_id,
+        "sourceVersion": line.source.source_version,
+        "lineId": line.source.line_id,
+        "lineName": line.name,
+        "lineVersion": line.line_version,
+        "providerEventId": pending.invite.provider_event_id,
+        "callerNumber": pending.invite.caller_number,
+        "presentation": presentation,
+        "occurredAt": pending.occurred_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+    })
+}
+
+fn build_local_event_body_for_target(
+    line: &GrandstreamFxoSourceLine,
+    pending: &PendingEvent,
+) -> Option<Value> {
+    line.is_receiving_target
+        .then(|| build_local_event_body(line, pending))
 }
 
 #[cfg(test)]
@@ -1454,6 +1489,17 @@ mod tests {
 
     fn parse_source_lines(value: &Value) -> Result<Vec<GrandstreamFxoSourceLine>, String> {
         validate_ip_trust_source_lines(value)
+    }
+
+    #[test]
+    fn preserves_server_selected_local_receiving_target() {
+        let receiving = parse_source_line(&source_line()).unwrap();
+        assert!(receiving.is_receiving_target);
+
+        let mut source_only = source_line();
+        source_only["isReceivingTarget"] = json!(false);
+        let source_only = parse_source_line(&source_only).unwrap();
+        assert!(!source_only.is_receiving_target);
     }
 
     async fn installed_test_generation(manager: &Arc<CallerIdManager>) -> (u64, CancellationToken) {
@@ -2274,6 +2320,7 @@ mod tests {
             },
             name: "Runtime test".into(),
             line_version: 1,
+            is_receiving_target: true,
             readiness_attempt: None,
         };
         let manager = Arc::new(CallerIdManager::new());
@@ -2399,6 +2446,71 @@ mod tests {
         assert_eq!(body["sourceChannel"], "fxo-3");
         assert!(body.get("trustedDeviceIp").is_none());
         assert!(body.get("deviceProfileKey").is_none());
+    }
+
+    #[test]
+    fn local_event_body_contains_only_validated_display_identity() {
+        let line = parse_source_line(&source_line()).unwrap();
+        let pending = PendingEvent {
+            invite: ParsedInvite {
+                caller_number: Some("2101234567".into()),
+                presentation: Presentation::Allowed,
+                provider_event_id: "local-display-call@ht813".into(),
+            },
+            occurred_at: DateTime::parse_from_rfc3339("2026-07-28T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+
+        let body = build_local_event_body(&line, &pending);
+
+        assert_eq!(body["schemaVersion"], 1);
+        assert_eq!(body["sourceId"], SOURCE_ID);
+        assert_eq!(body["sourceVersion"], 7);
+        assert_eq!(body["lineId"], LINE_ID);
+        assert_eq!(body["lineName"], "Cosmote line");
+        assert_eq!(body["lineVersion"], 4);
+        assert_eq!(body["providerEventId"], "local-display-call@ht813");
+        assert_eq!(body["callerNumber"], "2101234567");
+        assert_eq!(body["presentation"], "allowed");
+        assert_eq!(body["occurredAt"], "2026-07-28T12:00:00.000Z");
+        assert!(body.get("trustedDeviceIp").is_none());
+        assert!(body.get("sourceChannel").is_none());
+    }
+
+    #[test]
+    fn restricted_local_event_body_never_contains_a_phone_number() {
+        let line = parse_source_line(&source_line()).unwrap();
+        let pending = PendingEvent {
+            invite: ParsedInvite {
+                caller_number: None,
+                presentation: Presentation::Restricted,
+                provider_event_id: "private-local-display@ht813".into(),
+            },
+            occurred_at: Utc::now(),
+        };
+
+        let body = build_local_event_body(&line, &pending);
+
+        assert_eq!(body["presentation"], "restricted");
+        assert!(body["callerNumber"].is_null());
+    }
+
+    #[test]
+    fn source_only_terminal_does_not_build_a_local_display_event() {
+        let mut source_only = source_line();
+        source_only["isReceivingTarget"] = json!(false);
+        let source_only = parse_source_line(&source_only).unwrap();
+        let pending = PendingEvent {
+            invite: ParsedInvite {
+                caller_number: Some("2101234567".into()),
+                presentation: Presentation::Allowed,
+                provider_event_id: "source-only-call@ht813".into(),
+            },
+            occurred_at: Utc::now(),
+        };
+
+        assert!(build_local_event_body_for_target(&source_only, &pending).is_none());
     }
 
     #[test]

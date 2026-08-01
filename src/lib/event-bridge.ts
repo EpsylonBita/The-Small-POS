@@ -117,6 +117,7 @@ const EVENT_MAP: Record<string, string> = {
 
   // --- Caller ID events ---
   'caller_id_incoming_call': 'callerid:incoming-call',
+  'caller_id_validated_local_call': 'callerid:validated-local-call',
   'caller_id_status_changed': 'callerid:status-changed',
 
   // --- ECR events ---

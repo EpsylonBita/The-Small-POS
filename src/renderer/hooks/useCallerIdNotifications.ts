@@ -1,16 +1,18 @@
 /**
- * useCallerIdNotifications — Displays validated Caller ID v2 private Realtime
- * events. Legacy native SIP events are intentionally outside this hook.
+ * useCallerIdNotifications — Displays validated local Caller ID events
+ * immediately, then merges their terminal-scoped cloud delivery evidence.
+ * Legacy native SIP events are intentionally outside this hook.
  *
  * Gated by `plugin_integrations`; caller_id itself is a plugin integration.
  */
 import { useEffect, useRef, useCallback } from 'react'
+import { offEvent, onEvent } from '../../lib'
 import { useModules } from '../contexts/module-context'
 import { getCachedTerminalCredentials } from '../services/terminal-credentials'
 import {
-  reportCallerIdReceipt,
   subscribeToCallerIdEvents,
   type CallerIdBroadcastEvent,
+  type CallerIdReceipt,
   type CallerIdRealtimeClient,
 } from '../services/CallerIdRealtimeService'
 import { showCallerIdToast } from '../components/callerid/CallerIdPopup'
@@ -21,65 +23,94 @@ interface CallerIdNotificationsOptions {
   realtimeClient?: CallerIdRealtimeClient | null
 }
 
+interface AcceptedCallState {
+  event: CallerIdBroadcastEvent
+  completion: CallerIdReceipt | null
+  receiptReported: boolean
+}
+
+interface ValidatedLocalCallPayload {
+  schemaVersion: number
+  sourceId: string
+  sourceVersion: number
+  lineId: string
+  lineName: string
+  lineVersion: number
+  providerEventId: string
+  callerNumber: string | null
+  presentation: 'allowed' | 'restricted'
+  occurredAt: string
+}
+
+const VALIDATED_LOCAL_CALL_CHANNEL = 'callerid:validated-local-call'
+const LOCAL_EVENT_TTL_MS = 30_000
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const LOCAL_PHONE_REGEX = /^\+?\d{3,32}$/
+const PROVIDER_EVENT_ID_REGEX = /^[\x21-\x7e]{1,255}$/
+const LOCAL_PAYLOAD_KEYS = [
+  'callerNumber',
+  'lineId',
+  'lineName',
+  'lineVersion',
+  'occurredAt',
+  'presentation',
+  'providerEventId',
+  'schemaVersion',
+  'sourceId',
+  'sourceVersion',
+] as const
+
 export function useCallerIdNotifications(options?: CallerIdNotificationsOptions) {
   const { isModuleEnabled } = useModules()
   const enabled = isModuleEnabled('plugin_integrations' as any)
   const realtimeReady = options?.realtimeReady === true
   const realtimeClient = options?.realtimeClient ?? null
-  const callEventsRef = useRef(new Map<string, CallerIdBroadcastEvent>())
+  const callEventsRef = useRef(new Map<string, AcceptedCallState>())
   const cleanupTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>())
-  const optionsRef = useRef(options)
-  optionsRef.current = options
 
   const handleCallEvent = useCallback((event: CallerIdBroadcastEvent) => {
-    const existing = callEventsRef.current.get(event.sipCallId)
-    const merged = mergeCallerIdEvent(existing, event)
-
-    if (existing && callerIdEventsEqual(existing, merged)) {
+    const eventKey = callerIdEventKey(event)
+    const existing = callEventsRef.current.get(eventKey)
+    if (existing) {
+      existing.event = mergeCallerIdEvent(existing.event, event)
+      flushCallerIdCompletion(existing)
       return
     }
 
-    callEventsRef.current.set(event.sipCallId, merged)
+    const accepted: AcceptedCallState = {
+      event: mergeCallerIdEvent(undefined, event),
+      completion: null,
+      receiptReported: false,
+    }
+    callEventsRef.current.set(eventKey, accepted)
 
-    const existingTimer = cleanupTimersRef.current.get(event.sipCallId)
+    const existingTimer = cleanupTimersRef.current.get(eventKey)
     if (existingTimer) {
       clearTimeout(existingTimer)
     }
 
     const cleanupTimer = setTimeout(() => {
-      callEventsRef.current.delete(event.sipCallId)
-      cleanupTimersRef.current.delete(event.sipCallId)
-    }, 30_000)
-    cleanupTimersRef.current.set(event.sipCallId, cleanupTimer)
-
-    const reportReceipt =
-      merged.reportReceipt ??
-      ((receipt: Parameters<typeof reportCallerIdReceipt>[1]) =>
-        reportCallerIdReceipt(
-          merged.sipCallId,
-          receipt,
-          merged.timestamp,
-        ))
-    let completionReported = false
-    const reportCompletion = (
-      receipt: Parameters<typeof reportCallerIdReceipt>[1],
-    ) => {
-      if (completionReported) return
-      completionReported = true
-      void reportReceipt(receipt)
-    }
+      callEventsRef.current.delete(eventKey)
+      cleanupTimersRef.current.delete(eventKey)
+    }, LOCAL_EVENT_TTL_MS)
+    cleanupTimersRef.current.set(eventKey, cleanupTimer)
 
     try {
-      showCallerIdToast(merged, {
+      showCallerIdToast(accepted.event, {
         onSearchCustomer: () =>
-          navigateToCallerIdCustomerSearch(merged.callerNumber),
-        onDisplayed: () => reportCompletion({ status: 'displayed' }),
+          navigateToCallerIdCustomerSearch(accepted.event.callerNumber),
+        onDisplayed: () => {
+          accepted.completion ??= { status: 'displayed' }
+          flushCallerIdCompletion(accepted)
+        },
       })
     } catch {
-      reportCompletion({
+      accepted.completion = {
         status: 'failed',
         failureCode: 'DISPLAY_FAILED',
-      })
+      }
+      flushCallerIdCompletion(accepted)
     }
   }, [])
 
@@ -97,6 +128,23 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
 
     return clearAcceptedEvents
   }, [enabled])
+
+  useEffect(() => {
+    if (!enabled) {
+      return
+    }
+
+    const handleValidatedLocalCall = (payload: unknown) => {
+      const event = parseValidatedLocalCall(payload)
+      if (event) {
+        handleCallEvent(event)
+      }
+    }
+    onEvent(VALIDATED_LOCAL_CALL_CHANNEL, handleValidatedLocalCall)
+    return () => {
+      offEvent(VALIDATED_LOCAL_CALL_CHANNEL, handleValidatedLocalCall)
+    }
+  }, [enabled, handleCallEvent])
 
   useEffect(() => {
     if (!enabled || !realtimeReady || !realtimeClient) {
@@ -125,6 +173,92 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
   }, [enabled, handleCallEvent, realtimeClient, realtimeReady])
 }
 
+function parseValidatedLocalCall(value: unknown): CallerIdBroadcastEvent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const keys = Object.keys(value).sort()
+  if (
+    keys.length !== LOCAL_PAYLOAD_KEYS.length ||
+    keys.some((key, index) => key !== LOCAL_PAYLOAD_KEYS[index])
+  ) {
+    return null
+  }
+  const payload = value as ValidatedLocalCallPayload
+  if (
+    payload.schemaVersion !== 1 ||
+    typeof payload.sourceId !== 'string' ||
+    !UUID_REGEX.test(payload.sourceId) ||
+    !Number.isSafeInteger(payload.sourceVersion) ||
+    payload.sourceVersion <= 0 ||
+    typeof payload.lineId !== 'string' ||
+    !UUID_REGEX.test(payload.lineId) ||
+    typeof payload.lineName !== 'string' ||
+    payload.lineName.length === 0 ||
+    payload.lineName.length > 120 ||
+    payload.lineName.trim() !== payload.lineName ||
+    !Number.isSafeInteger(payload.lineVersion) ||
+    payload.lineVersion <= 0 ||
+    typeof payload.providerEventId !== 'string' ||
+    !PROVIDER_EVENT_ID_REGEX.test(payload.providerEventId) ||
+    !['allowed', 'restricted'].includes(payload.presentation) ||
+    (payload.presentation === 'allowed'
+      ? typeof payload.callerNumber !== 'string' ||
+        !LOCAL_PHONE_REGEX.test(payload.callerNumber)
+      : payload.callerNumber !== null) ||
+    typeof payload.occurredAt !== 'string'
+  ) {
+    return null
+  }
+  const occurredAt = Date.parse(payload.occurredAt)
+  const now = Date.now()
+  if (
+    !Number.isFinite(occurredAt) ||
+    now - occurredAt > LOCAL_EVENT_TTL_MS ||
+    occurredAt - now > 5_000
+  ) {
+    return null
+  }
+
+  return {
+    callerNumber: payload.callerNumber ?? 'Private number',
+    callerName: null,
+    customer: null,
+    sipCallId: payload.providerEventId,
+    timestamp: payload.occurredAt,
+    lineId: payload.lineId,
+    lineName: payload.lineName,
+    presentation: payload.presentation,
+  }
+}
+
+function callerIdEventKey(event: CallerIdBroadcastEvent): string {
+  if (!event.lineId || !event.presentation) {
+    return `event:${event.sipCallId}`
+  }
+  const numberSuffix =
+    event.presentation === 'allowed'
+      ? event.callerNumber.replace(/\D/g, '').slice(-8)
+      : 'private'
+  const occurredAt = Date.parse(event.timestamp)
+  const timeKey = Number.isFinite(occurredAt)
+    ? String(occurredAt)
+    : event.timestamp
+  return [
+    'call',
+    event.lineId,
+    timeKey,
+    event.presentation,
+    numberSuffix,
+  ].join(':')
+}
+
+function flushCallerIdCompletion(state: AcceptedCallState): void {
+  if (!state.completion || state.receiptReported) return
+  const reportReceipt = state.event.reportReceipt
+  if (!reportReceipt) return
+  state.receiptReported = true
+  void reportReceipt(state.completion)
+}
+
 function mergeCallerIdEvent(
   existing: CallerIdBroadcastEvent | undefined,
   incoming: CallerIdBroadcastEvent,
@@ -146,43 +280,12 @@ function mergeCallerIdEvent(
           notes: incomingCustomer.notes ?? existingCustomer?.notes ?? null,
         }
       : existingCustomer,
-    sipCallId: incoming.sipCallId,
-    timestamp: incoming.timestamp || existing?.timestamp || new Date().toISOString(),
+    sipCallId: existing?.sipCallId ?? incoming.sipCallId,
+    timestamp: existing?.timestamp || incoming.timestamp || new Date().toISOString(),
     sourceTerminalId: incoming.sourceTerminalId ?? existing?.sourceTerminalId ?? null,
+    lineId: incoming.lineId ?? existing?.lineId,
+    lineName: incoming.lineName ?? existing?.lineName,
+    presentation: incoming.presentation ?? existing?.presentation,
     reportReceipt: incoming.reportReceipt ?? existing?.reportReceipt,
   }
-}
-
-function callerIdEventsEqual(a: CallerIdBroadcastEvent, b: CallerIdBroadcastEvent): boolean {
-  return (
-    a.callerNumber === b.callerNumber &&
-    (a.callerName ?? null) === (b.callerName ?? null) &&
-    a.sipCallId === b.sipCallId &&
-    a.timestamp === b.timestamp &&
-    (a.sourceTerminalId ?? null) === (b.sourceTerminalId ?? null) &&
-    callerIdCustomersEqual(a.customer, b.customer)
-  )
-}
-
-function callerIdCustomersEqual(
-  a: CallerIdBroadcastEvent['customer'],
-  b: CallerIdBroadcastEvent['customer'],
-): boolean {
-  if (a === b) {
-    return true
-  }
-
-  if (!a || !b) {
-    return !a && !b
-  }
-
-  return (
-    a.id === b.id &&
-    (a.name ?? null) === (b.name ?? null) &&
-    (a.phone ?? null) === (b.phone ?? null) &&
-    (a.email ?? null) === (b.email ?? null) &&
-    (a.address ?? null) === (b.address ?? null) &&
-    (a.is_banned ?? null) === (b.is_banned ?? null) &&
-    (a.notes ?? null) === (b.notes ?? null)
-  )
 }
