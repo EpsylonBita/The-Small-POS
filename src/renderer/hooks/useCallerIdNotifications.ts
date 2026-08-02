@@ -147,7 +147,7 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
   }, [enabled, handleCallEvent])
 
   useEffect(() => {
-    if (!enabled || !realtimeReady || !realtimeClient) {
+    if (!enabled) {
       return
     }
 
@@ -157,7 +157,7 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
     }
 
     return subscribeToCallerIdEvents(
-      realtimeClient,
+      realtimeReady ? realtimeClient : null,
       creds.organizationId,
       creds.terminalId,
       handleCallEvent,

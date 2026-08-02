@@ -80,10 +80,10 @@ requireContract(
   'passive installs must enter the non-interactive migration branch',
 )
 requireContract(
-  /\$UpdateMode\s*(?:==|=)\s*1[\s\S]*?Goto\s+caller_id_firewall_update_migration/i.test(
-    postInstall,
+  !/\$UpdateMode\s*(?:==|=)\s*1[\s\S]*?Goto\s+caller_id_firewall_update_migration/i.test(
+    postInstall.slice(0, promptIndex),
   ),
-  'updater installs must enter the non-interactive migration branch',
+  'interactive updater installs must reach the explicit Private-network consent prompt',
 )
 requireContract(
   migrationActionIndex >= 0 && migrationActionIndex < doneLabelIndex,

@@ -842,6 +842,74 @@ describe('CallerIdRealtimeService', () => {
     unsubscribe()
   })
 
+  it('keeps delivering authenticated polled events without a Realtime client', async () => {
+    vi.mocked(Date.now).mockRestore()
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const eventId = '20000000-0000-4000-8000-000000000040'
+    let eventPolls = 0
+    mocks.posApiGet.mockImplementation((path: string) => {
+      if (path === '/api/pos/caller-id/config') {
+        return Promise.resolve({
+          success: true,
+          data: {
+            receivingLines: [
+              {
+                id: firstLineId,
+                name: 'Main line',
+                topic: `callerid:line:${firstLineId}`,
+                version: 1,
+              },
+            ],
+          },
+        })
+      }
+      if (path === '/api/pos/caller-id/events') {
+        eventPolls += 1
+        return Promise.resolve({
+          success: true,
+          data: {
+            serverTime: new Date(Date.now()).toISOString(),
+            events:
+              eventPolls === 1
+                ? []
+                : [
+                    {
+                      eventId,
+                      lineId: firstLineId,
+                      lineName: 'Main line',
+                      lineVersion: 1,
+                      callerNumber: '+302101234567',
+                      presentation: 'allowed',
+                      occurredAt: '2026-07-27T10:00:31.000Z',
+                      deliveryExpiresAt: '2026-07-27T10:00:51.000Z',
+                    },
+                  ],
+          },
+        })
+      }
+      return Promise.reject(new Error(`Unexpected POS API path: ${path}`))
+    })
+    const onEvent = vi.fn()
+
+    const unsubscribe = subscribeToCallerIdEventsWithClient(
+      null,
+      'org-1',
+      'terminal-1',
+      onEvent,
+    )
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(mocks.channel).not.toHaveBeenCalled()
+    expect(eventPolls).toBeGreaterThanOrEqual(2)
+    expect(onEvent).toHaveBeenCalledTimes(1)
+    expect(mocks.posApiPost).toHaveBeenCalledWith(
+      `/api/pos/caller-id/events/${eventId}/receipt`,
+      { status: 'received' },
+    )
+    unsubscribe()
+  })
+
   it('keeps startup catch-up active until an asynchronous Realtime subscription is joined', async () => {
     vi.mocked(Date.now).mockRestore()
     vi.useFakeTimers()
@@ -1018,7 +1086,7 @@ describe('CallerIdRealtimeService', () => {
     await vi.advanceTimersByTimeAsync(31_000)
     const pollsAfterCatchupWindow = eventPolls
     await vi.advanceTimersByTimeAsync(5_000)
-    expect(eventPolls).toBe(pollsAfterCatchupWindow)
+    expect(eventPolls).toBeGreaterThan(pollsAfterCatchupWindow)
     unsubscribe()
   })
 

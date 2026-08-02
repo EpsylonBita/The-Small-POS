@@ -1,8 +1,9 @@
 /**
- * Private, terminal-scoped Caller ID Realtime subscriptions.
+ * Private, terminal-scoped Caller ID delivery.
  *
- * Configuration is reconciled continuously so a prepared setup line can be
- * subscribed and acknowledged without restarting the POS.
+ * The strict terminal API is the continuous safety path. Private Realtime is
+ * an optional low-latency accelerator, so a failed or unavailable channel
+ * cannot suppress selected-line delivery.
  */
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
 import { posApiGet, posApiPost } from '../utils/api-helpers'
@@ -323,11 +324,11 @@ export async function reportCallerIdReceipt(
 }
 
 /**
- * Subscribe to every line selected for this terminal and continuously
- * reconcile prepared tests. Cleanup is valid immediately.
+ * Deliver every line selected for this terminal and continuously reconcile
+ * prepared tests. Cleanup is valid immediately.
  */
 export function subscribeToCallerIdEvents(
-  client: CallerIdRealtimeClient,
+  client: CallerIdRealtimeClient | null,
   organizationId: string,
   terminalId: string,
   onEvent: CallerIdEventCallback,
@@ -396,6 +397,8 @@ export function subscribeToCallerIdEvents(
     }
     if (pendingRemovals.has(lineId)) return
 
+    if (!client) return
+
     let removal: Promise<unknown>
     try {
       removal = Promise.resolve(client.removeChannel(active.channel)).catch(
@@ -437,8 +440,10 @@ export function subscribeToCallerIdEvents(
     retryTimers.clear()
     retryAttempts.clear()
     pendingRemovals.clear()
-    for (const { channel } of channels.values()) {
-      void client.removeChannel(channel)
+    if (client) {
+      for (const { channel } of channels.values()) {
+        void client.removeChannel(channel)
+      }
     }
     channels.clear()
   }
@@ -524,18 +529,7 @@ export function subscribeToCallerIdEvents(
   }
 
   const shouldPollEvents = () => {
-    const now = Date.now()
-    return (
-      desiredLines.size > 0 &&
-      [...desiredLines.values()].some(
-        (config) =>
-          fallbackLineIds.has(config.line.id) ||
-          pendingCatchupLineIds.has(config.line.id) ||
-          (postAttemptCatchupUntil.get(config.line.id) ?? 0) > now ||
-          (config.readinessAttempt !== undefined &&
-            Date.parse(config.readinessAttempt.expiresAt) > now),
-      )
-    )
+    return desiredLines.size > 0
   }
 
   const pollPendingEvents = async () => {
@@ -698,6 +692,7 @@ export function subscribeToCallerIdEvents(
         if (
           disposed ||
           !identityCurrent() ||
+          !client ||
           channels.has(config.line.id) ||
           retryTimers.has(config.line.id) ||
           pendingRemovals.has(config.line.id) ||

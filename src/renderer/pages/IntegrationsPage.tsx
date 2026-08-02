@@ -745,7 +745,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
                   : t('common.no', 'No')}
               </strong>
               <span>{t('integrations.efood.lastError', 'Last error')}</span>
-              <strong className="truncate" title={integration.lastError || ''}>{integration.lastError || '—'}</strong>
+              <strong className="truncate">{integration.lastError || '—'}</strong>
             </div>
           )}
         </div>

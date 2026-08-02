@@ -6,10 +6,10 @@
 ; __FILEDIR__ inside a hook macro would resolve to Tauri's generated installer.
 !define CALLER_ID_FIREWALL_HELPER "${__FILEDIR__}\caller-id-firewall.ps1"
 
-; A normal interactive install asks before changing firewall state. The Tauri
-; updater runs as /P /UPDATE, so it only narrows a compatible active Public app
-; grant whose constraints prove the replacement is no broader; it never creates
-; a first-time inbound grant on an unrelated installation.
+; Every interactive install or manual upgrade asks before changing firewall
+; state. Silent/passive updater runs only narrow a compatible active Public app
+; grant whose constraints prove the replacement is no broader; they never
+; create a first-time inbound grant on an unrelated installation.
 !macro NSIS_HOOK_POSTINSTALL
   InitPluginsDir
   File /oname=$PLUGINSDIR\caller-id-firewall.ps1 "${CALLER_ID_FIREWALL_HELPER}"
@@ -18,10 +18,6 @@
   ${If} $PassiveMode = 1
     Goto caller_id_firewall_update_migration
   ${EndIf}
-  ${If} $UpdateMode = 1
-    Goto caller_id_firewall_update_migration
-  ${EndIf}
-
   MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON1 "Enable Caller ID on this trusted store's Private network?$\r$\n$\r$\nYes removes old Public access and allows only local UDP 5060. No makes no network changes.$\r$\n$\r$\nΝα ενεργοποιηθεί η αναγνώριση κλήσεων στο Ιδιωτικό δίκτυο του καταστήματος;$\r$\n$\r$\nΤο Ναι αφαιρεί την παλιά Δημόσια πρόσβαση και επιτρέπει μόνο τοπικό UDP 5060. Το Όχι δεν αλλάζει το δίκτυο." IDNO caller_id_firewall_done
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\caller-id-firewall.ps1" -Action Install -ExecutablePath "$INSTDIR\${MAINBINARYNAME}.exe"'
   Pop $0

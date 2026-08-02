@@ -56,15 +56,21 @@ describe('useCallerIdNotifications', () => {
     mocks.subscribeToCallerIdEvents.mockReturnValue(mocks.unsubscribeRealtime)
   })
 
-  it('does not subscribe before the authenticated terminal client is available', () => {
+  it('starts authenticated cloud polling before Realtime is available', () => {
     renderHook(() =>
       useCallerIdNotifications({
-        realtimeReady: true,
+        realtimeReady: false,
         realtimeClient: null,
       }),
     )
 
-    expect(mocks.subscribeToCallerIdEvents).not.toHaveBeenCalled()
+    expect(mocks.subscribeToCallerIdEvents).toHaveBeenCalledWith(
+      null,
+      'org-1',
+      'terminal-1',
+      expect.any(Function),
+      expect.any(Function),
+    )
   })
 
   it('invalidates the subscription when only the terminal branch changes', () => {
@@ -92,7 +98,13 @@ describe('useCallerIdNotifications', () => {
       { initialProps: { realtimeReady: false } },
     )
 
-    expect(mocks.subscribeToCallerIdEvents).not.toHaveBeenCalled()
+    expect(mocks.subscribeToCallerIdEvents).toHaveBeenCalledWith(
+      null,
+      'org-1',
+      'terminal-1',
+      expect.any(Function),
+      expect.any(Function),
+    )
 
     const legacyRegistration = mocks.onEvent.mock.calls.find(
       ([eventName]) => eventName === 'callerid:incoming-call',
@@ -119,7 +131,7 @@ describe('useCallerIdNotifications', () => {
       expect.any(Function),
     )
     const identityCurrent =
-      mocks.subscribeToCallerIdEvents.mock.calls[0]?.[4]
+      mocks.subscribeToCallerIdEvents.mock.calls.at(-1)?.[4]
     expect(identityCurrent()).toBe(true)
     mocks.getCachedTerminalCredentials.mockReturnValue({
       terminalId: 'terminal-2',
@@ -130,7 +142,7 @@ describe('useCallerIdNotifications', () => {
     expect(identityCurrent()).toBe(false)
 
     rerender({ realtimeReady: false })
-    expect(mocks.unsubscribeRealtime).toHaveBeenCalledTimes(1)
+    expect(mocks.unsubscribeRealtime).toHaveBeenCalledTimes(2)
 
     unmount()
     expect(mocks.offEvent).not.toHaveBeenCalledWith(
@@ -167,7 +179,13 @@ describe('useCallerIdNotifications', () => {
       })
     })
 
-    expect(mocks.subscribeToCallerIdEvents).not.toHaveBeenCalled()
+    expect(mocks.subscribeToCallerIdEvents).toHaveBeenCalledWith(
+      null,
+      'org-1',
+      'terminal-1',
+      expect.any(Function),
+      expect.any(Function),
+    )
     expect(mocks.showCallerIdToast).toHaveBeenCalledTimes(1)
     expect(mocks.showCallerIdToast).toHaveBeenCalledWith(
       expect.objectContaining({
