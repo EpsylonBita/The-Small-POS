@@ -19,6 +19,14 @@ const firewallHelperPath = resolve(
 const firewallHelperSource = existsSync(firewallHelperPath)
   ? readFileSync(firewallHelperPath, 'utf8')
   : ''
+const firewallRuntimeSource = readFileSync(
+  resolve(posRoot, 'src-tauri', 'src', 'commands', 'callerid_firewall.rs'),
+  'utf8',
+)
+const ipcAdapterSource = readFileSync(
+  resolve(posRoot, 'src', 'lib', 'ipc-adapter.ts'),
+  'utf8',
+)
 
 const failures = []
 const requireContract = (condition, message) => {
@@ -32,6 +40,11 @@ const macroBody = (name) =>
 requireContract(
   tauriConfig.bundle?.windows?.nsis?.installerHooks === './nsis-hooks.nsh',
   'tauri.conf.json must load ./nsis-hooks.nsh',
+)
+requireContract(
+  Array.isArray(tauriConfig.bundle?.resources) &&
+    tauriConfig.bundle.resources.includes('caller-id-firewall.ps1'),
+  'the Caller ID firewall helper must be bundled for the in-app permission control',
 )
 
 const postInstall = macroBody('NSIS_HOOK_POSTINSTALL')
@@ -105,10 +118,23 @@ requireContract(
   'caller-id-firewall.ps1 is required',
 )
 requireContract(
-  /ValidateSet\([^)]*['"]Install['"][^)]*['"]MigrateLegacyPublic['"]/i.test(
+  /ValidateSet\([^)]*['"]Install['"][^)]*['"]MigrateLegacyPublic['"][^)]*['"]Status['"][^)]*['"]Remove['"]/i.test(
     firewallHelperSource,
   ),
-  'the helper must expose only interactive install and legacy-Public migration actions',
+  'the helper must expose install, migration, status, and removal actions only',
+)
+requireContract(
+  /function\s+Test-InstallerOwnedRuleExact\b/i.test(firewallHelperSource) &&
+    /\$Action\s+-eq\s+['"]Status['"][\s\S]*?Test-InstallerOwnedRuleExact/i.test(
+      firewallHelperSource,
+    ),
+  'runtime status must verify the complete installer-owned rule instead of trusting its name',
+)
+requireContract(
+  /\$Action\s+-eq\s+['"]Remove['"][\s\S]*?Remove-InstallerOwnedRule[\s\S]*?exit\s+0/i.test(
+    firewallHelperSource,
+  ),
+  'runtime removal must delete only the installer-owned rule and stop before install logic',
 )
 requireContract(
   /Get-NetFirewallApplicationFilter\s+-Program\s+\$ExecutablePath\s+-PolicyStore\s+ActiveStore\s+-ErrorAction\s+Stop/i.test(
@@ -252,6 +278,49 @@ requireContract(
   ),
   'a failed final verification must roll back the newly added Private rule',
 )
+
+requireContract(
+  /pub\s+async\s+fn\s+callerid_firewall_enable\s*\(\s*app:\s*AppHandle\s*,?\s*\)/i.test(
+    firewallRuntimeSource,
+  ) &&
+    /pub\s+async\s+fn\s+callerid_firewall_remove\s*\(\s*app:\s*AppHandle\s*,?\s*\)/i.test(
+      firewallRuntimeSource,
+    ),
+  'renderer firewall commands must not accept a path, port, profile, or arbitrary action',
+)
+requireContract(
+  /windows::change\(&app,\s*["']Install["']\)/i.test(firewallRuntimeSource) &&
+    /windows::change\(&app,\s*["']Remove["']\)/i.test(firewallRuntimeSource),
+  'runtime firewall mutations must use fixed native actions',
+)
+requireContract(
+  /ShellExecuteExW/i.test(firewallRuntimeSource) &&
+    /OsStr::new\(["']runas["']\)/i.test(firewallRuntimeSource) &&
+    /GetExitCodeProcess/i.test(firewallRuntimeSource),
+  'runtime firewall mutations must cross UAC and verify the elevated helper exit code',
+)
+requireContract(
+  /BaseDirectory::Resource/i.test(firewallRuntimeSource) &&
+    /helper\.parent\(\)\s*!=\s*Some\(resource_dir\.as_path\(\)\)/i.test(
+      firewallRuntimeSource,
+    ) &&
+    /std::env::current_exe\(\)/i.test(firewallRuntimeSource),
+  'runtime firewall paths must resolve to the bundled helper and exact running POS executable',
+)
+requireContract(
+  /-EncodedCommand\s+\{encoded\}/i.test(firewallRuntimeSource),
+  'elevated PowerShell arguments must use an encoded command instead of interpolated shell arguments',
+)
+for (const channel of [
+  'callerid:firewall-status',
+  'callerid:firewall-enable',
+  'callerid:firewall-remove',
+]) {
+  requireContract(
+    ipcAdapterSource.includes(`"${channel}"`),
+    `${channel} must be exposed through the typed POS bridge`,
+  )
+}
 
 const postUninstall = macroBody('NSIS_HOOK_POSTUNINSTALL')
 const uninstallGuardIndex = postUninstall.search(/\$UpdateMode\s*<>\s*1/i)

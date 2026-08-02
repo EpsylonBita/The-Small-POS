@@ -1884,6 +1884,9 @@ export interface PlatformBridge {
     saveConfig(config: any): Promise<{ success: boolean }>;
     getConfig(): Promise<any>;
     testConnection(config?: any): Promise<{ success: boolean; message: string; reasonCode?: string }>;
+    getFirewallStatus(): Promise<any>;
+    enableFirewall(): Promise<any>;
+    removeFirewall(): Promise<any>;
   };
 
   // -- Loyalty ---------------------------------------------------------------
@@ -2449,6 +2452,9 @@ export const CHANNEL_MAP: Record<string, string> = {
   "callerid:save-config": "callerid.saveConfig",
   "callerid:get-config": "callerid.getConfig",
   "callerid:test": "callerid.testConnection",
+  "callerid:firewall-status": "callerid.getFirewallStatus",
+  "callerid:firewall-enable": "callerid.enableFirewall",
+  "callerid:firewall-remove": "callerid.removeFirewall",
 
   // Loyalty
   "loyalty:get-settings": "loyalty.getSettings",
@@ -3347,6 +3353,9 @@ export class TauriBridge implements PlatformBridge {
     saveConfig: (config: any) => this.inv("callerid:save-config", config),
     getConfig: () => this.inv("callerid:get-config"),
     testConnection: (config?: any) => this.inv("callerid:test", config),
+    getFirewallStatus: () => this.inv("callerid:firewall-status"),
+    enableFirewall: () => this.inv("callerid:firewall-enable"),
+    removeFirewall: () => this.inv("callerid:firewall-remove"),
   };
 
   loyalty = {

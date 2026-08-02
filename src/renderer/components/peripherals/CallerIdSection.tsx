@@ -42,6 +42,7 @@ import {
   type CallerIdStatusReason,
   type CallerIdTransport,
 } from '../../services/CallerIdService'
+import CallerIdNetworkAccessCard from './CallerIdNetworkAccessCard'
 
 type SetupType = 'provider_preset' | 'generic_sip' | 'legacy_pbx'
 
@@ -464,6 +465,8 @@ const CallerIdSection: React.FC = () => {
           {status?.registered && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
         </div>
       </div>
+
+      <CallerIdNetworkAccessCard />
 
       {/* Compact one-line reminder (this terminal is the single source for the line). */}
       <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border px-3 py-2">

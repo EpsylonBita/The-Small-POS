@@ -4,6 +4,7 @@ pub mod api_bridge;
 pub mod auth;
 pub mod branch_data;
 pub mod callerid;
+pub mod callerid_firewall;
 pub mod customers;
 pub mod diagnostics;
 pub mod ecr;

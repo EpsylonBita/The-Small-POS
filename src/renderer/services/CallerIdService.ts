@@ -43,6 +43,15 @@ export interface CallerIdTestResult {
   reasonCode?: CallerIdStatusReason
 }
 
+export interface CallerIdFirewallStatus {
+  supported: boolean
+  configured: boolean
+  privateNetworkActive: boolean
+  publicNetworkActive: boolean
+  networkProfileKnown: boolean
+  publicRulePresent: boolean
+}
+
 const CALLER_ID_REASON_CODES: CallerIdStatusReason[] = [
   'auth_failed',
   'timeout',
@@ -95,4 +104,16 @@ export async function callerIdTestConnection(
     message: typeof result?.message === 'string' ? result.message : '',
     reasonCode: asReasonCode(result?.reasonCode),
   }
+}
+
+export async function callerIdGetFirewallStatus(): Promise<CallerIdFirewallStatus> {
+  return getBridge().callerid.getFirewallStatus()
+}
+
+export async function callerIdEnableFirewall(): Promise<CallerIdFirewallStatus> {
+  return getBridge().callerid.enableFirewall()
+}
+
+export async function callerIdRemoveFirewall(): Promise<CallerIdFirewallStatus> {
+  return getBridge().callerid.removeFirewall()
 }

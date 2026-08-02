@@ -1121,6 +1121,9 @@ pub fn run() {
             commands::callerid::callerid_save_config,
             commands::callerid::callerid_get_config,
             commands::callerid::callerid_test_connection,
+            commands::callerid_firewall::callerid_firewall_status,
+            commands::callerid_firewall::callerid_firewall_enable,
+            commands::callerid_firewall::callerid_firewall_remove,
             // Cash drawer
             commands::hardware::drawer_open,
             // Serial ports

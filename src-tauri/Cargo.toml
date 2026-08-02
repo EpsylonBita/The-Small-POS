@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.4.55"
+version = "1.4.56"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -79,6 +79,15 @@ webbrowser = "1.0"
 # transitively via reqwest; this declares it as a direct dep so we can `use`
 # it without depending on reqwest's transitive surface.
 url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 # Test-level serialization for tests that touch process-global state (OS keyring

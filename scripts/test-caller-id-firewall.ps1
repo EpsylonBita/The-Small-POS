@@ -53,7 +53,9 @@ function Assert-Equal {
 Import-HelperFunction -Name 'Test-AllowsCallerIdUdp5060'
 Import-HelperFunction -Name 'Test-ValueSetContains'
 Import-HelperFunction -Name 'Test-ValueSetIsEmptyOrAny'
+Import-HelperFunction -Name 'Test-ValueSetEquals'
 Import-HelperFunction -Name 'Test-MigrationReplacementDoesNotBroadenRule'
+Import-HelperFunction -Name 'Test-InstallerOwnedRuleExact'
 
 # The production function consumes NetSecurity pipeline objects. This mock
 # preserves scalar and String[] shapes so Windows API representation changes
@@ -174,6 +176,40 @@ function New-MigrationRule {
   }
 }
 
+function New-InstallerOwnedRule {
+  param(
+    $Name = 'TheSmallPOS-CallerID-PrivateLAN',
+    $Direction = 'Inbound',
+    $Action = 'Allow',
+    $Enabled = $true,
+    $Profile = 'Private',
+    $EdgeTraversalPolicy = 'Block',
+    $Protocol = 'UDP',
+    $LocalPort = '5060',
+    $RemotePort = 'Any',
+    $DynamicTarget = 'Any',
+    $LocalAddress = 'Any',
+    $RemoteAddress = 'LocalSubnet',
+    $Program = 'C:\Program Files\The Small POS\the-small-pos.exe'
+  )
+
+  $rule = New-MigrationRule -RemoteAddress $RemoteAddress -LocalAddress $LocalAddress
+  $rule | Add-Member -NotePropertyName Name -NotePropertyValue $Name
+  $rule | Add-Member -NotePropertyName Direction -NotePropertyValue $Direction
+  $rule | Add-Member -NotePropertyName Action -NotePropertyValue $Action
+  $rule | Add-Member -NotePropertyName Enabled -NotePropertyValue $Enabled
+  $rule | Add-Member -NotePropertyName Profile -NotePropertyValue $Profile
+  $rule | Add-Member -NotePropertyName EdgeTraversalPolicy -NotePropertyValue $EdgeTraversalPolicy
+  $rule | Add-Member -NotePropertyName PortFilter -NotePropertyValue ([pscustomobject]@{
+    Protocol = $Protocol
+    LocalPort = $LocalPort
+    RemotePort = $RemotePort
+    DynamicTarget = $DynamicTarget
+  })
+  $rule.ApplicationFilter.Program = $Program
+  $rule
+}
+
 $migrationCases = @(
   @{ Name = 'ordinary broad app prompt'; Rule = New-MigrationRule; Expected = $true },
   @{ Name = 'existing LocalSubnet scope'; Rule = New-MigrationRule -RemoteAddress 'LocalSubnet'; Expected = $true },
@@ -201,4 +237,23 @@ foreach ($case in $migrationCases) {
   Assert-Equal -Expected $case.Expected -Actual $actual -Message $case.Name
 }
 
-Write-Output "Caller ID firewall behavior tests passed: $($portCases.Count) port cases, $($migrationCases.Count) migration-scope cases."
+$exactRuleCases = @(
+  @{ Name = 'exact private Caller ID rule'; Rule = New-InstallerOwnedRule; Expected = $true },
+  @{ Name = 'disabled rule'; Rule = New-InstallerOwnedRule -Enabled $false; Expected = $false },
+  @{ Name = 'public profile'; Rule = New-InstallerOwnedRule -Profile 'Public'; Expected = $false },
+  @{ Name = 'all profiles'; Rule = New-InstallerOwnedRule -Profile 'Any'; Expected = $false },
+  @{ Name = 'wrong executable'; Rule = New-InstallerOwnedRule -Program 'C:\Temp\the-small-pos.exe'; Expected = $false },
+  @{ Name = 'TCP listener'; Rule = New-InstallerOwnedRule -Protocol 'TCP'; Expected = $false },
+  @{ Name = 'broad local port'; Rule = New-InstallerOwnedRule -LocalPort 'Any'; Expected = $false },
+  @{ Name = 'internet remote address'; Rule = New-InstallerOwnedRule -RemoteAddress 'Any'; Expected = $false },
+  @{ Name = 'edge traversal allowed'; Rule = New-InstallerOwnedRule -EdgeTraversalPolicy 'Allow'; Expected = $false }
+)
+
+foreach ($case in $exactRuleCases) {
+  $actual = Test-InstallerOwnedRuleExact `
+    -Rule $case.Rule `
+    -ExpectedExecutablePath 'C:\Program Files\The Small POS\the-small-pos.exe'
+  Assert-Equal -Expected $case.Expected -Actual $actual -Message $case.Name
+}
+
+Write-Output "Caller ID firewall behavior tests passed: $($portCases.Count) port cases, $($migrationCases.Count) migration-scope cases, $($exactRuleCases.Count) exact-rule cases."

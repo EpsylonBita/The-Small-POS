@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('Install', 'MigrateLegacyPublic')]
+  [ValidateSet('Install', 'MigrateLegacyPublic', 'Status', 'Remove')]
   [string]$Action,
 
   [Parameter(Mandatory = $true)]
@@ -124,6 +124,29 @@ function Test-ValueSetIsEmptyOrAny {
   return (-not $sawValue) -or (Test-ValueSetContains -Value $Value -AllowedValues @('Any'))
 }
 
+function Test-ValueSetEquals {
+  param(
+    $Value,
+    [Parameter(Mandatory = $true)][string[]]$ExpectedValues
+  )
+
+  $actualValues = @(
+    foreach ($valueEntry in @($Value)) {
+      if ($null -eq $valueEntry) { continue }
+      foreach ($part in $valueEntry.ToString().Split(',')) {
+        $trimmed = $part.Trim()
+        if ($trimmed.Length -gt 0) { $trimmed }
+      }
+    }
+  )
+
+  if ($actualValues.Count -ne $ExpectedValues.Count) { return $false }
+  foreach ($expectedValue in $ExpectedValues) {
+    if ($expectedValue -notin $actualValues) { return $false }
+  }
+  return $true
+}
+
 function Test-MigrationReplacementDoesNotBroadenRule {
   param(
     [Parameter(Mandatory = $true)]$Rule,
@@ -199,6 +222,53 @@ function Test-MigrationReplacementDoesNotBroadenRule {
   return $true
 }
 
+function Test-InstallerOwnedRuleExact {
+  param(
+    [Parameter(Mandatory = $true)]$Rule,
+    [Parameter(Mandatory = $true)][string]$ExpectedExecutablePath
+  )
+
+  if ($Rule.Name -ne 'TheSmallPOS-CallerID-PrivateLAN' -or
+      $Rule.Direction.ToString() -ne 'Inbound' -or
+      $Rule.Action.ToString() -ne 'Allow' -or
+      $Rule.Enabled.ToString() -ne 'True' -or
+      $Rule.Profile.ToString() -ne 'Private' -or
+      $Rule.EdgeTraversalPolicy.ToString() -ne 'Block' -or
+      -not (Test-MigrationReplacementDoesNotBroadenRule `
+        -Rule $Rule `
+        -ExpectedExecutablePath $ExpectedExecutablePath)) {
+    return $false
+  }
+
+  $portFilters = @($Rule | Get-NetFirewallPortFilter -ErrorAction Stop)
+  if ($portFilters.Count -ne 1) { return $false }
+  $portFilter = $portFilters[0]
+  $protocolIsUdp =
+    (Test-ValueSetEquals -Value $portFilter.Protocol -ExpectedValues @('UDP')) -or
+    (Test-ValueSetEquals -Value $portFilter.Protocol -ExpectedValues @('17'))
+  if (-not $protocolIsUdp -or
+      -not (Test-ValueSetEquals -Value $portFilter.LocalPort -ExpectedValues @('5060')) -or
+      -not (Test-ValueSetEquals -Value $portFilter.RemotePort -ExpectedValues @('Any')) -or
+      -not (Test-ValueSetEquals -Value $portFilter.DynamicTarget -ExpectedValues @('Any'))) {
+    return $false
+  }
+
+  $addressFilters = @($Rule | Get-NetFirewallAddressFilter -ErrorAction Stop)
+  if ($addressFilters.Count -ne 1 -or
+      -not (Test-ValueSetEquals -Value $addressFilters[0].LocalAddress -ExpectedValues @('Any')) -or
+      -not (Test-ValueSetEquals -Value $addressFilters[0].RemoteAddress -ExpectedValues @('LocalSubnet'))) {
+    return $false
+  }
+
+  $applicationFilters = @($Rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
+  if ($applicationFilters.Count -ne 1 -or
+      $applicationFilters[0].Program -ne $ExpectedExecutablePath) {
+    return $false
+  }
+
+  return $true
+}
+
 function Get-LocalPublicAllowRulesForExecutable {
   param([switch]$ActiveOnly)
 
@@ -233,6 +303,63 @@ try {
   $ExecutablePath = [System.IO.Path]::GetFullPath($ExecutablePath)
   if (-not [System.IO.File]::Exists($ExecutablePath)) {
     throw "The installed POS executable does not exist: $ExecutablePath"
+  }
+
+  if ($Action -eq 'Status') {
+    $ownedRules = @(
+      Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop |
+        Where-Object { $_.Name -eq $ruleName }
+    )
+    $configured =
+      $ownedRules.Count -eq 1 -and
+      (Test-InstallerOwnedRuleExact `
+        -Rule $ownedRules[0] `
+        -ExpectedExecutablePath $ExecutablePath)
+    $publicRulePresent = @(
+      Get-LocalPublicAllowRulesForExecutable -ActiveOnly
+    ).Count -gt 0
+
+    $privateNetworkActive = $false
+    $publicNetworkActive = $false
+    $networkProfileKnown = $false
+    try {
+      $connectedProfiles = @(
+        Get-NetConnectionProfile -ErrorAction Stop |
+          Where-Object {
+            $_.IPv4Connectivity.ToString() -ne 'Disconnected' -or
+            $_.IPv6Connectivity.ToString() -ne 'Disconnected'
+          }
+      )
+      if ($connectedProfiles.Count -gt 0) {
+        $networkProfileKnown = $true
+        $privateNetworkActive = @(
+          $connectedProfiles | Where-Object { $_.NetworkCategory.ToString() -eq 'Private' }
+        ).Count -gt 0
+        $publicNetworkActive = @(
+          $connectedProfiles | Where-Object { $_.NetworkCategory.ToString() -eq 'Public' }
+        ).Count -gt 0
+      }
+    } catch {
+      # The firewall grant can still be verified when Windows cannot report a
+      # connection profile. Keep the profile state explicitly unknown.
+      $networkProfileKnown = $false
+    }
+
+    [ordered]@{
+      supported = $true
+      configured = [bool]$configured
+      privateNetworkActive = [bool]$privateNetworkActive
+      publicNetworkActive = [bool]$publicNetworkActive
+      networkProfileKnown = [bool]$networkProfileKnown
+      publicRulePresent = [bool]$publicRulePresent
+    } | ConvertTo-Json -Compress
+    exit 0
+  }
+
+  if ($Action -eq 'Remove') {
+    Remove-InstallerOwnedRule
+    Write-Output 'Caller ID Private-network firewall access removed.'
+    exit 0
   }
 
   if ($Action -eq 'MigrateLegacyPublic') {

@@ -4490,7 +4490,7 @@ dependencies = [
 
 [[package]]
 name = "the-small-pos"
-version = "1.4.55"
+version = "1.4.56"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4521,6 +4521,7 @@ dependencies = [
  "url",
  "uuid",
  "webbrowser",
+ "windows-sys 0.59.0",
  "zeroize",
  "zip 2.4.2",
  "zstd",
