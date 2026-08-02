@@ -81,6 +81,7 @@ webbrowser = "1.0"
 url = "2"
 
 [target.'cfg(windows)'.dependencies]
+dunce = "1.0.5"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_Registry",

@@ -77,6 +77,24 @@ mod windows {
         Ok(canonical)
     }
 
+    /// Convert Rust's canonical Windows path into the ordinary absolute form
+    /// accepted and returned by Windows Firewall. `std::fs::canonicalize`
+    /// deliberately produces `\\?\` paths on Windows; passing that spelling
+    /// across the NetSecurity boundary can either be rejected or normalized to
+    /// a different string, which makes the installed rule look absent.
+    fn firewall_external_path(path: &Path) -> Result<PathBuf, String> {
+        let simplified = dunce::simplified(path).to_path_buf();
+        if !simplified.is_absolute() {
+            return Err("The POS executable path is not absolute".into());
+        }
+        if simplified.to_string_lossy().starts_with(r"\\?\") {
+            return Err(
+                "The POS executable path could not be converted for Windows Firewall".into(),
+            );
+        }
+        Ok(simplified)
+    }
+
     fn resolve_paths(app: &AppHandle) -> Result<FirewallPaths, String> {
         let resource_dir = app
             .path()
@@ -114,6 +132,7 @@ mod windows {
         {
             return Err("The POS executable path is not a Windows executable".into());
         }
+        let executable = firewall_external_path(&executable)?;
 
         let system_root = std::env::var_os("SystemRoot")
             .ok_or_else(|| "Windows SystemRoot is unavailable".to_string())?;
@@ -280,6 +299,19 @@ mod windows {
             let quoted =
                 powershell_single_quote(Path::new("C:\\Program Files\\Owner's POS\\app.exe"));
             assert_eq!(quoted, "C:\\Program Files\\Owner''s POS\\app.exe");
+        }
+
+        #[test]
+        fn firewall_path_removes_windows_verbatim_prefix_before_external_use() {
+            let external = firewall_external_path(Path::new(
+                r"\\?\C:\Program Files\The Small POS\The Small POS.exe",
+            ))
+            .expect("convert canonical Windows path");
+
+            assert_eq!(
+                external,
+                PathBuf::from(r"C:\Program Files\The Small POS\The Small POS.exe")
+            );
         }
 
         #[test]
